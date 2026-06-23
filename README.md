@@ -1,2 +1,109 @@
 # WorkTrace
-通过监听消息流，利用LLM语义分析，自动从聊天中识别并结构化记录每日关键工作事件、决策与待办，生成日报。
+
+WorkTrace 是一个面向个人工作回顾的自动化记录项目，目标是从飞书聊天中提取与工作相关的沟通内容，通过 Codex 做语义分析，整理成结构化工作事件，并写入本地 Excel 文件。首版聚焦“手动指定日期执行”的日处理链路，不承诺真正的定时调度。
+
+仓库根目录同时作为 Codex skill 根目录使用，安装时应链接整个仓库目录，而不是单独链接某个 `skill/` 子目录。
+
+## 当前范围
+
+首版当前确认的能力包括：
+
+- 飞书聊天源，基于 `lark-cli`
+- Codex 作为分析 Agent
+- Excel 本地存储
+- 事项级事件抽取
+- 同日重跑覆盖
+- 只保留工作相关内容
+- 支持跨会话合并事项
+
+## 仓库结构
+
+计划中的仓库结构如下：
+
+```text
+.
+├── SKILL.md
+├── README.md
+├── docs/
+│   └── detailed-design.md
+├── src/
+└── tests/
+```
+
+说明：
+
+- 根目录既是通用脚本项目根目录，也是 Codex skill 根目录。
+- `SKILL.md` 放在仓库根目录，作为 skill 入口说明。
+- `src/` 承载可复用的 Python 逻辑。
+
+## 核心设计摘要
+
+- Python 负责确定性流程，包括抓取、裁剪、分批、校验和存储。
+- Codex 负责批量语义分析，不负责确定性流程控制。
+- LLM 不参与数据计算，计算必须由 Python 或 Excel 公式完成。
+- 原始聊天内容不长期落盘，只保留结构化事件。
+- 存储目标为年度 Excel 明细表。
+
+## 依赖说明
+
+首版依赖如下：
+
+- `python3`
+- `lark-cli`
+- Codex
+- 已登录且具备消息读取权限的飞书 user 身份
+
+当前环境默认的 Codex skill 安装目录为 `~/.codex/skills`。
+
+## Codex Skill 安装说明
+
+首版推荐使用本地软链接方式安装 skill，便于一边开发一边调试。安装时链接整个仓库目录。
+
+1. 确保仓库根目录存在 `SKILL.md`
+2. 创建软链接到 Codex skill 目录
+3. 重启 Codex 以加载新 skill
+
+示例命令：
+
+```bash
+mkdir -p ~/.codex/skills
+ln -s /path/to/WorkTrace ~/.codex/skills/worktrace
+```
+
+说明：
+
+- `~/.codex/skills` 是默认本地 skill 目录。
+- `worktrace` 是建议的安装名。
+- 如果同名目录已经存在，请先手动清理或改用其他名字。
+- 安装完成后需要重启 Codex，Codex 才会重新扫描并识别新 skill。
+
+远程 GitHub 安装方式不是当前主流程，后续如需公开分享，可再补充相应安装说明。
+
+## 使用方式
+
+首版预期使用形态如下：
+
+- 在 Codex 对话中触发 WorkTrace skill
+- 指定一个目标日期执行
+- 读取当天自己参与过讨论的飞书会话
+- 输出结构化工作事件
+- 将结果写入本地 Excel 文件
+
+具体触发提示词与参数约定由根目录 `SKILL.md` 定义，当前 README 不固定写死最终触发语句。
+
+## 设计文档
+
+详细设计见 [docs/detailed-design.md](/Users/sunweisheng/Documents/GitHub/WorkTrace/docs/detailed-design.md)。
+
+该文档包含：
+
+- 抽象工厂设计
+- 批量分析策略
+- 脚本与 LLM 职责边界
+- 存储与覆盖策略
+
+## 开发说明
+
+- 优先修改 `src/` 中的通用逻辑。
+- 仓库根目录就是 skill 根目录，不再单独维护 `skill/` 子目录。
+- 任何统计或计算必须由 Python 或 Excel 公式完成，不由 LLM 执行。
