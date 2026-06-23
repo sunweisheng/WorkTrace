@@ -145,6 +145,13 @@ WorkTrace 首版采用五层结构：
 - `output_path` 在成功写入文件时返回绝对路径字符串。
 - `output_path` 在 `failed` 或 `invalid_input` 状态下返回 `null`。
 - `error_summary` 无错误时返回空字符串 `""`，不返回 `null`。
+- CLI 在进入正式业务流程前必须执行一次轻量 preflight 检查。
+- preflight 检查至少覆盖：Python 版本、`lark-cli` 是否存在、`lark-cli` 当前登录身份是否为可读取消息的飞书 user、Codex 调用能力是否可用、结果目录是否可创建或可写、业务时区配置是否可用。
+- “Codex 调用能力是否可用” 不得仅通过命令存在性判断，必须执行一次最小真实探测调用。
+- 最小真实探测调用至少需要验证：可成功发起一次结构化请求、可在预设超时时间内收到合法 machine-readable JSON 响应。
+- Codex 最小探测失败时，`error_summary` 应尽量区分为以下可读原因之一：命令不存在、未登录或无权限、网络或服务不可达、返回结果不是合法 JSON、探测调用超时。
+- 因命令缺失、版本不满足、身份未登录或关键依赖不可用导致的 preflight 失败，统一归类为 `failed`，并在 `error_summary` 中返回可读原因。
+- `--date` 缺失或格式不合法这类参数问题仍归类为 `invalid_input`。
 
 ### 6.2 Python 负责的内容
 
@@ -346,6 +353,9 @@ DailyTraceRunner
 补充约束：
 
 - `fetch_related_messages` 的 `direction` 取值限定为 `earlier` 或 `later`。
+- `fetch_conversation_messages` 只返回目标日期内的消息，不返回跨天消息；跨天消息只能通过 `fetch_related_messages` 在补上下文阶段获取。
+- `fetch_conversation_messages` 在 source 层必须完成去重、北京时间归一化，并按 `send_time asc, message_id asc` 稳定排序后再返回。
+- `fetch_conversation_messages` 返回的每条消息都必须是抓取时可见的最终态；首版不追踪消息编辑历史，也不恢复撤回前正文。
 - `fetch_related_messages` 用于承接 `ContextRequest` 中的 `earlier_messages` 和 `later_messages`。
 - 当 `direction = earlier` 时，以 `target_message_ids` 中最早的消息为边界，向前抓取最多 `limit` 条消息。
 - 当 `direction = later` 时，以 `target_message_ids` 中最晚的消息为边界，向后抓取最多 `limit` 条消息。
@@ -374,25 +384,31 @@ DailyTraceRunner
 
 #### 9.2.3 `NormalizedMessage`
 
-表示统一格式的消息对象，屏蔽 `lark-cli` 原始输出差异。建议包含：
+表示统一格式的消息对象，屏蔽 `lark-cli` 原始输出差异。首版固定字段如下：
 
-- 会话标识
-- 会话名称
-- 消息标识
-- 发送人标识
-- 发送时间
-- 消息类型
-- 文本内容
-- 回复目标消息标识
-- 引用目标消息标识
-- 提取出的链接元数据
-- 附件元数据
-- 是否系统消息
+- `conversation_id: str`
+- `conversation_name: str`
+- `message_id: str`
+- `sender_open_id: str | null`
+- `sender_name: str`
+- `send_time: str`
+- `message_type: str`
+- `text: str`
+- `reply_to_message_id: str | null`
+- `quote_message_id: str | null`
+- `links: list[LinkMeta]`
+- `attachments: list[AttachmentMeta]`
+- `is_system: bool`
 
 补充约束：
 
+- `send_time` 固定使用带时区的 ISO 8601 时间字符串，并统一归一化为 `Asia/Shanghai` 语义下可比较的时间值。
+- `text` 固定为供分析使用的主文本出口；消息正文、富文本、卡片文本、@人显示文本、链接标题等可直接提取的可读内容，都应尽量收敛到 `text` 或 `links`，不向上层暴露飞书原始结构。
+- `message_type` 保留来源类型信息，但上层逻辑不得依赖底层私有字段判断消息语义。
+- `sender_open_id` 对系统消息可为空；是否属于本人发言的判断仍以非空 `sender_open_id` 为准。
 - 每个附件元数据都应包含稳定的 `attachment_id`，用于后续精确补读。
-- 链接元数据至少应区分普通链接与飞书文档链接，并保留原始 URL。
+- 链接元数据 `LinkMeta` 首版固定包含：`url: str`、`title: str`、`link_type: str`；其中 `link_type` 至少区分 `feishu_doc` 与 `normal`。
+- 附件元数据 `AttachmentMeta` 首版固定包含：`attachment_id: str`、`file_name: str`、`mime_type: str`、`file_size: int | null`。
 - `NormalizedMessage` 是确定性预处理后的统一对象，不直接暴露底层 `lark-cli` 原始结构。
 
 #### 9.2.4 `AttachmentTextBlock`
@@ -491,6 +507,11 @@ DailyTraceRunner
 - 首轮每个候选事项必须且只能对应一个 `source_slice_id`，不得在首轮跨多个 `slice` 合并。
 - 首轮每个候选事项必须且只能对应一个 `source_conversation_id`；跨会话合并统一放到次轮处理。
 - `source_message_ids` 仅包含目标日期内的消息 ID；跨天补充的上下文消息不得写入该字段。
+- Python 在接受首轮 `candidate_event` 前，必须先对 `source_message_ids` 做本地归一化：去掉空值和非字符串值、按消息 ID 去重、仅保留当前 `source_slice_id` 对应 `ConversationSlice` 内存在的消息 ID、仅保留目标日期内消息 ID，并按该切片中消息的稳定顺序排序。
+- `source_message_ids` 的稳定顺序以所属 `ConversationSlice.messages` 中的顺序为准；该顺序已由上游统一约束为 `send_time asc, message_id asc`。
+- 若首轮 `candidate_event` 的 `source_slice_id`、`source_conversation_id` 与实际切片来源不一致，则该 `candidate_event` 必须直接视为无效。
+- 若首轮 `candidate_event` 的 `source_message_ids` 归一化后为空数组，则该 `candidate_event` 必须直接视为无效。
+- 若首轮 `candidate_event` 的 `source_message_ids` 仅混入少量非法、重复或跨天消息 ID，但归一化后仍保留至少 1 个合法目标日期消息 ID，则 Python 应接受归一化后的结果继续后续流程，而不是整条丢弃。
 - `content` 可包含与该事项直接相关的飞书文档标题或链接。
 
 #### 9.2.9 `BatchAnalysisResult`
@@ -522,6 +543,8 @@ DailyTraceRunner
 - 仅做同一天内合并，不做跨天合并。
 - `source_message_ids` 仅包含目标日期内消息，不包含跨天补充上下文消息。
 - 若多个候选事项都引用同一飞书文档链接，次轮合并时应去重后保留。
+- Python 在接受次轮 `MergedEventDraft` 前，必须再次对 `source_message_ids` 做本地归一化：去重、仅保留目标日期内消息、按全日消息稳定顺序排序。
+- 若次轮 `MergedEventDraft` 的 `source_message_ids` 归一化后为空数组，则该草稿必须直接视为无效。
 
 #### 9.2.11 `WorkEvent`
 
@@ -539,11 +562,18 @@ DailyTraceRunner
 - `result` 可为空字符串。
 - `content` 允许包含与该事项直接相关的飞书文档链接，作为内容摘要的一部分写入，不单独拆列。
 - `event_id` 由脚本在次轮合并完成后，基于目标日期和排序后的当日源消息 ID 集合稳定生成。
-- 首版固定算法为：`sha1(f"{date}|{','.join(sorted(in_day_source_message_ids))}")[:16]`。
+- 首版固定算法为：`sha1(f"{date}|{','.join(in_day_source_message_ids)}")[:16]`。
 - 其中 `in_day_source_message_ids` 表示去重、排序后的目标日期内 `source_message_ids`；跨天补充上下文消息不得参与 `event_id` 计算。
-- Python 在计算 `event_id` 前必须先对 `source_message_ids` 做本地归一化：去重、仅保留目标日期内消息、按稳定顺序排序。
+- Python 在计算 `event_id` 前必须先对 `source_message_ids` 做本地归一化：去重、仅保留目标日期内消息、按全日消息稳定顺序排序；全日消息稳定顺序固定为 `send_time asc, message_id asc`。
 - `topic`、`content`、`result` 仅作为展示字段，不参与 `event_id` 计算。
 - 若多个 `MergedEventDraft` 归一化后得到完全相同的 `in_day_source_message_ids` 集合，Python 必须先在本地视为同一事项并合并，再计算 `event_id`。
+- 对“同一事项”的判定固定以归一化后的 `in_day_source_message_ids` 完全一致为准，不比较 `topic`、`content`、`result` 文本是否一致。
+- 对同一来源集合的多个 `MergedEventDraft`，Python 只保留一条合并后的事项；该合并后的事项继续沿用该来源集合计算单个 `event_id`。
+- 同一来源集合的展示字段采用确定性择优规则：
+- `topic`：优先保留非空值；若存在多个非空值，则保留长度更长且不超过实现上限的值；若仍并列，则保留首次出现的值。
+- `content`：按段落顺序去重后合并；若某条 `content` 完全包含另一条，则保留信息更完整的一条；若各自包含不同有效信息，则按原始出现顺序拼接并去重重复段落与重复飞书文档链接。
+- `result`：优先保留非空值；若存在多个非空值，则保留信息更完整的一条；若结果文本明显冲突且无法在不引入语义判断的前提下安全合并，则保留首次出现的值并记录告警。
+- 上述“展示字段择优”仅允许使用非空、长度、包含关系、段落去重和首次出现顺序等确定性规则，不允许 Python 在本地做新的语义改写或事实裁决。
 - 若多个 `MergedEventDraft` 生成出相同的 `event_id`，Python 必须在本地按来源集合再次合并后重算；若仍无法消除冲突，则判定整日失败。
 - 不长期保存原始消息正文。
 - `source_message_ids` 等来源字段不写入最终 Markdown 文件。
@@ -641,6 +671,7 @@ DailyTraceRunner
 
 Python 负责：
 
+- preflight 依赖检查。
 - 切片分批。
 - token 预算估算。
 - 批次重试。
@@ -674,6 +705,9 @@ Codex 负责：
 - `earlier_messages` / `later_messages` 的 `limit` 默认尽量尊重 LLM 请求值，只有在超过实现配置项 `max_model_input_tokens` 或超出可读取范围时才截断。
 - 一旦进入补上下文流程，首轮切片基础 `150` 条上限不再生效。
 - 跨天补充继续允许，但只允许在原命中的同一会话内扩展，不新增新的会话范围。
+- 同一轮、同一 `slice` 内的多个合法 `context_requests`，Python 应先统一收集并去重，再合并执行一次补充，不应为每条请求分别立即重跑该 `slice`。
+- 同一 `slice` 的补充执行顺序固定为：先 `attachment_text`，再 `earlier_messages`，最后 `later_messages`。
+- 已成功补入某个 `slice` 的消息和附件文本，在该 `slice` 后续重跑轮次中持续保留；后续重复请求同一附件或已补过的消息范围时，Python 应直接去重，不重复加载。
 
 补充处理规则如下：
 
@@ -720,6 +754,7 @@ Codex 负责：
 
 ### 10.6 失败恢复
 
+- preflight 检查失败时，不进入当日业务处理流程，不写入任何结果文件。
 - 单批失败只重试该批，不重跑整天。
 - 补充上下文或附件时，只重跑相关 `slice`，不影响其他已完成结果。
 - 整日执行失败时不写入半成品结果。
@@ -855,6 +890,7 @@ Front matter 固定字段如下：
 
 ### 13.2 错误处理要求
 
+- preflight 失败时，应优先返回缺失依赖、版本不满足、未登录或不可写目录等明确错误原因，而不是在业务中途报模糊错误。
 - 单批失败可重试。
 - 次轮合并失败时，不应替换当天旧文件。
 - 整日失败不应写入半成品。
