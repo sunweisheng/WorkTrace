@@ -1,0 +1,862 @@
+from __future__ import annotations
+
+from datetime import datetime
+import re
+
+from ..config import RuntimeConfig
+from ..constants import AnchorStatus
+from ..constants import LinkType
+from ..models import (
+    AnalysisBatch,
+    AnchorAnalysisResult,
+    AnchorUnit,
+    AttachmentTextBlock,
+    BatchAnchorAnalysisResult,
+    BucketMergedDraft,
+    ConversationSlice,
+    ContextRequest,
+    CrossBucketMergeResult,
+    CrossMergeBucketResult,
+    NormalizedMessage,
+    SourceBackedEventDraft,
+)
+from ..utils.json_io import dump_json
+from ..utils.text import clean_text
+
+_AUDIO_TAG_RE = re.compile(r"<audio\b[^>]*duration=\"([^\"]+)\"[^>]*/?>", re.IGNORECASE)
+_VIDEO_TAG_RE = re.compile(r"<video\b[^>]*duration=\"([^\"]+)\"[^>]*/?>", re.IGNORECASE)
+_IMAGE_TAG_RE = re.compile(r"^\[Image:\s*[^\]]+\]$", re.IGNORECASE)
+_HTML_TAG_RE = re.compile(r"</?(?:p|div|span|strong|b|i|u|ol|ul|li|br)[^>]*>", re.IGNORECASE)
+_AT_TAG_RE = re.compile(r"<at\b[^>]*>(.*?)</at>|<at\b[^>]*/>", re.IGNORECASE)
+_MARKDOWN_IMAGE_RE = re.compile(r"!\[[^\]]*\]\([^)]+\)")
+_MARKDOWN_LINK_RE = re.compile(r"\[([^\]]+)\]\((https?://[^)]+)\)")
+_URL_RE = re.compile(r"https?://[^\s)\]<>]+")
+_EMOJI_TOKEN_RE = re.compile(r":[A-Za-z0-9_+-]{3,}:")
+_WHITESPACE_RE = re.compile(r"[ \t]+")
+_BLANK_LINE_RE = re.compile(r"\n{3,}")
+
+
+def build_batch_analysis_prompt(
+    batch: AnalysisBatch,
+    *,
+    config: RuntimeConfig | None = None,
+) -> str:
+    runtime_config = config or RuntimeConfig()
+    protocol = {
+        "instruction": (
+            "按会话切片提炼当天讨论过的工作事项摘要。"
+            "只返回一个 JSON 对象，包含 candidate_events 和 context_requests。"
+        ),
+        "rules": [
+            "只提炼工作事项。",
+            "只提炼与本人直接相关的工作事项。",
+            "本人信息见 input.self；只有事项明确由本人发起、本人负责、本人审批、本人催办、本人汇报、本人跟进，或他人明确要求本人推进/处理时，才提炼。",
+            "如果事项主体明显是他人的工作、他人的进展、他人的承诺，而本人只是参与了会话或说过别的话，不要提炼。",
+            "如果只是同群讨论背景信息、但没有明确落到本人，也不要提炼。",
+            _build_confidential_rule(runtime_config),
+            _build_non_work_sensitive_rule(runtime_config),
+            "一件事写一条；如果有多件事就拆开。",
+            "topic 写短标题，content 写事项，result 只写明确结果；没有结果就留空。",
+            "每条事项附上最相关的消息 id。",
+            "source_conversation_id 必须原样回填 input.slices[*].conversation_id。",
+            "source_slice_id 必须原样回填 input.slices[*].slice_id。",
+            "只能使用输入里出现过的真实 id，不要自造 conversation-001、slice_0、event_1 这类占位符 id。",
+            "正例：本人要求他人汇报、本人审批、本人同步、本人催办、本人推进，都算与本人直接相关。",
+            "反例：他人之间讨论自己的工作、自己的承诺、自己的处理进度，即使本人在该会话里发过言，也不算与本人直接相关。",
+            "拿不准就用 context_requests，不要猜。",
+        ],
+        "required_output_schema": {
+            "candidate_events": [
+                {
+                    "draft_id": "string",
+                    "date": "YYYY-MM-DD",
+                    "topic": "string",
+                    "content": "string",
+                    "result": "string",
+                    "source_message_ids": ["message_id"],
+                    "source_conversation_id": "conversation_id",
+                    "source_slice_id": "slice_id",
+                    "confidence": 0.0,
+                }
+            ],
+            "context_requests": [
+                {
+                    "slice_id": "slice_id",
+                    "request_type": "earlier_messages | later_messages | attachment_text",
+                    "target_message_ids": ["message_id"],
+                    "target_attachment_ids": ["attachment_id"],
+                    "reason": "string",
+                    "limit": 1,
+                }
+            ],
+        },
+        "input": serialize_batch_for_prompt(batch),
+    }
+    return dump_json(protocol, pretty=True)
+
+
+def build_merge_prompt(target_date: str, candidates: list[SourceBackedEventDraft]) -> str:
+    protocol = {
+        "instruction": (
+            "按是否描述同一真实工作事件，对同一天的候选事项做跨会话分组。"
+            "只返回一个 JSON 对象，包含 groups。"
+        ),
+        "rules": [
+            "只把明显属于同一真实事件的事项分到一起。",
+            "如果拿不准，宁可分开。",
+            "背景相同不等于同一事件。",
+            "动作类型不同通常不是同一事件。",
+            "同步/通知 和 核对/执行/跟进，通常不是同一事件。",
+            "每个 draft_id 必须且只能出现在一个 group 里。",
+        ],
+        "required_output_schema": {
+            "groups": [
+                {
+                    "group_id": "string",
+                    "draft_ids": ["draft_id"],
+                }
+            ]
+        },
+        "target_date": target_date,
+        "candidates": [
+            {
+                "draft_id": candidate.draft_id,
+                "source_conversation_id": candidate.source_conversation_id,
+                "topic": candidate.topic,
+                "content": candidate.content,
+                "result": candidate.result,
+            }
+            for candidate in candidates
+        ],
+    }
+    return dump_json(protocol, pretty=True)
+
+
+def build_cross_merge_bucket_prompt(
+    target_date: str,
+    candidates: list[SourceBackedEventDraft],
+) -> str:
+    protocol = {
+        "instruction": (
+            "按是否描述同一真实工作事件，对同日候选事件进行分桶。"
+            "只返回 JSON。不要合并内容。"
+            "每个 bucket 的 reason 用一句短话写清分组依据。"
+        ),
+        "rules": [
+            "只把大概率是同一事件的候选放进同一桶。",
+            "如果拿不准，宁可分开。",
+            "每个 id 必须且只能出现在一个桶里。",
+            "不要编造或修改 id。",
+            "仅仅背景相同，不足以分到一起。",
+            "仅仅文档名相同，不足以分到一起。",
+            "如果具体动作不同，就分开。",
+            "动作类型比共享名词更重要。",
+            "同步/通知 与 核对/校验/执行，通常不是同一事件。",
+            "设计、审批、付款跟进、文档编辑，通常不是同一事件。",
+            "只有在明确属于同一连续动作时，才把同步和核对放进同一桶。",
+            "每个 reason 要短、要具体。",
+        ],
+        "required_output_schema": {
+            "buckets": [
+                {
+                    "bucket_id": "string",
+                    "draft_ids": ["draft_id"],
+                    "reason": "string",
+                }
+            ]
+        },
+        "target_date": target_date,
+        "candidates": [serialize_cross_merge_candidate_for_prompt(item) for item in candidates],
+    }
+    return dump_json(protocol, pretty=True)
+
+
+def build_cross_bucket_merge_prompt(
+    target_date: str,
+    merged_buckets: list[BucketMergedDraft],
+    candidate_pairs: list[tuple[str, str]],
+) -> str:
+    bucket_cards = [serialize_bucket_merged_draft_for_prompt(item) for item in merged_buckets]
+    protocol = {
+        "instruction": (
+            "Review already-merged bucket-level events and decide whether any candidate bucket pairs "
+            "actually describe the same real work event. Return only one JSON object with key merge_decisions. "
+            "Be conservative and prefer not merging unless the two buckets are clearly the same event."
+        ),
+        "rules": [
+            "Only evaluate the provided candidate_pairs.",
+            "Set should_merge to true only when the two bucket-level events are clearly the same real work event.",
+            "Shared background topic alone is not enough; the action chain and outcome should also align.",
+            "If one bucket is only a prerequisite, side note, or related follow-up, do not merge.",
+            "Do not invent bucket IDs.",
+        ],
+        "required_output_schema": {
+            "merge_decisions": [
+                {
+                    "left_bucket_id": "string",
+                    "right_bucket_id": "string",
+                    "should_merge": True,
+                    "reason": "string",
+                }
+            ]
+        },
+        "target_date": target_date,
+        "bucket_cards": bucket_cards,
+        "candidate_pairs": [
+            {
+                "left_bucket_id": left_bucket_id,
+                "right_bucket_id": right_bucket_id,
+            }
+            for left_bucket_id, right_bucket_id in candidate_pairs
+        ],
+    }
+    return dump_json(protocol, pretty=True)
+
+
+def build_anchor_analysis_prompt(
+    target_date: str,
+    anchor_unit: AnchorUnit,
+    *,
+    pass_index: int = 1,
+    config: RuntimeConfig | None = None,
+) -> str:
+    runtime_config = config or RuntimeConfig()
+    protocol = {
+        "instruction": (
+            "分析一个锚点聊天窗口。"
+            "只返回 JSON：anchor_status、candidate_events、context_requests、needs_cross_anchor_merge。"
+        ),
+        "rules": [
+            (
+                "anchor_status 只能是 "
+                f"{AnchorStatus.COMPLETED.value}、{AnchorStatus.NEEDS_MORE_CONTEXT.value}、"
+                f"{AnchorStatus.NEEDS_ATTACHMENT_TEXT.value}、{AnchorStatus.NOT_WORK_RELATED.value}、"
+                f"{AnchorStatus.UNCERTAIN.value}。"
+            ),
+            "只抽取工作事件。",
+            "每个 candidate_event 只能落在当前 anchor_unit 内。",
+            "每个 candidate_event 只表示一个主要动作。",
+            "如果窗口里有多个动作，就拆开。",
+            "动作类型比共享名词更重要。",
+            "同步/通知 与 核对/校验/执行/跟进，通常不是同一事件。",
+            "每个 result 只能归属于自己的动作，不要串到别的动作上。",
+            "例如：已同步给老板、老板未回复可视为已知悉，属于同步动作，不属于优惠券核对动作。",
+            "如果上下文不够，就用 context_requests，不要猜。",
+            "只有事件明显跨多个锚点窗口或会话时，needs_cross_anchor_merge 才设为 true。",
+            "没有明确结果时，result 置空字符串。",
+        ],
+        "required_output_schema": {
+            "anchor_status": [
+                AnchorStatus.COMPLETED.value,
+                AnchorStatus.NEEDS_MORE_CONTEXT.value,
+                AnchorStatus.NEEDS_ATTACHMENT_TEXT.value,
+                AnchorStatus.NOT_WORK_RELATED.value,
+                AnchorStatus.UNCERTAIN.value,
+            ],
+            "candidate_events_item": {
+                "draft_id": "string",
+                "date": "YYYY-MM-DD",
+                "topic": "string",
+                "content": "string",
+                "result": "string",
+                "source_message_ids": ["message_id"],
+                "source_conversation_id": "conversation_id",
+                "source_slice_id": "anchor_unit_id",
+                "confidence": 0.0,
+            },
+            "context_requests_item": {
+                "slice_id": "anchor_unit_id",
+                "request_type": "earlier_messages | later_messages | attachment_text",
+                "target_message_ids": ["message_id"],
+                "target_attachment_ids": ["attachment_id"],
+                "reason": "string",
+                "limit": 1,
+            },
+            "needs_cross_anchor_merge": "boolean",
+        },
+        "input": {
+            "target_date": target_date,
+            "pass_index": pass_index,
+            "anchor_unit": serialize_anchor_unit_for_prompt(anchor_unit, runtime_config),
+        },
+    }
+    return dump_json(protocol, pretty=True)
+
+
+def build_anchor_batch_analysis_prompt(
+    target_date: str,
+    anchor_units: list[AnchorUnit],
+    *,
+    config: RuntimeConfig | None = None,
+) -> str:
+    runtime_config = config or RuntimeConfig()
+    protocol = {
+        "instruction": (
+            "一次分析多个彼此独立的锚点聊天窗口。"
+            "只返回 JSON，顶层键为 results。每个 result 必须对应一个 anchor_unit_id。"
+        ),
+        "rules": [
+            "每个 anchor unit 独立判断，不要串信息。",
+            "每个 result 必须包含 anchor_unit_id 和 analysis。",
+            "只抽取工作事件。",
+            "每个 candidate_event 只能留在自己的 anchor_unit 内。",
+            "每个 candidate_event 只表示一个主要动作。",
+            "如果同一窗口有多个动作，就拆开。",
+            "动作类型比共享名词更重要。",
+            "同步/通知 与 核对/校验/执行/跟进，通常不是同一事件。",
+            "每个 result 只能归属于自己的动作，不要串到别的动作上。",
+            "如果上下文不够，就用 context_requests，不要猜。",
+            "只有事件明显跨多个锚点窗口或会话时，needs_cross_anchor_merge 才设为 true。",
+            "没有明确结果时，result 置空字符串。",
+        ],
+        "required_output_schema": {
+            "results": [
+                {
+                    "anchor_unit_id": "anchor_unit_id",
+                    "analysis": {
+                        "anchor_status": [
+                            AnchorStatus.COMPLETED.value,
+                            AnchorStatus.NEEDS_MORE_CONTEXT.value,
+                            AnchorStatus.NEEDS_ATTACHMENT_TEXT.value,
+                            AnchorStatus.NOT_WORK_RELATED.value,
+                            AnchorStatus.UNCERTAIN.value,
+                        ],
+                        "candidate_events_item": {
+                            "draft_id": "string",
+                            "date": "YYYY-MM-DD",
+                            "topic": "string",
+                            "content": "string",
+                            "result": "string",
+                            "source_message_ids": ["message_id"],
+                            "source_conversation_id": "conversation_id",
+                            "source_slice_id": "anchor_unit_id",
+                            "confidence": 0.0,
+                        },
+                        "context_requests_item": {
+                            "slice_id": "anchor_unit_id",
+                            "request_type": "earlier_messages | later_messages | attachment_text",
+                            "target_message_ids": ["message_id"],
+                            "target_attachment_ids": ["attachment_id"],
+                            "reason": "string",
+                            "limit": 1,
+                        },
+                        "needs_cross_anchor_merge": "boolean",
+                    },
+                }
+            ]
+        },
+        "input": {
+            "target_date": target_date,
+            "anchor_units": [
+                serialize_anchor_unit_for_prompt(anchor_unit, runtime_config)
+                | {"anchor_unit_id": anchor_unit.anchor_unit_id}
+                for anchor_unit in anchor_units
+            ],
+        },
+    }
+    return dump_json(protocol, pretty=True)
+
+
+def build_anchor_expansion_prompt(
+    target_date: str,
+    anchor_unit: AnchorUnit,
+    previous_result: AnchorAnalysisResult,
+    *,
+    trigger_requests: list[ContextRequest],
+    new_messages: list[NormalizedMessage],
+    attachment_texts: list[AttachmentTextBlock],
+    pass_index: int = 2,
+    config: RuntimeConfig | None = None,
+) -> str:
+    runtime_config = config or RuntimeConfig()
+    protocol = {
+        "instruction": (
+            "You are continuing analysis of one anchor-focused chat window after Python "
+            "expanded the context. Return only one JSON object with keys anchor_status, "
+            "candidate_events, context_requests, and needs_cross_anchor_merge. "
+            "Do not return markdown, explanations, or extra keys."
+        ),
+        "rules": [
+            (
+                "anchor_status must be one of "
+                f"{AnchorStatus.COMPLETED.value}, "
+                f"{AnchorStatus.NEEDS_MORE_CONTEXT.value}, "
+                f"{AnchorStatus.NEEDS_ATTACHMENT_TEXT.value}, "
+                f"{AnchorStatus.NOT_WORK_RELATED.value}, "
+                f"{AnchorStatus.UNCERTAIN.value}."
+            ),
+            "Use previous_analysis as prior state, but revise it when new context changes the conclusion.",
+            "candidate_events should represent the latest consolidated judgment for this anchor_unit.",
+            "Each candidate_event must still represent exactly one primary action or work thread.",
+            (
+                "If new context reveals that one previous candidate_event actually mixed multiple actions, split it into "
+                "multiple candidate_events."
+            ),
+            (
+                "Action type matters more than shared background nouns. Notification/sync, review/check, execution, "
+                "design, approval, payment follow-up, and document editing are usually different events."
+            ),
+            (
+                "If one part is mainly about notifying or syncing information, and another part is mainly about checking, "
+                "validating, executing, or following up, keep them as separate candidate_events unless the text clearly "
+                "shows they are the same continuous action."
+            ),
+            (
+                "result must belong only to the same candidate_event's primary action. If the newly added context shows that "
+                "a result belongs to another action, move it or split the event instead of keeping them mixed."
+            ),
+            (
+                "For example, 'already synced to the boss / no reply so assume acknowledged' belongs to the sync action, "
+                "not to a separate coupon configuration checking action."
+            ),
+            "Only request more context when the newly added messages or attachment texts still do not resolve the event.",
+            "needs_cross_anchor_merge should be true only when the event likely spans other anchor windows or conversations.",
+            "result must be an empty string when there is no explicit result.",
+        ],
+        "required_output_schema": {
+            "anchor_status": (
+                f"{AnchorStatus.COMPLETED.value} | "
+                f"{AnchorStatus.NEEDS_MORE_CONTEXT.value} | "
+                f"{AnchorStatus.NEEDS_ATTACHMENT_TEXT.value} | "
+                f"{AnchorStatus.NOT_WORK_RELATED.value} | "
+                f"{AnchorStatus.UNCERTAIN.value}"
+            ),
+            "candidate_events": [
+                {
+                    "draft_id": "string",
+                    "date": "YYYY-MM-DD",
+                    "topic": "string",
+                    "content": "string",
+                    "result": "string",
+                    "source_message_ids": ["message_id"],
+                    "source_conversation_id": "conversation_id",
+                    "source_slice_id": "anchor_unit_id",
+                    "confidence": 0.0,
+                }
+            ],
+            "context_requests": [
+                {
+                    "slice_id": "anchor_unit_id",
+                    "request_type": "earlier_messages | later_messages | attachment_text",
+                    "target_message_ids": ["message_id"],
+                    "target_attachment_ids": ["attachment_id"],
+                    "reason": "string",
+                    "limit": 1,
+                }
+            ],
+            "needs_cross_anchor_merge": True,
+        },
+        "input": {
+            "target_date": target_date,
+            "pass_index": pass_index,
+            "anchor_unit": serialize_anchor_unit_for_prompt(anchor_unit, runtime_config),
+            "previous_analysis": serialize_anchor_analysis_result_for_prompt(previous_result),
+            "expansion": {
+                "trigger_requests": [
+                    serialize_context_request_for_prompt(item) for item in trigger_requests
+                ],
+                "new_messages": [
+                    serialize_message_for_prompt(message, runtime_config)
+                    for message in new_messages
+                ],
+                "attachment_texts": [
+                    serialize_attachment_for_prompt(block, runtime_config)
+                    for block in attachment_texts
+                ],
+            },
+        },
+    }
+    return dump_json(protocol, pretty=True)
+
+
+def serialize_batch_for_prompt(
+    batch: AnalysisBatch,
+    *,
+    config: RuntimeConfig | None = None,
+) -> dict[str, object]:
+    runtime_config = config or RuntimeConfig()
+    return {
+        "target_date": batch.target_date,
+        "batch_id": batch.batch_id,
+        "retry_round": batch.retry_round,
+        "estimated_tokens": batch.estimated_tokens,
+        "self": {
+            "open_id": batch.self_open_id,
+            "display_name": batch.self_display_name,
+        },
+        "slices": [
+            serialize_slice_for_prompt(conversation_slice, runtime_config)
+            for conversation_slice in batch.slices
+        ],
+    }
+
+
+def serialize_slice_for_prompt(
+    conversation_slice: ConversationSlice,
+    config: RuntimeConfig,
+) -> dict[str, object]:
+    limited_messages = conversation_slice.messages[: config.prompt_slice_message_limit]
+    serialized_messages = _serialize_prompt_messages(conversation_slice, limited_messages, config)
+    serialized: dict[str, object] = {
+        "slice_id": conversation_slice.slice_id,
+        "conversation_id": conversation_slice.conversation_id,
+        "messages": serialized_messages,
+    }
+    if conversation_slice.conversation_name:
+        serialized["conversation_name"] = conversation_slice.conversation_name
+    if len(conversation_slice.messages) > len(limited_messages):
+        serialized["omitted_message_count"] = (
+            len(conversation_slice.messages) - len(limited_messages)
+        )
+    if conversation_slice.attachment_texts:
+        serialized["attachment_texts"] = [
+            serialize_attachment_for_prompt(block, config)
+            for block in conversation_slice.attachment_texts
+        ]
+    return serialized
+
+
+def serialize_anchor_unit_for_prompt(
+    anchor_unit: AnchorUnit,
+    config: RuntimeConfig,
+) -> dict[str, object]:
+    limited_messages = anchor_unit.messages[: config.prompt_slice_message_limit]
+    serialized_messages = _serialize_anchor_prompt_messages(anchor_unit, limited_messages, config)
+    serialized: dict[str, object] = {
+        "messages": serialized_messages,
+    }
+    if anchor_unit.conversation_name:
+        serialized["conversation_name"] = anchor_unit.conversation_name
+    if len(anchor_unit.messages) > len(limited_messages):
+        serialized["omitted_message_count"] = len(anchor_unit.messages) - len(limited_messages)
+    if anchor_unit.attachment_refs:
+        serialized["attachment_refs"] = [
+            {
+                "id": item.attachment_id,
+                "name": item.file_name,
+                "mime": item.mime_type,
+            }
+            for item in anchor_unit.attachment_refs
+        ]
+    return serialized
+
+
+def serialize_anchor_analysis_result_for_prompt(
+    result: AnchorAnalysisResult,
+) -> dict[str, object]:
+    return {
+        "anchor_status": result.anchor_status,
+        "candidate_events": [item.to_dict() for item in result.candidate_events],
+        "context_requests": [
+            serialize_context_request_for_prompt(item) for item in result.context_requests
+        ],
+        "needs_cross_anchor_merge": result.needs_cross_anchor_merge,
+    }
+
+
+def serialize_cross_merge_candidate_for_prompt(
+    candidate: SourceBackedEventDraft,
+) -> dict[str, object]:
+    return {
+        "id": candidate.draft_id,
+        "t": candidate.topic,
+        "c": candidate.content,
+        "r": candidate.result,
+    }
+
+
+def serialize_bucket_merged_draft_for_prompt(
+    item: BucketMergedDraft,
+) -> dict[str, object]:
+    return {
+        "bucket_id": item.bucket_id,
+        "topic": item.draft.topic,
+        "content": item.draft.content,
+        "result": item.draft.result,
+        "source_conversation_ids": list(item.draft.source_conversation_ids),
+        "source_message_ids": list(item.draft.source_message_ids),
+        "upstream_draft_ids": list(item.upstream_draft_ids),
+    }
+
+
+def serialize_context_request_for_prompt(request: ContextRequest) -> dict[str, object]:
+    return {
+        "slice_id": request.slice_id,
+        "request_type": request.request_type,
+        "target_message_ids": list(request.target_message_ids),
+        "target_attachment_ids": list(request.target_attachment_ids),
+        "reason": request.reason,
+        "limit": request.limit,
+    }
+
+
+def serialize_message_for_prompt(
+    message: NormalizedMessage,
+    config: RuntimeConfig,
+    *,
+    short_id: str | None = None,
+) -> dict[str, object]:
+    compressed_text = _trim_text(
+        _compress_prompt_message_text(message),
+        config.prompt_message_char_limit,
+    )
+    serialized: dict[str, object] = {
+        "t": _format_prompt_time(message.send_time, config),
+        "s": message.sender_name or message.sender_open_id or "",
+        "x": compressed_text,
+    }
+    if short_id:
+        serialized["id"] = short_id
+    return serialized
+
+
+def _serialize_prompt_messages(
+    conversation_slice: ConversationSlice,
+    messages: list[NormalizedMessage],
+    config: RuntimeConfig,
+) -> list[dict[str, object]]:
+    serialized_messages: list[dict[str, object]] = []
+    short_id_map = build_prompt_message_short_ids(conversation_slice.messages)
+    for message in messages:
+        serialized = serialize_message_for_prompt(
+            message,
+            config,
+            short_id=short_id_map.get(message.message_id),
+        )
+        if _is_prompt_message_meaningful(serialized):
+            serialized_messages.append(serialized)
+    return serialized_messages
+
+
+def _serialize_anchor_prompt_messages(
+    anchor_unit: AnchorUnit,
+    messages: list[NormalizedMessage],
+    config: RuntimeConfig,
+) -> list[dict[str, object]]:
+    anchor_ids = set(anchor_unit.anchor_message_ids)
+    serialized_messages: list[dict[str, object]] = []
+    for message in messages:
+        serialized = serialize_message_for_prompt(message, config)
+        if not _is_prompt_message_meaningful(serialized):
+            continue
+        if _is_non_anchor_weak_placeholder(message, serialized, anchor_ids):
+            continue
+        serialized_messages.append(serialized)
+    return serialized_messages
+
+
+def _is_prompt_message_meaningful(message: dict[str, object]) -> bool:
+    text = clean_text(str(message.get("x", "")))
+    if not text:
+        return False
+    if text == "[Sticker]":
+        return False
+    return True
+
+
+def _is_non_anchor_weak_placeholder(
+    message: NormalizedMessage,
+    serialized: dict[str, object],
+    anchor_ids: set[str],
+) -> bool:
+    if message.message_id in anchor_ids:
+        return False
+    text = clean_text(str(serialized.get("x", "")))
+    return text in {
+        "[图片]",
+        "[链接]",
+        "[飞书文档]",
+        "[表单链接]",
+    } or text.startswith("[文件: ")
+
+
+def serialize_attachment_for_prompt(
+    block: AttachmentTextBlock,
+    config: RuntimeConfig,
+) -> dict[str, object]:
+    return {
+        "id": block.attachment_id,
+        "mid": block.message_id,
+        "name": block.file_name,
+        "text": _trim_text(block.text, config.prompt_attachment_char_limit),
+    }
+
+
+def _trim_text(value: str, limit: int) -> str:
+    cleaned = clean_text(value)
+    if len(cleaned) <= limit:
+        return cleaned
+    return f"{cleaned[:limit].rstrip()}..."
+
+
+def _compress_prompt_message_text(message: NormalizedMessage) -> str:
+    feishu_doc_label = _build_feishu_doc_label(message)
+    if feishu_doc_label:
+        return feishu_doc_label
+
+    text = clean_text(message.text)
+    if not text:
+        return ""
+
+    file_name = _extract_inline_media_name(text)
+    if message.message_type == "file" and file_name:
+        return f"[文件: {file_name}]"
+
+    audio_match = _AUDIO_TAG_RE.fullmatch(text)
+    if audio_match:
+        duration = audio_match.group(1).strip()
+        if file_name:
+            return f"[语音消息 {duration}: {file_name}]"
+        return f"[语音消息 {duration}]"
+
+    video_match = _VIDEO_TAG_RE.fullmatch(text)
+    if video_match:
+        duration = video_match.group(1).strip()
+        return f"[视频 {duration}]"
+
+    if _IMAGE_TAG_RE.fullmatch(text):
+        return _build_image_placeholder(message, text)
+    if text == "[Sticker]":
+        return ""
+
+    if message.message_type == "audio":
+        return f"[语音消息: {file_name}]" if file_name else "[语音消息]"
+    if message.message_type in {"image", "media"} and not text:
+        return f"[媒体消息: {file_name}]" if file_name else "[媒体消息]"
+    if message.message_type == "post":
+        normalized = _normalize_prompt_text(text)
+        normalized_lines = [line for line in normalized.splitlines() if line.strip()]
+        deduped_lines: list[str] = []
+        seen_image = False
+        for line in normalized_lines:
+            if line == "[图片]":
+                if seen_image:
+                    continue
+                seen_image = True
+            deduped_lines.append(line)
+        return "\n".join(deduped_lines)
+    return _normalize_prompt_text(text)
+
+
+def _normalize_prompt_text(text: str) -> str:
+    normalized = text.replace("\r\n", "\n").replace("\r", "\n")
+    normalized = _AT_TAG_RE.sub(_replace_at_tag, normalized)
+    normalized = _MARKDOWN_IMAGE_RE.sub("[图片]", normalized)
+    normalized = _MARKDOWN_LINK_RE.sub(_replace_markdown_link, normalized)
+    normalized = _URL_RE.sub(_replace_url, normalized)
+    normalized = _HTML_TAG_RE.sub("\n", normalized)
+    normalized = re.sub(r"<[^>]+>", " ", normalized)
+    normalized = normalized.replace("&nbsp;", " ")
+    normalized = normalized.replace("&amp;", "&")
+    normalized = normalized.replace(" / ", "\n")
+    normalized = _EMOJI_TOKEN_RE.sub("", normalized)
+    normalized = "\n".join(_WHITESPACE_RE.sub(" ", line).strip() for line in normalized.splitlines())
+    normalized = _BLANK_LINE_RE.sub("\n\n", normalized)
+    normalized = clean_text(normalized)
+    normalized = "\n".join(line for line in normalized.splitlines() if line.strip())
+    normalized = clean_text(normalized)
+    if not normalized:
+        return ""
+    if _contains_only_image_placeholders(normalized):
+        return "[图片]"
+    return normalized
+
+
+def _replace_at_tag(match: re.Match[str]) -> str:
+    label = clean_text(match.group(1) or "")
+    if not label:
+        return ""
+    return f"@{label}"
+
+
+def _replace_markdown_link(match: re.Match[str]) -> str:
+    label = clean_text(match.group(1))
+    if label:
+        return f"{label}[链接]"
+    return "[链接]"
+
+
+def _replace_url(match: re.Match[str]) -> str:
+    url = match.group(0)
+    if "feishu.cn/docx/" in url or "larksuite.com/docx/" in url:
+        return "[飞书文档]"
+    if "feishu.cn/share/base/form/" in url or "larksuite.com/share/base/form/" in url:
+        return "[表单链接]"
+    return "[链接]"
+
+
+def _contains_only_image_placeholders(text: str) -> bool:
+    compact = clean_text(text.replace("\n", " "))
+    if not compact:
+        return False
+    stripped = compact.replace("[图片]", "").strip()
+    return not stripped
+
+
+def _extract_inline_media_name(text: str) -> str:
+    match = re.search(r'name="([^"]+)"', text)
+    if not match:
+        return ""
+    return clean_text(match.group(1))
+
+
+def _build_image_placeholder(message: NormalizedMessage, text: str) -> str:
+    image_count = text.count("[Image:")
+    if image_count > 1:
+        return f"[图片 {image_count}张]"
+    return "[图片]"
+
+
+def _format_prompt_time(value: str, config: RuntimeConfig) -> str:
+    try:
+        return datetime.fromisoformat(value).strftime(config.prompt_time_format)
+    except ValueError:
+        return value
+
+
+def _build_confidential_rule(config: RuntimeConfig) -> str:
+    joined = "、".join(config.confidential_event_keywords)
+    return f"涉及{joined}等工作保密信息，不要提炼为事项。"
+
+
+def _build_non_work_sensitive_rule(config: RuntimeConfig) -> str:
+    joined = "、".join(config.non_work_sensitive_keywords)
+    return f"涉及{joined}等非工作敏感内容，不要提炼为事项。"
+
+
+def _build_feishu_doc_label(message: NormalizedMessage) -> str:
+    if message.message_type == "file":
+        file_name = _extract_inline_media_name(message.text)
+        if file_name:
+            return f"[文件: {file_name}]"
+
+    text = clean_text(message.text)
+    pure_feishu_doc_message = False
+    if text:
+        normalized_doc_only = _URL_RE.sub("[飞书文档]", text)
+        normalized_doc_only = clean_text(normalized_doc_only)
+        pure_feishu_doc_message = normalized_doc_only == "[飞书文档]"
+
+    for link in message.links:
+        if link.link_type != LinkType.FEISHU_DOC.value:
+            continue
+        if not pure_feishu_doc_message:
+            break
+        title = clean_text(link.title)
+        if title:
+            return f"[飞书文档: {title}]"
+        return "[飞书文档]"
+
+    if pure_feishu_doc_message and ("feishu.cn/docx/" in text or "larksuite.com/docx/" in text):
+        return "[飞书文档]"
+
+    return ""
+
+
+def build_prompt_message_short_ids(
+    messages: list[NormalizedMessage],
+) -> dict[str, str]:
+    return {
+        message.message_id: f"m{index}"
+        for index, message in enumerate(messages, start=1)
+    }

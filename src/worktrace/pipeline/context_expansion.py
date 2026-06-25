@@ -1,0 +1,126 @@
+from __future__ import annotations
+
+from collections import defaultdict
+from dataclasses import replace
+
+from ..config import RuntimeConfig
+from ..constants import ContextDirection, ContextRequestType
+from ..models import (
+    AnalysisBatch,
+    AttachmentTextBlock,
+    ContextRequest,
+    ConversationSlice,
+    NormalizedMessage,
+)
+from ..resolvers.base import ContentResolver
+from ..sources.base import ChatSource
+
+
+def validate_context_request(request: ContextRequest) -> bool:
+    if request.request_type not in {
+        ContextRequestType.EARLIER_MESSAGES.value,
+        ContextRequestType.LATER_MESSAGES.value,
+        ContextRequestType.ATTACHMENT_TEXT.value,
+    }:
+        return False
+    if request.request_type == ContextRequestType.ATTACHMENT_TEXT.value:
+        return bool(request.target_message_ids and request.target_attachment_ids)
+    return not request.target_attachment_ids
+
+
+def group_requests_by_slice(requests: list[ContextRequest]) -> dict[str, list[ContextRequest]]:
+    grouped: dict[str, list[ContextRequest]] = defaultdict(list)
+    for request in requests:
+        if validate_context_request(request):
+            grouped[request.slice_id].append(request)
+    return dict(grouped)
+
+
+def expand_slice_context(
+    conversation_slice: ConversationSlice,
+    requests: list[ContextRequest],
+    *,
+    chat_source: ChatSource,
+    content_resolver: ContentResolver,
+    config: RuntimeConfig,
+) -> ConversationSlice:
+    if not requests:
+        return conversation_slice
+
+    request_order = {
+        ContextRequestType.ATTACHMENT_TEXT.value: 0,
+        ContextRequestType.EARLIER_MESSAGES.value: 1,
+        ContextRequestType.LATER_MESSAGES.value: 2,
+    }
+    ordered = sorted(requests, key=lambda item: request_order[item.request_type])
+
+    message_by_id = {message.message_id: message for message in conversation_slice.messages}
+    attachment_blocks: dict[str, AttachmentTextBlock] = {
+        block.attachment_id: block for block in conversation_slice.attachment_texts
+    }
+
+    for request in ordered:
+        if request.request_type == ContextRequestType.ATTACHMENT_TEXT.value:
+            for message_id in request.target_message_ids:
+                message = message_by_id.get(message_id)
+                if not message:
+                    continue
+                loaded = content_resolver.load_attachment_text_if_needed(
+                    message,
+                    request.target_attachment_ids,
+                    request.reason,
+                )
+                for block in loaded or []:
+                    attachment_blocks.setdefault(block.attachment_id, block)
+            continue
+
+        direction = (
+            ContextDirection.EARLIER
+            if request.request_type == ContextRequestType.EARLIER_MESSAGES.value
+            else ContextDirection.LATER
+        )
+        related = chat_source.fetch_related_messages(
+            conversation_slice.conversation_id,
+            request.target_message_ids,
+            direction,
+            min(request.limit, config.max_model_input_tokens),
+        )
+        for message in related:
+            message_by_id.setdefault(message.message_id, message)
+
+    updated_messages = sorted(
+        message_by_id.values(),
+        key=lambda item: (item.send_time, item.message_id),
+    )
+    return replace(
+        conversation_slice,
+        messages=updated_messages,
+        attachment_texts=sorted(
+            attachment_blocks.values(),
+            key=lambda item: (item.message_id, item.attachment_id),
+        ),
+    )
+
+
+def build_single_slice_retry_batch(
+    target_date: str,
+    conversation_slice: ConversationSlice,
+    *,
+    retry_round: int,
+    self_open_id: str,
+    self_display_name: str,
+    config: RuntimeConfig | None = None,
+) -> AnalysisBatch:
+    runtime_config = config or RuntimeConfig()
+    from .batching import estimate_slice_tokens
+
+    estimated_tokens = estimate_slice_tokens(conversation_slice, runtime_config)
+    return AnalysisBatch(
+        target_date=target_date,
+        batch_id=f"{conversation_slice.slice_id}-retry-{retry_round}",
+        retry_round=retry_round,
+        estimated_tokens=estimated_tokens,
+        self_open_id=self_open_id,
+        self_display_name=self_display_name,
+        slices=[conversation_slice],
+    )

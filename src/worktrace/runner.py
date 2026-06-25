@@ -1,0 +1,440 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+import logging
+from time import perf_counter
+
+from .config import RuntimeConfig
+from .constants import DailyRunStatus
+from .errors import AnalyzerProtocolError, ChatSourceError, StoreWriteError
+from .factories import RuntimeDependencies, build_runtime_dependencies
+from .logging_utils import log_timing
+from .models import (
+    AnalysisBatch,
+    CrossConversationGroupResult,
+    DailyRunResult,
+    MergedEventDraft,
+    SourceBackedEventDraft,
+)
+from .pipeline.conversation_first_pass import build_conversation_level_slices
+from .pipeline.context_expansion import (
+    build_single_slice_retry_batch,
+    expand_slice_context,
+)
+from .pipeline.cross_conversation_merge import materialize_grouped_merged_drafts
+from .pipeline.event_merge import build_work_events
+from .pipeline.filtering import filter_messages
+from .pipeline.sensitive_filter import filter_sensitive_merged_drafts
+from .pipeline.validation import (
+    validate_batch_analysis_result,
+    validate_merged_event_drafts,
+)
+from .models import BatchAnalysisResult, ConversationSlice, SelfIdentity
+
+logger = logging.getLogger("worktrace")
+
+
+@dataclass
+class DailyTraceRunner:
+    config: RuntimeConfig
+    dependencies: RuntimeDependencies
+
+    def run(self, target_date: str) -> DailyRunResult:
+        run_started_at = perf_counter()
+        warning_messages: list[str] = []
+        skipped_slice_count = 0
+
+        try:
+            stage_started_at = perf_counter()
+            self_identity = self.dependencies.chat_source.get_self_identity()
+            log_timing(
+                logger,
+                "runner.stage.completed",
+                stage_started_at,
+                stage="get_self_identity",
+                target_date=target_date,
+            )
+            stage_started_at = perf_counter()
+            conversations = self.dependencies.chat_source.list_target_conversations(
+                target_date, self_identity
+            )
+            log_timing(
+                logger,
+                "runner.stage.completed",
+                stage_started_at,
+                stage="list_target_conversations",
+                target_date=target_date,
+                conversation_count=len(conversations),
+            )
+            stage_started_at = perf_counter()
+            messages = self.dependencies.chat_source.fetch_conversation_messages(
+                target_date,
+                [item.conversation_id for item in conversations],
+            )
+            log_timing(
+                logger,
+                "runner.stage.completed",
+                stage_started_at,
+                stage="fetch_conversation_messages",
+                target_date=target_date,
+                message_count=len(messages),
+            )
+        except ChatSourceError as exc:
+            return self._finish_run(
+                run_started_at,
+                self._failed_result(target_date, str(exc)),
+            )
+
+        if not conversations and not messages:
+            return self._finish_run(
+                run_started_at,
+                self._write_empty_day(
+                    target_date,
+                    conversation_count=0,
+                    message_count=0,
+                    slice_count=0,
+                    batch_count=0,
+                ),
+            )
+
+        stage_started_at = perf_counter()
+        filtered_messages = filter_messages(messages)
+        log_timing(
+            logger,
+            "runner.stage.completed",
+            stage_started_at,
+            stage="filter_messages",
+            input_message_count=len(messages),
+            output_message_count=len(filtered_messages),
+        )
+        stage_started_at = perf_counter()
+        conversation_slices = build_conversation_level_slices(
+            filtered_messages,
+            self_identity.open_id,
+            self.config,
+        )
+        log_timing(
+            logger,
+            "runner.stage.completed",
+            stage_started_at,
+            stage="build_conversation_level_slices",
+            slice_count=len(conversation_slices),
+        )
+        all_candidates: list[SourceBackedEventDraft] = []
+        analyzed_batch_count = 0
+        all_message_order = [message.message_id for message in filtered_messages]
+        slices_by_id = {
+            conversation_slice.slice_id: conversation_slice
+            for conversation_slice in conversation_slices
+        }
+
+        try:
+            for slice_index, conversation_slice in enumerate(conversation_slices, start=1):
+                (
+                    validated_result,
+                    final_slice,
+                    slice_warnings,
+                    unresolved,
+                    run_count,
+                ) = self._analyze_conversation_slice_with_retry(
+                    target_date=target_date,
+                    conversation_slice=conversation_slice,
+                    self_identity=self_identity,
+                )
+                analyzed_batch_count += run_count
+                slices_by_id[final_slice.slice_id] = final_slice
+
+                for candidate in validated_result.candidate_events:
+                    all_candidates.append(candidate)
+
+                if unresolved:
+                    skipped_slice_count += 1
+                warning_messages.extend(slice_warnings)
+        except AnalyzerProtocolError as exc:
+            return self._finish_run(
+                run_started_at,
+                self._failed_result(target_date, str(exc)),
+            )
+
+        merged_drafts: list[MergedEventDraft] = []
+        if all_candidates:
+            try:
+                if len(all_candidates) == 1:
+                    merged_drafts = materialize_grouped_merged_drafts(
+                        all_candidates,
+                        [[all_candidates[0].draft_id]],
+                        target_date=target_date,
+                    )
+                else:
+                    merge_started_at = perf_counter()
+                    group_result = self.dependencies.analyzer.merge_day_candidates(
+                        target_date,
+                        all_candidates,
+                    )
+                    merged_drafts = materialize_grouped_merged_drafts(
+                        all_candidates,
+                        [group.draft_ids for group in group_result.groups],
+                        target_date=target_date,
+                    )
+                    merged_drafts = validate_merged_event_drafts(
+                        merged_drafts,
+                        message_order=all_message_order,
+                    )
+                    log_timing(
+                        logger,
+                        "runner.stage.completed",
+                        merge_started_at,
+                        stage="merge_day_candidates",
+                        candidate_event_count=len(all_candidates),
+                        merged_event_count=len(merged_drafts),
+                    )
+            except (AnalyzerProtocolError, ValueError) as exc:
+                return self._finish_run(
+                    run_started_at,
+                    self._failed_result(target_date, str(exc)),
+                )
+
+        if not merged_drafts:
+            return self._finish_run(
+                run_started_at,
+                self._write_empty_day(
+                    target_date,
+                    conversation_count=len(conversations),
+                    message_count=len(messages),
+                    slice_count=len(conversation_slices),
+                    batch_count=analyzed_batch_count,
+                    warning_messages=warning_messages,
+                    skipped_slice_count=skipped_slice_count,
+                ),
+            )
+
+        try:
+            merged_drafts, sensitive_warnings = filter_sensitive_merged_drafts(
+                merged_drafts,
+                self.config,
+            )
+            warning_messages.extend(sensitive_warnings)
+            event_build_started_at = perf_counter()
+            events, merge_warnings = build_work_events(target_date, merged_drafts)
+            log_timing(
+                logger,
+                "runner.stage.completed",
+                event_build_started_at,
+                stage="build_work_events",
+                event_count=len(events),
+                warning_count=len(merge_warnings),
+            )
+            warning_messages.extend(merge_warnings)
+            write_started_at = perf_counter()
+            write_result = self.dependencies.event_store.replace_day(
+                target_date,
+                events,
+            )
+            log_timing(
+                logger,
+                "runner.stage.completed",
+                write_started_at,
+                stage="write_markdown",
+                event_count=len(events),
+                output_path=write_result.output_path,
+            )
+        except (AnalyzerProtocolError, StoreWriteError, ValueError) as exc:
+            return self._finish_run(
+                run_started_at,
+                self._failed_result(target_date, str(exc)),
+            )
+
+        status = (
+            DailyRunStatus.SUCCESS_WITH_WARNINGS.value
+            if warning_messages or skipped_slice_count
+            else DailyRunStatus.SUCCESS.value
+        )
+        return self._finish_run(
+            run_started_at,
+            DailyRunResult(
+                target_date=target_date,
+                conversation_count=len(conversations),
+                message_count=len(messages),
+                slice_count=len(conversation_slices),
+                batch_count=analyzed_batch_count,
+                event_count=len(events),
+                skipped_slice_count=skipped_slice_count,
+                warning_count=len(warning_messages),
+                status=status,
+                output_path=write_result.output_path,
+                error_summary="; ".join(warning_messages),
+            ),
+        )
+
+    def _write_empty_day(
+        self,
+        target_date: str,
+        *,
+        conversation_count: int,
+        message_count: int,
+        slice_count: int,
+        batch_count: int,
+        warning_messages: list[str] | None = None,
+        skipped_slice_count: int = 0,
+    ) -> DailyRunResult:
+        warning_messages = warning_messages or []
+        write_result = self.dependencies.event_store.replace_day(
+            target_date,
+            [],
+        )
+        status = (
+            DailyRunStatus.SUCCESS_WITH_WARNINGS.value
+            if warning_messages or skipped_slice_count
+            else DailyRunStatus.SUCCESS.value
+        )
+        return DailyRunResult(
+            target_date=target_date,
+            conversation_count=conversation_count,
+            message_count=message_count,
+            slice_count=slice_count,
+            batch_count=batch_count,
+            event_count=0,
+            skipped_slice_count=skipped_slice_count,
+            warning_count=len(warning_messages),
+            status=status,
+            output_path=write_result.output_path,
+            error_summary="; ".join(warning_messages),
+        )
+
+    def _failed_result(self, target_date: str, error_summary: str) -> DailyRunResult:
+        return DailyRunResult(
+            target_date=target_date,
+            conversation_count=0,
+            message_count=0,
+            slice_count=0,
+            batch_count=0,
+            event_count=0,
+            skipped_slice_count=0,
+            warning_count=0,
+            status=DailyRunStatus.FAILED.value,
+            output_path=None,
+            error_summary=error_summary,
+        )
+
+    def _finish_run(
+        self,
+        run_started_at: float,
+        result: DailyRunResult,
+    ) -> DailyRunResult:
+        log_timing(
+            logger,
+            "runner.run.completed",
+            run_started_at,
+            target_date=result.target_date,
+            status=result.status,
+            conversation_count=result.conversation_count,
+            message_count=result.message_count,
+            slice_count=result.slice_count,
+            batch_count=result.batch_count,
+            event_count=result.event_count,
+            warning_count=result.warning_count,
+            skipped_slice_count=result.skipped_slice_count,
+        )
+        return result
+
+    def _analyze_conversation_slice_with_retry(
+        self,
+        *,
+        target_date: str,
+        conversation_slice: ConversationSlice,
+        self_identity: SelfIdentity,
+    ) -> tuple[BatchAnalysisResult, ConversationSlice, list[str], bool, int]:
+        current_slice = conversation_slice
+        warning_messages: list[str] = []
+        run_count = 0
+
+        for retry_round in range(0, self.config.slice_retry_limit + 1):
+            if retry_round == 0:
+                batch_input = AnalysisBatch(
+                    target_date=target_date,
+                    batch_id=f"conversation-{run_count + 1:03d}",
+                    retry_round=0,
+                    estimated_tokens=0,
+                    self_open_id=self_identity.open_id,
+                    self_display_name=self_identity.display_name,
+                    slices=[current_slice],
+                )
+            else:
+                batch_input = build_single_slice_retry_batch(
+                    target_date,
+                    current_slice,
+                    retry_round=retry_round,
+                    self_open_id=self_identity.open_id,
+                    self_display_name=self_identity.display_name,
+                    config=self.config,
+                )
+
+            batch_started_at = perf_counter()
+            batch_result = self.dependencies.analyzer.analyze_batch(target_date, batch_input)
+            validated_result = validate_batch_analysis_result(
+                batch_result,
+                {current_slice.slice_id: current_slice},
+            )
+            run_count += 1
+            log_timing(
+                logger,
+                "runner.stage.completed",
+                batch_started_at,
+                stage="analyze_conversation_slice",
+                batch_id=batch_input.batch_id,
+                slice_id=current_slice.slice_id,
+                slice_count=1,
+                retry_round=retry_round,
+                candidate_event_count=len(validated_result.candidate_events),
+                context_request_count=len(validated_result.context_requests),
+            )
+
+            if not validated_result.context_requests:
+                return validated_result, current_slice, warning_messages, False, run_count
+
+            if retry_round >= self.config.slice_retry_limit:
+                warning_messages.extend(
+                    [
+                        (
+                            f"Slice needs more context after retries: {request.slice_id} "
+                            f"({request.request_type}) {request.reason}"
+                        )
+                        for request in validated_result.context_requests
+                    ]
+                )
+                return validated_result, current_slice, warning_messages, True, run_count
+
+            expanded_slice = expand_slice_context(
+                current_slice,
+                validated_result.context_requests,
+                chat_source=self.dependencies.chat_source,
+                content_resolver=self.dependencies.content_resolver,
+                config=self.config,
+            )
+            if _conversation_slice_signature(expanded_slice) == _conversation_slice_signature(
+                current_slice
+            ):
+                warning_messages.extend(
+                    [
+                        (
+                            f"Slice expansion produced no new context: {request.slice_id} "
+                            f"({request.request_type}) {request.reason}"
+                        )
+                        for request in validated_result.context_requests
+                    ]
+                )
+                return validated_result, current_slice, warning_messages, True, run_count
+
+            current_slice = expanded_slice
+
+        return BatchAnalysisResult(), current_slice, warning_messages, True, run_count
+def run_daily_trace(target_date: str, config: RuntimeConfig) -> DailyRunResult:
+    runner = DailyTraceRunner(config=config, dependencies=build_runtime_dependencies(config))
+    return runner.run(target_date)
+
+
+def _conversation_slice_signature(conversation_slice: ConversationSlice) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    return (
+        tuple(message.message_id for message in conversation_slice.messages),
+        tuple(block.attachment_id for block in conversation_slice.attachment_texts),
+    )
