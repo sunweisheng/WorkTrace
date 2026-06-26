@@ -168,6 +168,10 @@ class FeishuCliChatSource(ChatSource):
         direction: ContextDirection | str,
         limit: int,
     ) -> list[NormalizedMessage]:
+        target_message_ids = [message_id.strip() for message_id in target_message_ids if message_id.strip()]
+        if not target_message_ids:
+            return []
+
         started_at = perf_counter()
         boundary_payload = self._run_json(
             (

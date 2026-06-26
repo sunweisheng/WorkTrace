@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Mapping
 
 
-DEFAULT_HOOK_COMMAND = "python3 -m src.worktrace.hook_runner --mode responses-http"
+DEFAULT_HOOK_COMMAND = "python3 -m src.worktrace.hook_runner --mode chat-completions-http"
 DEFAULT_LLM_BASE_URL_ENV_VAR = "WORKTRACE_LLM_BASE_URL"
 DEFAULT_LLM_MODEL_ENV_VAR = "WORKTRACE_LLM_MODEL"
 DEFAULT_LLM_API_KEY_ENV_VAR = "WORKTRACE_LLM_API_KEY"

@@ -22,6 +22,7 @@ def test_readme_mentions_local_online_llm_configuration() -> None:
 def test_skill_mentions_first_run_configuration_requirement() -> None:
     content = Path("SKILL.md").read_text(encoding="utf-8")
 
-    assert "首次使用前" in content
+    assert "每次使用前" in content
+    assert "必须先检查用户是否已经提供本地在线模型配置" in content
     assert "WORKTRACE_LLM_API_KEY" in content
     assert "不能提交到 git 仓库" in content

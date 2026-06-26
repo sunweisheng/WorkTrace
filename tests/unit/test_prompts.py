@@ -85,7 +85,7 @@ def test_prompt_serialization_is_compact(tmp_path: Path) -> None:
     assert payload["self"]["open_id"] == "ou_self"
     assert payload["self"]["display_name"] == "Me"
     assert payload["slices"][0]["messages"][0]["x"] == "abcdefghijkl..."
-    assert payload["slices"][0]["messages"][0]["id"] == "m1"
+    assert payload["slices"][0]["messages"][0]["id"] == "om_1"
     assert payload["slices"][0]["omitted_message_count"] == 1
     assert payload["slices"][0]["slice_id"] == "slice-1"
     assert payload["slices"][0]["conversation_id"] == "oc_1"
@@ -93,7 +93,7 @@ def test_prompt_serialization_is_compact(tmp_path: Path) -> None:
     assert "in_day_message_ids" not in payload["slices"][0]
 
 
-def test_batch_prompt_uses_short_message_ids_and_slim_rules(tmp_path: Path) -> None:
+def test_batch_prompt_uses_original_message_ids_and_slim_rules(tmp_path: Path) -> None:
     config = RuntimeConfig(
         data_root=tmp_path / "data",
         prompt_slice_message_limit=3,
@@ -161,8 +161,8 @@ def test_batch_prompt_uses_short_message_ids_and_slim_rules(tmp_path: Path) -> N
     assert "如果只是同群讨论背景信息、但没有明确落到本人，也不要提炼。" in prompt
     assert "正例：本人要求他人汇报、本人审批、本人同步、本人催办、本人推进，都算与本人直接相关。" in prompt
     assert "反例：他人之间讨论自己的工作、自己的承诺、自己的处理进度，即使本人在该会话里发过言，也不算与本人直接相关。" in prompt
-    assert '"id": "m1"' in prompt
-    assert '"id": "m2"' in prompt
+    assert '"id": "om_1"' in prompt
+    assert '"id": "om_2"' in prompt
     assert "每条事项附上最相关的消息 id。" in prompt
     assert "source_conversation_id 必须原样回填 input.slices[*].conversation_id。" in prompt
     assert "source_slice_id 必须原样回填 input.slices[*].slice_id。" in prompt
@@ -379,7 +379,7 @@ def test_media_messages_are_compressed_for_prompt(tmp_path: Path) -> None:
     assert payload["messages"][0]["x"] == "[语音消息 10s]"
     assert payload["messages"][1]["x"] == "[视频 62s]"
     assert "type" not in payload["messages"][0]
-    assert "id" not in payload["messages"][0]
+    assert payload["messages"][0]["id"] == "om_audio"
 
 
 def test_html_and_links_are_compressed_for_prompt(tmp_path: Path) -> None:
@@ -598,6 +598,7 @@ def test_anchor_prompt_skips_empty_and_sticker_messages(tmp_path: Path) -> None:
 
     assert payload["messages"] == [
         {
+            "id": "om_text",
             "t": "10:02",
             "s": "Alice",
             "x": "继续推进配置核对",
@@ -673,11 +674,13 @@ def test_anchor_prompt_skips_non_anchor_weak_placeholders_only(tmp_path: Path) -
 
     assert payload["messages"] == [
         {
+            "id": "om_img_anchor",
             "t": "10:01",
             "s": "Alice",
             "x": "[图片]",
         },
         {
+            "id": "om_text",
             "t": "10:02",
             "s": "Alice",
             "x": "这里是图片对应的处理结论",

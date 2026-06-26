@@ -119,9 +119,10 @@ def test_preflight_fails_when_online_llm_config_is_missing(tmp_path: Path) -> No
 
     assert report.ok is False
     assert "Missing online LLM configuration" in report.error_summary
+    assert "requires the user to provide" in report.error_summary
 
 
-def test_preflight_allows_explicit_codex_stdin_hook_without_online_llm(tmp_path: Path) -> None:
+def test_preflight_requires_online_llm_config_even_for_codex_stdin_hook(tmp_path: Path) -> None:
     report = run_preflight_checks(
         RuntimeConfig(
             data_root=tmp_path / "data",
@@ -132,7 +133,8 @@ def test_preflight_allows_explicit_codex_stdin_hook_without_online_llm(tmp_path:
         python_version=(3, 13, 0),
     )
 
-    assert report.ok is True
+    assert report.ok is False
+    assert "Missing online LLM configuration" in report.error_summary
 
 
 @pytest.mark.parametrize(
@@ -171,7 +173,7 @@ def test_classify_hook_failure() -> None:
         ("Network error: connection reset", "Hook analyzer network or service is unreachable."),
         (
             "Missing online LLM configuration: WORKTRACE_LLM_API_KEY",
-            "Online LLM configuration is missing. Configure local .env or environment variables before running WorkTrace.",
+            "Online LLM configuration is missing. WorkTrace requires the user to provide local .env or environment variables before running.",
         ),
     ],
 )

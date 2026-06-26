@@ -14,6 +14,18 @@ from ..resolvers.base import ContentResolver
 from ..sources.base import ChatSource
 
 
+def _normalize_target_message_ids(message_ids: list[str]) -> list[str]:
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for message_id in message_ids:
+        trimmed = message_id.strip()
+        if not trimmed or trimmed in seen:
+            continue
+        seen.add(trimmed)
+        normalized.append(trimmed)
+    return normalized
+
+
 def expand_slice_context(
     conversation_slice: ConversationSlice,
     requests: list[ContextRequest],
@@ -39,7 +51,7 @@ def expand_slice_context(
 
     for request in ordered:
         if request.request_type == ContextRequestType.ATTACHMENT_TEXT.value:
-            for message_id in request.target_message_ids:
+            for message_id in _normalize_target_message_ids(request.target_message_ids):
                 message = message_by_id.get(message_id)
                 if not message:
                     continue
@@ -57,9 +69,12 @@ def expand_slice_context(
             if request.request_type == ContextRequestType.EARLIER_MESSAGES.value
             else ContextDirection.LATER
         )
+        target_message_ids = _normalize_target_message_ids(request.target_message_ids)
+        if not target_message_ids:
+            continue
         related = chat_source.fetch_related_messages(
             conversation_slice.conversation_id,
-            request.target_message_ids,
+            target_message_ids,
             direction,
             min(request.limit, config.max_model_input_tokens),
         )

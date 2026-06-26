@@ -78,6 +78,7 @@ def test_load_hook_llm_settings_requires_all_required_values(tmp_path: Path) -> 
         load_hook_llm_settings(RuntimeConfig(), cwd=tmp_path, environ={})
 
     assert "Missing online LLM configuration" in str(exc_info.value)
+    assert "requires the user to provide" in str(exc_info.value)
     assert "Do not commit real secrets to git" in str(exc_info.value)
 
 

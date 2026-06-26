@@ -4,13 +4,13 @@ from ..constants import ContextRequestType
 from ..errors import AnalyzerProtocolError
 from ..models import (
     BatchAnalysisResult,
+    CrossConversationGroup,
     CrossConversationGroupResult,
     ContextRequest,
     ConversationSlice,
     MergedEventDraft,
     SourceBackedEventDraft,
 )
-from ..analyzers.prompts import build_prompt_message_short_ids
 from ..utils.hashing import stable_event_id
 
 
@@ -20,12 +20,7 @@ def normalize_source_message_ids(
 ) -> list[str]:
     allowed = [message.message_id for message in conversation_slice.messages]
     allowed_set = set(conversation_slice.in_day_message_ids)
-    short_id_map = build_prompt_message_short_ids(conversation_slice.messages)
-    reverse_short_id_map = {short_id: message_id for message_id, short_id in short_id_map.items()}
-    expanded_ids = {
-        reverse_short_id_map.get(message_id, message_id)
-        for message_id in source_message_ids
-    }
+    expanded_ids = set(source_message_ids)
     normalized: list[str] = []
     seen: set[str] = set()
 
@@ -51,15 +46,19 @@ def validate_context_request_against_slice(
     }:
         return False
 
+    target_message_ids = [message_id.strip() for message_id in request.target_message_ids if message_id.strip()]
+    if not target_message_ids:
+        return False
+
     message_ids = {message.message_id for message in conversation_slice.messages}
-    if not set(request.target_message_ids).issubset(message_ids):
+    if not set(target_message_ids).issubset(message_ids):
         return False
 
     if request.request_type == ContextRequestType.ATTACHMENT_TEXT.value:
         valid_attachment_ids = {
             attachment.attachment_id
             for message in conversation_slice.messages
-            if message.message_id in request.target_message_ids
+            if message.message_id in target_message_ids
             for attachment in message.attachments
         }
         return bool(request.target_attachment_ids) and set(request.target_attachment_ids).issubset(
@@ -92,7 +91,7 @@ def validate_batch_analysis_result(
 
         draft_id = candidate.draft_id.strip()
         if not draft_id:
-            draft_id = stable_event_id(candidate.date, normalized_ids)
+            draft_id = stable_event_id(candidate.date, normalized_ids, candidate.content)
 
         valid_candidates.append(
             SourceBackedEventDraft(
@@ -152,10 +151,12 @@ def validate_cross_conversation_groups(
     expected = [candidate.draft_id for candidate in candidates]
     expected_set = set(expected)
     seen: set[str] = set()
+    normalized_groups: list[CrossConversationGroup] = []
     duplicates: list[str] = []
     unknown: list[str] = []
 
     for group in group_result.groups:
+        normalized_ids: list[str] = []
         for draft_id in group.draft_ids:
             if draft_id not in expected_set:
                 unknown.append(draft_id)
@@ -164,10 +165,19 @@ def validate_cross_conversation_groups(
                 duplicates.append(draft_id)
                 continue
             seen.add(draft_id)
+            normalized_ids.append(draft_id)
+
+        if normalized_ids:
+            normalized_groups.append(
+                CrossConversationGroup(
+                    group_id=group.group_id,
+                    draft_ids=normalized_ids,
+                )
+            )
 
     missing = [draft_id for draft_id in expected if draft_id not in seen]
-    if not missing and not duplicates and not unknown:
-        return group_result
+    if not missing and not unknown:
+        return CrossConversationGroupResult(groups=normalized_groups)
 
     details: list[str] = []
     if missing:

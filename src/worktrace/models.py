@@ -368,6 +368,16 @@ class ContextRequest:
         }
 
 
+def _parse_context_requests(value: Any) -> list[ContextRequest]:
+    parsed: list[ContextRequest] = []
+    for item in _dict_list(value):
+        try:
+            parsed.append(ContextRequest.from_dict(item))
+        except (KeyError, TypeError, ValueError):
+            continue
+    return parsed
+
+
 @dataclass(frozen=True)
 class SourceBackedEventDraft:
     draft_id: str
@@ -420,10 +430,7 @@ class BatchAnalysisResult:
                 SourceBackedEventDraft.from_dict(item)
                 for item in _dict_list(data.get("candidate_events"))
             ],
-            context_requests=[
-                ContextRequest.from_dict(item)
-                for item in _dict_list(data.get("context_requests"))
-            ],
+            context_requests=_parse_context_requests(data.get("context_requests")),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -448,10 +455,7 @@ class AnchorAnalysisResult:
                 SourceBackedEventDraft.from_dict(item)
                 for item in _dict_list(data.get("candidate_events"))
             ],
-            context_requests=[
-                ContextRequest.from_dict(item)
-                for item in _dict_list(data.get("context_requests"))
-            ],
+            context_requests=_parse_context_requests(data.get("context_requests")),
             needs_cross_anchor_merge=bool(data.get("needs_cross_anchor_merge", False)),
         )
 

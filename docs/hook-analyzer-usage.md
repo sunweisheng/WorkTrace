@@ -15,7 +15,7 @@
 当前默认链路为：
 
 ```text
-HookAnalyzer -> hook_runner.py --mode responses-http -> 在线 Responses API provider
+HookAnalyzer -> hook_runner.py --mode chat-completions-http -> 在线 Chat Completions API provider
 ```
 
 ## 2. 当前默认模式
@@ -23,20 +23,21 @@ HookAnalyzer -> hook_runner.py --mode responses-http -> 在线 Responses API pro
 当前仓库默认使用：
 
 ```bash
-python3 -m src.worktrace.hook_runner --mode responses-http
+python3 -m src.worktrace.hook_runner --mode chat-completions-http
 ```
 
 这个模式会：
 
 - 从 `stdin` 读取 prompt
 - 从本地 `.env` 或环境变量读取在线模型配置
-- 直接调用兼容 OpenAI `Responses API` 的在线服务
+- 直接调用兼容 OpenAI `Chat Completions API` 的在线服务
+- HTTP 请求通过 `curl -w` 输出网络阶段耗时
 - 继续消费 `WORKTRACE_HOOK_SCHEMA_PATH`，尽量带上 WorkTrace 当前任务的 JSON schema 约束
 - 把模型输出归一化为标准 JSON 后写回 `stdout`
 
 ## 3. 本地配置
 
-默认模式要求本地单独配置以下参数：
+默认模式要求用户在本地单独配置以下参数：
 
 ```dotenv
 WORKTRACE_LLM_BASE_URL=https://your-openai-compatible-endpoint.example/v1
@@ -57,7 +58,7 @@ WORKTRACE_LLM_TIMEOUT_SECONDS=180
 1. 进程环境变量
 2. 仓库根目录 `.env`
 
-如果缺少任一必填项，preflight 和 `responses-http` 模式都会直接失败，并提示使用者单独在本地配置这些值，不能随仓库提交。
+如果缺少任一必填项，preflight 和 `chat-completions-http` 模式都会直接失败，并要求使用者先单独在本地配置这些值，不能随仓库提交。
 
 ## 4. 如何启用 HookAnalyzer
 
@@ -70,7 +71,7 @@ from src.worktrace.config import RuntimeConfig
 config = RuntimeConfig(
     data_root=Path("data"),
     analyzer_backend="hook",
-    hook_command="python3 -m src.worktrace.hook_runner --mode responses-http",
+    hook_command="python3 -m src.worktrace.hook_runner --mode chat-completions-http",
 )
 ```
 
@@ -82,7 +83,7 @@ config = RuntimeConfig(
 python3 -m src.worktrace.hook_runner --mode codex-stdin
 ```
 
-这个模式会继续通过 `codex exec -` 调用 Codex，但它不再是默认模式。
+这个模式会继续通过 `codex exec -` 调用 Codex，但它不再是默认模式，且主流程仍要求先通过本地 `WORKTRACE_LLM_*` 配置检查。
 
 ## 6. 输出与错误行为
 

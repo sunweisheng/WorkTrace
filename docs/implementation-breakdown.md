@@ -42,7 +42,7 @@
 
 - `timezone = "Asia/Shanghai"`
 - `analyzer_backend = "hook"`
-- `hook_command = "python3 -m src.worktrace.hook_runner --mode responses-http"`
+- `hook_command = "python3 -m src.worktrace.hook_runner --mode chat-completions-http"`
 - `slice_base_limit = 150`
 - `max_model_input_tokens = 100000`
 - `slice_retry_limit = 3`

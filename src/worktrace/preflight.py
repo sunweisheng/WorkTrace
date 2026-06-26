@@ -235,8 +235,6 @@ def probe_hook(
 
 
 def ensure_hook_runtime_config(config: RuntimeConfig, *, cwd: Path) -> None:
-    if "--mode codex-stdin" in config.hook_command:
-        return
     try:
         load_hook_llm_settings(config, cwd=cwd)
     except ValueError as exc:
@@ -269,8 +267,8 @@ def classify_hook_failure(result: CommandResult) -> str:
         return "Hook analyzer command failed."
     if "missing online llm configuration" in combined:
         return (
-            "Online LLM configuration is missing. Configure local .env or environment variables "
-            "before running WorkTrace."
+            "Online LLM configuration is missing. WorkTrace requires the user to provide local .env "
+            "or environment variables before running."
         )
     if "401" in combined or "403" in combined or "unauthorized" in combined or "forbidden" in combined:
         return "Hook analyzer online LLM API key is invalid or lacks permission."

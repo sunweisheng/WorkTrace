@@ -16,8 +16,11 @@ from src.worktrace.models import (
     NormalizedMessage,
 )
 from src.worktrace.hook_runner import (
+    _build_chat_completions_request_body,
+    _extract_text_from_chat_completions_payload,
     _build_responses_request_body,
     _extract_text_from_responses_payload,
+    _run_chat_completions_http,
     _run_codex_via_stdin,
     _run_responses_http,
 )
@@ -256,6 +259,125 @@ def test_build_responses_request_body_includes_schema(tmp_path: Path) -> None:
     assert body["input"] == "prompt"
     assert body["text"]["format"]["type"] == "json_schema"
     assert body["text"]["format"]["schema"]["required"] == ["candidate_events"]
+
+
+def test_extract_text_from_chat_completions_payload_supports_string_content() -> None:
+    payload = {
+        "choices": [
+            {
+                "message": {
+                    "content": '{"candidate_events":[],"context_requests":[]}',
+                }
+            }
+        ]
+    }
+
+    assert (
+        _extract_text_from_chat_completions_payload(payload)
+        == '{"candidate_events":[],"context_requests":[]}'
+    )
+
+
+def test_extract_text_from_chat_completions_payload_supports_list_content() -> None:
+    payload = {
+        "choices": [
+            {
+                "message": {
+                    "content": [
+                        {
+                            "type": "output_text",
+                            "text": '{"candidate_events":[],"context_requests":[]}',
+                        }
+                    ]
+                }
+            }
+        ]
+    }
+
+    assert (
+        _extract_text_from_chat_completions_payload(payload)
+        == '{"candidate_events":[],"context_requests":[]}'
+    )
+
+
+def test_build_chat_completions_request_body_includes_schema(tmp_path: Path) -> None:
+    schema_path = tmp_path / "schema.json"
+    schema_path.write_text('{"type":"object","required":["candidate_events"]}', encoding="utf-8")
+
+    body = _build_chat_completions_request_body(
+        "prompt",
+        settings=__import__("src.worktrace.config", fromlist=["HookLLMSettings"]).HookLLMSettings(
+            base_url="https://llm.example/v1",
+            model="provider-model",
+            api_key="secret",
+            timeout_seconds=30,
+        ),
+        schema_path=str(schema_path),
+    )
+
+    assert body["model"] == "provider-model"
+    assert body["messages"] == [{"role": "user", "content": "prompt"}]
+    assert body["response_format"]["type"] == "json_schema"
+    assert body["response_format"]["json_schema"]["schema"]["required"] == [
+        "candidate_events"
+    ]
+
+
+def test_hook_runner_chat_completions_http_normalizes_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / ".env").write_text(
+        "WORKTRACE_LLM_BASE_URL=https://llm.example/v1\n"
+        "WORKTRACE_LLM_MODEL=provider-model\n"
+        "WORKTRACE_LLM_API_KEY=file-key\n",
+        encoding="utf-8",
+    )
+    stdout_capture = io.StringIO()
+    monkeypatch.setattr("sys.stdout", stdout_capture)
+    monkeypatch.setattr(
+        "src.worktrace.hook_runner._post_chat_completions_request",
+        lambda prompt, *, settings, schema_path: {
+            "choices": [
+                {
+                    "message": {
+                        "content": '{"candidate_events":[],"context_requests":[]}',
+                    }
+                }
+            ]
+        },
+    )
+
+    code = _run_chat_completions_http("prompt", cwd=tmp_path, config=RuntimeConfig())
+
+    assert code == 0
+    assert json.loads(stdout_capture.getvalue()) == {
+        "candidate_events": [],
+        "context_requests": [],
+    }
+
+
+def test_hook_runner_chat_completions_http_surfaces_runtime_errors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / ".env").write_text(
+        "WORKTRACE_LLM_BASE_URL=https://llm.example/v1\n"
+        "WORKTRACE_LLM_MODEL=provider-model\n"
+        "WORKTRACE_LLM_API_KEY=file-key\n",
+        encoding="utf-8",
+    )
+    stderr_capture = io.StringIO()
+    monkeypatch.setattr("sys.stderr", stderr_capture)
+    monkeypatch.setattr(
+        "src.worktrace.hook_runner._post_chat_completions_request",
+        lambda prompt, *, settings, schema_path: (_ for _ in ()).throw(
+            RuntimeError("HTTP 504")
+        ),
+    )
+
+    code = _run_chat_completions_http("prompt", cwd=tmp_path, config=RuntimeConfig())
+
+    assert code == 1
+    assert "HTTP 504" in stderr_capture.getvalue()
 
 
 def test_extract_text_from_responses_payload_supports_output_content() -> None:

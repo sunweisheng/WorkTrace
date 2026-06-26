@@ -15,7 +15,11 @@ from src.worktrace.resolvers.feishu_message import FeishuMessageContentResolver
 
 
 class FakeChatSource:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, list[str], object, int]] = []
+
     def fetch_related_messages(self, conversation_id, target_message_ids, direction, limit):
+        self.calls.append((conversation_id, target_message_ids, direction, limit))
         return [
             NormalizedMessage(
                 conversation_id=conversation_id,
@@ -37,6 +41,7 @@ class FakeChatSource:
 
 def test_expand_slice_context_adds_messages_and_attachments(tmp_path: Path) -> None:
     config = RuntimeConfig(data_root=tmp_path / "data")
+    chat_source = FakeChatSource()
     message = NormalizedMessage(
         conversation_id="oc_1",
         conversation_name="项目群",
@@ -83,10 +88,60 @@ def test_expand_slice_context_adds_messages_and_attachments(tmp_path: Path) -> N
     expanded = expand_slice_context(
         conversation_slice,
         requests,
-        chat_source=FakeChatSource(),
+        chat_source=chat_source,
         content_resolver=FeishuMessageContentResolver(config=config),
         config=config,
     )
 
     assert len(expanded.messages) == 2
     assert len(expanded.attachment_texts) == 1
+    assert chat_source.calls == [("oc_1", ["om_1"], ContextDirection.EARLIER, 1)]
+
+
+def test_expand_slice_context_ignores_empty_related_request(tmp_path: Path) -> None:
+    config = RuntimeConfig(data_root=tmp_path / "data")
+    chat_source = FakeChatSource()
+    message = NormalizedMessage(
+        conversation_id="oc_1",
+        conversation_name="项目群",
+        message_id="om_1",
+        sender_open_id="ou_self",
+        sender_name="Me",
+        send_time="2026-06-22T10:00:00+08:00",
+        message_type="text",
+        text="hello",
+        reply_to_message_id=None,
+        quote_message_id=None,
+        links=[],
+        attachments=[],
+        is_system=False,
+    )
+    conversation_slice = ConversationSlice(
+        slice_id="slice-1",
+        conversation_id="oc_1",
+        conversation_name="项目群",
+        anchor_message_ids=["om_1"],
+        in_day_message_ids=["om_1"],
+        messages=[message],
+        attachment_texts=[],
+    )
+
+    expanded = expand_slice_context(
+        conversation_slice,
+        [
+            ContextRequest(
+                slice_id="slice-1",
+                request_type=ContextRequestType.LATER_MESSAGES.value,
+                target_message_ids=["", "   "],
+                target_attachment_ids=[],
+                reason="bad request",
+                limit=1,
+            )
+        ],
+        chat_source=chat_source,
+        content_resolver=FeishuMessageContentResolver(config=config),
+        config=config,
+    )
+
+    assert expanded == conversation_slice
+    assert chat_source.calls == []

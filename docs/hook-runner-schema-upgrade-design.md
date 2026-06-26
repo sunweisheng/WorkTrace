@@ -8,7 +8,7 @@
 
 当前默认分析链路为：
 
-`HookAnalyzer -> hook_runner.py --mode responses-http -> 在线 Responses API provider`
+`HookAnalyzer -> hook_runner.py --mode chat-completions-http -> 在线 Chat Completions API provider`
 
 默认命令定义在 [src/worktrace/config.py](/Users/sunweisheng/Documents/GitHub/WorkTrace/src/worktrace/config.py:8)。
 
@@ -16,7 +16,7 @@
 
 - `HookAnalyzer` 会按任务传入 `output_schema`
 - `HookAnalyzer` 会把 schema 写入临时文件，并通过 `WORKTRACE_HOOK_SCHEMA_PATH` 传给 hook runner
-- `hook_runner.py` 支持 `responses-http` 和 `codex-stdin` 两种模式
+- `hook_runner.py` 支持 `chat-completions-http`、`responses-http` 和 `codex-stdin` 三种模式
 - `hook_runner.py` 会读取 `WORKTRACE_HOOK_SCHEMA_PATH`
 - `hook_runner.py` 会把响应归一化为干净 JSON 后写回 `stdout`
 

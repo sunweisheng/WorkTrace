@@ -24,7 +24,10 @@ def test_runtime_config_defaults_to_hook_backend() -> None:
     config = RuntimeConfig()
 
     assert config.analyzer_backend == "hook"
-    assert config.hook_command == "python3 -m src.worktrace.hook_runner --mode responses-http"
+    assert (
+        config.hook_command
+        == "python3 -m src.worktrace.hook_runner --mode chat-completions-http"
+    )
 
 
 def test_build_runtime_dependencies_supports_hook_analyzer(tmp_path: Path) -> None:

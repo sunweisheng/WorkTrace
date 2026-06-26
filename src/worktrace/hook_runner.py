@@ -129,6 +129,37 @@ def _extract_text_from_responses_payload(payload: object) -> str:
     return ""
 
 
+def _extract_text_from_chat_completions_payload(payload: object) -> str:
+    if not isinstance(payload, dict):
+        return ""
+
+    choices = payload.get("choices")
+    if not isinstance(choices, list):
+        return ""
+
+    for item in choices:
+        if not isinstance(item, dict):
+            continue
+        message = item.get("message")
+        if not isinstance(message, dict):
+            continue
+        content = message.get("content")
+        if isinstance(content, str) and content.strip():
+            return content
+        if isinstance(content, list):
+            chunks: list[str] = []
+            for part in content:
+                if not isinstance(part, dict):
+                    continue
+                text = part.get("text")
+                if isinstance(text, str):
+                    chunks.append(text)
+            combined = "".join(chunks)
+            if combined.strip():
+                return combined
+    return ""
+
+
 def _build_responses_request_body(
     prompt: str,
     *,
@@ -157,6 +188,39 @@ def _build_responses_request_body(
     return body
 
 
+def _build_chat_completions_request_body(
+    prompt: str,
+    *,
+    settings: HookLLMSettings,
+    schema_path: str,
+) -> dict[str, object]:
+    body: dict[str, object] = {
+        "model": settings.model,
+        "messages": [
+            {
+                "role": "user",
+                "content": prompt,
+            }
+        ],
+    }
+    if schema_path:
+        try:
+            schema = json.loads(Path(schema_path).read_text(encoding="utf-8"))
+        except OSError as exc:
+            raise RuntimeError(f"Failed to read output schema file: {schema_path}") from exc
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(f"Output schema file is not valid JSON: {schema_path}") from exc
+        body["response_format"] = {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "worktrace_output",
+                "schema": schema,
+                "strict": True,
+            },
+        }
+    return body
+
+
 def _post_responses_request(
     prompt: str,
     *,
@@ -178,6 +242,109 @@ def _post_responses_request(
     with urllib.request.urlopen(request, timeout=settings.timeout_seconds) as response:
         raw = response.read().decode("utf-8")
     return json.loads(raw)
+
+
+def _emit_chat_completions_timing(metrics: dict[str, object]) -> None:
+    rendered = " ".join(
+        f"{key}={json.dumps(value, ensure_ascii=False, separators=(',', ':'))}"
+        for key, value in metrics.items()
+    )
+    sys.stderr.write(f"chat_completions_http.timing {rendered}\n")
+
+
+def _post_chat_completions_request(
+    prompt: str,
+    *,
+    settings: HookLLMSettings,
+    schema_path: str,
+) -> object:
+    body = _build_chat_completions_request_body(
+        prompt,
+        settings=settings,
+        schema_path=schema_path,
+    )
+    base_url = settings.base_url.rstrip("/")
+    endpoint = f"{base_url}/chat/completions"
+    request_path: Path | None = None
+    response_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            prefix="worktrace-chat-request-",
+            suffix=".json",
+            delete=False,
+        ) as request_handle:
+            request_path = Path(request_handle.name)
+            request_handle.write(json.dumps(body, ensure_ascii=False).encode("utf-8"))
+        with tempfile.NamedTemporaryFile(
+            prefix="worktrace-chat-response-",
+            suffix=".json",
+            delete=False,
+        ) as response_handle:
+            response_path = Path(response_handle.name)
+
+        curl_write_out = (
+            '{"http_code":%{http_code},"time_namelookup":%{time_namelookup},'
+            '"time_connect":%{time_connect},"time_appconnect":%{time_appconnect},'
+            '"time_pretransfer":%{time_pretransfer},"time_starttransfer":%{time_starttransfer},'
+            '"time_total":%{time_total},"size_upload":%{size_upload},"size_download":%{size_download}}'
+        )
+        completed = subprocess.run(
+            [
+                "curl",
+                "-sS",
+                "--show-error",
+                "--fail-with-body",
+                "--connect-timeout",
+                str(settings.timeout_seconds),
+                "--max-time",
+                str(settings.timeout_seconds),
+                "-X",
+                "POST",
+                endpoint,
+                "-H",
+                "Content-Type: application/json",
+                "-H",
+                f"Authorization: Bearer {settings.api_key}",
+                "--data-binary",
+                f"@{request_path}",
+                "-o",
+                str(response_path),
+                "-w",
+                curl_write_out,
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        raw = response_path.read_text(encoding="utf-8")
+        metrics_text = (completed.stdout or "").strip()
+        try:
+            metrics = json.loads(metrics_text) if metrics_text else {}
+        except json.JSONDecodeError:
+            metrics = {"raw_metrics": metrics_text}
+        if isinstance(metrics, dict):
+            metrics.setdefault("endpoint", endpoint)
+        else:
+            metrics = {"endpoint": endpoint, "raw_metrics": metrics_text}
+        _emit_chat_completions_timing(metrics)
+
+        if completed.returncode != 0:
+            http_code = metrics.get("http_code")
+            if isinstance(http_code, int) and http_code >= 400:
+                detail = raw.strip()
+                if detail:
+                    raise RuntimeError(f"HTTP {http_code}: {detail}")
+                raise RuntimeError(f"HTTP {http_code}")
+            stderr_text = (completed.stderr or "").strip()
+            if stderr_text:
+                raise RuntimeError(f"curl request failed: {stderr_text}")
+            raise RuntimeError("curl request failed.")
+        return json.loads(raw)
+    finally:
+        if request_path is not None:
+            request_path.unlink(missing_ok=True)
+        if response_path is not None:
+            response_path.unlink(missing_ok=True)
 
 
 def _run_responses_http(prompt: str, *, cwd: Path, config: RuntimeConfig | None = None) -> int:
@@ -226,9 +393,50 @@ def _run_responses_http(prompt: str, *, cwd: Path, config: RuntimeConfig | None 
     return 0
 
 
+def _run_chat_completions_http(
+    prompt: str,
+    *,
+    cwd: Path,
+    config: RuntimeConfig | None = None,
+) -> int:
+    runtime_config = config or RuntimeConfig()
+    try:
+        settings = load_hook_llm_settings(runtime_config, cwd=cwd, environ=os.environ)
+    except ValueError as exc:
+        sys.stderr.write(f"{exc}\n")
+        return 2
+
+    schema_path = os.environ.get("WORKTRACE_HOOK_SCHEMA_PATH", "").strip()
+    try:
+        payload = _post_chat_completions_request(
+            prompt,
+            settings=settings,
+            schema_path=schema_path,
+        )
+    except RuntimeError as exc:
+        sys.stderr.write(f"{exc}\n")
+        return 1
+    except json.JSONDecodeError:
+        sys.stderr.write("Online LLM returned invalid JSON response envelope.\n")
+        return 1
+
+    text = _extract_text_from_chat_completions_payload(payload)
+    if not text.strip():
+        sys.stderr.write("Online LLM response did not contain chat completion text output.\n")
+        return 1
+    try:
+        normalized = parse_json_value_from_text(text)
+    except ValueError:
+        sys.stderr.write("Online LLM response did not contain valid JSON output.\n")
+        return 1
+
+    sys.stdout.write(dump_json(normalized))
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m src.worktrace.hook_runner", add_help=True)
-    parser.add_argument("--mode", dest="mode", default="responses-http")
+    parser.add_argument("--mode", dest="mode", default="chat-completions-http")
     args = parser.parse_args(argv)
 
     prompt = sys.stdin.read()
@@ -236,6 +444,8 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.mode == "responses-http":
         return _run_responses_http(prompt, cwd=cwd)
+    if args.mode == "chat-completions-http":
+        return _run_chat_completions_http(prompt, cwd=cwd)
     if args.mode == "codex-stdin":
         return _run_codex_via_stdin(prompt, cwd=cwd)
 

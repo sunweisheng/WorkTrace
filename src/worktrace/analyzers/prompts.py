@@ -494,20 +494,17 @@ def serialize_context_request_for_prompt(request: ContextRequest) -> dict[str, o
 def serialize_message_for_prompt(
     message: NormalizedMessage,
     config: RuntimeConfig,
-    *,
-    short_id: str | None = None,
 ) -> dict[str, object]:
     compressed_text = _trim_text(
         _compress_prompt_message_text(message),
         config.prompt_message_char_limit,
     )
     serialized: dict[str, object] = {
+        "id": message.message_id,
         "t": _format_prompt_time(message.send_time, config),
         "s": message.sender_name or message.sender_open_id or "",
         "x": compressed_text,
     }
-    if short_id:
-        serialized["id"] = short_id
     return serialized
 
 
@@ -517,13 +514,8 @@ def _serialize_prompt_messages(
     config: RuntimeConfig,
 ) -> list[dict[str, object]]:
     serialized_messages: list[dict[str, object]] = []
-    short_id_map = build_prompt_message_short_ids(conversation_slice.messages)
     for message in messages:
-        serialized = serialize_message_for_prompt(
-            message,
-            config,
-            short_id=short_id_map.get(message.message_id),
-        )
+        serialized = serialize_message_for_prompt(message, config)
         if _is_prompt_message_meaningful(serialized):
             serialized_messages.append(serialized)
     return serialized_messages
@@ -752,12 +744,3 @@ def _build_feishu_doc_label(message: NormalizedMessage) -> str:
         return "[飞书文档]"
 
     return ""
-
-
-def build_prompt_message_short_ids(
-    messages: list[NormalizedMessage],
-) -> dict[str, str]:
-    return {
-        message.message_id: f"m{index}"
-        for index, message in enumerate(messages, start=1)
-    }
