@@ -11,7 +11,6 @@ from .factories import RuntimeDependencies, build_runtime_dependencies
 from .logging_utils import log_timing
 from .models import (
     AnalysisBatch,
-    CrossConversationGroupResult,
     DailyRunResult,
     MergedEventDraft,
     SourceBackedEventDraft,
@@ -123,16 +122,11 @@ class DailyTraceRunner:
         all_candidates: list[SourceBackedEventDraft] = []
         analyzed_batch_count = 0
         all_message_order = [message.message_id for message in filtered_messages]
-        slices_by_id = {
-            conversation_slice.slice_id: conversation_slice
-            for conversation_slice in conversation_slices
-        }
 
         try:
-            for slice_index, conversation_slice in enumerate(conversation_slices, start=1):
+            for conversation_slice in conversation_slices:
                 (
                     validated_result,
-                    final_slice,
                     slice_warnings,
                     unresolved,
                     run_count,
@@ -142,7 +136,6 @@ class DailyTraceRunner:
                     self_identity=self_identity,
                 )
                 analyzed_batch_count += run_count
-                slices_by_id[final_slice.slice_id] = final_slice
 
                 for candidate in validated_result.candidate_events:
                     all_candidates.append(candidate)
@@ -343,7 +336,7 @@ class DailyTraceRunner:
         target_date: str,
         conversation_slice: ConversationSlice,
         self_identity: SelfIdentity,
-    ) -> tuple[BatchAnalysisResult, ConversationSlice, list[str], bool, int]:
+    ) -> tuple[BatchAnalysisResult, list[str], bool, int]:
         current_slice = conversation_slice
         warning_messages: list[str] = []
         run_count = 0
@@ -390,7 +383,7 @@ class DailyTraceRunner:
             )
 
             if not validated_result.context_requests:
-                return validated_result, current_slice, warning_messages, False, run_count
+                return validated_result, warning_messages, False, run_count
 
             if retry_round >= self.config.slice_retry_limit:
                 warning_messages.extend(
@@ -402,7 +395,7 @@ class DailyTraceRunner:
                         for request in validated_result.context_requests
                     ]
                 )
-                return validated_result, current_slice, warning_messages, True, run_count
+                return validated_result, warning_messages, True, run_count
 
             expanded_slice = expand_slice_context(
                 current_slice,
@@ -423,11 +416,11 @@ class DailyTraceRunner:
                         for request in validated_result.context_requests
                     ]
                 )
-                return validated_result, current_slice, warning_messages, True, run_count
+                return validated_result, warning_messages, True, run_count
 
             current_slice = expanded_slice
 
-        return BatchAnalysisResult(), current_slice, warning_messages, True, run_count
+        return BatchAnalysisResult(), warning_messages, True, run_count
 def run_daily_trace(target_date: str, config: RuntimeConfig) -> DailyRunResult:
     runner = DailyTraceRunner(config=config, dependencies=build_runtime_dependencies(config))
     return runner.run(target_date)

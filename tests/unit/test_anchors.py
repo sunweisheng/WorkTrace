@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from src.worktrace.config import RuntimeConfig
 from src.worktrace.models import NormalizedMessage
 from src.worktrace.pipeline.anchors import group_anchor_units
 
@@ -33,11 +32,6 @@ def _message(
 
 
 def test_group_anchor_units_keeps_small_anchor_window(tmp_path: Path) -> None:
-    config = RuntimeConfig(
-        data_root=tmp_path / "data",
-        slice_context_before=1,
-        slice_context_after=1,
-    )
     messages = [
         _message("om_1", "ou_other", "2026-06-23T09:00:00+08:00"),
         _message("om_2", "ou_self", "2026-06-23T09:01:00+08:00"),
@@ -45,7 +39,7 @@ def test_group_anchor_units_keeps_small_anchor_window(tmp_path: Path) -> None:
         _message("om_4", "ou_other", "2026-06-23T09:03:00+08:00"),
     ]
 
-    anchor_units = group_anchor_units(messages, "ou_self", config)
+    anchor_units = group_anchor_units(messages, "ou_self", before_limit=1, after_limit=1)
 
     assert len(anchor_units) == 1
     assert anchor_units[0].anchor_message_ids == ["om_2"]
@@ -54,17 +48,12 @@ def test_group_anchor_units_keeps_small_anchor_window(tmp_path: Path) -> None:
 
 
 def test_group_anchor_units_splits_separated_self_messages(tmp_path: Path) -> None:
-    config = RuntimeConfig(
-        data_root=tmp_path / "data",
-        slice_context_before=0,
-        slice_context_after=0,
-    )
     messages = [
         _message("om_1", "ou_self", "2026-06-23T09:00:00+08:00"),
         _message("om_2", "ou_other", "2026-06-23T09:01:00+08:00"),
         _message("om_3", "ou_self", "2026-06-23T09:02:00+08:00"),
     ]
 
-    anchor_units = group_anchor_units(messages, "ou_self", config)
+    anchor_units = group_anchor_units(messages, "ou_self", before_limit=0, after_limit=0)
 
     assert [item.anchor_message_ids for item in anchor_units] == [["om_1"], ["om_3"]]

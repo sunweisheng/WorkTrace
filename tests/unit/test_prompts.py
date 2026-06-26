@@ -5,7 +5,6 @@ from pathlib import Path
 from src.worktrace.analyzers.prompts import (
     build_anchor_analysis_prompt,
     build_anchor_expansion_prompt,
-    build_cross_merge_bucket_prompt,
     build_batch_analysis_prompt,
     serialize_message_for_prompt,
     serialize_anchor_unit_for_prompt,
@@ -310,40 +309,6 @@ def test_anchor_expansion_prompt_includes_previous_result_and_expansion(tmp_path
     assert AnchorStatus.NEEDS_ATTACHMENT_TEXT.value in prompt
     assert "If new context reveals that one previous candidate_event actually mixed multiple actions" in prompt
     assert "result must belong only to the same candidate_event's primary action." in prompt
-
-
-def test_cross_merge_bucket_prompt_contains_bucket_contract() -> None:
-    prompt = build_cross_merge_bucket_prompt(
-        "2026-06-22",
-        [
-            SourceBackedEventDraft(
-                draft_id="d1",
-                date="2026-06-22",
-                topic="发布排期确认",
-                content="同步 release-123",
-                result="",
-                source_message_ids=["om_1"],
-                source_conversation_id="oc_1",
-                source_slice_id="oc_1:om_1",
-                confidence=0.9,
-            )
-        ],
-    )
-
-    assert '"buckets"' in prompt
-    assert '"id": "d1"' in prompt
-    assert '"t": "发布排期确认"' in prompt
-    assert '"c": "同步 release-123"' in prompt
-    assert '"r": ""' in prompt
-    assert '"source_conversation_id"' not in prompt
-    assert '"source_slice_id"' not in prompt
-    assert '"source_message_ids"' not in prompt
-    assert '"confidence"' not in prompt
-    assert '"bucket_id": "string"' in prompt
-    assert "每个 bucket 的 reason 用一句短话写清分组依据。" in prompt
-    assert "每个 id 必须且只能出现在一个桶里。" in prompt
-    assert "动作类型比共享名词更重要。" in prompt
-    assert "只有在明确属于同一连续动作时，才把同步和核对放进同一桶。" in prompt
 
 
 def test_media_messages_are_compressed_for_prompt(tmp_path: Path) -> None:

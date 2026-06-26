@@ -17,10 +17,7 @@ from ..models import (
     AnchorUnit,
     BatchAnalysisResult,
     BatchAnchorAnalysisResult,
-    BucketMergedDraft,
     CrossConversationGroupResult,
-    CrossBucketMergeResult,
-    CrossMergeBucketResult,
     SourceBackedEventDraft,
 )
 from ..utils.json_io import load_json_object
@@ -28,23 +25,17 @@ from .base import Analyzer
 from .output_schemas import (
     anchor_batch_output_schema,
     batch_output_schema,
-    bucket_output_schema,
-    cross_bucket_merge_output_schema,
     merge_output_schema,
 )
 from .prompts import (
     build_batch_analysis_prompt,
     build_anchor_batch_analysis_prompt,
-    build_cross_bucket_merge_prompt,
-    build_cross_merge_bucket_prompt,
     build_merge_prompt,
 )
 from .protocol import (
     parse_anchor_batch_analysis_payload,
     parse_batch_analysis_payload,
     parse_merge_payload,
-    parse_cross_bucket_merge_payload,
-    parse_cross_merge_bucket_payload,
 )
 
 logger = logging.getLogger("worktrace")
@@ -104,29 +95,6 @@ class CodexAnalyzer(Analyzer):
             output_schema=merge_output_schema(),
         )
         return parse_merge_payload(payload)
-
-    def bucket_cross_merge_candidates(
-        self,
-        target_date: str,
-        candidates: list[SourceBackedEventDraft],
-    ) -> CrossMergeBucketResult:
-        payload = self._invoke_codex(
-            build_cross_merge_bucket_prompt(target_date, candidates),
-            output_schema=bucket_output_schema(),
-        )
-        return parse_cross_merge_bucket_payload(payload)
-
-    def decide_cross_bucket_merges(
-        self,
-        target_date: str,
-        merged_buckets: list[BucketMergedDraft],
-        candidate_pairs: list[tuple[str, str]],
-    ) -> CrossBucketMergeResult:
-        payload = self._invoke_codex(
-            build_cross_bucket_merge_prompt(target_date, merged_buckets, candidate_pairs),
-            output_schema=cross_bucket_merge_output_schema(),
-        )
-        return parse_cross_bucket_merge_payload(payload)
 
     def _run_command(
         self,

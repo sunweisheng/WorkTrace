@@ -2,9 +2,7 @@
 
 ## 1. 文档目标
 
-本文档只定义一件事：`AnchorUnit` 首轮识别时，Python 送给 LLM 的输入结构，以及 LLM 必须返回的输出结构。
-
-它是 [anchor-first-multi-pass-design.md](/Users/sunweisheng/Documents/GitHub/WorkTrace/docs/anchor-first-multi-pass-design.md) 的实现级补充，避免协议细节散落在 prompt 代码里。
+本文档定义当前 `anchor_experiment` 使用的 `AnchorUnit` 首轮识别协议：Python 送给 LLM 的输入结构，以及 LLM 必须返回的输出结构。
 
 ## 2. 输入对象
 
@@ -14,38 +12,26 @@
 - `pass_index`
 - `anchor_unit`
 
-其中 `anchor_unit` 固定包含：
+其中 `anchor_unit` 当前实际送出的字段为：
 
-- `anchor_unit_id`
 - `conversation_name`
-- `anchor_message_ids`
-- `in_day_message_ids`
-- `base_message_ids`
-- `reply_relation_ids`
-- `quote_relation_ids`
 - `messages`
+- `omitted_message_count`
 - `attachment_refs`
 
 ### 2.1 `messages` 字段
 
-每条消息固定包含：
+每条消息当前使用压缩字段：
 
-- `id`
-- `t`
-- `s`
-- `type`
-- `text`
+- `t`：时间
+- `s`：发送人
+- `x`：压缩后的消息文本
 
-按需补充：
-
-- `reply_to`
-- `quote_to`
-- `links`
-- `attachments`
+锚点协议当前不会在消息对象里额外发送 `id`、`type`、`reply_to`、`quote_to`、`links`、`attachments`。
 
 ### 2.2 `attachment_refs` 字段
 
-首轮只提供附件元信息，不提供附件正文。每个附件对象固定包含：
+首轮只提供附件元信息，不提供附件正文。每个附件对象当前包含：
 
 - `id`
 - `name`

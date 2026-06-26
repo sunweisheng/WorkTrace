@@ -16,9 +16,7 @@
 
 ### 2.1 旧链路的问题
 
-旧思路是在得到最终事件列表后，再额外执行一次：
-
-- `summarize_for_manager(...)`
+旧思路是在得到最终事件列表后，再额外执行一次“管理者总结生成”。
 
 然后把“总结段落 + 事项列表”一起写入 Markdown。
 
@@ -64,7 +62,7 @@
 
 - `replace_day(...)` 只接收 `target_date` 和 `events`
 
-已经不再接收 `manager_summary`。
+当前 store 接口不再承载任何额外总结层输入。
 
 ## 4. 输出模型变化
 
@@ -76,7 +74,7 @@
 - `events`
 - `generated_at`
 
-不再包含 `manager_summary`。
+不再包含任何总结层字段。
 
 对应模型位于 [models.py](/Users/sunweisheng/Documents/GitHub/WorkTrace/src/worktrace/models.py)。
 

@@ -15,7 +15,9 @@ class RawAnchorCluster:
 def group_anchor_units(
     messages: list[NormalizedMessage],
     self_open_id: str,
-    config: RuntimeConfig,
+    *,
+    before_limit: int,
+    after_limit: int,
 ) -> list[AnchorUnit]:
     by_conversation: dict[str, list[NormalizedMessage]] = {}
     for message in messages:
@@ -28,8 +30,8 @@ def group_anchor_units(
             base_message_ids = build_anchor_base_window(
                 conversation_messages,
                 cluster,
-                config.slice_context_before,
-                config.slice_context_after,
+                before_limit,
+                after_limit,
             )
             expanded_message_ids = expand_anchor_direct_relations(
                 conversation_messages,

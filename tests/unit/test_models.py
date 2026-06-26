@@ -6,15 +6,12 @@ from src.worktrace.constants import AnchorStatus, ContextDirection, ContextReque
 from src.worktrace.models import (
     AnalysisBatch,
     AnchorAnalysisResult,
-    AnchorAnalysisState,
     AnchorUnit,
     AttachmentMeta,
     AttachmentTextBlock,
     BatchAnalysisResult,
     CrossConversationGroup,
     CrossConversationGroupResult,
-    CrossMergeBucket,
-    CrossMergeBucketResult,
     ContextRequest,
     ConversationRef,
     ConversationSlice,
@@ -130,21 +127,6 @@ def test_model_roundtrip(sample_message: NormalizedMessage) -> None:
         context_requests=[request],
         needs_cross_anchor_merge=True,
     )
-    anchor_state = AnchorAnalysisState(
-        anchor_unit_id="oc_123:om_001",
-        target_date="2026-06-22",
-        status=AnchorStatus.COMPLETED.value,
-        pass_index=1,
-        message_window_before=8,
-        message_window_after=8,
-        included_message_ids=["om_001"],
-        included_attachment_ids=["att_001"],
-        needs_more_context=False,
-        needs_attachment_text=False,
-        needs_cross_anchor_merge=False,
-        completed_event_drafts=[draft],
-        warnings=[],
-    )
     merged = MergedEventDraft(
         date="2026-06-22",
         topic="发布推进",
@@ -153,12 +135,6 @@ def test_model_roundtrip(sample_message: NormalizedMessage) -> None:
         source_message_ids=["om_001"],
         source_conversation_ids=["oc_123"],
     )
-    bucket = CrossMergeBucket(
-        bucket_id="bucket-1",
-        draft_ids=["draft-001"],
-        reason="同一事项",
-    )
-    bucket_result = CrossMergeBucketResult(buckets=[bucket])
     event = WorkEvent(
         date="2026-06-22",
         event_id="abcd1234abcd1234",
@@ -175,10 +151,8 @@ def test_model_roundtrip(sample_message: NormalizedMessage) -> None:
     )
     store_result = StoreWriteResult(
         output_path="/tmp/2026-06-22.md",
-        temp_path="",
         event_count=1,
         written_at="2026-06-22T20:01:00+08:00",
-        validation_passed=True,
     )
     run_result = DailyRunResult(
         target_date="2026-06-22",
@@ -208,12 +182,9 @@ def test_model_roundtrip(sample_message: NormalizedMessage) -> None:
         draft,
         batch_result,
         anchor_result,
-        anchor_state,
         merged,
         group,
         group_result,
-        bucket,
-        bucket_result,
         event,
         day_doc,
         store_result,

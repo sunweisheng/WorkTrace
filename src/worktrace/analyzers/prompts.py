@@ -11,12 +11,8 @@ from ..models import (
     AnchorAnalysisResult,
     AnchorUnit,
     AttachmentTextBlock,
-    BatchAnchorAnalysisResult,
-    BucketMergedDraft,
     ConversationSlice,
     ContextRequest,
-    CrossBucketMergeResult,
-    CrossMergeBucketResult,
     NormalizedMessage,
     SourceBackedEventDraft,
 )
@@ -127,87 +123,6 @@ def build_merge_prompt(target_date: str, candidates: list[SourceBackedEventDraft
                 "result": candidate.result,
             }
             for candidate in candidates
-        ],
-    }
-    return dump_json(protocol, pretty=True)
-
-
-def build_cross_merge_bucket_prompt(
-    target_date: str,
-    candidates: list[SourceBackedEventDraft],
-) -> str:
-    protocol = {
-        "instruction": (
-            "按是否描述同一真实工作事件，对同日候选事件进行分桶。"
-            "只返回 JSON。不要合并内容。"
-            "每个 bucket 的 reason 用一句短话写清分组依据。"
-        ),
-        "rules": [
-            "只把大概率是同一事件的候选放进同一桶。",
-            "如果拿不准，宁可分开。",
-            "每个 id 必须且只能出现在一个桶里。",
-            "不要编造或修改 id。",
-            "仅仅背景相同，不足以分到一起。",
-            "仅仅文档名相同，不足以分到一起。",
-            "如果具体动作不同，就分开。",
-            "动作类型比共享名词更重要。",
-            "同步/通知 与 核对/校验/执行，通常不是同一事件。",
-            "设计、审批、付款跟进、文档编辑，通常不是同一事件。",
-            "只有在明确属于同一连续动作时，才把同步和核对放进同一桶。",
-            "每个 reason 要短、要具体。",
-        ],
-        "required_output_schema": {
-            "buckets": [
-                {
-                    "bucket_id": "string",
-                    "draft_ids": ["draft_id"],
-                    "reason": "string",
-                }
-            ]
-        },
-        "target_date": target_date,
-        "candidates": [serialize_cross_merge_candidate_for_prompt(item) for item in candidates],
-    }
-    return dump_json(protocol, pretty=True)
-
-
-def build_cross_bucket_merge_prompt(
-    target_date: str,
-    merged_buckets: list[BucketMergedDraft],
-    candidate_pairs: list[tuple[str, str]],
-) -> str:
-    bucket_cards = [serialize_bucket_merged_draft_for_prompt(item) for item in merged_buckets]
-    protocol = {
-        "instruction": (
-            "Review already-merged bucket-level events and decide whether any candidate bucket pairs "
-            "actually describe the same real work event. Return only one JSON object with key merge_decisions. "
-            "Be conservative and prefer not merging unless the two buckets are clearly the same event."
-        ),
-        "rules": [
-            "Only evaluate the provided candidate_pairs.",
-            "Set should_merge to true only when the two bucket-level events are clearly the same real work event.",
-            "Shared background topic alone is not enough; the action chain and outcome should also align.",
-            "If one bucket is only a prerequisite, side note, or related follow-up, do not merge.",
-            "Do not invent bucket IDs.",
-        ],
-        "required_output_schema": {
-            "merge_decisions": [
-                {
-                    "left_bucket_id": "string",
-                    "right_bucket_id": "string",
-                    "should_merge": True,
-                    "reason": "string",
-                }
-            ]
-        },
-        "target_date": target_date,
-        "bucket_cards": bucket_cards,
-        "candidate_pairs": [
-            {
-                "left_bucket_id": left_bucket_id,
-                "right_bucket_id": right_bucket_id,
-            }
-            for left_bucket_id, right_bucket_id in candidate_pairs
         ],
     }
     return dump_json(protocol, pretty=True)
@@ -562,20 +477,6 @@ def serialize_cross_merge_candidate_for_prompt(
         "t": candidate.topic,
         "c": candidate.content,
         "r": candidate.result,
-    }
-
-
-def serialize_bucket_merged_draft_for_prompt(
-    item: BucketMergedDraft,
-) -> dict[str, object]:
-    return {
-        "bucket_id": item.bucket_id,
-        "topic": item.draft.topic,
-        "content": item.draft.content,
-        "result": item.draft.result,
-        "source_conversation_ids": list(item.draft.source_conversation_ids),
-        "source_message_ids": list(item.draft.source_message_ids),
-        "upstream_draft_ids": list(item.upstream_draft_ids),
     }
 
 

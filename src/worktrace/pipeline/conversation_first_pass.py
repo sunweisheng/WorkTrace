@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from ..config import RuntimeConfig
 from ..models import ConversationSlice, NormalizedMessage
-from .slicing import build_slice_id
 
 
 def build_conversation_level_slices(
@@ -39,7 +38,7 @@ def build_conversation_level_slices(
 
         slices.append(
             ConversationSlice(
-                slice_id=build_slice_id(conversation_id, kept_anchor_ids),
+                slice_id=_build_slice_id(conversation_id, kept_anchor_ids),
                 conversation_id=conversation_id,
                 conversation_name=conversation_messages[0].conversation_name
                 if conversation_messages
@@ -131,3 +130,8 @@ def _min_anchor_distance(message_index: int, anchor_indexes: list[int]) -> int:
     if not anchor_indexes:
         return 999999
     return min(abs(message_index - anchor_index) for anchor_index in anchor_indexes)
+
+
+def _build_slice_id(conversation_id: str, anchor_message_ids: list[str]) -> str:
+    suffix = "-".join(anchor_message_ids[:3]) if anchor_message_ids else "empty"
+    return f"{conversation_id}:{suffix}"

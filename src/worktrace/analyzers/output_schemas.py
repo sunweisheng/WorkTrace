@@ -33,26 +33,3 @@ def merge_output_schema() -> dict[str, object]:
         "required": ["groups"],
         "additionalProperties": True,
     }
-
-
-def bucket_output_schema() -> dict[str, object]:
-    return {
-        "type": "object",
-        "properties": {
-            "buckets": {"type": "array"},
-        },
-        "required": ["buckets"],
-        "additionalProperties": True,
-    }
-
-
-def cross_bucket_merge_output_schema() -> dict[str, object]:
-    return {
-        "type": "object",
-        "properties": {
-            "merge_decisions": {"type": "array"},
-        },
-        "required": ["merge_decisions"],
-        "additionalProperties": True,
-    }
-

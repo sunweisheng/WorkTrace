@@ -41,10 +41,8 @@ class MarkdownEventStore(EventStore):
 
         return StoreWriteResult(
             output_path=str(output_path.resolve()),
-            temp_path="",
             event_count=len(events),
             written_at=generated_at,
-            validation_passed=True,
         )
 
     def read_day(self, target_date: str) -> DayDocument | None:

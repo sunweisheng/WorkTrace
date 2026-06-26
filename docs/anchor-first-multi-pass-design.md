@@ -1,5 +1,7 @@
 # WorkTrace 锚点优先多轮识别设计
 
+> 这是一份未来演进设计稿，不是当前主流程实现说明。当前主流程仍以会话级 `ConversationSlice` 为主，锚点链路主要存在于 `anchor_experiment.py`。
+
 ## 1. 文档目标
 
 本文档用于定义 WorkTrace 下一阶段的演进方案：将当前“先构造较大切片、再统一分析”的流程，调整为“锚点优先、按需扩窗、局部缓存、最终再合并”的多轮识别链路。
@@ -381,7 +383,6 @@ data/cache/
 - `anchor_completed_first_pass_count`
 - `anchor_context_expanded_count`
 - `anchor_attachment_expanded_count`
-- `final_merge_bucket_count`
 - `final_merge_candidate_count`
 
 重点观察：

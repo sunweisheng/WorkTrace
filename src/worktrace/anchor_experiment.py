@@ -146,7 +146,12 @@ def run_anchor_experiment(
         output_message_count=len(filtered_messages),
     )
     stage_started_at = perf_counter()
-    anchor_units = group_anchor_units(filtered_messages, self_identity.open_id, config)
+    anchor_units = group_anchor_units(
+        filtered_messages,
+        self_identity.open_id,
+        before_limit=30,
+        after_limit=30,
+    )
     log_timing(
         logger,
         "anchor_experiment.stage.completed",

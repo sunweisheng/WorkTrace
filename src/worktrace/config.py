@@ -117,18 +117,10 @@ class RuntimeConfig:
     timezone: str = "Asia/Shanghai"
     analyzer_backend: str = "hook"
     hook_command: str = DEFAULT_HOOK_COMMAND
-    slice_context_before: int = 30
-    slice_context_after: int = 30
     anchor_retry_limit: int = 3
     slice_base_limit: int = 150
-    batch_slice_limit: int = 3
-    batch_target_tokens: int = 8000
-    batch_hard_limit: int = 12000
-    single_slice_hard_limit: int = 18000
     max_model_input_tokens: int = 100000
-    batch_retry_limit: int = 2
     slice_retry_limit: int = 3
-    merge_retry_limit: int = 3
     prompt_slice_message_limit: int = 40
     prompt_message_char_limit: int = 300
     prompt_attachment_char_limit: int = 800
@@ -136,7 +128,6 @@ class RuntimeConfig:
     analyzer_timeout_seconds: int = 180
     codex_stdin_mode: bool = False
     anchor_batch_size: int = 3
-    enable_cross_bucket_merge: bool = False
     confidential_event_keywords: tuple[str, ...] = (
         "工资",
         "薪资",

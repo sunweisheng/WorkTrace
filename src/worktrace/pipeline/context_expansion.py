@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from collections import defaultdict
 from dataclasses import replace
 
 from ..config import RuntimeConfig
@@ -10,30 +9,9 @@ from ..models import (
     AttachmentTextBlock,
     ContextRequest,
     ConversationSlice,
-    NormalizedMessage,
 )
 from ..resolvers.base import ContentResolver
 from ..sources.base import ChatSource
-
-
-def validate_context_request(request: ContextRequest) -> bool:
-    if request.request_type not in {
-        ContextRequestType.EARLIER_MESSAGES.value,
-        ContextRequestType.LATER_MESSAGES.value,
-        ContextRequestType.ATTACHMENT_TEXT.value,
-    }:
-        return False
-    if request.request_type == ContextRequestType.ATTACHMENT_TEXT.value:
-        return bool(request.target_message_ids and request.target_attachment_ids)
-    return not request.target_attachment_ids
-
-
-def group_requests_by_slice(requests: list[ContextRequest]) -> dict[str, list[ContextRequest]]:
-    grouped: dict[str, list[ContextRequest]] = defaultdict(list)
-    for request in requests:
-        if validate_context_request(request):
-            grouped[request.slice_id].append(request)
-    return dict(grouped)
 
 
 def expand_slice_context(
@@ -112,9 +90,7 @@ def build_single_slice_retry_batch(
     config: RuntimeConfig | None = None,
 ) -> AnalysisBatch:
     runtime_config = config or RuntimeConfig()
-    from .batching import estimate_slice_tokens
-
-    estimated_tokens = estimate_slice_tokens(conversation_slice, runtime_config)
+    estimated_tokens = _estimate_slice_tokens(conversation_slice, runtime_config)
     return AnalysisBatch(
         target_date=target_date,
         batch_id=f"{conversation_slice.slice_id}-retry-{retry_round}",
@@ -124,3 +100,16 @@ def build_single_slice_retry_batch(
         self_display_name=self_display_name,
         slices=[conversation_slice],
     )
+
+
+def _estimate_slice_tokens(
+    conversation_slice: ConversationSlice,
+    config: RuntimeConfig,
+) -> int:
+    import json
+
+    from ..analyzers.prompts import serialize_slice_for_prompt
+
+    payload = serialize_slice_for_prompt(conversation_slice, config)
+    serialized = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    return max(1, len(serialized) // 3 + 50)

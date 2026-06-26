@@ -56,9 +56,6 @@ class FailingAnalyzer:
     def merge_day_candidates(self, target_date, candidates):
         raise AssertionError("Should not merge")
 
-    def bucket_cross_merge_candidates(self, target_date, candidates):
-        raise AssertionError("Should not bucket")
-
 
 def test_runner_failure_modes(tmp_path: Path) -> None:
     config = RuntimeConfig(data_root=tmp_path / "data")

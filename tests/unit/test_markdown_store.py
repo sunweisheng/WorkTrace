@@ -23,7 +23,7 @@ def test_markdown_store_roundtrip(tmp_path: Path) -> None:
     )
     loaded = store.read_day("2026-06-22")
 
-    assert write_result.validation_passed is True
+    assert write_result.event_count == 1
     assert loaded is not None
     assert loaded.events[0].event_id == "evt1"
 

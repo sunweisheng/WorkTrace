@@ -39,9 +39,6 @@ class EmptyAnalyzer:
     def merge_day_candidates(self, target_date, candidates):
         raise AssertionError("Should not merge empty day")
 
-    def bucket_cross_merge_candidates(self, target_date, candidates):
-        raise AssertionError("Should not bucket empty day")
-
 
 def test_runner_empty_day_is_success(tmp_path: Path) -> None:
     config = RuntimeConfig(data_root=tmp_path / "data")

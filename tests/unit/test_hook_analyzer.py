@@ -12,11 +12,8 @@ from src.worktrace.config import RuntimeConfig
 from src.worktrace.errors import AnalyzerProtocolError
 from src.worktrace.models import (
     AnalysisBatch,
-    BucketMergedDraft,
     ConversationSlice,
-    MergedEventDraft,
     NormalizedMessage,
-    SourceBackedEventDraft,
 )
 from src.worktrace.hook_runner import (
     _build_responses_request_body,
@@ -165,119 +162,6 @@ def test_hook_analyzer_surfaces_stderr_tail_on_failure(tmp_path: Path) -> None:
     message = str(exc_info.value)
     assert "returncode=1" in message
     assert "line2 | line3 | line4" in message
-
-
-def test_hook_analyzer_parses_cross_merge_bucket_result(tmp_path: Path) -> None:
-    def fake_runner(args, *, cwd=None, timeout=None, input_text=None, env=None):
-        class Result:
-            returncode = 0
-            stdout = json.dumps(
-                {
-                    "buckets": [
-                        {
-                            "bucket_id": "b1",
-                            "draft_ids": ["d1"],
-                            "reason": "same event",
-                        }
-                    ]
-                }
-            )
-            stderr = ""
-
-        return Result()
-
-    analyzer = HookAnalyzer(
-        config=RuntimeConfig(
-            data_root=tmp_path / "data",
-            analyzer_backend="hook",
-            hook_command="mock-hook",
-        ),
-        command_runner=fake_runner,
-        cwd=tmp_path,
-    )
-
-    result = analyzer.bucket_cross_merge_candidates(
-        "2026-06-23",
-        [
-            SourceBackedEventDraft(
-                draft_id="d1",
-                date="2026-06-23",
-                topic="发布推进",
-                content="同步",
-                result="",
-                source_message_ids=["om_1"],
-                source_conversation_id="oc_1",
-                source_slice_id="slice-1",
-                confidence=0.9,
-            )
-        ],
-    )
-
-    assert [bucket.bucket_id for bucket in result.buckets] == ["b1"]
-
-
-def test_hook_analyzer_parses_cross_bucket_merge_result(tmp_path: Path) -> None:
-    def fake_runner(args, *, cwd=None, timeout=None, input_text=None, env=None):
-        class Result:
-            returncode = 0
-            stdout = json.dumps(
-                {
-                    "merge_decisions": [
-                        {
-                            "left_bucket_id": "b1",
-                            "right_bucket_id": "b2",
-                            "should_merge": True,
-                            "reason": "same thread",
-                        }
-                    ]
-                }
-            )
-            stderr = ""
-
-        return Result()
-
-    analyzer = HookAnalyzer(
-        config=RuntimeConfig(
-            data_root=tmp_path / "data",
-            analyzer_backend="hook",
-            hook_command="mock-hook",
-        ),
-        command_runner=fake_runner,
-        cwd=tmp_path,
-    )
-
-    result = analyzer.decide_cross_bucket_merges(
-        "2026-06-23",
-        [
-            BucketMergedDraft(
-                bucket_id="b1",
-                draft=MergedEventDraft(
-                    date="2026-06-23",
-                    topic="主题1",
-                    content="内容1",
-                    result="",
-                    source_message_ids=["m1"],
-                    source_conversation_ids=["c1"],
-                ),
-                upstream_draft_ids=["d1"],
-            ),
-            BucketMergedDraft(
-                bucket_id="b2",
-                draft=MergedEventDraft(
-                    date="2026-06-23",
-                    topic="主题2",
-                    content="内容2",
-                    result="",
-                    source_message_ids=["m2"],
-                    source_conversation_ids=["c2"],
-                ),
-                upstream_draft_ids=["d2"],
-            ),
-        ],
-        [("b1", "b2")],
-    )
-
-    assert result.merge_decisions[0].should_merge is True
 
 
 def test_hook_runner_reports_missing_output_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

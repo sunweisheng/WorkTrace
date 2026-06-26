@@ -6,8 +6,6 @@ from ..models import (
     BatchAnalysisResult,
     BatchAnchorAnalysisResult,
     CrossConversationGroupResult,
-    CrossBucketMergeResult,
-    CrossMergeBucketResult,
 )
 from ..pipeline.validation import expect_json_object
 
@@ -36,25 +34,9 @@ def parse_anchor_batch_analysis_payload(payload: object) -> BatchAnchorAnalysisR
         raise AnalyzerProtocolError("Invalid batch anchor analysis payload.") from exc
 
 
-def parse_merge_payload(payload: object) -> list[MergedEventDraft]:
+def parse_merge_payload(payload: object) -> CrossConversationGroupResult:
     data = expect_json_object(payload, "Cross-conversation merge result")
     try:
         return CrossConversationGroupResult.from_dict(data)
     except (KeyError, TypeError, ValueError) as exc:
         raise AnalyzerProtocolError("Invalid cross-conversation merge payload.") from exc
-
-
-def parse_cross_merge_bucket_payload(payload: object) -> CrossMergeBucketResult:
-    data = expect_json_object(payload, "Cross-merge bucket result")
-    try:
-        return CrossMergeBucketResult.from_dict(data)
-    except (KeyError, TypeError, ValueError) as exc:
-        raise AnalyzerProtocolError("Invalid cross-merge bucket payload.") from exc
-
-
-def parse_cross_bucket_merge_payload(payload: object) -> CrossBucketMergeResult:
-    data = expect_json_object(payload, "Cross-bucket merge result")
-    try:
-        return CrossBucketMergeResult.from_dict(data)
-    except (KeyError, TypeError, ValueError) as exc:
-        raise AnalyzerProtocolError("Invalid cross-bucket merge payload.") from exc

@@ -7,11 +7,7 @@ from ..models import (
     AnchorUnit,
     BatchAnalysisResult,
     BatchAnchorAnalysisResult,
-    BucketMergedDraft,
     CrossConversationGroupResult,
-    CrossBucketMergeResult,
-    CrossMergeBucketResult,
-    MergedEventDraft,
     SourceBackedEventDraft,
 )
 
@@ -39,21 +35,4 @@ class Analyzer(ABC):
         target_date: str,
         candidates: list[SourceBackedEventDraft],
     ) -> CrossConversationGroupResult:
-        raise NotImplementedError
-
-    @abstractmethod
-    def bucket_cross_merge_candidates(
-        self,
-        target_date: str,
-        candidates: list[SourceBackedEventDraft],
-    ) -> CrossMergeBucketResult:
-        raise NotImplementedError
-
-    @abstractmethod
-    def decide_cross_bucket_merges(
-        self,
-        target_date: str,
-        merged_buckets: list[BucketMergedDraft],
-        candidate_pairs: list[tuple[str, str]],
-    ) -> CrossBucketMergeResult:
         raise NotImplementedError

@@ -591,47 +591,6 @@ class MergedEventDraft:
 
 
 @dataclass(frozen=True)
-class CrossMergeBucket:
-    bucket_id: str
-    draft_ids: list[str]
-    reason: str = ""
-
-    @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> CrossMergeBucket:
-        return cls(
-            bucket_id=str(data["bucket_id"]),
-            draft_ids=_string_list(data.get("draft_ids")),
-            reason=str(data.get("reason", "")),
-        )
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "bucket_id": self.bucket_id,
-            "draft_ids": list(self.draft_ids),
-            "reason": self.reason,
-        }
-
-
-@dataclass(frozen=True)
-class CrossMergeBucketResult:
-    buckets: list[CrossMergeBucket] = field(default_factory=list)
-
-    @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> CrossMergeBucketResult:
-        return cls(
-            buckets=[
-                CrossMergeBucket.from_dict(item)
-                for item in _dict_list(data.get("buckets"))
-            ]
-        )
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "buckets": [item.to_dict() for item in self.buckets],
-        }
-
-
-@dataclass(frozen=True)
 class CrossConversationGroup:
     group_id: str
     draft_ids: list[str]
@@ -666,72 +625,6 @@ class CrossConversationGroupResult:
     def to_dict(self) -> dict[str, Any]:
         return {
             "groups": [item.to_dict() for item in self.groups],
-        }
-
-
-@dataclass(frozen=True)
-class BucketMergedDraft:
-    bucket_id: str
-    draft: MergedEventDraft
-    upstream_draft_ids: list[str] = field(default_factory=list)
-
-    @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> BucketMergedDraft:
-        return cls(
-            bucket_id=str(data["bucket_id"]),
-            draft=MergedEventDraft.from_dict(data["draft"]),
-            upstream_draft_ids=_string_list(data.get("upstream_draft_ids")),
-        )
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "bucket_id": self.bucket_id,
-            "draft": self.draft.to_dict(),
-            "upstream_draft_ids": list(self.upstream_draft_ids),
-        }
-
-
-@dataclass(frozen=True)
-class CrossBucketMergeDecision:
-    left_bucket_id: str
-    right_bucket_id: str
-    should_merge: bool
-    reason: str = ""
-
-    @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> CrossBucketMergeDecision:
-        return cls(
-            left_bucket_id=str(data["left_bucket_id"]),
-            right_bucket_id=str(data["right_bucket_id"]),
-            should_merge=bool(data.get("should_merge", False)),
-            reason=str(data.get("reason", "")),
-        )
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "left_bucket_id": self.left_bucket_id,
-            "right_bucket_id": self.right_bucket_id,
-            "should_merge": self.should_merge,
-            "reason": self.reason,
-        }
-
-
-@dataclass(frozen=True)
-class CrossBucketMergeResult:
-    merge_decisions: list[CrossBucketMergeDecision] = field(default_factory=list)
-
-    @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> CrossBucketMergeResult:
-        return cls(
-            merge_decisions=[
-                CrossBucketMergeDecision.from_dict(item)
-                for item in _dict_list(data.get("merge_decisions"))
-            ]
-        )
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "merge_decisions": [item.to_dict() for item in self.merge_decisions],
         }
 
 
@@ -788,28 +681,22 @@ class DayDocument:
 @dataclass(frozen=True)
 class StoreWriteResult:
     output_path: str
-    temp_path: str
     event_count: int
     written_at: str
-    validation_passed: bool
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> StoreWriteResult:
         return cls(
             output_path=str(data["output_path"]),
-            temp_path=str(data.get("temp_path", "")),
             event_count=int(data.get("event_count", 0)),
             written_at=str(data["written_at"]),
-            validation_passed=bool(data.get("validation_passed", False)),
         )
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "output_path": self.output_path,
-            "temp_path": self.temp_path,
             "event_count": self.event_count,
             "written_at": self.written_at,
-            "validation_passed": self.validation_passed,
         }
 
 
@@ -871,61 +758,6 @@ class AnchorCacheEntry:
             "included_attachment_ids": list(self.included_attachment_ids),
             "needs_cross_anchor_merge": self.needs_cross_anchor_merge,
             "created_at": self.created_at,
-        }
-
-
-@dataclass(frozen=True)
-class AnchorAnalysisState:
-    anchor_unit_id: str
-    target_date: str
-    status: str
-    pass_index: int
-    message_window_before: int
-    message_window_after: int
-    included_message_ids: list[str] = field(default_factory=list)
-    included_attachment_ids: list[str] = field(default_factory=list)
-    needs_more_context: bool = False
-    needs_attachment_text: bool = False
-    needs_cross_anchor_merge: bool = False
-    completed_event_drafts: list[SourceBackedEventDraft] = field(default_factory=list)
-    warnings: list[str] = field(default_factory=list)
-
-    @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> AnchorAnalysisState:
-        return cls(
-            anchor_unit_id=str(data["anchor_unit_id"]),
-            target_date=str(data["target_date"]),
-            status=str(data["status"]),
-            pass_index=int(data.get("pass_index", 0)),
-            message_window_before=int(data.get("message_window_before", 0)),
-            message_window_after=int(data.get("message_window_after", 0)),
-            included_message_ids=_string_list(data.get("included_message_ids")),
-            included_attachment_ids=_string_list(data.get("included_attachment_ids")),
-            needs_more_context=bool(data.get("needs_more_context", False)),
-            needs_attachment_text=bool(data.get("needs_attachment_text", False)),
-            needs_cross_anchor_merge=bool(data.get("needs_cross_anchor_merge", False)),
-            completed_event_drafts=[
-                SourceBackedEventDraft.from_dict(item)
-                for item in _dict_list(data.get("completed_event_drafts"))
-            ],
-            warnings=_string_list(data.get("warnings")),
-        )
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "anchor_unit_id": self.anchor_unit_id,
-            "target_date": self.target_date,
-            "status": self.status,
-            "pass_index": self.pass_index,
-            "message_window_before": self.message_window_before,
-            "message_window_after": self.message_window_after,
-            "included_message_ids": list(self.included_message_ids),
-            "included_attachment_ids": list(self.included_attachment_ids),
-            "needs_more_context": self.needs_more_context,
-            "needs_attachment_text": self.needs_attachment_text,
-            "needs_cross_anchor_merge": self.needs_cross_anchor_merge,
-            "completed_event_drafts": [item.to_dict() for item in self.completed_event_drafts],
-            "warnings": list(self.warnings),
         }
 
 

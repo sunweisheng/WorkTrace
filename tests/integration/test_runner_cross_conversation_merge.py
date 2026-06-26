@@ -156,9 +156,6 @@ class MergeAnalyzer:
             ]
         )
 
-    def bucket_cross_merge_candidates(self, target_date, candidates):
-        raise AssertionError("Should not use old bucket pipeline")
-
 
 def test_runner_groups_candidates_across_conversations_once(tmp_path: Path) -> None:
     analyzer = MergeAnalyzer()

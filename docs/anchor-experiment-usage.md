@@ -113,6 +113,16 @@ data/anchor-debug/<target_date>/<safe_anchor_unit_id>/
 - second pass 会额外写 `expansion.json`
 - 如已补附件正文，会写 `attachment_texts.json`
 
+这些调试文件可能包含：
+
+- 锚点窗口消息与消息元数据
+- 送给 analyzer 的 prompt
+- 模型返回结果
+- 按需补充的附件正文
+- 多轮扩窗时新增的请求与上下文
+
+它们只在显式启用 `--dump-dir` 时落盘，不属于正式日处理主流程输出。
+
 以 `2026-06-23` 的一次真实实验为例，目录结构类似：
 
 ```text
