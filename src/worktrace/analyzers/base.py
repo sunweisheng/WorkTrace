@@ -14,6 +14,10 @@ from ..models import (
 
 class Analyzer(ABC):
     @abstractmethod
+    def build_batch_prompt(self, batch_input: AnalysisBatch) -> str:
+        raise NotImplementedError
+
+    @abstractmethod
     def analyze_batch(
         self,
         target_date: str,

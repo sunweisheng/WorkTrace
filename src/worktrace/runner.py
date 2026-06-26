@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import logging
+from pathlib import Path
 from time import perf_counter
 
 from .config import RuntimeConfig
@@ -26,9 +27,11 @@ from .pipeline.filtering import filter_messages
 from .pipeline.sensitive_filter import filter_sensitive_merged_drafts
 from .pipeline.validation import (
     validate_batch_analysis_result,
+    validate_cross_conversation_groups,
     validate_merged_event_drafts,
 )
-from .models import BatchAnalysisResult, ConversationSlice, SelfIdentity
+from .models import AnalysisBatch, BatchAnalysisResult, ConversationSlice, SelfIdentity
+from .utils.json_io import dump_json
 
 logger = logging.getLogger("worktrace")
 
@@ -162,6 +165,10 @@ class DailyTraceRunner:
                     merge_started_at = perf_counter()
                     group_result = self.dependencies.analyzer.merge_day_candidates(
                         target_date,
+                        all_candidates,
+                    )
+                    group_result = validate_cross_conversation_groups(
+                        group_result,
                         all_candidates,
                     )
                     merged_drafts = materialize_grouped_merged_drafts(
@@ -363,12 +370,37 @@ class DailyTraceRunner:
                 )
 
             batch_started_at = perf_counter()
-            batch_result = self.dependencies.analyzer.analyze_batch(target_date, batch_input)
+            prompt = self.dependencies.analyzer.build_batch_prompt(
+                batch_input
+            ) if hasattr(self.dependencies.analyzer, "build_batch_prompt") else None
+            try:
+                batch_result = self.dependencies.analyzer.analyze_batch(target_date, batch_input)
+            except AnalyzerProtocolError as exc:
+                if retry_round == 0:
+                    self._dump_conversation_debug_artifacts(
+                        target_date=target_date,
+                        conversation_slice=current_slice,
+                        batch_input=batch_input,
+                        prompt=prompt,
+                        elapsed_ms=(perf_counter() - batch_started_at) * 1000,
+                        error_summary=str(exc),
+                    )
+                raise
             validated_result = validate_batch_analysis_result(
                 batch_result,
                 {current_slice.slice_id: current_slice},
             )
             run_count += 1
+            if retry_round == 0:
+                self._dump_conversation_debug_artifacts(
+                    target_date=target_date,
+                    conversation_slice=current_slice,
+                    batch_input=batch_input,
+                    prompt=prompt,
+                    elapsed_ms=(perf_counter() - batch_started_at) * 1000,
+                    output_payload=batch_result.to_dict(),
+                    validated_result=validated_result,
+                )
             log_timing(
                 logger,
                 "runner.stage.completed",
@@ -421,6 +453,69 @@ class DailyTraceRunner:
             current_slice = expanded_slice
 
         return BatchAnalysisResult(), warning_messages, True, run_count
+
+    def _dump_conversation_debug_artifacts(
+        self,
+        *,
+        target_date: str,
+        conversation_slice: ConversationSlice,
+        batch_input: AnalysisBatch,
+        elapsed_ms: float,
+        prompt: str | None,
+        output_payload: dict[str, object] | None = None,
+        validated_result: BatchAnalysisResult | None = None,
+        error_summary: str | None = None,
+    ) -> None:
+        debug_root = self.config.conversation_debug_root
+        if debug_root is None:
+            return
+
+        conversation_dir = (
+            debug_root
+            / target_date
+            / _safe_conversation_dir_name(conversation_slice.slice_id)
+            / "pass_01"
+        )
+        conversation_dir.mkdir(parents=True, exist_ok=True)
+        (conversation_dir / "input.json").write_text(
+            dump_json(batch_input.to_dict(), pretty=True) + "\n",
+            encoding="utf-8",
+        )
+        if prompt is not None:
+            (conversation_dir / "prompt.txt").write_text(prompt, encoding="utf-8")
+        if output_payload is not None:
+            (conversation_dir / "output.json").write_text(
+                dump_json(output_payload, pretty=True) + "\n",
+                encoding="utf-8",
+            )
+
+        meta = {
+            "target_date": target_date,
+            "slice_id": conversation_slice.slice_id,
+            "conversation_id": conversation_slice.conversation_id,
+            "conversation_name": conversation_slice.conversation_name,
+            "retry_round": batch_input.retry_round,
+            "elapsed_ms": round(elapsed_ms, 3),
+            "message_count": len(conversation_slice.messages),
+            "anchor_message_count": len(conversation_slice.anchor_message_ids),
+            "in_day_message_count": len(conversation_slice.in_day_message_ids),
+            "candidate_event_count": (
+                len(validated_result.candidate_events) if validated_result is not None else None
+            ),
+            "context_request_count": (
+                len(validated_result.context_requests) if validated_result is not None else None
+            ),
+            "status": "failed" if error_summary else "completed",
+            "error_summary": error_summary or "",
+        }
+        (conversation_dir / "meta.json").write_text(
+            dump_json(meta, pretty=True) + "\n",
+            encoding="utf-8",
+        )
+
+
+def _safe_conversation_dir_name(slice_id: str) -> str:
+    return slice_id.replace("/", "_").replace(":", "__")
 def run_daily_trace(target_date: str, config: RuntimeConfig) -> DailyRunResult:
     runner = DailyTraceRunner(config=config, dependencies=build_runtime_dependencies(config))
     return runner.run(target_date)

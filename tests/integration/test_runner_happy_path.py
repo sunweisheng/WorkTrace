@@ -57,6 +57,9 @@ class FakeResolver:
 
 
 class FakeAnalyzer:
+    def build_batch_prompt(self, batch_input):
+        return "batch prompt"
+
     def analyze_batch(self, target_date, batch_input):
         return BatchAnalysisResult(
             candidate_events=[
@@ -96,6 +99,34 @@ def test_runner_happy_path(tmp_path: Path) -> None:
     assert result.status == DailyRunStatus.SUCCESS.value
     assert result.event_count == 1
     assert result.output_path is not None
+    assert not (tmp_path / "data" / "debug" / "conversations").exists()
+
+
+def test_runner_dumps_first_pass_conversation_debug_artifacts(tmp_path: Path) -> None:
+    config = RuntimeConfig(
+        data_root=tmp_path / "data",
+        conversation_debug_root=tmp_path / "debug",
+    )
+    runner = DailyTraceRunner(
+        config=config,
+        dependencies=RuntimeDependencies(
+            chat_source=FakeSource(),
+            content_resolver=FakeResolver(),
+            analyzer=FakeAnalyzer(),
+            event_store=MarkdownEventStore(config=config),
+        ),
+    )
+
+    result = runner.run("2026-06-22")
+
+    assert result.status == DailyRunStatus.SUCCESS.value
+    pass_dir = tmp_path / "debug" / "2026-06-22" / "oc_1__om_1" / "pass_01"
+    assert (pass_dir / "input.json").exists()
+    assert (pass_dir / "prompt.txt").read_text(encoding="utf-8") == "batch prompt"
+    assert (pass_dir / "output.json").exists()
+    meta = (pass_dir / "meta.json").read_text(encoding="utf-8")
+    assert '"status": "completed"' in meta
+    assert '"candidate_event_count": 1' in meta
 
 
 def test_runner_groups_multiple_self_messages_in_same_conversation_into_one_llm_call(

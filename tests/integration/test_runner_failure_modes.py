@@ -50,6 +50,9 @@ class SimpleResolver:
 
 
 class FailingAnalyzer:
+    def build_batch_prompt(self, batch_input):
+        return "bad prompt"
+
     def analyze_batch(self, target_date, batch_input):
         raise AnalyzerProtocolError("bad json")
 
@@ -73,3 +76,29 @@ def test_runner_failure_modes(tmp_path: Path) -> None:
 
     assert result.status == DailyRunStatus.FAILED.value
     assert result.output_path is None
+
+
+def test_runner_dumps_failed_first_pass_debug_artifacts(tmp_path: Path) -> None:
+    config = RuntimeConfig(
+        data_root=tmp_path / "data",
+        conversation_debug_root=tmp_path / "debug",
+    )
+    runner = DailyTraceRunner(
+        config=config,
+        dependencies=RuntimeDependencies(
+            chat_source=FailingSource(),
+            content_resolver=SimpleResolver(),
+            analyzer=FailingAnalyzer(),
+            event_store=MarkdownEventStore(config=config),
+        ),
+    )
+
+    result = runner.run("2026-06-22")
+
+    assert result.status == DailyRunStatus.FAILED.value
+    pass_dir = tmp_path / "debug" / "2026-06-22" / "oc_1__om_1" / "pass_01"
+    assert (pass_dir / "input.json").exists()
+    assert (pass_dir / "prompt.txt").read_text(encoding="utf-8") == "bad prompt"
+    meta = (pass_dir / "meta.json").read_text(encoding="utf-8")
+    assert '"status": "failed"' in meta
+    assert '"error_summary": "bad json"' in meta

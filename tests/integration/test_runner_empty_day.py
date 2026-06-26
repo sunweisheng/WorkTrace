@@ -33,6 +33,9 @@ class EmptyResolver:
 
 
 class EmptyAnalyzer:
+    def build_batch_prompt(self, batch_input):
+        return "prompt"
+
     def analyze_batch(self, target_date, batch_input):
         raise AssertionError("Should not analyze empty day")
 

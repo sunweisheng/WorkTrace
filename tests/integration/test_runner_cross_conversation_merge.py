@@ -156,6 +156,9 @@ class MergeAnalyzer:
             ]
         )
 
+    def build_batch_prompt(self, batch_input):
+        return "prompt"
+
 
 def test_runner_groups_candidates_across_conversations_once(tmp_path: Path) -> None:
     analyzer = MergeAnalyzer()
@@ -175,3 +178,32 @@ def test_runner_groups_candidates_across_conversations_once(tmp_path: Path) -> N
     assert result.status == DailyRunStatus.SUCCESS.value
     assert result.event_count == 2
     assert analyzer.group_calls == [["d1", "d2", "d3"]]
+
+
+class MissingDraftMergeAnalyzer(MergeAnalyzer):
+    def merge_day_candidates(self, target_date, candidates):
+        self.group_calls.append([item.draft_id for item in candidates])
+        return CrossConversationGroupResult(
+            groups=[
+                CrossConversationGroup(group_id="g1", draft_ids=["d1", "d2"]),
+            ]
+        )
+
+
+def test_runner_fails_when_merge_result_drops_candidate_draft(tmp_path: Path) -> None:
+    analyzer = MissingDraftMergeAnalyzer()
+    config = RuntimeConfig(data_root=tmp_path / "data")
+    runner = DailyTraceRunner(
+        config=config,
+        dependencies=RuntimeDependencies(
+            chat_source=MergeSource(),
+            content_resolver=MergeResolver(),
+            analyzer=analyzer,
+            event_store=MarkdownEventStore(config=config),
+        ),
+    )
+
+    result = runner.run("2026-06-22")
+
+    assert result.status == DailyRunStatus.FAILED.value
+    assert "missing=['d3']" in result.error_summary

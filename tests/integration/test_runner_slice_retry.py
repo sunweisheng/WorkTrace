@@ -78,6 +78,9 @@ class RetryAnalyzer:
     def __init__(self):
         self.calls = 0
 
+    def build_batch_prompt(self, batch_input):
+        return "retry prompt"
+
     def analyze_batch(self, target_date, batch_input):
         self.calls += 1
         if self.calls == 1:

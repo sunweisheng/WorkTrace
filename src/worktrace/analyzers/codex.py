@@ -69,10 +69,13 @@ class CodexAnalyzer(Analyzer):
         batch_input: AnalysisBatch,
     ) -> BatchAnalysisResult:
         payload = self._invoke_codex(
-            build_batch_analysis_prompt(batch_input, config=self.config),
+            self.build_batch_prompt(batch_input),
             output_schema=batch_output_schema(),
         )
         return parse_batch_analysis_payload(payload)
+
+    def build_batch_prompt(self, batch_input: AnalysisBatch) -> str:
+        return build_batch_analysis_prompt(batch_input, config=self.config)
 
     def analyze_anchor_batch(
         self,

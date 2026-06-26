@@ -4,12 +4,14 @@ from ..constants import ContextRequestType
 from ..errors import AnalyzerProtocolError
 from ..models import (
     BatchAnalysisResult,
+    CrossConversationGroupResult,
     ContextRequest,
     ConversationSlice,
     MergedEventDraft,
     SourceBackedEventDraft,
 )
 from ..analyzers.prompts import build_prompt_message_short_ids
+from ..utils.hashing import stable_event_id
 
 
 def normalize_source_message_ids(
@@ -88,9 +90,13 @@ def validate_batch_analysis_result(
         if not normalized_ids:
             continue
 
+        draft_id = candidate.draft_id.strip()
+        if not draft_id:
+            draft_id = stable_event_id(candidate.date, normalized_ids)
+
         valid_candidates.append(
             SourceBackedEventDraft(
-                draft_id=candidate.draft_id,
+                draft_id=draft_id,
                 date=candidate.date,
                 topic=candidate.topic,
                 content=candidate.content,
@@ -137,6 +143,42 @@ def validate_merged_event_drafts(
             )
         )
     return normalized
+
+
+def validate_cross_conversation_groups(
+    group_result: CrossConversationGroupResult,
+    candidates: list[SourceBackedEventDraft],
+) -> CrossConversationGroupResult:
+    expected = [candidate.draft_id for candidate in candidates]
+    expected_set = set(expected)
+    seen: set[str] = set()
+    duplicates: list[str] = []
+    unknown: list[str] = []
+
+    for group in group_result.groups:
+        for draft_id in group.draft_ids:
+            if draft_id not in expected_set:
+                unknown.append(draft_id)
+                continue
+            if draft_id in seen:
+                duplicates.append(draft_id)
+                continue
+            seen.add(draft_id)
+
+    missing = [draft_id for draft_id in expected if draft_id not in seen]
+    if not missing and not duplicates and not unknown:
+        return group_result
+
+    details: list[str] = []
+    if missing:
+        details.append(f"missing={missing}")
+    if duplicates:
+        details.append(f"duplicates={sorted(set(duplicates))}")
+    if unknown:
+        details.append(f"unknown={sorted(set(unknown))}")
+    raise AnalyzerProtocolError(
+        "Cross-conversation merge groups are invalid: " + "; ".join(details)
+    )
 
 
 def expect_json_object(payload: object, context: str) -> dict:

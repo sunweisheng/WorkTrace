@@ -69,7 +69,8 @@ def build_missing_llm_config_message(config: RuntimeConfig, missing_keys: list[s
     missing = ", ".join(missing_keys)
     return (
         "Missing online LLM configuration: "
-        f"{missing}. Configure them in local `{config.llm_env_file_name}` or environment variables. "
+        f"{missing}. WorkTrace requires the user to provide these values in local "
+        f"`{config.llm_env_file_name}` or environment variables before running. "
         "Do not commit real secrets to git."
     )
 
@@ -156,6 +157,7 @@ class RuntimeConfig:
     )
     data_root: Path = field(default_factory=lambda: Path("data"))
     cache_root: Path | None = None
+    conversation_debug_root: Path | None = None
     generator_name: str = "worktrace"
     llm_base_url_env_var: str = DEFAULT_LLM_BASE_URL_ENV_VAR
     llm_model_env_var: str = DEFAULT_LLM_MODEL_ENV_VAR
