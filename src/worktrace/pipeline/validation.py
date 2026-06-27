@@ -77,9 +77,13 @@ def validate_batch_analysis_result(
 
     for candidate in result.candidate_events:
         conversation_slice = slices_by_id.get(candidate.source_slice_id)
+        if conversation_slice is None and len(slices_by_id) == 1:
+            conversation_slice = next(iter(slices_by_id.values()))
         if conversation_slice is None:
             continue
-        if candidate.source_conversation_id != conversation_slice.conversation_id:
+        source_conversation_id = candidate.source_conversation_id.strip() or conversation_slice.conversation_id
+        source_slice_id = candidate.source_slice_id.strip() or conversation_slice.slice_id
+        if source_conversation_id != conversation_slice.conversation_id:
             continue
 
         normalized_ids = normalize_source_message_ids(
@@ -90,27 +94,42 @@ def validate_batch_analysis_result(
             continue
 
         draft_id = candidate.draft_id.strip()
+        date = candidate.date.strip()
+        if not date:
+            date = _infer_target_date_from_slice(conversation_slice)
         if not draft_id:
-            draft_id = stable_event_id(candidate.date, normalized_ids, candidate.content)
+            draft_id = stable_event_id(date, normalized_ids, candidate.content)
 
         valid_candidates.append(
             SourceBackedEventDraft(
                 draft_id=draft_id,
-                date=candidate.date,
+                date=date,
                 topic=candidate.topic,
                 content=candidate.content,
-                result=candidate.result,
                 source_message_ids=normalized_ids,
-                source_conversation_id=candidate.source_conversation_id,
-                source_slice_id=candidate.source_slice_id,
+                source_conversation_id=source_conversation_id,
+                source_slice_id=source_slice_id,
                 confidence=candidate.confidence,
             )
         )
 
     for request in result.context_requests:
-        conversation_slice = slices_by_id.get(request.slice_id)
+        request_slice_id = request.slice_id.strip()
+        conversation_slice = slices_by_id.get(request_slice_id)
+        if conversation_slice is None and len(slices_by_id) == 1:
+            conversation_slice = next(iter(slices_by_id.values()))
+            request_slice_id = conversation_slice.slice_id
         if conversation_slice and validate_context_request_against_slice(request, conversation_slice):
-            valid_requests.append(request)
+            valid_requests.append(
+                ContextRequest(
+                    slice_id=request_slice_id,
+                    request_type=request.request_type,
+                    target_message_ids=request.target_message_ids,
+                    target_attachment_ids=request.target_attachment_ids,
+                    reason=request.reason,
+                    limit=max(1, request.limit),
+                )
+            )
 
     return BatchAnalysisResult(
         candidate_events=valid_candidates,
@@ -136,7 +155,6 @@ def validate_merged_event_drafts(
                 date=draft.date,
                 topic=draft.topic,
                 content=draft.content,
-                result=draft.result,
                 source_message_ids=ordered_ids,
                 source_conversation_ids=sorted(set(draft.source_conversation_ids)),
             )
@@ -195,3 +213,11 @@ def expect_json_object(payload: object, context: str) -> dict:
     if not isinstance(payload, dict):
         raise AnalyzerProtocolError(f"{context} must be a JSON object.")
     return payload
+
+
+def _infer_target_date_from_slice(conversation_slice: ConversationSlice) -> str:
+    if conversation_slice.messages:
+        send_time = conversation_slice.messages[0].send_time.strip()
+        if len(send_time) >= 10:
+            return send_time[:10]
+    return ""

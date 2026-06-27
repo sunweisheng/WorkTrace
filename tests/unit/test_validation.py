@@ -47,7 +47,6 @@ def test_validation_normalizes_source_ids() -> None:
                 date="2026-06-22",
                 topic="t",
                 content="c",
-                result="r",
                 source_message_ids=["bad", "om_1", "om_1"],
                 source_conversation_id="oc_1",
                 source_slice_id="slice-1",
@@ -94,7 +93,6 @@ def test_validation_fills_missing_draft_id_with_stable_value() -> None:
                 date="2026-06-22",
                 topic="t",
                 content="c",
-                result="r",
                 source_message_ids=["om_1"],
                 source_conversation_id="oc_1",
                 source_slice_id="slice-1",
@@ -106,6 +104,50 @@ def test_validation_fills_missing_draft_id_with_stable_value() -> None:
 
     validated = validate_batch_analysis_result(result, {"slice-1": conversation_slice})
     assert validated.candidate_events[0].draft_id == "4d0bd4f270b2a007"
+
+
+def test_validation_backfills_minimal_candidate_fields_from_single_slice() -> None:
+    message = NormalizedMessage(
+        conversation_id="oc_1",
+        conversation_name="项目群",
+        message_id="om_1",
+        sender_open_id="ou_self",
+        sender_name="Me",
+        send_time="2026-06-22T10:00:00+08:00",
+        message_type="text",
+        text="hello",
+        reply_to_message_id=None,
+        quote_message_id=None,
+        links=[],
+        attachments=[],
+        is_system=False,
+    )
+    conversation_slice = ConversationSlice(
+        slice_id="slice-1",
+        conversation_id="oc_1",
+        conversation_name="项目群",
+        anchor_message_ids=["om_1"],
+        in_day_message_ids=["om_1"],
+        messages=[message],
+        attachment_texts=[],
+    )
+    result = BatchAnalysisResult.from_dict(
+        {
+            "candidate_events": [
+                {
+                    "topic": "t",
+                    "content": "c",
+                    "source_message_ids": ["om_1"],
+                }
+            ],
+            "context_requests": [],
+        }
+    )
+
+    validated = validate_batch_analysis_result(result, {"slice-1": conversation_slice})
+    assert validated.candidate_events[0].date == "2026-06-22"
+    assert validated.candidate_events[0].source_conversation_id == "oc_1"
+    assert validated.candidate_events[0].source_slice_id == "slice-1"
 
 
 def test_validation_uses_content_to_disambiguate_missing_draft_ids() -> None:
@@ -140,7 +182,6 @@ def test_validation_uses_content_to_disambiguate_missing_draft_ids() -> None:
                 date="2026-06-22",
                 topic="t1",
                 content="first content",
-                result="r",
                 source_message_ids=["om_1"],
                 source_conversation_id="oc_1",
                 source_slice_id="slice-1",
@@ -151,7 +192,6 @@ def test_validation_uses_content_to_disambiguate_missing_draft_ids() -> None:
                 date="2026-06-22",
                 topic="t2",
                 content="second content",
-                result="r",
                 source_message_ids=["om_1"],
                 source_conversation_id="oc_1",
                 source_slice_id="slice-1",
@@ -209,6 +249,50 @@ def test_validation_drops_empty_context_request() -> None:
     assert validated.context_requests == []
 
 
+def test_validation_backfills_minimal_context_request_from_single_slice() -> None:
+    message = NormalizedMessage(
+        conversation_id="oc_1",
+        conversation_name="项目群",
+        message_id="om_1",
+        sender_open_id="ou_self",
+        sender_name="Me",
+        send_time="2026-06-22T10:00:00+08:00",
+        message_type="text",
+        text="hello",
+        reply_to_message_id=None,
+        quote_message_id=None,
+        links=[],
+        attachments=[],
+        is_system=False,
+    )
+    conversation_slice = ConversationSlice(
+        slice_id="slice-1",
+        conversation_id="oc_1",
+        conversation_name="项目群",
+        anchor_message_ids=["om_1"],
+        in_day_message_ids=["om_1"],
+        messages=[message],
+        attachment_texts=[],
+    )
+    result = BatchAnalysisResult.from_dict(
+        {
+            "candidate_events": [],
+            "context_requests": [
+                {
+                    "request_type": "later_messages",
+                    "target_message_ids": ["om_1"],
+                    "target_attachment_ids": [],
+                }
+            ],
+        }
+    )
+
+    validated = validate_batch_analysis_result(result, {"slice-1": conversation_slice})
+    assert len(validated.context_requests) == 1
+    assert validated.context_requests[0].slice_id == "slice-1"
+    assert validated.context_requests[0].limit == 1
+
+
 def test_validation_deduplicates_cross_conversation_groups() -> None:
     candidates = [
         SourceBackedEventDraft(
@@ -216,7 +300,6 @@ def test_validation_deduplicates_cross_conversation_groups() -> None:
             date="2026-06-22",
             topic="t1",
             content="c1",
-            result="",
             source_message_ids=["om_1"],
             source_conversation_id="oc_1",
             source_slice_id="slice-1",
@@ -227,7 +310,6 @@ def test_validation_deduplicates_cross_conversation_groups() -> None:
             date="2026-06-22",
             topic="t2",
             content="c2",
-            result="",
             source_message_ids=["om_2"],
             source_conversation_id="oc_2",
             source_slice_id="slice-2",

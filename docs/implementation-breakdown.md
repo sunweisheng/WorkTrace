@@ -41,8 +41,7 @@
 当前主流程仍在使用的关键配置位于 [src/worktrace/config.py](/Users/sunweisheng/Documents/GitHub/WorkTrace/src/worktrace/config.py:115)：
 
 - `timezone = "Asia/Shanghai"`
-- `analyzer_backend = "hook"`
-- `hook_command = "python3 -m src.worktrace.hook_runner --mode chat-completions-http"`
+- `analyzer_backend = "online"`
 - `slice_base_limit = 150`
 - `max_model_input_tokens = 100000`
 - `slice_retry_limit = 3`

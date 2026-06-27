@@ -109,7 +109,6 @@
 - `event_id`
 - `topic`
 - `content`
-- `result`
 
 ## 6. 当前实现原则
 

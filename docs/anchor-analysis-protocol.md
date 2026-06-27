@@ -74,7 +74,6 @@ LLM 必须返回单个 JSON 对象，固定包含以下顶层字段：
 - `date`
 - `topic`
 - `content`
-- `result`
 - `source_message_ids`
 - `source_conversation_id`
 - `source_slice_id`
@@ -84,7 +83,6 @@ LLM 必须返回单个 JSON 对象，固定包含以下顶层字段：
 
 - `source_slice_id` 在锚点协议里写 `anchor_unit_id`
 - `source_message_ids` 只能引用当前 `anchor_unit` 内已有消息
-- `result` 无明确结果时必须返回空字符串
 
 ## 6. `context_requests`
 

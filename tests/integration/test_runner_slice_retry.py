@@ -104,7 +104,6 @@ class RetryAnalyzer:
                     date="2026-06-22",
                     topic="补充后确认",
                     content="补充上下文后完成分析",
-                    result="完成",
                     source_message_ids=["om_1", "om_2"],
                     source_conversation_id="oc_1",
                     source_slice_id=batch_input.slices[0].slice_id,

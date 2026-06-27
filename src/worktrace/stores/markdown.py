@@ -90,8 +90,7 @@ class MarkdownEventStore(EventStore):
             f"### {event.topic}\n\n"
             f"- 日期: {event.date}\n"
             f"- 事件: {event.topic}\n"
-            f"- 事件内容: {event.content}\n"
-            f"- 结果: {event.result}"
+            f"- 事件内容: {event.content}"
         ).strip()
 
     def _render_event(self, event: WorkEvent) -> str:
@@ -102,9 +101,7 @@ class MarkdownEventStore(EventStore):
             f"- event_id: {event.event_id}\n"
             f"- topic: {event.topic}\n\n"
             "#### content\n\n"
-            f"{event.content}\n\n"
-            "#### result\n\n"
-            f"{event.result}\n"
+            f"{event.content}\n"
             "<!-- worktrace:event:end -->"
         ).strip()
 
@@ -140,8 +137,7 @@ class MarkdownEventStore(EventStore):
             lines = block.splitlines()
             title_line = lines[0].strip("# ").strip()
             topic = title_line[len(event_id) :].strip() if title_line.startswith(event_id) else title_line
-            content = self._extract_section(block, "#### content", "#### result")
-            result = self._extract_section(block, "#### result", None)
+            content = self._extract_section(block, "#### content", None)
             date_line = next((line for line in lines if line.startswith("- date: ")), "")
             event_date = date_line.replace("- date: ", "").strip()
             events.append(
@@ -150,7 +146,6 @@ class MarkdownEventStore(EventStore):
                     event_id=event_id,
                     topic=topic,
                     content=content,
-                    result=result,
                 )
             )
             cursor = block_end + len(end_marker)

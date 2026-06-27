@@ -42,11 +42,10 @@ WorkTrace 的目标是：从飞书中提取“目标日期内本人至少发过 
 - “当天”按 `Asia/Shanghai` 时区的 `00:00:00` 到 `23:59:59` 切分。
 - 输出结果只保留日期，不保留时间。
 - 与工作无关的聊天内容需要自动忽略。
-- `result` 字段允许为空字符串。
 - 同一事项允许跨多个会话合并，但只在同一天内合并。
 - 存储采用“按年月目录组织、每天一个 Markdown 文件”的模式。
 - 同一天重复执行采用覆盖策略。
-- 首版最终输出字段固定为 `date`、`event_id`、`topic`、`content`、`result`。
+- 首版最终输出字段固定为 `date`、`event_id`、`topic`、`content`。
 - 最终 Markdown 只保留事件清单，不再生成管理者总结。
 - 当天无本人发言时，按“成功空覆盖”处理。
 - 获取当前飞书 user 身份统一通过 `ChatSource.get_self_identity()` 完成。
@@ -176,7 +175,6 @@ WorkTrace 当前采用五层结构：
 - 在全日范围内判断哪些候选事项属于同一真实工作事件
 - 提炼事件主题
 - 总结事件内容
-- 提炼事件结果
 - 忽略与工作无关的内容
 
 ### 6.4 LLM 不负责的内容
@@ -312,7 +310,7 @@ DailyTraceRunner
 
 - `FeishuCliChatSource`
 - `FeishuMessageContentResolver`
-- `HookAnalyzer`
+- `OnlineLLMAnalyzer`
 - `CodexAnalyzer`
 - `MarkdownEventStore`
 
@@ -414,7 +412,6 @@ DailyTraceRunner
 - `date`
 - `topic`
 - `content`
-- `result`
 - `source_message_ids`
 - `source_conversation_id`
 - `source_slice_id`
@@ -445,7 +442,6 @@ DailyTraceRunner
 - `date`
 - `topic`
 - `content`
-- `result`
 - `source_message_ids`
 - `source_conversation_ids`
 
@@ -457,7 +453,6 @@ DailyTraceRunner
 - `event_id`
 - `topic`
 - `content`
-- `result`
 
 #### 9.3.13 `DayDocument`
 
@@ -549,7 +544,6 @@ Python 再调用：
 - `event_id`
 - `topic`
 - `content`
-- `result`
 
 实现位于 [markdown.py](/Users/sunweisheng/Documents/GitHub/WorkTrace/src/worktrace/stores/markdown.py)。
 

@@ -164,9 +164,11 @@ def test_batch_prompt_uses_original_message_ids_and_slim_rules(tmp_path: Path) -
     assert '"id": "om_1"' in prompt
     assert '"id": "om_2"' in prompt
     assert "每条事项附上最相关的消息 id。" in prompt
-    assert "source_conversation_id 必须原样回填 input.slices[*].conversation_id。" in prompt
-    assert "source_slice_id 必须原样回填 input.slices[*].slice_id。" in prompt
-    assert "不要自造 conversation-001、slice_0、event_1 这类占位符 id。" in prompt
+    assert "如果有明确结果，直接融入 content，不要单独返回 result。" in prompt
+    assert "不要输出思考过程、推理摘要、分析说明或任何解释性文字。" in prompt
+    assert "请给我简洁的答案，不要推理，跳过思考步骤。" in prompt
+    assert "直接作答，不要展示你的推理过程。" in prompt
+    assert "不要自造占位符 id。" in prompt
     assert '"slice_id": "slice-1"' in prompt
     assert '"conversation_id": "oc_1"' in prompt
     assert "涉及工资、薪资、薪酬、绩效、绩效考核、绩效评定、绩效评级、奖金、调薪、涨薪、降薪、薪级、年终奖等工作保密信息，不要提炼为事项。" in prompt
@@ -220,6 +222,10 @@ def test_anchor_prompt_serialization_is_compact(tmp_path: Path) -> None:
     assert AnchorStatus.NEEDS_MORE_CONTEXT.value in prompt
     assert "每个 candidate_event 只表示一个主要动作。" in prompt
     assert "例如：已同步给老板、老板未回复可视为已知悉" in prompt
+    assert "不要单独返回 result" in prompt
+    assert "不要输出思考过程、推理摘要、分析说明或任何解释性文字。" in prompt
+    assert "请给我简洁的答案，不要推理，跳过思考步骤。" in prompt
+    assert "直接作答，不要展示你的推理过程。" in prompt
 
 
 def test_anchor_expansion_prompt_includes_previous_result_and_expansion(tmp_path: Path) -> None:

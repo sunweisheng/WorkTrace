@@ -544,15 +544,9 @@ def test_run_anchor_experiment_retries_anchor_with_more_context(tmp_path: Path) 
                 "anchor_status": "completed",
                 "candidate_events": [
                     {
-                        "draft_id": "evt_1",
-                        "date": "2026-06-23",
                         "topic": "语音事项确认",
                         "content": "补齐语音转写后确认中午前给结果",
-                        "result": "",
                         "source_message_ids": ["om_1"],
-                        "source_conversation_id": "oc_1",
-                        "source_slice_id": "oc_1:om_1",
-                        "confidence": 0.9,
                     }
                 ],
                 "context_requests": [],
@@ -651,15 +645,9 @@ def test_run_anchor_experiment_reuses_cached_anchor_result(tmp_path: Path) -> No
                 "anchor_status": "completed",
                 "candidate_events": [
                     {
-                        "draft_id": "evt_1",
-                        "date": "2026-06-23",
                         "topic": "结果确认",
                         "content": "中午前给结果",
-                        "result": "",
                         "source_message_ids": ["om_1"],
-                        "source_conversation_id": "oc_1",
-                        "source_slice_id": "oc_1:om_1",
-                        "confidence": 0.9,
                     }
                 ],
                 "context_requests": [],
@@ -882,10 +870,17 @@ def test_run_anchor_experiment_refresh_cache_invalidates_day(tmp_path: Path) -> 
     assert analyzer.calls == 2
 
 
-def test_run_anchor_experiment_supports_hook_style_analyzer(tmp_path: Path) -> None:
+def test_run_anchor_experiment_supports_online_style_analyzer(tmp_path: Path) -> None:
     from src.worktrace.anchor_experiment import run_anchor_experiment
     from src.worktrace.factories import RuntimeDependencies
-    from src.worktrace.models import ConversationRef, NormalizedMessage, SelfIdentity
+    from src.worktrace.models import (
+        AnchorAnalysisResult,
+        BatchAnchorAnalysisItem,
+        BatchAnchorAnalysisResult,
+        ConversationRef,
+        NormalizedMessage,
+        SelfIdentity,
+    )
 
     class FakeSource:
         def get_self_identity(self):
@@ -923,20 +918,27 @@ def test_run_anchor_experiment_supports_hook_style_analyzer(tmp_path: Path) -> N
         def load_attachment_text_if_needed(self, message, attachment_ids, hint):
             return None
 
-    class FakeHookAnalyzer:
+    class FakeOnlineAnalyzer:
         def __init__(self):
             self.calls = 0
 
-        def _invoke_hook(self, prompt):
+        def analyze_anchor_batch(self, target_date, anchor_units):
             self.calls += 1
-            return {
-                "anchor_status": "completed",
-                "candidate_events": [],
-                "context_requests": [],
-                "needs_cross_anchor_merge": False,
-            }
+            return BatchAnchorAnalysisResult(
+                results=[
+                    BatchAnchorAnalysisItem(
+                        anchor_unit_id=anchor_units[0].anchor_unit_id,
+                        analysis=AnchorAnalysisResult(
+                            anchor_status="completed",
+                            candidate_events=[],
+                            context_requests=[],
+                            needs_cross_anchor_merge=False,
+                        ),
+                    )
+                ]
+            )
 
-    analyzer = FakeHookAnalyzer()
+    analyzer = FakeOnlineAnalyzer()
     fake_runtime = RuntimeDependencies(
         chat_source=FakeSource(),
         content_resolver=FakeResolver(),
@@ -1040,7 +1042,7 @@ def test_run_anchor_experiment_batches_first_pass_anchors(tmp_path: Path) -> Non
                 ]
             )
 
-        def _invoke_hook(self, prompt):
+        def _invoke_online(self, prompt):
             self.single_calls += 1
             return {
                 "anchor_status": "completed",
@@ -1123,7 +1125,7 @@ def test_run_anchor_experiment_falls_back_to_single_anchor_when_batch_fails(tmp_
             self.batch_calls += 1
             raise AnalyzerProtocolError("batch failed")
 
-        def _invoke_hook(self, prompt):
+        def _invoke_online(self, prompt):
             self.single_calls += 1
             return {
                 "anchor_status": "completed",

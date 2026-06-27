@@ -20,4 +20,4 @@ def test_benchmark_script_pins_both_analyzer_backends() -> None:
     content = Path("src/worktrace/benchmark_hook_vs_codex.py").read_text(encoding="utf-8")
 
     assert "RuntimeConfig(analyzer_backend='codex')" in content
-    assert "RuntimeConfig(analyzer_backend='hook'" in content
+    assert "RuntimeConfig(analyzer_backend='online')" in content

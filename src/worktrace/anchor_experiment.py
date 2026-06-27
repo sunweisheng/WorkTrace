@@ -661,7 +661,7 @@ def _write_anchor_cache_from_payload(
 
 
 def _invoke_anchor_analyzer(analyzer, prompt: str) -> object:
-    for method_name in ("_invoke_codex", "_invoke_hook"):
+    for method_name in ("_invoke_codex", "_invoke_online"):
         method = getattr(analyzer, method_name, None)
         if callable(method):
             return method(prompt)

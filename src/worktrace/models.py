@@ -349,12 +349,12 @@ class ContextRequest:
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> ContextRequest:
         return cls(
-            slice_id=str(data["slice_id"]),
+            slice_id=str(data.get("slice_id", "")),
             request_type=str(data["request_type"]),
             target_message_ids=_string_list(data.get("target_message_ids")),
             target_attachment_ids=_string_list(data.get("target_attachment_ids")),
             reason=str(data.get("reason", "")),
-            limit=int(data.get("limit", 0)),
+            limit=int(data.get("limit", 1)),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -372,9 +372,14 @@ def _parse_context_requests(value: Any) -> list[ContextRequest]:
     parsed: list[ContextRequest] = []
     for item in _dict_list(value):
         try:
-            parsed.append(ContextRequest.from_dict(item))
+            request = ContextRequest.from_dict(item)
         except (KeyError, TypeError, ValueError):
             continue
+        if not request.request_type.strip():
+            continue
+        if not request.target_message_ids:
+            continue
+        parsed.append(request)
     return parsed
 
 
@@ -384,7 +389,6 @@ class SourceBackedEventDraft:
     date: str
     topic: str
     content: str
-    result: str
     source_message_ids: list[str]
     source_conversation_id: str
     source_slice_id: str
@@ -393,14 +397,13 @@ class SourceBackedEventDraft:
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> SourceBackedEventDraft:
         return cls(
-            draft_id=str(data["draft_id"]),
-            date=str(data["date"]),
+            draft_id=str(data.get("draft_id", "")),
+            date=str(data.get("date", "")),
             topic=str(data.get("topic", "")),
             content=str(data.get("content", "")),
-            result=str(data.get("result", "")),
             source_message_ids=_string_list(data.get("source_message_ids")),
-            source_conversation_id=str(data["source_conversation_id"]),
-            source_slice_id=str(data["source_slice_id"]),
+            source_conversation_id=str(data.get("source_conversation_id", "")),
+            source_slice_id=str(data.get("source_slice_id", "")),
             confidence=float(data.get("confidence", 0.0)),
         )
 
@@ -410,7 +413,6 @@ class SourceBackedEventDraft:
             "date": self.date,
             "topic": self.topic,
             "content": self.content,
-            "result": self.result,
             "source_message_ids": list(self.source_message_ids),
             "source_conversation_id": self.source_conversation_id,
             "source_slice_id": self.source_slice_id,
@@ -568,7 +570,6 @@ class MergedEventDraft:
     date: str
     topic: str
     content: str
-    result: str
     source_message_ids: list[str]
     source_conversation_ids: list[str]
 
@@ -578,7 +579,6 @@ class MergedEventDraft:
             date=str(data["date"]),
             topic=str(data.get("topic", "")),
             content=str(data.get("content", "")),
-            result=str(data.get("result", "")),
             source_message_ids=_string_list(data.get("source_message_ids")),
             source_conversation_ids=_string_list(data.get("source_conversation_ids")),
         )
@@ -588,7 +588,6 @@ class MergedEventDraft:
             "date": self.date,
             "topic": self.topic,
             "content": self.content,
-            "result": self.result,
             "source_message_ids": list(self.source_message_ids),
             "source_conversation_ids": list(self.source_conversation_ids),
         }
@@ -638,7 +637,6 @@ class WorkEvent:
     event_id: str
     topic: str
     content: str
-    result: str
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> WorkEvent:
@@ -647,7 +645,6 @@ class WorkEvent:
             event_id=str(data["event_id"]),
             topic=str(data.get("topic", "")),
             content=str(data.get("content", "")),
-            result=str(data.get("result", "")),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -656,7 +653,6 @@ class WorkEvent:
             "event_id": self.event_id,
             "topic": self.topic,
             "content": self.content,
-            "result": self.result,
         }
 
 

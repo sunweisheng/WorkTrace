@@ -73,3 +73,28 @@ def test_batch_parser_drops_invalid_context_request_items() -> None:
 
     assert len(batch.context_requests) == 1
     assert batch.context_requests[0].slice_id == "slice-1"
+
+
+def test_batch_parser_accepts_minimal_payload_shape() -> None:
+    batch = parse_batch_analysis_payload(
+        {
+            "candidate_events": [
+                {
+                    "topic": "发布推进",
+                    "content": "推进发布并确认上线窗口",
+                    "source_message_ids": ["om_1"],
+                }
+            ],
+            "context_requests": [
+                {
+                    "request_type": "later_messages",
+                    "target_message_ids": ["om_1"],
+                    "target_attachment_ids": [],
+                }
+            ],
+        }
+    )
+
+    assert batch.candidate_events[0].topic == "发布推进"
+    assert batch.candidate_events[0].result == ""
+    assert batch.context_requests[0].limit == 1

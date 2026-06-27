@@ -15,25 +15,17 @@ def merge_duplicate_drafts(
     from collections import defaultdict
 
     grouped: dict[tuple[str, ...], list[MergedEventDraft]] = defaultdict(list)
-    warnings: list[str] = []
 
     for draft in drafts:
         grouped[tuple(draft.source_message_ids)].append(draft)
 
     merged: list[MergedEventDraft] = []
     for message_ids, items in grouped.items():
-        results = [item.result for item in items if item.result.strip()]
-        if len(set(results)) > 1:
-            warnings.append(
-                f"Conflicting results for source set {','.join(message_ids)}; kept first preferred value."
-            )
-
         merged.append(
             MergedEventDraft(
                 date=items[0].date,
                 topic=choose_preferred_text([item.topic for item in items]),
                 content=merge_content_texts([item.content for item in items]),
-                result=choose_preferred_text([item.result for item in items]),
                 source_message_ids=list(message_ids),
                 source_conversation_ids=sorted(
                     {cid for item in items for cid in item.source_conversation_ids}
@@ -41,7 +33,7 @@ def merge_duplicate_drafts(
             )
         )
 
-    return merged, warnings
+    return merged, []
 
 
 def build_work_events(
@@ -63,7 +55,6 @@ def build_work_events(
                 event_id=event_id,
                 topic=draft.topic,
                 content=draft.content,
-                result=draft.result,
             )
         )
 

@@ -6,20 +6,29 @@ from pathlib import Path
 from typing import Mapping
 
 
-DEFAULT_HOOK_COMMAND = "python3 -m src.worktrace.hook_runner --mode chat-completions-http"
 DEFAULT_LLM_BASE_URL_ENV_VAR = "WORKTRACE_LLM_BASE_URL"
 DEFAULT_LLM_MODEL_ENV_VAR = "WORKTRACE_LLM_MODEL"
 DEFAULT_LLM_API_KEY_ENV_VAR = "WORKTRACE_LLM_API_KEY"
 DEFAULT_LLM_TIMEOUT_ENV_VAR = "WORKTRACE_LLM_TIMEOUT_SECONDS"
+DEFAULT_LLM_STREAM_ENV_VAR = "WORKTRACE_LLM_STREAM"
+DEFAULT_LLM_TLS_VERIFY_ENV_VAR = "WORKTRACE_LLM_TLS_VERIFY"
+DEFAULT_LLM_SLEEP_MIN_ENV_VAR = "WORKTRACE_LLM_SLEEP_MIN_SECONDS"
+DEFAULT_LLM_SLEEP_MAX_ENV_VAR = "WORKTRACE_LLM_SLEEP_MAX_SECONDS"
+DEFAULT_LLM_REASONING_EFFORT_ENV_VAR = "WORKTRACE_LLM_REASONING_EFFORT"
 DEFAULT_LLM_ENV_FILE_NAME = ".env"
 
 
 @dataclass(frozen=True)
-class HookLLMSettings:
+class OnlineLLMSettings:
     base_url: str
     model: str
     api_key: str
     timeout_seconds: int
+    stream_enabled: bool
+    tls_verify: bool
+    sleep_min_seconds: float
+    sleep_max_seconds: float
+    reasoning_effort: str | None
 
 
 def parse_dotenv_lines(text: str) -> dict[str, str]:
@@ -75,12 +84,33 @@ def build_missing_llm_config_message(config: RuntimeConfig, missing_keys: list[s
     )
 
 
-def load_hook_llm_settings(
+def _parse_bool_value(raw_value: str, *, env_var: str) -> bool:
+    normalized = raw_value.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"Invalid online LLM boolean: {env_var} must be true or false.")
+
+
+def _parse_positive_float(raw_value: str, *, env_var: str) -> float:
+    try:
+        value = float(raw_value)
+    except ValueError as exc:
+        raise ValueError(
+            f"Invalid online LLM delay: {env_var} must be a number."
+        ) from exc
+    if value < 0:
+        raise ValueError(f"Invalid online LLM delay: {env_var} must be non-negative.")
+    return value
+
+
+def load_online_llm_settings(
     config: RuntimeConfig,
     *,
     cwd: Path | None = None,
     environ: Mapping[str, str] | None = None,
-) -> HookLLMSettings:
+) -> OnlineLLMSettings:
     values = _read_llm_env_values(config, cwd=cwd, environ=environ)
     required_keys = [
         config.llm_base_url_env_var,
@@ -105,19 +135,62 @@ def load_hook_llm_settings(
                 f"Invalid online LLM timeout: {config.llm_timeout_env_var} must be positive."
             )
 
-    return HookLLMSettings(
+    stream_raw = values.get(config.llm_stream_env_var, "").strip()
+    stream_enabled = config.llm_stream_enabled
+    if stream_raw:
+        stream_enabled = _parse_bool_value(stream_raw, env_var=config.llm_stream_env_var)
+
+    tls_verify_raw = values.get(config.llm_tls_verify_env_var, "").strip()
+    tls_verify = config.llm_tls_verify
+    if tls_verify_raw:
+        tls_verify = _parse_bool_value(
+            tls_verify_raw,
+            env_var=config.llm_tls_verify_env_var,
+        )
+
+    sleep_min_raw = values.get(config.llm_sleep_min_env_var, "").strip()
+    sleep_min_seconds = config.llm_sleep_min_seconds
+    if sleep_min_raw:
+        sleep_min_seconds = _parse_positive_float(
+            sleep_min_raw,
+            env_var=config.llm_sleep_min_env_var,
+        )
+
+    sleep_max_raw = values.get(config.llm_sleep_max_env_var, "").strip()
+    sleep_max_seconds = config.llm_sleep_max_seconds
+    if sleep_max_raw:
+        sleep_max_seconds = _parse_positive_float(
+            sleep_max_raw,
+            env_var=config.llm_sleep_max_env_var,
+        )
+
+    if sleep_min_seconds > sleep_max_seconds:
+        raise ValueError(
+            "Invalid online LLM delay range: "
+            f"{config.llm_sleep_min_env_var} must be less than or equal to "
+            f"{config.llm_sleep_max_env_var}."
+        )
+
+    reasoning_effort_raw = values.get(config.llm_reasoning_effort_env_var, "").strip()
+    reasoning_effort = reasoning_effort_raw or config.llm_reasoning_effort
+
+    return OnlineLLMSettings(
         base_url=values[config.llm_base_url_env_var].strip(),
         model=values[config.llm_model_env_var].strip(),
         api_key=values[config.llm_api_key_env_var].strip(),
         timeout_seconds=timeout_seconds,
+        stream_enabled=stream_enabled,
+        tls_verify=tls_verify,
+        sleep_min_seconds=sleep_min_seconds,
+        sleep_max_seconds=sleep_max_seconds,
+        reasoning_effort=reasoning_effort,
     )
 
 
 @dataclass(frozen=True)
 class RuntimeConfig:
     timezone: str = "Asia/Shanghai"
-    analyzer_backend: str = "hook"
-    hook_command: str = DEFAULT_HOOK_COMMAND
+    analyzer_backend: str = "online"
     anchor_retry_limit: int = 3
     slice_base_limit: int = 150
     max_model_input_tokens: int = 100000
@@ -163,7 +236,17 @@ class RuntimeConfig:
     llm_model_env_var: str = DEFAULT_LLM_MODEL_ENV_VAR
     llm_api_key_env_var: str = DEFAULT_LLM_API_KEY_ENV_VAR
     llm_timeout_env_var: str = DEFAULT_LLM_TIMEOUT_ENV_VAR
+    llm_stream_env_var: str = DEFAULT_LLM_STREAM_ENV_VAR
+    llm_tls_verify_env_var: str = DEFAULT_LLM_TLS_VERIFY_ENV_VAR
+    llm_sleep_min_env_var: str = DEFAULT_LLM_SLEEP_MIN_ENV_VAR
+    llm_sleep_max_env_var: str = DEFAULT_LLM_SLEEP_MAX_ENV_VAR
+    llm_reasoning_effort_env_var: str = DEFAULT_LLM_REASONING_EFFORT_ENV_VAR
     llm_env_file_name: str = DEFAULT_LLM_ENV_FILE_NAME
+    llm_stream_enabled: bool = False
+    llm_tls_verify: bool = False
+    llm_sleep_min_seconds: float = 1.0
+    llm_sleep_max_seconds: float = 2.0
+    llm_reasoning_effort: str | None = None
 
 
 DEFAULT_CONFIG = RuntimeConfig()

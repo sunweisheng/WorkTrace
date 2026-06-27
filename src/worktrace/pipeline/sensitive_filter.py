@@ -14,7 +14,7 @@ def filter_sensitive_merged_drafts(
     keywords = config.confidential_event_keywords + config.non_work_sensitive_keywords
 
     for draft in drafts:
-        haystack = clean_text("\n".join([draft.topic, draft.content, draft.result]))
+        haystack = clean_text("\n".join([draft.topic, draft.content]))
         if any(keyword in haystack for keyword in keywords):
             warnings.append(
                 f"Filtered sensitive event draft: {draft.topic or '(empty topic)'}"

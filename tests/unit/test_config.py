@@ -6,7 +6,7 @@ import pytest
 
 from src.worktrace.config import (
     RuntimeConfig,
-    load_hook_llm_settings,
+    load_online_llm_settings,
     parse_dotenv_lines,
 )
 
@@ -29,7 +29,7 @@ def test_parse_dotenv_lines_supports_comments_quotes_and_export() -> None:
     }
 
 
-def test_load_hook_llm_settings_reads_local_env(tmp_path: Path) -> None:
+def test_load_online_llm_settings_reads_local_env(tmp_path: Path) -> None:
     (tmp_path / ".env").write_text(
         "WORKTRACE_LLM_BASE_URL=https://llm.example/v1\n"
         "WORKTRACE_LLM_MODEL=provider-model\n"
@@ -38,15 +38,18 @@ def test_load_hook_llm_settings_reads_local_env(tmp_path: Path) -> None:
         encoding="utf-8",
     )
 
-    settings = load_hook_llm_settings(RuntimeConfig(), cwd=tmp_path, environ={})
+    settings = load_online_llm_settings(RuntimeConfig(), cwd=tmp_path, environ={})
 
     assert settings.base_url == "https://llm.example/v1"
     assert settings.model == "provider-model"
     assert settings.api_key == "file-key"
     assert settings.timeout_seconds == 45
+    assert settings.stream_enabled is False
+    assert settings.tls_verify is False
+    assert settings.reasoning_effort is None
 
 
-def test_load_hook_llm_settings_prefers_process_environment(tmp_path: Path) -> None:
+def test_load_online_llm_settings_prefers_process_environment(tmp_path: Path) -> None:
     (tmp_path / ".env").write_text(
         "WORKTRACE_LLM_BASE_URL=https://llm.example/v1\n"
         "WORKTRACE_LLM_MODEL=file-model\n"
@@ -54,7 +57,7 @@ def test_load_hook_llm_settings_prefers_process_environment(tmp_path: Path) -> N
         encoding="utf-8",
     )
 
-    settings = load_hook_llm_settings(
+    settings = load_online_llm_settings(
         RuntimeConfig(),
         cwd=tmp_path,
         environ={
@@ -68,21 +71,21 @@ def test_load_hook_llm_settings_prefers_process_environment(tmp_path: Path) -> N
     assert settings.api_key == "env-key"
 
 
-def test_load_hook_llm_settings_requires_all_required_values(tmp_path: Path) -> None:
+def test_load_online_llm_settings_requires_all_required_values(tmp_path: Path) -> None:
     (tmp_path / ".env").write_text(
         "WORKTRACE_LLM_BASE_URL=https://llm.example/v1\n",
         encoding="utf-8",
     )
 
     with pytest.raises(ValueError) as exc_info:
-        load_hook_llm_settings(RuntimeConfig(), cwd=tmp_path, environ={})
+        load_online_llm_settings(RuntimeConfig(), cwd=tmp_path, environ={})
 
     assert "Missing online LLM configuration" in str(exc_info.value)
     assert "requires the user to provide" in str(exc_info.value)
     assert "Do not commit real secrets to git" in str(exc_info.value)
 
 
-def test_load_hook_llm_settings_requires_positive_integer_timeout(tmp_path: Path) -> None:
+def test_load_online_llm_settings_requires_positive_integer_timeout(tmp_path: Path) -> None:
     (tmp_path / ".env").write_text(
         "WORKTRACE_LLM_BASE_URL=https://llm.example/v1\n"
         "WORKTRACE_LLM_MODEL=provider-model\n"
@@ -92,6 +95,44 @@ def test_load_hook_llm_settings_requires_positive_integer_timeout(tmp_path: Path
     )
 
     with pytest.raises(ValueError) as exc_info:
-        load_hook_llm_settings(RuntimeConfig(), cwd=tmp_path, environ={})
+        load_online_llm_settings(RuntimeConfig(), cwd=tmp_path, environ={})
 
     assert "must be an integer" in str(exc_info.value)
+
+
+def test_load_online_llm_settings_reads_stream_tls_and_sleep_overrides(tmp_path: Path) -> None:
+    (tmp_path / ".env").write_text(
+        "WORKTRACE_LLM_BASE_URL=https://llm.example/v1\n"
+        "WORKTRACE_LLM_MODEL=provider-model\n"
+        "WORKTRACE_LLM_API_KEY=file-key\n"
+        "WORKTRACE_LLM_STREAM=true\n"
+        "WORKTRACE_LLM_TLS_VERIFY=true\n"
+        "WORKTRACE_LLM_REASONING_EFFORT=none\n"
+        "WORKTRACE_LLM_SLEEP_MIN_SECONDS=1.5\n"
+        "WORKTRACE_LLM_SLEEP_MAX_SECONDS=2.5\n",
+        encoding="utf-8",
+    )
+
+    settings = load_online_llm_settings(RuntimeConfig(), cwd=tmp_path, environ={})
+
+    assert settings.stream_enabled is True
+    assert settings.tls_verify is True
+    assert settings.reasoning_effort == "none"
+    assert settings.sleep_min_seconds == 1.5
+    assert settings.sleep_max_seconds == 2.5
+
+
+def test_load_online_llm_settings_rejects_invalid_sleep_range(tmp_path: Path) -> None:
+    (tmp_path / ".env").write_text(
+        "WORKTRACE_LLM_BASE_URL=https://llm.example/v1\n"
+        "WORKTRACE_LLM_MODEL=provider-model\n"
+        "WORKTRACE_LLM_API_KEY=file-key\n"
+        "WORKTRACE_LLM_SLEEP_MIN_SECONDS=2\n"
+        "WORKTRACE_LLM_SLEEP_MAX_SECONDS=1\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError) as exc_info:
+        load_online_llm_settings(RuntimeConfig(), cwd=tmp_path, environ={})
+
+    assert "delay range" in str(exc_info.value)

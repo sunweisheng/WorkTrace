@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import ssl
 import shutil
 import subprocess
 import tempfile
@@ -8,10 +9,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Sequence
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
-import shlex
 
-from .config import RuntimeConfig, load_hook_llm_settings
+from openai import APIConnectionError, APIStatusError, APITimeoutError, OpenAI
+from openai import AuthenticationError, PermissionDeniedError, RateLimitError
+import httpx
+
+from .config import RuntimeConfig, load_online_llm_settings
 from .errors import PreflightError
+from .analyzers.online import _extract_text_from_responses_payload
 
 
 MIN_PYTHON = (3, 11)
@@ -73,16 +78,11 @@ def run_preflight_checks(
         check_lark_identity(command_runner)
         details["lark_identity"] = "ok"
 
-        if config.analyzer_backend == "hook":
-            hook_args = shlex.split(config.hook_command)
-            if not hook_args:
-                raise PreflightError("Hook analyzer requires a non-empty hook_command.")
-            details["hook_command_path"] = require_executable(hook_args[0])
-            ensure_hook_runtime_config(config, cwd=cwd)
-            details["hook_llm_config"] = "ok"
-            probe_hook(config, command_runner, cwd=cwd)
-            details["analyzer_backend"] = "hook"
-            details["hook_probe"] = "ok"
+        if config.analyzer_backend == "online":
+            ensure_online_runtime_config(config, cwd=cwd)
+            details["online_llm_config"] = "ok"
+            details.update(probe_online_llm(config, cwd=cwd))
+            details["analyzer_backend"] = "online"
         else:
             codex_path = require_command("codex")
             details["codex_path"] = codex_path
@@ -118,15 +118,6 @@ def require_command(command_name: str) -> str:
     if not path:
         raise PreflightError(f"Required command not found: {command_name}.")
     return path
-
-
-def require_executable(command_name: str) -> str:
-    command_path = Path(command_name).expanduser()
-    if "/" in command_name:
-        if not command_path.exists():
-            raise PreflightError(f"Required command not found: {command_name}.")
-        return str(command_path)
-    return require_command(command_name)
 
 
 def check_lark_identity(command_runner) -> None:
@@ -202,41 +193,9 @@ def probe_codex(command_runner, *, cwd: Path) -> None:
         raise PreflightError("Codex probe returned unexpected JSON content.")
 
 
-def probe_hook(
-    config: RuntimeConfig,
-    command_runner,
-    *,
-    cwd: Path,
-) -> None:
-    if not config.hook_command.strip():
-        raise PreflightError("Hook analyzer requires a non-empty hook_command.")
-
-    probe_prompt = 'Return only this compact JSON object: {"probe":"ok"}'
+def ensure_online_runtime_config(config: RuntimeConfig, *, cwd: Path) -> None:
     try:
-        result = command_runner(
-            tuple(shlex.split(config.hook_command)),
-            cwd=cwd,
-            timeout=CODEX_PROBE_TIMEOUT_SECONDS,
-            input_text=probe_prompt,
-        )
-    except subprocess.TimeoutExpired as exc:
-        raise PreflightError("Hook probe timed out.") from exc
-
-    if result.returncode != 0:
-        raise PreflightError(classify_hook_failure(result))
-
-    try:
-        payload = json.loads(result.stdout.strip())
-    except json.JSONDecodeError as exc:
-        raise PreflightError("Hook probe returned invalid JSON.") from exc
-
-    if not isinstance(payload, dict) or payload.get("probe") != "ok":
-        raise PreflightError("Hook probe returned unexpected JSON content.")
-
-
-def ensure_hook_runtime_config(config: RuntimeConfig, *, cwd: Path) -> None:
-    try:
-        load_hook_llm_settings(config, cwd=cwd)
+        load_online_llm_settings(config, cwd=cwd)
     except ValueError as exc:
         raise PreflightError(str(exc)) from exc
 
@@ -261,38 +220,93 @@ def classify_codex_failure(result: CommandResult) -> str:
     return "Codex probe failed."
 
 
-def classify_hook_failure(result: CommandResult) -> str:
-    combined = f"{result.stdout}\n{result.stderr}".lower()
-    if "hook analysis command failed" in combined:
-        return "Hook analyzer command failed."
-    if "missing online llm configuration" in combined:
-        return (
-            "Online LLM configuration is missing. WorkTrace requires the user to provide local .env "
-            "or environment variables before running."
-        )
-    if "401" in combined or "403" in combined or "unauthorized" in combined or "forbidden" in combined:
-        return "Hook analyzer online LLM API key is invalid or lacks permission."
-    if "429" in combined or "rate limit" in combined or "too many requests" in combined:
-        return "Hook analyzer online LLM is rate limited."
-    if any(
-        token in combined
-        for token in (
-            "503 service unavailable",
-            "service temporarily unavailable",
-            "stream disconnected",
-            "reconnecting...",
-            "unexpected status 503",
-            "500",
-            "502",
-            "504",
-        )
-    ):
-        return "Hook analyzer upstream provider or service is temporarily unavailable."
-    if any(
-        token in combined for token in ("network", "unreachable", "connection", "timed out", "request timed out")
-    ):
-        return "Hook analyzer network or service is unreachable."
-    return "Hook probe failed."
+def classify_online_failure(exc: Exception) -> str:
+    if isinstance(exc, (AuthenticationError, PermissionDeniedError)):
+        return "Online LLM API key is invalid or lacks permission."
+    if isinstance(exc, RateLimitError):
+        return "Online LLM is rate limited."
+    if isinstance(exc, APIStatusError):
+        if exc.status_code >= 500:
+            return "Online LLM upstream provider or service is temporarily unavailable."
+        return f"HTTP {exc.status_code}: {exc.message}"
+    if isinstance(exc, APITimeoutError):
+        return "Online LLM probe timed out."
+    if isinstance(exc, APIConnectionError):
+        reason = str(exc)
+        lowered = reason.lower()
+        if "certificate verify failed" in lowered:
+            return "Online LLM TLS certificate verification failed."
+        if "tls" in lowered or "ssl" in lowered:
+            return "Online LLM TLS handshake failed."
+        return "Online LLM network or service is unreachable."
+    return "Online LLM probe failed."
+
+
+def probe_online_llm(config: RuntimeConfig, *, cwd: Path) -> dict[str, str]:
+    settings = load_online_llm_settings(config, cwd=cwd)
+    ssl_context = ssl.create_default_context()
+    if not settings.tls_verify:
+        ssl_context.check_hostname = False
+        ssl_context.verify_mode = ssl.CERT_NONE
+
+    try:
+        with httpx.Client(
+            verify=ssl_context if settings.tls_verify else False,
+            timeout=httpx.Timeout(
+                min(settings.timeout_seconds, CODEX_PROBE_TIMEOUT_SECONDS),
+                connect=min(5.0, settings.timeout_seconds),
+            ),
+        ) as http_client:
+            client = OpenAI(
+                api_key=settings.api_key,
+                base_url=settings.base_url.strip(),
+                http_client=http_client,
+                max_retries=0,
+            )
+            probe_schema = {
+                "type": "object",
+                "properties": {"probe": {"type": "string"}},
+                "required": ["probe"],
+                "additionalProperties": False,
+            }
+            kwargs: dict[str, object] = {
+                "model": settings.model,
+                "input": '请严格输出 JSON：{"probe":"ok"}\n/no_think',
+                "text": {
+                    "format": {
+                        "type": "json_schema",
+                        "name": "worktrace_probe",
+                        "schema": probe_schema,
+                        "strict": True,
+                    }
+                },
+            }
+            if settings.reasoning_effort == "none":
+                kwargs["reasoning"] = {"effort": "none"}
+            response = client.responses.create(**kwargs)
+            payload = response.model_dump()
+    except Exception as exc:
+        raise PreflightError(classify_online_failure(exc)) from exc
+
+    output_text = _extract_text_from_responses_payload(payload)
+    if not output_text.strip():
+        raise PreflightError("Online LLM probe returned invalid JSON.")
+
+    try:
+        normalized = json.loads(output_text)
+    except json.JSONDecodeError as exc:
+        raise PreflightError("Online LLM probe returned invalid JSON.") from exc
+    if normalized.get("probe") != "ok":
+        raise PreflightError("Online LLM probe returned unexpected JSON content.")
+
+    return {
+        "online_probe": "ok",
+        "tls_verify": str(settings.tls_verify).lower(),
+        "reasoning_effort": settings.reasoning_effort or "",
+        "certificate_verification": (
+            "enabled" if settings.tls_verify else "disabled"
+        ),
+    }
 
 
 def ensure_data_root_writable(data_root: Path) -> None:

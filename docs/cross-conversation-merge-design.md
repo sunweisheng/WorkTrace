@@ -68,7 +68,6 @@
 - 单会话内相对完整的事项草稿
 - 带 `topic`
 - 带 `content`
-- 带 `result`
 - 带来源会话和来源消息
 
 ### 5.2 跨会话合并阶段负责的事
@@ -102,14 +101,12 @@
 - `id`
 - `t`
 - `c`
-- `r`
 
 其中分别对应：
 
 - `draft_id`
 - `topic`
 - `content`
-- `result`
 
 序列化逻辑位于 [prompts.py](/Users/sunweisheng/Documents/GitHub/WorkTrace/src/worktrace/analyzers/prompts.py) 的 `serialize_cross_merge_candidate_for_prompt(...)`。
 
@@ -160,7 +157,6 @@
 
 - `topic` 从组内候选中选优
 - `content` 合并组内内容
-- `result` 从组内候选中选优
 - `source_message_ids` 去重汇总
 - `source_conversation_ids` 去重汇总
 

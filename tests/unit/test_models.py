@@ -111,7 +111,6 @@ def test_model_roundtrip(sample_message: NormalizedMessage) -> None:
         date="2026-06-22",
         topic="发布推进",
         content="同步发布安排并附带方案文档",
-        result="确认今天上线窗口",
         source_message_ids=["om_001"],
         source_conversation_id="oc_123",
         source_slice_id="slice-001",
@@ -131,7 +130,6 @@ def test_model_roundtrip(sample_message: NormalizedMessage) -> None:
         date="2026-06-22",
         topic="发布推进",
         content="完成发布沟通",
-        result="上线窗口已确认",
         source_message_ids=["om_001"],
         source_conversation_ids=["oc_123"],
     )
@@ -140,7 +138,6 @@ def test_model_roundtrip(sample_message: NormalizedMessage) -> None:
         event_id="abcd1234abcd1234",
         topic="发布推进",
         content="完成发布沟通",
-        result="上线窗口已确认",
     )
     group = CrossConversationGroup(group_id="g1", draft_ids=["draft-001"])
     group_result = CrossConversationGroupResult(groups=[group])

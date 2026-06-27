@@ -33,7 +33,7 @@ def _run_command(args: list[str], *, cwd: Path) -> dict[str, object]:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        prog="python -m src.worktrace.benchmark_hook_vs_codex",
+        prog="python -m src.worktrace.benchmark_online_vs_codex",
         add_help=True,
     )
     parser.add_argument("--date", dest="target_date", required=True)
@@ -68,15 +68,14 @@ def main(argv: list[str] | None = None) -> int:
         common_args.append("--ignore-cache")
 
     codex_args = list(common_args)
-    hook_args = [
+    online_args = [
         "python3",
         "-c",
         (
             "from src.worktrace.anchor_experiment import _main_impl; "
             "from src.worktrace.config import RuntimeConfig; "
             "import sys; "
-            "cfg = RuntimeConfig(analyzer_backend='hook', "
-            "hook_command='python3 -m src.worktrace.hook_runner --mode codex-stdin'); "
+            "cfg = RuntimeConfig(analyzer_backend='online'); "
             "raise SystemExit(_main_impl("
             "sys.argv[1:], sys.stdout.write, config=cfg, "
             "preflight_func=lambda config, cwd: type('Report', (), {'ok': True, 'error_summary': '', 'details': {}})()"
@@ -89,16 +88,16 @@ def main(argv: list[str] | None = None) -> int:
         "--summary-only",
     ]
     if args.dump_dir:
-        hook_args.extend(["--dump-dir", args.dump_dir])
+        online_args.extend(["--dump-dir", args.dump_dir])
     if args.ignore_cache:
-        hook_args.append("--ignore-cache")
+        online_args.append("--ignore-cache")
 
     result = {
         "target_date": args.target_date,
         "limit": args.limit,
         "ignore_cache": args.ignore_cache,
         "codex": _run_command(codex_args, cwd=cwd),
-        "hook_codex_stdin": _run_command(hook_args, cwd=cwd),
+        "online": _run_command(online_args, cwd=cwd),
     }
     sys_stdout = json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True)
     print(sys_stdout)

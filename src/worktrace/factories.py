@@ -36,10 +36,10 @@ class ContentResolverFactory:
 class AnalyzerFactory:
     @staticmethod
     def create_default(config: RuntimeConfig) -> Analyzer:
-        if config.analyzer_backend == "hook":
-            from .analyzers.hook import HookAnalyzer
+        if config.analyzer_backend == "online":
+            from .analyzers.online import OnlineLLMAnalyzer
 
-            return HookAnalyzer(config=config)
+            return OnlineLLMAnalyzer(config=config)
 
         from .analyzers.codex import CodexAnalyzer
 

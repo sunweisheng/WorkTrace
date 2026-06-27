@@ -22,7 +22,6 @@ def materialize_grouped_merged_drafts(
                 date=target_date,
                 topic=choose_preferred_text([item.topic for item in items]),
                 content=merge_content_texts([item.content for item in items]),
-                result=choose_preferred_text([item.result for item in items]),
                 source_message_ids=sorted(
                     {
                         message_id

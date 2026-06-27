@@ -42,21 +42,22 @@ def build_batch_analysis_prompt(
         "instruction": (
             "按会话切片提炼当天讨论过的工作事项摘要。"
             "只返回一个 JSON 对象，包含 candidate_events 和 context_requests。"
+            "请给我简洁的答案，不要推理，跳过思考步骤。"
+            "直接作答，不要展示你的推理过程。"
         ),
         "rules": [
             "只提炼工作事项。",
             "只提炼与本人直接相关的工作事项。",
+            "不要输出思考过程、推理摘要、分析说明或任何解释性文字。",
             "本人信息见 input.self；只有事项明确由本人发起、本人负责、本人审批、本人催办、本人汇报、本人跟进，或他人明确要求本人推进/处理时，才提炼。",
             "如果事项主体明显是他人的工作、他人的进展、他人的承诺，而本人只是参与了会话或说过别的话，不要提炼。",
             "如果只是同群讨论背景信息、但没有明确落到本人，也不要提炼。",
             _build_confidential_rule(runtime_config),
             _build_non_work_sensitive_rule(runtime_config),
             "一件事写一条；如果有多件事就拆开。",
-            "topic 写短标题，content 写事项，result 只写明确结果；没有结果就留空。",
+            "topic 写短标题，content 写完整事项；如果有明确结果，直接融入 content，不要单独返回 result。",
             "每条事项附上最相关的消息 id。",
-            "source_conversation_id 必须原样回填 input.slices[*].conversation_id。",
-            "source_slice_id 必须原样回填 input.slices[*].slice_id。",
-            "只能使用输入里出现过的真实 id，不要自造 conversation-001、slice_0、event_1 这类占位符 id。",
+            "只能使用输入里出现过的真实 message id，不要自造占位符 id。",
             "正例：本人要求他人汇报、本人审批、本人同步、本人催办、本人推进，都算与本人直接相关。",
             "反例：他人之间讨论自己的工作、自己的承诺、自己的处理进度，即使本人在该会话里发过言，也不算与本人直接相关。",
             "拿不准就用 context_requests，不要猜。",
@@ -64,25 +65,16 @@ def build_batch_analysis_prompt(
         "required_output_schema": {
             "candidate_events": [
                 {
-                    "draft_id": "string",
-                    "date": "YYYY-MM-DD",
                     "topic": "string",
                     "content": "string",
-                    "result": "string",
                     "source_message_ids": ["message_id"],
-                    "source_conversation_id": "conversation_id",
-                    "source_slice_id": "slice_id",
-                    "confidence": 0.0,
                 }
             ],
             "context_requests": [
                 {
-                    "slice_id": "slice_id",
                     "request_type": "earlier_messages | later_messages | attachment_text",
                     "target_message_ids": ["message_id"],
                     "target_attachment_ids": ["attachment_id"],
-                    "reason": "string",
-                    "limit": 1,
                 }
             ],
         },
@@ -96,9 +88,12 @@ def build_merge_prompt(target_date: str, candidates: list[SourceBackedEventDraft
         "instruction": (
             "按是否描述同一真实工作事件，对同一天的候选事项做跨会话分组。"
             "只返回一个 JSON 对象，包含 groups。"
+            "请给我简洁的答案，不要推理，跳过思考步骤。"
+            "直接作答，不要展示你的推理过程。"
         ),
         "rules": [
             "只把明显属于同一真实事件的事项分到一起。",
+            "不要输出思考过程、推理摘要、分析说明或任何解释性文字。",
             "如果拿不准，宁可分开。",
             "背景相同不等于同一事件。",
             "动作类型不同通常不是同一事件。",
@@ -120,7 +115,6 @@ def build_merge_prompt(target_date: str, candidates: list[SourceBackedEventDraft
                 "source_conversation_id": candidate.source_conversation_id,
                 "topic": candidate.topic,
                 "content": candidate.content,
-                "result": candidate.result,
             }
             for candidate in candidates
         ],
@@ -140,6 +134,8 @@ def build_anchor_analysis_prompt(
         "instruction": (
             "分析一个锚点聊天窗口。"
             "只返回 JSON：anchor_status、candidate_events、context_requests、needs_cross_anchor_merge。"
+            "请给我简洁的答案，不要推理，跳过思考步骤。"
+            "直接作答，不要展示你的推理过程。"
         ),
         "rules": [
             (
@@ -148,17 +144,18 @@ def build_anchor_analysis_prompt(
                 f"{AnchorStatus.NEEDS_ATTACHMENT_TEXT.value}、{AnchorStatus.NOT_WORK_RELATED.value}、"
                 f"{AnchorStatus.UNCERTAIN.value}。"
             ),
+            "不要输出思考过程、推理摘要、分析说明或任何解释性文字。",
             "只抽取工作事件。",
             "每个 candidate_event 只能落在当前 anchor_unit 内。",
             "每个 candidate_event 只表示一个主要动作。",
             "如果窗口里有多个动作，就拆开。",
             "动作类型比共享名词更重要。",
             "同步/通知 与 核对/校验/执行/跟进，通常不是同一事件。",
-            "每个 result 只能归属于自己的动作，不要串到别的动作上。",
+            "content 里如果包含结果信息，也只能归属于自己的动作，不要串到别的动作上。",
             "例如：已同步给老板、老板未回复可视为已知悉，属于同步动作，不属于优惠券核对动作。",
             "如果上下文不够，就用 context_requests，不要猜。",
             "只有事件明显跨多个锚点窗口或会话时，needs_cross_anchor_merge 才设为 true。",
-            "没有明确结果时，result 置空字符串。",
+            "如果有明确结果，直接融入 content，不要单独返回 result。",
         ],
         "required_output_schema": {
             "anchor_status": [
@@ -169,23 +166,14 @@ def build_anchor_analysis_prompt(
                 AnchorStatus.UNCERTAIN.value,
             ],
             "candidate_events_item": {
-                "draft_id": "string",
-                "date": "YYYY-MM-DD",
                 "topic": "string",
                 "content": "string",
-                "result": "string",
                 "source_message_ids": ["message_id"],
-                "source_conversation_id": "conversation_id",
-                "source_slice_id": "anchor_unit_id",
-                "confidence": 0.0,
             },
             "context_requests_item": {
-                "slice_id": "anchor_unit_id",
                 "request_type": "earlier_messages | later_messages | attachment_text",
                 "target_message_ids": ["message_id"],
                 "target_attachment_ids": ["attachment_id"],
-                "reason": "string",
-                "limit": 1,
             },
             "needs_cross_anchor_merge": "boolean",
         },
@@ -209,9 +197,12 @@ def build_anchor_batch_analysis_prompt(
         "instruction": (
             "一次分析多个彼此独立的锚点聊天窗口。"
             "只返回 JSON，顶层键为 results。每个 result 必须对应一个 anchor_unit_id。"
+            "请给我简洁的答案，不要推理，跳过思考步骤。"
+            "直接作答，不要展示你的推理过程。"
         ),
         "rules": [
             "每个 anchor unit 独立判断，不要串信息。",
+            "不要输出思考过程、推理摘要、分析说明或任何解释性文字。",
             "每个 result 必须包含 anchor_unit_id 和 analysis。",
             "只抽取工作事件。",
             "每个 candidate_event 只能留在自己的 anchor_unit 内。",
@@ -219,10 +210,10 @@ def build_anchor_batch_analysis_prompt(
             "如果同一窗口有多个动作，就拆开。",
             "动作类型比共享名词更重要。",
             "同步/通知 与 核对/校验/执行/跟进，通常不是同一事件。",
-            "每个 result 只能归属于自己的动作，不要串到别的动作上。",
+            "content 里如果包含结果信息，也只能归属于自己的动作，不要串到别的动作上。",
             "如果上下文不够，就用 context_requests，不要猜。",
             "只有事件明显跨多个锚点窗口或会话时，needs_cross_anchor_merge 才设为 true。",
-            "没有明确结果时，result 置空字符串。",
+            "如果有明确结果，直接融入 content，不要单独返回 result。",
         ],
         "required_output_schema": {
             "results": [
@@ -237,23 +228,14 @@ def build_anchor_batch_analysis_prompt(
                             AnchorStatus.UNCERTAIN.value,
                         ],
                         "candidate_events_item": {
-                            "draft_id": "string",
-                            "date": "YYYY-MM-DD",
                             "topic": "string",
                             "content": "string",
-                            "result": "string",
                             "source_message_ids": ["message_id"],
-                            "source_conversation_id": "conversation_id",
-                            "source_slice_id": "anchor_unit_id",
-                            "confidence": 0.0,
                         },
                         "context_requests_item": {
-                            "slice_id": "anchor_unit_id",
                             "request_type": "earlier_messages | later_messages | attachment_text",
                             "target_message_ids": ["message_id"],
                             "target_attachment_ids": ["attachment_id"],
-                            "reason": "string",
-                            "limit": 1,
                         },
                         "needs_cross_anchor_merge": "boolean",
                     },
@@ -289,7 +271,9 @@ def build_anchor_expansion_prompt(
             "You are continuing analysis of one anchor-focused chat window after Python "
             "expanded the context. Return only one JSON object with keys anchor_status, "
             "candidate_events, context_requests, and needs_cross_anchor_merge. "
-            "Do not return markdown, explanations, or extra keys."
+            "Do not return markdown, explanations, or extra keys. "
+            "Give concise answers, do not reason aloud, and skip thinking steps. "
+            "Answer directly and do not show your reasoning process."
         ),
         "rules": [
             (
@@ -300,6 +284,7 @@ def build_anchor_expansion_prompt(
                 f"{AnchorStatus.NOT_WORK_RELATED.value}, "
                 f"{AnchorStatus.UNCERTAIN.value}."
             ),
+            "Do not output chain-of-thought, reasoning summary, analysis notes, or any explanation text.",
             "Use previous_analysis as prior state, but revise it when new context changes the conclusion.",
             "candidate_events should represent the latest consolidated judgment for this anchor_unit.",
             "Each candidate_event must still represent exactly one primary action or work thread.",
@@ -317,8 +302,8 @@ def build_anchor_expansion_prompt(
                 "shows they are the same continuous action."
             ),
             (
-                "result must belong only to the same candidate_event's primary action. If the newly added context shows that "
-                "a result belongs to another action, move it or split the event instead of keeping them mixed."
+                "If content includes a result, that result must belong only to the same candidate_event's primary action. "
+                "If the newly added context shows that the result belongs to another action, move it or split the event instead of keeping them mixed."
             ),
             (
                 "For example, 'already synced to the boss / no reply so assume acknowledged' belongs to the sync action, "
@@ -326,7 +311,7 @@ def build_anchor_expansion_prompt(
             ),
             "Only request more context when the newly added messages or attachment texts still do not resolve the event.",
             "needs_cross_anchor_merge should be true only when the event likely spans other anchor windows or conversations.",
-            "result must be an empty string when there is no explicit result.",
+            "If there is an explicit result, merge it into content instead of returning a separate result field.",
         ],
         "required_output_schema": {
             "anchor_status": (
@@ -338,25 +323,16 @@ def build_anchor_expansion_prompt(
             ),
             "candidate_events": [
                 {
-                    "draft_id": "string",
-                    "date": "YYYY-MM-DD",
                     "topic": "string",
                     "content": "string",
-                    "result": "string",
                     "source_message_ids": ["message_id"],
-                    "source_conversation_id": "conversation_id",
-                    "source_slice_id": "anchor_unit_id",
-                    "confidence": 0.0,
                 }
             ],
             "context_requests": [
                 {
-                    "slice_id": "anchor_unit_id",
                     "request_type": "earlier_messages | later_messages | attachment_text",
                     "target_message_ids": ["message_id"],
                     "target_attachment_ids": ["attachment_id"],
-                    "reason": "string",
-                    "limit": 1,
                 }
             ],
             "needs_cross_anchor_merge": True,
@@ -476,7 +452,6 @@ def serialize_cross_merge_candidate_for_prompt(
         "id": candidate.draft_id,
         "t": candidate.topic,
         "c": candidate.content,
-        "r": candidate.result,
     }
 
 

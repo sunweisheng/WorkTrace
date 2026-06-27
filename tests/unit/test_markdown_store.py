@@ -17,7 +17,6 @@ def test_markdown_store_roundtrip(tmp_path: Path) -> None:
                 event_id="evt1",
                 topic="主题",
                 content="内容",
-                result="结果",
             )
         ],
     )
@@ -38,14 +37,12 @@ def test_markdown_store_renders_my_daily_report_section(tmp_path: Path) -> None:
                 event_id="evt1",
                 topic="主题一",
                 content="内容一",
-                result="结果一",
             ),
             WorkEvent(
                 date="2026-06-22",
                 event_id="evt2",
                 topic="主题二",
                 content="内容二",
-                result="",
             ),
         ],
     )
@@ -57,11 +54,9 @@ def test_markdown_store_renders_my_daily_report_section(tmp_path: Path) -> None:
     assert "- 日期: 2026-06-22" in content
     assert "- 事件: 主题一" in content
     assert "- 事件内容: 内容一" in content
-    assert "- 结果: 结果一" in content
     assert "### 主题二" in content
     assert "- 事件: 主题二" in content
     assert "- 事件内容: 内容二" in content
-    assert "- 结果: " in content
     assert "## 事项列表" in content
 
 
@@ -75,7 +70,6 @@ def test_markdown_store_my_daily_report_does_not_break_roundtrip(tmp_path: Path)
                 event_id="evt1",
                 topic="主题",
                 content="内容",
-                result="",
             )
         ],
     )
@@ -85,4 +79,3 @@ def test_markdown_store_my_daily_report_does_not_break_roundtrip(tmp_path: Path)
     assert loaded is not None
     assert len(loaded.events) == 1
     assert loaded.events[0].event_id == "evt1"
-    assert loaded.events[0].result == ""
