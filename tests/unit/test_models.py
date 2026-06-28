@@ -17,6 +17,7 @@ from src.worktrace.models import (
     ConversationSlice,
     DailyRunResult,
     DayDocument,
+    EventFileLink,
     LinkMeta,
     MergedEventDraft,
     NormalizedMessage,
@@ -111,6 +112,8 @@ def test_model_roundtrip(sample_message: NormalizedMessage) -> None:
         date="2026-06-22",
         topic="发布推进",
         content="同步发布安排并附带方案文档",
+        action_label="同步",
+        object_hint="发布安排",
         source_message_ids=["om_001"],
         source_conversation_id="oc_123",
         source_slice_id="slice-001",
@@ -136,8 +139,16 @@ def test_model_roundtrip(sample_message: NormalizedMessage) -> None:
     event = WorkEvent(
         date="2026-06-22",
         event_id="abcd1234abcd1234",
-        topic="发布推进",
+        title="发布推进",
         content="完成发布沟通",
+        source_message_ids=["om_001"],
+        file_links=[
+            EventFileLink(
+                url="https://example.feishu.cn/docx/abc",
+                title="发布方案",
+                link_type="feishu_doc",
+            )
+        ],
     )
     group = CrossConversationGroup(group_id="g1", draft_ids=["draft-001"])
     group_result = CrossConversationGroupResult(groups=[group])
@@ -163,6 +174,9 @@ def test_model_roundtrip(sample_message: NormalizedMessage) -> None:
         status=DailyRunStatus.SUCCESS.value,
         output_path="/tmp/2026-06-22.md",
         error_summary="",
+        self_delivery_status="pending",
+        self_delivery_target="",
+        self_delivery_error="",
     )
 
     payloads = [

@@ -96,5 +96,4 @@ def test_batch_parser_accepts_minimal_payload_shape() -> None:
     )
 
     assert batch.candidate_events[0].topic == "发布推进"
-    assert batch.candidate_events[0].result == ""
     assert batch.context_requests[0].limit == 1

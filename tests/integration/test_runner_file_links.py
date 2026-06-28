@@ -7,21 +7,17 @@ from src.worktrace.constants import DailyRunStatus
 from src.worktrace.factories import RuntimeDependencies
 from src.worktrace.models import (
     BatchAnalysisResult,
-    ContextRequest,
     ConversationRef,
-    CrossConversationGroup,
-    CrossConversationGroupResult,
-    MergedEventDraft,
+    LinkMeta,
     NormalizedMessage,
     SelfIdentity,
     SourceBackedEventDraft,
 )
 from src.worktrace.runner import DailyTraceRunner
 from src.worktrace.stores.markdown import MarkdownEventStore
-from tests.helpers import NullDelivery
 
 
-class RetrySource:
+class LinkSource:
     def get_self_identity(self):
         return SelfIdentity(open_id="ou_self", display_name="Me", source="fake")
 
@@ -38,36 +34,26 @@ class RetrySource:
                 sender_name="Me",
                 send_time="2026-06-22T10:00:00+08:00",
                 message_type="text",
-                text="看附件",
+                text="请看文档 https://foo.feishu.cn/docx/abc",
                 reply_to_message_id=None,
                 quote_message_id=None,
-                links=[],
+                links=[
+                    LinkMeta(
+                        url="https://foo.feishu.cn/docx/abc",
+                        title="发布方案",
+                        link_type="feishu_doc",
+                    )
+                ],
                 attachments=[],
                 is_system=False,
             )
         ]
 
     def fetch_related_messages(self, conversation_id, target_message_ids, direction, limit):
-        return [
-            NormalizedMessage(
-                conversation_id="oc_1",
-                conversation_name="项目群",
-                message_id="om_2",
-                sender_open_id="ou_other",
-                sender_name="Alice",
-                send_time="2026-06-22T10:01:00+08:00",
-                message_type="text",
-                text="补充上下文",
-                reply_to_message_id="om_1",
-                quote_message_id=None,
-                links=[],
-                attachments=[],
-                is_system=False,
-            )
-        ]
+        return []
 
 
-class RetryResolver:
+class LinkResolver:
     def to_text(self, message):
         return message.text
 
@@ -75,40 +61,22 @@ class RetryResolver:
         return list(message.links)
 
     def load_attachment_text_if_needed(self, message, attachment_ids, hint):
-        return []
+        return None
 
 
-class RetryAnalyzer:
-    def __init__(self):
-        self.calls = 0
-
+class LinkAnalyzer:
     def build_batch_prompt(self, batch_input):
-        return "retry prompt"
+        return "prompt"
 
     def analyze_batch(self, target_date, batch_input):
-        self.calls += 1
-        if self.calls == 1:
-            return BatchAnalysisResult(
-                candidate_events=[],
-                context_requests=[
-                    ContextRequest(
-                        slice_id=batch_input.slices[0].slice_id,
-                        request_type="later_messages",
-                        target_message_ids=["om_1"],
-                        target_attachment_ids=[],
-                        reason="补上下文",
-                        limit=1,
-                    )
-                ],
-            )
         return BatchAnalysisResult(
             candidate_events=[
                 SourceBackedEventDraft(
-                    draft_id="d1",
+                    draft_id="draft-1",
                     date="2026-06-22",
-                    topic="补充后确认",
-                    content="补充上下文后完成分析",
-                    source_message_ids=["om_1", "om_2"],
+                    topic="发布推进",
+                    content="完成发布沟通",
+                    source_message_ids=["om_1"],
                     source_conversation_id="oc_1",
                     source_slice_id=batch_input.slices[0].slice_id,
                     confidence=0.9,
@@ -118,21 +86,23 @@ class RetryAnalyzer:
         )
 
     def merge_day_candidates(self, target_date, candidates):
-        return CrossConversationGroupResult(
-            groups=[CrossConversationGroup(group_id="g1", draft_ids=["d1"])]
-        )
+        raise AssertionError("Should not group when there is only one candidate")
 
 
-def test_runner_retries_slice_until_context_is_resolved(tmp_path: Path) -> None:
+class LinkDelivery:
+    def deliver_to_self(self, *, self_identity, markdown_path):
+        return ("success", self_identity.open_id)
+
+
+def test_runner_attaches_file_links_from_source_messages(tmp_path: Path) -> None:
     config = RuntimeConfig(data_root=tmp_path / "data")
-    analyzer = RetryAnalyzer()
     runner = DailyTraceRunner(
         config=config,
         dependencies=RuntimeDependencies(
-            chat_source=RetrySource(),
-            content_resolver=RetryResolver(),
-            analyzer=analyzer,
-            delivery_channel=NullDelivery(),
+            chat_source=LinkSource(),
+            content_resolver=LinkResolver(),
+            analyzer=LinkAnalyzer(),
+            delivery_channel=LinkDelivery(),
             event_store=MarkdownEventStore(config=config),
         ),
     )
@@ -140,6 +110,7 @@ def test_runner_retries_slice_until_context_is_resolved(tmp_path: Path) -> None:
     result = runner.run("2026-06-22")
 
     assert result.status == DailyRunStatus.SUCCESS.value
-    assert result.event_count == 1
-    assert result.skipped_slice_count == 0
-    assert analyzer.calls == 2
+    assert result.output_path is not None
+
+    content = Path(result.output_path).read_text(encoding="utf-8")
+    assert "[发布方案](https://foo.feishu.cn/docx/abc)" in content

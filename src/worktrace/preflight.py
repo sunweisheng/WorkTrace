@@ -14,7 +14,7 @@ from openai import APIConnectionError, APIStatusError, APITimeoutError, OpenAI
 from openai import AuthenticationError, PermissionDeniedError, RateLimitError
 import httpx
 
-from .config import RuntimeConfig, load_online_llm_settings
+from .config import OnlineLLMSettings, RuntimeConfig, load_online_llm_settings
 from .errors import PreflightError
 from .analyzers.online import _extract_text_from_responses_payload
 
@@ -79,8 +79,10 @@ def run_preflight_checks(
         details["lark_identity"] = "ok"
 
         if config.analyzer_backend == "online":
-            ensure_online_runtime_config(config, cwd=cwd)
+            settings = ensure_online_runtime_config(config, cwd=cwd)
             details["online_llm_config"] = "ok"
+            ensure_reasoning_disabled(settings.reasoning_effort)
+            details["reasoning_effort"] = settings.reasoning_effort or ""
             details.update(probe_online_llm(config, cwd=cwd))
             details["analyzer_backend"] = "online"
         else:
@@ -193,11 +195,18 @@ def probe_codex(command_runner, *, cwd: Path) -> None:
         raise PreflightError("Codex probe returned unexpected JSON content.")
 
 
-def ensure_online_runtime_config(config: RuntimeConfig, *, cwd: Path) -> None:
+def ensure_online_runtime_config(config: RuntimeConfig, *, cwd: Path) -> OnlineLLMSettings:
     try:
-        load_online_llm_settings(config, cwd=cwd)
+        return load_online_llm_settings(config, cwd=cwd)
     except ValueError as exc:
         raise PreflightError(str(exc)) from exc
+
+
+def ensure_reasoning_disabled(reasoning_effort: str | None) -> None:
+    if reasoning_effort != "none":
+        raise PreflightError(
+            "WorkTrace requires WORKTRACE_LLM_REASONING_EFFORT=none in the main flow."
+        )
 
 
 def classify_codex_failure(result: CommandResult) -> str:

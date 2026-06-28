@@ -20,3 +20,7 @@ class AnalyzerProtocolError(WorkTraceError):
 
 class StoreWriteError(WorkTraceError):
     """Raised when store write or validation fails."""
+
+
+class DeliveryError(WorkTraceError):
+    """Raised when self delivery fails."""

@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from src.worktrace.config import RuntimeConfig
-from src.worktrace.models import WorkEvent
+from src.worktrace.models import EventFileLink, WorkEvent
 from src.worktrace.stores.markdown import MarkdownEventStore
 
 
@@ -15,8 +15,10 @@ def test_markdown_store_roundtrip(tmp_path: Path) -> None:
             WorkEvent(
                 date="2026-06-22",
                 event_id="evt1",
-                topic="主题",
+                title="主题",
                 content="内容",
+                source_message_ids=["om_1"],
+                file_links=[],
             )
         ],
     )
@@ -27,7 +29,7 @@ def test_markdown_store_roundtrip(tmp_path: Path) -> None:
     assert loaded.events[0].event_id == "evt1"
 
 
-def test_markdown_store_renders_my_daily_report_section(tmp_path: Path) -> None:
+def test_markdown_store_renders_public_event_fields(tmp_path: Path) -> None:
     store = MarkdownEventStore(config=RuntimeConfig(data_root=tmp_path / "data"))
     write_result = store.replace_day(
         "2026-06-22",
@@ -35,32 +37,44 @@ def test_markdown_store_renders_my_daily_report_section(tmp_path: Path) -> None:
             WorkEvent(
                 date="2026-06-22",
                 event_id="evt1",
-                topic="主题一",
+                title="主题一",
                 content="内容一",
+                source_message_ids=["om_1"],
+                file_links=[
+                    EventFileLink(
+                        url="https://foo.feishu.cn/docx/abc",
+                        title="方案一",
+                        link_type="feishu_doc",
+                    )
+                ],
             ),
             WorkEvent(
                 date="2026-06-22",
                 event_id="evt2",
-                topic="主题二",
+                title="主题二",
                 content="内容二",
+                source_message_ids=["om_2"],
+                file_links=[],
             ),
         ],
     )
 
     content = Path(write_result.output_path).read_text(encoding="utf-8")
 
-    assert "## 我的日报" in content
+    assert "## 每日工作事件" in content
     assert "### 主题一" in content
     assert "- 日期: 2026-06-22" in content
-    assert "- 事件: 主题一" in content
+    assert "- 事件标题: 主题一" in content
     assert "- 事件内容: 内容一" in content
+    assert "- 涉及文件链接:" in content
+    assert "[方案一](https://foo.feishu.cn/docx/abc)" in content
     assert "### 主题二" in content
-    assert "- 事件: 主题二" in content
+    assert "- 事件标题: 主题二" in content
     assert "- 事件内容: 内容二" in content
-    assert "## 事项列表" in content
+    assert "  - 无" in content
 
 
-def test_markdown_store_my_daily_report_does_not_break_roundtrip(tmp_path: Path) -> None:
+def test_markdown_store_roundtrip_keeps_file_links(tmp_path: Path) -> None:
     store = MarkdownEventStore(config=RuntimeConfig(data_root=tmp_path / "data"))
     store.replace_day(
         "2026-06-22",
@@ -68,8 +82,16 @@ def test_markdown_store_my_daily_report_does_not_break_roundtrip(tmp_path: Path)
             WorkEvent(
                 date="2026-06-22",
                 event_id="evt1",
-                topic="主题",
+                title="主题",
                 content="内容",
+                source_message_ids=["om_1"],
+                file_links=[
+                    EventFileLink(
+                        url="https://foo.feishu.cn/docx/abc",
+                        title="方案",
+                        link_type="feishu_doc",
+                    )
+                ],
             )
         ],
     )
@@ -79,3 +101,6 @@ def test_markdown_store_my_daily_report_does_not_break_roundtrip(tmp_path: Path)
     assert loaded is not None
     assert len(loaded.events) == 1
     assert loaded.events[0].event_id == "evt1"
+    assert loaded.events[0].title == "主题"
+    assert loaded.events[0].source_message_ids == []
+    assert loaded.events[0].file_links[0].url == "https://foo.feishu.cn/docx/abc"

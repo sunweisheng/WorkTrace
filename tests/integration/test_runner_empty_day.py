@@ -8,6 +8,7 @@ from src.worktrace.factories import RuntimeDependencies
 from src.worktrace.models import SelfIdentity
 from src.worktrace.runner import DailyTraceRunner
 from src.worktrace.stores.markdown import MarkdownEventStore
+from tests.helpers import NullDelivery
 
 
 class EmptySource:
@@ -51,6 +52,7 @@ def test_runner_empty_day_is_success(tmp_path: Path) -> None:
             chat_source=EmptySource(),
             content_resolver=EmptyResolver(),
             analyzer=EmptyAnalyzer(),
+            delivery_channel=NullDelivery(),
             event_store=MarkdownEventStore(config=config),
         ),
     )

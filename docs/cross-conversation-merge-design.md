@@ -66,8 +66,11 @@
 进入跨会话合并阶段之前，每条 `candidate_event` 已经是：
 
 - 单会话内相对完整的事项草稿
+- 带 `draft_id`
 - 带 `topic`
 - 带 `content`
+- 带 `action_label`
+- 带 `object_hint`
 - 带来源会话和来源消息
 
 ### 5.2 跨会话合并阶段负责的事
@@ -96,19 +99,21 @@
 
 ### 6.2 当前卡片字段
 
-当前 prompt 里每条候选事件卡片使用的是压缩字段：
-
-- `id`
-- `t`
-- `c`
-
-其中分别对应：
+当前 prompt 里每条候选事件卡片使用的是以下字段：
 
 - `draft_id`
+- `action_label`
+- `object_hint`
+- `source_conversation_id`
 - `topic`
 - `content`
 
-序列化逻辑位于 [prompts.py](/Users/sunweisheng/Documents/GitHub/WorkTrace/src/worktrace/analyzers/prompts.py) 的 `serialize_cross_merge_candidate_for_prompt(...)`。
+其中：
+
+- `draft_id` 用于唯一标识候选事项，并要求 merge 结果必须逐条覆盖
+- `action_label` 用于表达主要动作类型，帮助模型区分“回复 / 催办 / 撰写 / 同步 / 跟进”等不同事件
+- `object_hint` 用于表达核心对象，帮助模型在共享背景下区分不同事项
+- `source_conversation_id` 作为弱辅助信息，帮助模型感知事项来源会话
 
 ### 6.3 当前不传的信息
 
@@ -119,6 +124,8 @@
 - `source_message_ids`
 - 附件正文
 - 扩窗后的上下文消息
+
+`action_label` 与 `object_hint` 虽然会传入 merge prompt，但它们仍然只是内部语义辅助字段，不属于最终员工可见输出。
 
 这样可以让模型聚焦“是否同一事件”的判断本身。
 

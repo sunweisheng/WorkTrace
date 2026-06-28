@@ -13,6 +13,7 @@ from src.worktrace.anchor_experiment import (
 from src.worktrace.config import RuntimeConfig
 from src.worktrace.constants import DailyRunStatus
 from src.worktrace.models import BatchAnchorAnalysisItem, BatchAnchorAnalysisResult, AnchorAnalysisResult
+from tests.helpers import NullDelivery
 
 
 def test_render_anchor_experiment_json_roundtrip() -> None:
@@ -557,6 +558,7 @@ def test_run_anchor_experiment_retries_anchor_with_more_context(tmp_path: Path) 
         chat_source=FakeSource(),
         content_resolver=FakeResolver(),
         analyzer=FakeAnalyzer(),
+        delivery_channel=NullDelivery(),
         event_store=None,  # type: ignore[arg-type]
     )
 
@@ -659,6 +661,7 @@ def test_run_anchor_experiment_reuses_cached_anchor_result(tmp_path: Path) -> No
         chat_source=FakeSource(),
         content_resolver=FakeResolver(),
         analyzer=analyzer,
+        delivery_channel=NullDelivery(),
         event_store=None,  # type: ignore[arg-type]
     )
     config = RuntimeConfig(
@@ -750,6 +753,7 @@ def test_run_anchor_experiment_ignore_cache_still_executes_analyzer(tmp_path: Pa
         chat_source=FakeSource(),
         content_resolver=FakeResolver(),
         analyzer=analyzer,
+        delivery_channel=NullDelivery(),
         event_store=None,  # type: ignore[arg-type]
     )
     config = RuntimeConfig(
@@ -839,6 +843,7 @@ def test_run_anchor_experiment_refresh_cache_invalidates_day(tmp_path: Path) -> 
         chat_source=FakeSource(),
         content_resolver=FakeResolver(),
         analyzer=analyzer,
+        delivery_channel=NullDelivery(),
         event_store=None,  # type: ignore[arg-type]
     )
     config = RuntimeConfig(
@@ -943,6 +948,7 @@ def test_run_anchor_experiment_supports_online_style_analyzer(tmp_path: Path) ->
         chat_source=FakeSource(),
         content_resolver=FakeResolver(),
         analyzer=analyzer,
+        delivery_channel=NullDelivery(),
         event_store=None,  # type: ignore[arg-type]
     )
 
@@ -1056,6 +1062,7 @@ def test_run_anchor_experiment_batches_first_pass_anchors(tmp_path: Path) -> Non
         chat_source=FakeSource(),
         content_resolver=FakeResolver(),
         analyzer=analyzer,
+        delivery_channel=NullDelivery(),
         event_store=None,  # type: ignore[arg-type]
     )
 
@@ -1139,6 +1146,7 @@ def test_run_anchor_experiment_falls_back_to_single_anchor_when_batch_fails(tmp_
         chat_source=FakeSource(),
         content_resolver=FakeResolver(),
         analyzer=analyzer,
+        delivery_channel=NullDelivery(),
         event_store=None,  # type: ignore[arg-type]
     )
 

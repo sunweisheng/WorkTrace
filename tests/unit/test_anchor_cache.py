@@ -98,7 +98,6 @@ def test_filesystem_anchor_cache_store_roundtrip(tmp_path: Path) -> None:
                 date="2026-06-23",
                 topic="日报整理",
                 content="确认中午前整理并发送进展",
-                result="",
                 source_message_ids=["om_001", "om_002"],
                 source_conversation_id="oc_123",
                 source_slice_id=anchor_unit.anchor_unit_id,

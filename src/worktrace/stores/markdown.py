@@ -6,7 +6,7 @@ from pathlib import Path
 
 from ..config import RuntimeConfig
 from ..errors import StoreWriteError
-from ..models import DayDocument, StoreWriteResult, WorkEvent
+from ..models import DayDocument, EventFileLink, StoreWriteResult, WorkEvent
 from ..utils.dates import now_iso
 from .base import EventStore
 
@@ -65,45 +65,38 @@ class MarkdownEventStore(EventStore):
             ]
         )
 
-        my_daily_report = self._render_my_daily_report(day_doc.events)
         event_blocks = "\n\n".join(self._render_event(event) for event in day_doc.events)
         if not event_blocks:
-            event_blocks = ""
+            event_blocks = "_当天没有提炼出需要保留的工作事件。_"
 
         return (
             f"---\n{front_matter}\n---\n\n"
             f"# WorkTrace {day_doc.date}\n\n"
-            "## 我的日报\n\n"
-            f"{my_daily_report}\n\n"
-            "## 事项列表\n\n"
+            "## 每日工作事件\n\n"
             f"{event_blocks}\n"
         )
 
-    def _render_my_daily_report(self, events: list[WorkEvent]) -> str:
-        if not events:
-            return ""
-
-        return "\n\n".join(self._render_my_daily_report_item(event) for event in events)
-
-    def _render_my_daily_report_item(self, event: WorkEvent) -> str:
-        return (
-            f"### {event.topic}\n\n"
-            f"- 日期: {event.date}\n"
-            f"- 事件: {event.topic}\n"
-            f"- 事件内容: {event.content}"
-        ).strip()
-
     def _render_event(self, event: WorkEvent) -> str:
+        link_lines = self._render_file_links(event.file_links)
         return (
             f'<!-- worktrace:event:start event_id="{event.event_id}" -->\n'
-            f"### {event.event_id} {event.topic}\n\n"
-            f"- date: {event.date}\n"
-            f"- event_id: {event.event_id}\n"
-            f"- topic: {event.topic}\n\n"
-            "#### content\n\n"
-            f"{event.content}\n"
+            f"### {event.title}\n\n"
+            f"- 日期: {event.date}\n"
+            f"- 事件标题: {event.title}\n"
+            f"- 事件内容: {event.content}\n"
+            f"- 涉及文件链接:\n{link_lines}\n"
             "<!-- worktrace:event:end -->"
         ).strip()
+
+    def _render_file_links(self, file_links: list[EventFileLink]) -> str:
+        if not file_links:
+            return "  - 无"
+
+        lines: list[str] = []
+        for link in file_links:
+            label = link.title.strip() or link.url
+            lines.append(f"  - [{label}]({link.url})")
+        return "\n".join(lines)
 
     def parse_day_document(self, markdown_text: str) -> DayDocument:
         if not markdown_text.startswith("---\n"):
@@ -134,30 +127,57 @@ class MarkdownEventStore(EventStore):
             event_id = body[event_id_start:event_id_end]
             block_end = body.find(end_marker, event_id_end)
             block = body[event_id_end + 5:block_end].strip()
-            lines = block.splitlines()
-            title_line = lines[0].strip("# ").strip()
-            topic = title_line[len(event_id) :].strip() if title_line.startswith(event_id) else title_line
-            content = self._extract_section(block, "#### content", None)
-            date_line = next((line for line in lines if line.startswith("- date: ")), "")
-            event_date = date_line.replace("- date: ", "").strip()
+            title = self._extract_value(block, "- 事件标题: ")
+            content = self._extract_value(block, "- 事件内容: ")
+            event_date = self._extract_value(block, "- 日期: ")
+            file_links = self._extract_file_links(block)
             events.append(
                 WorkEvent(
                     date=event_date,
                     event_id=event_id,
-                    topic=topic,
+                    title=title,
                     content=content,
+                    file_links=file_links,
                 )
             )
             cursor = block_end + len(end_marker)
 
         return sorted(events, key=lambda item: item.event_id)
 
-    def _extract_section(self, block: str, section: str, next_section: str | None) -> str:
-        start = block.index(section) + len(section)
-        if next_section is None:
-            return block[start:].strip()
-        end = block.index(next_section, start)
-        return block[start:end].strip()
+    def _extract_value(self, block: str, prefix: str) -> str:
+        for line in block.splitlines():
+            if line.startswith(prefix):
+                return line[len(prefix) :].strip()
+        return ""
+
+    def _extract_file_links(self, block: str) -> list[EventFileLink]:
+        lines = block.splitlines()
+        collected: list[EventFileLink] = []
+        in_section = False
+        for line in lines:
+            if line.startswith("- 涉及文件链接:"):
+                in_section = True
+                continue
+            if not in_section:
+                continue
+            stripped = line.strip()
+            if not stripped.startswith("- "):
+                continue
+            raw_value = stripped[2:].strip()
+            if raw_value == "无":
+                return []
+            if raw_value.startswith("[") and "](" in raw_value and raw_value.endswith(")"):
+                label_end = raw_value.find("](")
+                title = raw_value[1:label_end]
+                url = raw_value[label_end + 2 : -1]
+                collected.append(
+                    EventFileLink(
+                        url=url,
+                        title=title,
+                        link_type="normal",
+                    )
+                )
+        return collected
 
     def _parse_front_matter(self, text: str) -> dict[str, str]:
         parsed: dict[str, str] = {}

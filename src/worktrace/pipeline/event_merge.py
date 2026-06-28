@@ -53,8 +53,9 @@ def build_work_events(
             WorkEvent(
                 date=target_date,
                 event_id=event_id,
-                topic=draft.topic,
+                title=draft.topic,
                 content=draft.content,
+                source_message_ids=list(draft.source_message_ids),
             )
         )
 

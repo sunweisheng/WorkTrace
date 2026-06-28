@@ -74,6 +74,8 @@ LLM 必须返回单个 JSON 对象，固定包含以下顶层字段：
 - `date`
 - `topic`
 - `content`
+- `action_label`
+- `object_hint`
 - `source_message_ids`
 - `source_conversation_id`
 - `source_slice_id`
@@ -83,6 +85,8 @@ LLM 必须返回单个 JSON 对象，固定包含以下顶层字段：
 
 - `source_slice_id` 在锚点协议里写 `anchor_unit_id`
 - `source_message_ids` 只能引用当前 `anchor_unit` 内已有消息
+- `action_label` 只写主要动作标签，不要写成长句
+- `object_hint` 只写核心对象或主题，不要把完整事件内容复制进去
 
 ## 6. `context_requests`
 

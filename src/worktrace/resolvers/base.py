@@ -2,12 +2,16 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 
-from ..models import AttachmentTextBlock, NormalizedMessage
+from ..models import AttachmentTextBlock, LinkMeta, NormalizedMessage
 
 
 class ContentResolver(ABC):
     @abstractmethod
     def to_text(self, message: NormalizedMessage) -> str:
+        raise NotImplementedError
+
+    @abstractmethod
+    def extract_links(self, message: NormalizedMessage) -> list[LinkMeta]:
         raise NotImplementedError
 
     @abstractmethod

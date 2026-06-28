@@ -77,6 +77,13 @@ class CodexAnalyzer(Analyzer):
     def build_batch_prompt(self, batch_input: AnalysisBatch) -> str:
         return build_batch_analysis_prompt(batch_input, config=self.config)
 
+    def build_merge_prompt(
+        self,
+        target_date: str,
+        candidates: list[SourceBackedEventDraft],
+    ) -> str:
+        return build_merge_prompt(target_date, candidates)
+
     def analyze_anchor_batch(
         self,
         target_date: str,

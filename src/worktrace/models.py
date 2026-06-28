@@ -97,6 +97,28 @@ class LinkMeta:
 
 
 @dataclass(frozen=True)
+class EventFileLink:
+    url: str
+    title: str
+    link_type: str
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> EventFileLink:
+        return cls(
+            url=str(data["url"]),
+            title=str(data.get("title", "")),
+            link_type=str(data["link_type"]),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "url": self.url,
+            "title": self.title,
+            "link_type": self.link_type,
+        }
+
+
+@dataclass(frozen=True)
 class AttachmentMeta:
     attachment_id: str
     file_name: str
@@ -393,6 +415,8 @@ class SourceBackedEventDraft:
     source_conversation_id: str
     source_slice_id: str
     confidence: float
+    action_label: str = ""
+    object_hint: str = ""
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> SourceBackedEventDraft:
@@ -401,6 +425,8 @@ class SourceBackedEventDraft:
             date=str(data.get("date", "")),
             topic=str(data.get("topic", "")),
             content=str(data.get("content", "")),
+            action_label=str(data.get("action_label", "")),
+            object_hint=str(data.get("object_hint", "")),
             source_message_ids=_string_list(data.get("source_message_ids")),
             source_conversation_id=str(data.get("source_conversation_id", "")),
             source_slice_id=str(data.get("source_slice_id", "")),
@@ -413,6 +439,8 @@ class SourceBackedEventDraft:
             "date": self.date,
             "topic": self.topic,
             "content": self.content,
+            "action_label": self.action_label,
+            "object_hint": self.object_hint,
             "source_message_ids": list(self.source_message_ids),
             "source_conversation_id": self.source_conversation_id,
             "source_slice_id": self.source_slice_id,
@@ -635,25 +663,39 @@ class CrossConversationGroupResult:
 class WorkEvent:
     date: str
     event_id: str
-    topic: str
+    title: str
     content: str
+    source_message_ids: list[str] = field(default_factory=list)
+    file_links: list[EventFileLink] = field(default_factory=list)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> WorkEvent:
         return cls(
             date=str(data["date"]),
             event_id=str(data["event_id"]),
-            topic=str(data.get("topic", "")),
+            title=str(data.get("title", data.get("topic", ""))),
             content=str(data.get("content", "")),
+            source_message_ids=_string_list(data.get("source_message_ids")),
+            file_links=[
+                EventFileLink.from_dict(item)
+                for item in _dict_list(data.get("file_links"))
+            ],
         )
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "date": self.date,
             "event_id": self.event_id,
-            "topic": self.topic,
+            "title": self.title,
+            "topic": self.title,
             "content": self.content,
+            "source_message_ids": list(self.source_message_ids),
+            "file_links": [item.to_dict() for item in self.file_links],
         }
+
+    @property
+    def topic(self) -> str:
+        return self.title
 
 
 @dataclass(frozen=True)
@@ -774,6 +816,9 @@ class DailyRunResult:
     status: str
     output_path: str | None
     error_summary: str
+    self_delivery_status: str = ""
+    self_delivery_target: str = ""
+    self_delivery_error: str = ""
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> DailyRunResult:
@@ -791,6 +836,9 @@ class DailyRunResult:
                 None if data.get("output_path") is None else str(data["output_path"])
             ),
             error_summary=str(data.get("error_summary", "")),
+            self_delivery_status=str(data.get("self_delivery_status", "")),
+            self_delivery_target=str(data.get("self_delivery_target", "")),
+            self_delivery_error=str(data.get("self_delivery_error", "")),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -806,4 +854,36 @@ class DailyRunResult:
             "status": self.status,
             "output_path": self.output_path,
             "error_summary": self.error_summary,
+            "self_delivery_status": self.self_delivery_status,
+            "self_delivery_target": self.self_delivery_target,
+            "self_delivery_error": self.self_delivery_error,
+        }
+
+
+@dataclass(frozen=True)
+class PreflightResult:
+    status: str
+    error_summary: str
+    details: dict[str, str] = field(default_factory=dict)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> PreflightResult:
+        details = data.get("details", {})
+        if not isinstance(details, dict):
+            raise TypeError("Expected details to be a dictionary.")
+        normalized: dict[str, str] = {
+            str(key): str(value)
+            for key, value in details.items()
+        }
+        return cls(
+            status=str(data["status"]),
+            error_summary=str(data.get("error_summary", "")),
+            details=normalized,
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "status": self.status,
+            "error_summary": self.error_summary,
+            "details": dict(self.details),
         }

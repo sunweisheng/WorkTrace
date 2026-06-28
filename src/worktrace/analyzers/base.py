@@ -18,6 +18,14 @@ class Analyzer(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    def build_merge_prompt(
+        self,
+        target_date: str,
+        candidates: list[SourceBackedEventDraft],
+    ) -> str:
+        raise NotImplementedError
+
+    @abstractmethod
     def analyze_batch(
         self,
         target_date: str,

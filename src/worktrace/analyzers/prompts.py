@@ -52,10 +52,13 @@ def build_batch_analysis_prompt(
             "本人信息见 input.self；只有事项明确由本人发起、本人负责、本人审批、本人催办、本人汇报、本人跟进，或他人明确要求本人推进/处理时，才提炼。",
             "如果事项主体明显是他人的工作、他人的进展、他人的承诺，而本人只是参与了会话或说过别的话，不要提炼。",
             "如果只是同群讨论背景信息、但没有明确落到本人，也不要提炼。",
+            "咨询类事件、流程审核类事件、团建活动组织类事件、技能培训类事件，默认不要提炼；这类事项对后续公司级长期事件沉淀价值较低。",
             _build_confidential_rule(runtime_config),
             _build_non_work_sensitive_rule(runtime_config),
             "一件事写一条；如果有多件事就拆开。",
             "topic 写短标题，content 写完整事项；如果有明确结果，直接融入 content，不要单独返回 result。",
+            "action_label 只写主要动作标签，例如：回复、审批、催办、撰写、核对、跟进、同步、确认。",
+            "object_hint 只写该事项的核心对象或主题，例如：提前付款、优惠券配置、汇报文档、上海点位签约方案。",
             "每条事项附上最相关的消息 id。",
             "只能使用输入里出现过的真实 message id，不要自造占位符 id。",
             "正例：本人要求他人汇报、本人审批、本人同步、本人催办、本人推进，都算与本人直接相关。",
@@ -67,6 +70,8 @@ def build_batch_analysis_prompt(
                 {
                     "topic": "string",
                     "content": "string",
+                    "action_label": "string",
+                    "object_hint": "string",
                     "source_message_ids": ["message_id"],
                 }
             ],
@@ -99,6 +104,9 @@ def build_merge_prompt(target_date: str, candidates: list[SourceBackedEventDraft
             "动作类型不同通常不是同一事件。",
             "同步/通知 和 核对/执行/跟进，通常不是同一事件。",
             "每个 draft_id 必须且只能出现在一个 group 里。",
+            "禁止漏掉任何 draft_id。输出前必须逐个核对 candidates 里的全部 draft_id 都已被返回一次且仅一次。",
+            "错误示例：candidates 有 [d1, d2, d3]，但只返回 [['d1', 'd2']]，漏掉 d3，这是错误的。",
+            "正确示例：candidates 有 [d1, d2, d3]，若 d3 无法与其他事项合并，也必须返回 [['d1', 'd2'], ['d3']]。",
         ],
         "required_output_schema": {
             "groups": [
@@ -112,6 +120,8 @@ def build_merge_prompt(target_date: str, candidates: list[SourceBackedEventDraft
         "candidates": [
             {
                 "draft_id": candidate.draft_id,
+                "action_label": candidate.action_label,
+                "object_hint": candidate.object_hint,
                 "source_conversation_id": candidate.source_conversation_id,
                 "topic": candidate.topic,
                 "content": candidate.content,
@@ -146,8 +156,11 @@ def build_anchor_analysis_prompt(
             ),
             "不要输出思考过程、推理摘要、分析说明或任何解释性文字。",
             "只抽取工作事件。",
+            "咨询类事件、流程审核类事件、团建活动组织类事件、技能培训类事件，默认不要提炼；这类事项对后续公司级长期事件沉淀价值较低。",
             "每个 candidate_event 只能落在当前 anchor_unit 内。",
             "每个 candidate_event 只表示一个主要动作。",
+            "action_label 只写主要动作标签，例如：回复、审批、催办、撰写、核对、跟进、同步、确认。",
+            "object_hint 只写该事项的核心对象或主题。",
             "如果窗口里有多个动作，就拆开。",
             "动作类型比共享名词更重要。",
             "同步/通知 与 核对/校验/执行/跟进，通常不是同一事件。",
@@ -168,6 +181,8 @@ def build_anchor_analysis_prompt(
             "candidate_events_item": {
                 "topic": "string",
                 "content": "string",
+                "action_label": "string",
+                "object_hint": "string",
                 "source_message_ids": ["message_id"],
             },
             "context_requests_item": {
@@ -205,8 +220,11 @@ def build_anchor_batch_analysis_prompt(
             "不要输出思考过程、推理摘要、分析说明或任何解释性文字。",
             "每个 result 必须包含 anchor_unit_id 和 analysis。",
             "只抽取工作事件。",
+            "咨询类事件、流程审核类事件、团建活动组织类事件、技能培训类事件，默认不要提炼；这类事项对后续公司级长期事件沉淀价值较低。",
             "每个 candidate_event 只能留在自己的 anchor_unit 内。",
             "每个 candidate_event 只表示一个主要动作。",
+            "action_label 只写主要动作标签，例如：回复、审批、催办、撰写、核对、跟进、同步、确认。",
+            "object_hint 只写该事项的核心对象或主题。",
             "如果同一窗口有多个动作，就拆开。",
             "动作类型比共享名词更重要。",
             "同步/通知 与 核对/校验/执行/跟进，通常不是同一事件。",
@@ -230,6 +248,8 @@ def build_anchor_batch_analysis_prompt(
                         "candidate_events_item": {
                             "topic": "string",
                             "content": "string",
+                            "action_label": "string",
+                            "object_hint": "string",
                             "source_message_ids": ["message_id"],
                         },
                         "context_requests_item": {

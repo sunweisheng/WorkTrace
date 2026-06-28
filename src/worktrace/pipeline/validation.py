@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from hashlib import sha1
+
 from ..constants import ContextRequestType
 from ..errors import AnalyzerProtocolError
 from ..models import (
@@ -71,9 +73,12 @@ def validate_context_request_against_slice(
 def validate_batch_analysis_result(
     result: BatchAnalysisResult,
     slices_by_id: dict[str, ConversationSlice],
+    *,
+    self_open_id: str = "",
 ) -> BatchAnalysisResult:
     valid_candidates: list[SourceBackedEventDraft] = []
     valid_requests: list[ContextRequest] = []
+    seen_draft_ids: set[str] = set()
 
     for candidate in result.candidate_events:
         conversation_slice = slices_by_id.get(candidate.source_slice_id)
@@ -98,7 +103,15 @@ def validate_batch_analysis_result(
         if not date:
             date = _infer_target_date_from_slice(conversation_slice)
         if not draft_id:
-            draft_id = stable_event_id(date, normalized_ids, candidate.content)
+            draft_id = stable_event_id(date, normalized_ids)
+        if draft_id in seen_draft_ids:
+            draft_id = _make_unique_draft_id(
+                draft_id,
+                self_open_id=self_open_id,
+                title=candidate.topic,
+                seen_draft_ids=seen_draft_ids,
+            )
+        seen_draft_ids.add(draft_id)
 
         valid_candidates.append(
             SourceBackedEventDraft(
@@ -106,6 +119,8 @@ def validate_batch_analysis_result(
                 date=date,
                 topic=candidate.topic,
                 content=candidate.content,
+                action_label=(candidate.action_label or "").strip(),
+                object_hint=(candidate.object_hint or "").strip(),
                 source_message_ids=normalized_ids,
                 source_conversation_id=source_conversation_id,
                 source_slice_id=source_slice_id,
@@ -209,6 +224,62 @@ def validate_cross_conversation_groups(
     )
 
 
+def normalize_cross_conversation_groups_with_fallback(
+    group_result: CrossConversationGroupResult,
+    candidates: list[SourceBackedEventDraft],
+) -> tuple[CrossConversationGroupResult, list[str]]:
+    expected = [candidate.draft_id for candidate in candidates]
+    expected_set = set(expected)
+    seen: set[str] = set()
+    normalized_groups: list[CrossConversationGroup] = []
+    duplicates: list[str] = []
+    unknown: list[str] = []
+
+    for group in group_result.groups:
+        normalized_ids: list[str] = []
+        for draft_id in group.draft_ids:
+            if draft_id not in expected_set:
+                unknown.append(draft_id)
+                continue
+            if draft_id in seen:
+                duplicates.append(draft_id)
+                continue
+            seen.add(draft_id)
+            normalized_ids.append(draft_id)
+
+        if normalized_ids:
+            normalized_groups.append(
+                CrossConversationGroup(
+                    group_id=group.group_id,
+                    draft_ids=normalized_ids,
+                )
+            )
+
+    missing = [draft_id for draft_id in expected if draft_id not in seen]
+    for index, draft_id in enumerate(missing, start=1):
+        normalized_groups.append(
+            CrossConversationGroup(
+                group_id=f"fallback-{index}",
+                draft_ids=[draft_id],
+            )
+        )
+
+    warnings: list[str] = []
+    if missing or duplicates or unknown:
+        details: list[str] = []
+        if missing:
+            details.append(f"missing={missing}")
+        if duplicates:
+            details.append(f"duplicates={sorted(set(duplicates))}")
+        if unknown:
+            details.append(f"unknown={sorted(set(unknown))}")
+        warnings.append(
+            "Cross-conversation merge groups were repaired: " + "; ".join(details)
+        )
+
+    return CrossConversationGroupResult(groups=normalized_groups), warnings
+
+
 def expect_json_object(payload: object, context: str) -> dict:
     if not isinstance(payload, dict):
         raise AnalyzerProtocolError(f"{context} must be a JSON object.")
@@ -221,3 +292,23 @@ def _infer_target_date_from_slice(conversation_slice: ConversationSlice) -> str:
         if len(send_time) >= 10:
             return send_time[:10]
     return ""
+
+
+def _make_unique_draft_id(
+    base_draft_id: str,
+    *,
+    self_open_id: str,
+    title: str,
+    seen_draft_ids: set[str],
+) -> str:
+    suffix = sha1(f"{self_open_id}|{title}".encode("utf-8")).hexdigest()[:8]
+    candidate = f"{base_draft_id}-{suffix}"
+    if candidate not in seen_draft_ids:
+        return candidate
+
+    sequence = 2
+    while True:
+        candidate = f"{base_draft_id}-{suffix}-{sequence}"
+        if candidate not in seen_draft_ids:
+            return candidate
+        sequence += 1

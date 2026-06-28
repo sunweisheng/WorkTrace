@@ -4,6 +4,7 @@ from pathlib import Path
 
 from src.worktrace.analyzers.base import Analyzer
 from src.worktrace.config import RuntimeConfig
+from src.worktrace.delivery.base import DeliveryChannel
 from src.worktrace.factories import build_runtime_dependencies
 from src.worktrace.resolvers.base import ContentResolver
 from src.worktrace.sources.base import ChatSource
@@ -17,6 +18,7 @@ def test_build_runtime_dependencies_returns_interface_instances(tmp_path: Path) 
     assert isinstance(runtime.chat_source, ChatSource)
     assert isinstance(runtime.content_resolver, ContentResolver)
     assert isinstance(runtime.analyzer, Analyzer)
+    assert isinstance(runtime.delivery_channel, DeliveryChannel)
     assert isinstance(runtime.event_store, EventStore)
 
 

@@ -246,7 +246,7 @@ class RuntimeConfig:
     llm_tls_verify: bool = False
     llm_sleep_min_seconds: float = 1.0
     llm_sleep_max_seconds: float = 2.0
-    llm_reasoning_effort: str | None = None
+    llm_reasoning_effort: str | None = "none"
 
 
 DEFAULT_CONFIG = RuntimeConfig()

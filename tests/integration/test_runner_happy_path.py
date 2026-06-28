@@ -52,6 +52,9 @@ class FakeResolver:
     def to_text(self, message):
         return message.text
 
+    def extract_links(self, message):
+        return list(message.links)
+
     def load_attachment_text_if_needed(self, message, attachment_ids, hint):
         return None
 
@@ -81,6 +84,11 @@ class FakeAnalyzer:
         raise AssertionError("Should not group when there is only one candidate")
 
 
+class FakeDelivery:
+    def deliver_to_self(self, *, self_identity, markdown_path):
+        return ("success", self_identity.open_id)
+
+
 def test_runner_happy_path(tmp_path: Path) -> None:
     config = RuntimeConfig(data_root=tmp_path / "data")
     runner = DailyTraceRunner(
@@ -89,6 +97,7 @@ def test_runner_happy_path(tmp_path: Path) -> None:
             chat_source=FakeSource(),
             content_resolver=FakeResolver(),
             analyzer=FakeAnalyzer(),
+            delivery_channel=FakeDelivery(),
             event_store=MarkdownEventStore(config=config),
         ),
     )
@@ -98,6 +107,8 @@ def test_runner_happy_path(tmp_path: Path) -> None:
     assert result.status == DailyRunStatus.SUCCESS.value
     assert result.event_count == 1
     assert result.output_path is not None
+    assert result.self_delivery_status == "success"
+    assert result.self_delivery_target == "ou_self"
     assert not (tmp_path / "data" / "debug" / "conversations").exists()
 
 
@@ -112,6 +123,7 @@ def test_runner_dumps_first_pass_conversation_debug_artifacts(tmp_path: Path) ->
             chat_source=FakeSource(),
             content_resolver=FakeResolver(),
             analyzer=FakeAnalyzer(),
+            delivery_channel=FakeDelivery(),
             event_store=MarkdownEventStore(config=config),
         ),
     )
@@ -216,6 +228,7 @@ def test_runner_groups_multiple_self_messages_in_same_conversation_into_one_llm_
             chat_source=MultiAnchorSource(),
             content_resolver=FakeResolver(),
             analyzer=analyzer,
+            delivery_channel=FakeDelivery(),
             event_store=MarkdownEventStore(config=config),
         ),
     )
@@ -242,6 +255,7 @@ def test_runner_passes_self_identity_into_batch_input(tmp_path: Path) -> None:
             chat_source=FakeSource(),
             content_resolver=FakeResolver(),
             analyzer=CapturingAnalyzer(),
+            delivery_channel=FakeDelivery(),
             event_store=MarkdownEventStore(config=config),
         ),
     )

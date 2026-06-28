@@ -37,7 +37,8 @@ def test_preflight_success(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> N
     (tmp_path / ".env").write_text(
         "WORKTRACE_LLM_BASE_URL=https://llm.example/v1\n"
         "WORKTRACE_LLM_MODEL=provider-model\n"
-        "WORKTRACE_LLM_API_KEY=file-key\n",
+        "WORKTRACE_LLM_API_KEY=file-key\n"
+        "WORKTRACE_LLM_REASONING_EFFORT=none\n",
         encoding="utf-8",
     )
 
@@ -103,7 +104,8 @@ def test_preflight_fails_on_online_timeout(
     (tmp_path / ".env").write_text(
         "WORKTRACE_LLM_BASE_URL=https://llm.example/v1\n"
         "WORKTRACE_LLM_MODEL=provider-model\n"
-        "WORKTRACE_LLM_API_KEY=file-key\n",
+        "WORKTRACE_LLM_API_KEY=file-key\n"
+        "WORKTRACE_LLM_REASONING_EFFORT=none\n",
         encoding="utf-8",
     )
 
@@ -148,6 +150,31 @@ def test_preflight_fails_when_online_llm_config_is_missing(tmp_path: Path) -> No
 
     assert report.ok is False
     assert "Missing online LLM configuration" in report.error_summary
+
+
+def test_preflight_fails_when_reasoning_effort_is_not_none(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (tmp_path / ".env").write_text(
+        "WORKTRACE_LLM_BASE_URL=https://llm.example/v1\n"
+        "WORKTRACE_LLM_MODEL=provider-model\n"
+        "WORKTRACE_LLM_API_KEY=file-key\n"
+        "WORKTRACE_LLM_REASONING_EFFORT=medium\n",
+        encoding="utf-8",
+    )
+
+    report = run_preflight_checks(
+        RuntimeConfig(data_root=tmp_path / "data"),
+        cwd=tmp_path,
+        command_runner=_success_runner_factory(),
+        python_version=(3, 13, 0),
+    )
+
+    assert report.ok is False
+    assert report.error_summary == (
+        "WorkTrace requires WORKTRACE_LLM_REASONING_EFFORT=none in the main flow."
+    )
 
 
 @pytest.mark.parametrize(

@@ -6,6 +6,7 @@ from .config import RuntimeConfig
 from .analyzers.base import Analyzer
 from .resolvers.base import ContentResolver
 from .sources.base import ChatSource
+from .delivery.base import DeliveryChannel
 from .stores.base import EventStore
 
 
@@ -14,6 +15,7 @@ class RuntimeDependencies:
     chat_source: ChatSource
     content_resolver: ContentResolver
     analyzer: Analyzer
+    delivery_channel: DeliveryChannel
     event_store: EventStore
 
 
@@ -54,10 +56,19 @@ class StorageFactory:
         return MarkdownEventStore(config=config)
 
 
+class DeliveryFactory:
+    @staticmethod
+    def create_default(config: RuntimeConfig) -> DeliveryChannel:
+        from .delivery.feishu_cli import FeishuCliSelfDelivery
+
+        return FeishuCliSelfDelivery()
+
+
 def build_runtime_dependencies(config: RuntimeConfig) -> RuntimeDependencies:
     return RuntimeDependencies(
         chat_source=ChatSourceFactory.create_default(config),
         content_resolver=ContentResolverFactory.create_default(config),
         analyzer=AnalyzerFactory.create_default(config),
+        delivery_channel=DeliveryFactory.create_default(config),
         event_store=StorageFactory.create_default(config),
     )

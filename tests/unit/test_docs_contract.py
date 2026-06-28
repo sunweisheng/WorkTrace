@@ -9,6 +9,7 @@ def test_env_example_contains_required_online_llm_keys() -> None:
     assert "WORKTRACE_LLM_BASE_URL=" in content
     assert "WORKTRACE_LLM_MODEL=" in content
     assert "WORKTRACE_LLM_API_KEY=" in content
+    assert "WORKTRACE_LLM_REASONING_EFFORT=none" in content
 
 
 def test_readme_mentions_local_online_llm_configuration() -> None:
@@ -17,6 +18,7 @@ def test_readme_mentions_local_online_llm_configuration() -> None:
     assert "本地私有模型配置" in content
     assert "WORKTRACE_LLM_BASE_URL" in content
     assert "不能和代码一起提交到 git" in content
+    assert "/no_think" in content
 
 
 def test_skill_mentions_first_run_configuration_requirement() -> None:
@@ -26,3 +28,4 @@ def test_skill_mentions_first_run_configuration_requirement() -> None:
     assert "必须先检查用户是否已经提供本地在线模型配置" in content
     assert "WORKTRACE_LLM_API_KEY" in content
     assert "不能提交到 git 仓库" in content
+    assert "/no_think" in content

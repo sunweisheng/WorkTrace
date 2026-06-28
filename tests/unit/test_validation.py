@@ -10,6 +10,7 @@ from src.worktrace.models import (
     SourceBackedEventDraft,
 )
 from src.worktrace.pipeline.validation import (
+    normalize_cross_conversation_groups_with_fallback,
     validate_batch_analysis_result,
     validate_cross_conversation_groups,
 )
@@ -103,7 +104,7 @@ def test_validation_fills_missing_draft_id_with_stable_value() -> None:
     )
 
     validated = validate_batch_analysis_result(result, {"slice-1": conversation_slice})
-    assert validated.candidate_events[0].draft_id == "4d0bd4f270b2a007"
+    assert validated.candidate_events[0].draft_id == "b76138cfa97c4719"
 
 
 def test_validation_backfills_minimal_candidate_fields_from_single_slice() -> None:
@@ -201,9 +202,14 @@ def test_validation_uses_content_to_disambiguate_missing_draft_ids() -> None:
         context_requests=[],
     )
 
-    validated = validate_batch_analysis_result(result, {"slice-1": conversation_slice})
+    validated = validate_batch_analysis_result(
+        result,
+        {"slice-1": conversation_slice},
+        self_open_id="ou_self",
+    )
     assert len(validated.candidate_events) == 2
-    assert validated.candidate_events[0].draft_id != validated.candidate_events[1].draft_id
+    assert validated.candidate_events[0].draft_id == "b76138cfa97c4719"
+    assert validated.candidate_events[1].draft_id == "b76138cfa97c4719-d7d49cf0"
 
 
 def test_validation_drops_empty_context_request() -> None:
@@ -330,3 +336,43 @@ def test_validation_deduplicates_cross_conversation_groups() -> None:
 
     assert [group.group_id for group in validated.groups] == ["g1", "g3"]
     assert [group.draft_ids for group in validated.groups] == [["d1"], ["d2"]]
+
+
+def test_validation_repairs_missing_cross_conversation_groups() -> None:
+    candidates = [
+        SourceBackedEventDraft(
+            draft_id="d1",
+            date="2026-06-22",
+            topic="t1",
+            content="c1",
+            source_message_ids=["om_1"],
+            source_conversation_id="oc_1",
+            source_slice_id="slice-1",
+            confidence=0.8,
+        ),
+        SourceBackedEventDraft(
+            draft_id="d2",
+            date="2026-06-22",
+            topic="t2",
+            content="c2",
+            source_message_ids=["om_2"],
+            source_conversation_id="oc_2",
+            source_slice_id="slice-2",
+            confidence=0.8,
+        ),
+    ]
+
+    repaired, warnings = normalize_cross_conversation_groups_with_fallback(
+        CrossConversationGroupResult(
+            groups=[
+                CrossConversationGroup(group_id="g1", draft_ids=["d1"]),
+            ]
+        ),
+        candidates,
+    )
+
+    assert [group.group_id for group in repaired.groups] == ["g1", "fallback-1"]
+    assert [group.draft_ids for group in repaired.groups] == [["d1"], ["d2"]]
+    assert warnings == [
+        "Cross-conversation merge groups were repaired: missing=['d2']"
+    ]

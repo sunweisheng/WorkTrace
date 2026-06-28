@@ -86,6 +86,9 @@ class MergeResolver:
     def to_text(self, message):
         return message.text
 
+    def extract_links(self, message):
+        return list(message.links)
+
     def load_attachment_text_if_needed(self, message, attachment_ids, hint):
         return None
 
@@ -156,16 +159,28 @@ class MergeAnalyzer:
     def build_batch_prompt(self, batch_input):
         return "prompt"
 
+    def build_merge_prompt(self, target_date, candidates):
+        return "merge prompt"
+
+
+class MergeDelivery:
+    def deliver_to_self(self, *, self_identity, markdown_path):
+        return ("success", self_identity.open_id)
+
 
 def test_runner_groups_candidates_across_conversations_once(tmp_path: Path) -> None:
     analyzer = MergeAnalyzer()
-    config = RuntimeConfig(data_root=tmp_path / "data")
+    config = RuntimeConfig(
+        data_root=tmp_path / "data",
+        conversation_debug_root=tmp_path / "debug",
+    )
     runner = DailyTraceRunner(
         config=config,
         dependencies=RuntimeDependencies(
             chat_source=MergeSource(),
             content_resolver=MergeResolver(),
             analyzer=analyzer,
+            delivery_channel=MergeDelivery(),
             event_store=MarkdownEventStore(config=config),
         ),
     )
@@ -175,6 +190,9 @@ def test_runner_groups_candidates_across_conversations_once(tmp_path: Path) -> N
     assert result.status == DailyRunStatus.SUCCESS.value
     assert result.event_count == 2
     assert analyzer.group_calls == [["d1", "d2", "d3"]]
+    merge_dir = tmp_path / "debug" / "2026-06-22" / "_merge_day_candidates"
+    assert (merge_dir / "input.json").exists()
+    assert (merge_dir / "prompt.txt").read_text(encoding="utf-8") == "merge prompt"
 
 
 class MissingDraftMergeAnalyzer(MergeAnalyzer):
@@ -187,7 +205,7 @@ class MissingDraftMergeAnalyzer(MergeAnalyzer):
         )
 
 
-def test_runner_fails_when_merge_result_drops_candidate_draft(tmp_path: Path) -> None:
+def test_runner_recovers_when_merge_result_drops_candidate_draft(tmp_path: Path) -> None:
     analyzer = MissingDraftMergeAnalyzer()
     config = RuntimeConfig(data_root=tmp_path / "data")
     runner = DailyTraceRunner(
@@ -196,11 +214,14 @@ def test_runner_fails_when_merge_result_drops_candidate_draft(tmp_path: Path) ->
             chat_source=MergeSource(),
             content_resolver=MergeResolver(),
             analyzer=analyzer,
+            delivery_channel=MergeDelivery(),
             event_store=MarkdownEventStore(config=config),
         ),
     )
 
     result = runner.run("2026-06-22")
 
-    assert result.status == DailyRunStatus.FAILED.value
+    assert result.status == DailyRunStatus.SUCCESS_WITH_WARNINGS.value
+    assert result.event_count == 2
+    assert "Cross-conversation merge groups were repaired" in result.error_summary
     assert "missing=['d3']" in result.error_summary

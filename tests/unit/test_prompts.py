@@ -6,6 +6,7 @@ from src.worktrace.analyzers.prompts import (
     build_anchor_analysis_prompt,
     build_anchor_expansion_prompt,
     build_batch_analysis_prompt,
+    build_merge_prompt,
     serialize_message_for_prompt,
     serialize_anchor_unit_for_prompt,
     serialize_batch_for_prompt,
@@ -159,6 +160,7 @@ def test_batch_prompt_uses_original_message_ids_and_slim_rules(tmp_path: Path) -
     assert "本人信息见 input.self；只有事项明确由本人发起、本人负责、本人审批、本人催办、本人汇报、本人跟进，或他人明确要求本人推进/处理时，才提炼。" in prompt
     assert "如果事项主体明显是他人的工作、他人的进展、他人的承诺，而本人只是参与了会话或说过别的话，不要提炼。" in prompt
     assert "如果只是同群讨论背景信息、但没有明确落到本人，也不要提炼。" in prompt
+    assert "咨询类事件、流程审核类事件、团建活动组织类事件、技能培训类事件，默认不要提炼；这类事项对后续公司级长期事件沉淀价值较低。" in prompt
     assert "正例：本人要求他人汇报、本人审批、本人同步、本人催办、本人推进，都算与本人直接相关。" in prompt
     assert "反例：他人之间讨论自己的工作、自己的承诺、自己的处理进度，即使本人在该会话里发过言，也不算与本人直接相关。" in prompt
     assert '"id": "om_1"' in prompt
@@ -222,6 +224,7 @@ def test_anchor_prompt_serialization_is_compact(tmp_path: Path) -> None:
     assert AnchorStatus.NEEDS_MORE_CONTEXT.value in prompt
     assert "每个 candidate_event 只表示一个主要动作。" in prompt
     assert "例如：已同步给老板、老板未回复可视为已知悉" in prompt
+    assert "咨询类事件、流程审核类事件、团建活动组织类事件、技能培训类事件，默认不要提炼；这类事项对后续公司级长期事件沉淀价值较低。" in prompt
     assert "不要单独返回 result" in prompt
     assert "不要输出思考过程、推理摘要、分析说明或任何解释性文字。" in prompt
     assert "请给我简洁的答案，不要推理，跳过思考步骤。" in prompt
@@ -692,3 +695,52 @@ def test_anchor_prompt_skips_non_anchor_weak_placeholders_only(tmp_path: Path) -
             "x": "这里是图片对应的处理结论",
         },
     ]
+
+
+def test_merge_prompt_requires_all_draft_ids_to_be_returned() -> None:
+    candidates = [
+        SourceBackedEventDraft(
+            draft_id="d1",
+            date="2026-06-22",
+            topic="t1",
+            content="c1",
+            action_label="回复",
+            object_hint="提前付款",
+            source_message_ids=["om_1"],
+            source_conversation_id="oc_1",
+            source_slice_id="slice-1",
+            confidence=0.8,
+        ),
+        SourceBackedEventDraft(
+            draft_id="d2",
+            date="2026-06-22",
+            topic="t2",
+            content="c2",
+            action_label="催办",
+            object_hint="汇报文档",
+            source_message_ids=["om_2"],
+            source_conversation_id="oc_2",
+            source_slice_id="slice-2",
+            confidence=0.8,
+        ),
+        SourceBackedEventDraft(
+            draft_id="d3",
+            date="2026-06-22",
+            topic="t3",
+            content="c3",
+            action_label="撰写",
+            object_hint="方案文档",
+            source_message_ids=["om_3"],
+            source_conversation_id="oc_3",
+            source_slice_id="slice-3",
+            confidence=0.8,
+        ),
+    ]
+
+    prompt = build_merge_prompt("2026-06-22", candidates)
+
+    assert "禁止漏掉任何 draft_id。" in prompt
+    assert "错误示例：candidates 有 [d1, d2, d3]，但只返回 [['d1', 'd2']]，漏掉 d3，这是错误的。" in prompt
+    assert "正确示例：candidates 有 [d1, d2, d3]，若 d3 无法与其他事项合并，也必须返回 [['d1', 'd2'], ['d3']]。" in prompt
+    assert '"action_label": "回复"' in prompt
+    assert '"object_hint": "提前付款"' in prompt

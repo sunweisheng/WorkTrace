@@ -7,12 +7,14 @@ from time import perf_counter
 
 from .config import RuntimeConfig
 from .constants import DailyRunStatus
-from .errors import AnalyzerProtocolError, ChatSourceError, StoreWriteError
+from .errors import AnalyzerProtocolError, ChatSourceError, DeliveryError, StoreWriteError
 from .factories import RuntimeDependencies, build_runtime_dependencies
 from .logging_utils import log_timing
 from .models import (
     AnalysisBatch,
     DailyRunResult,
+    EventFileLink,
+    WorkEvent,
     MergedEventDraft,
     SourceBackedEventDraft,
 )
@@ -26,6 +28,7 @@ from .pipeline.event_merge import build_work_events
 from .pipeline.filtering import filter_messages
 from .pipeline.sensitive_filter import filter_sensitive_merged_drafts
 from .pipeline.validation import (
+    normalize_cross_conversation_groups_with_fallback,
     validate_batch_analysis_result,
     validate_cross_conversation_groups,
     validate_merged_event_drafts,
@@ -92,6 +95,7 @@ class DailyTraceRunner:
                 run_started_at,
                 self._write_empty_day(
                     target_date,
+                    self_identity=self_identity,
                     conversation_count=0,
                     message_count=0,
                     slice_count=0,
@@ -167,10 +171,28 @@ class DailyTraceRunner:
                         target_date,
                         all_candidates,
                     )
-                    group_result = validate_cross_conversation_groups(
-                        group_result,
-                        all_candidates,
+                    self._dump_merge_debug_artifacts(
+                        target_date=target_date,
+                        candidates=all_candidates,
+                        output_payload=getattr(
+                            self.dependencies.analyzer,
+                            "last_merge_payload",
+                            None,
+                        ),
                     )
+                    try:
+                        group_result = validate_cross_conversation_groups(
+                            group_result,
+                            all_candidates,
+                        )
+                    except AnalyzerProtocolError:
+                        group_result, merge_repair_warnings = (
+                            normalize_cross_conversation_groups_with_fallback(
+                                group_result,
+                                all_candidates,
+                            )
+                        )
+                        warning_messages.extend(merge_repair_warnings)
                     merged_drafts = materialize_grouped_merged_drafts(
                         all_candidates,
                         [group.draft_ids for group in group_result.groups],
@@ -199,6 +221,7 @@ class DailyTraceRunner:
                 run_started_at,
                 self._write_empty_day(
                     target_date,
+                    self_identity=self_identity,
                     conversation_count=len(conversations),
                     message_count=len(messages),
                     slice_count=len(conversation_slices),
@@ -216,6 +239,11 @@ class DailyTraceRunner:
             warning_messages.extend(sensitive_warnings)
             event_build_started_at = perf_counter()
             events, merge_warnings = build_work_events(target_date, merged_drafts)
+            events = _attach_event_file_links(
+                events,
+                messages=filtered_messages,
+                content_resolver=self.dependencies.content_resolver,
+            )
             log_timing(
                 logger,
                 "runner.stage.completed",
@@ -238,6 +266,13 @@ class DailyTraceRunner:
                 event_count=len(events),
                 output_path=write_result.output_path,
             )
+            delivery_status, delivery_target, delivery_error = _deliver_markdown_to_self(
+                self.dependencies.delivery_channel,
+                self_identity=self_identity,
+                markdown_path=Path(write_result.output_path),
+            )
+            if delivery_error:
+                warning_messages.append(delivery_error)
         except (AnalyzerProtocolError, StoreWriteError, ValueError) as exc:
             return self._finish_run(
                 run_started_at,
@@ -263,6 +298,9 @@ class DailyTraceRunner:
                 status=status,
                 output_path=write_result.output_path,
                 error_summary="; ".join(warning_messages),
+                self_delivery_status=delivery_status,
+                self_delivery_target=delivery_target,
+                self_delivery_error=delivery_error,
             ),
         )
 
@@ -270,6 +308,7 @@ class DailyTraceRunner:
         self,
         target_date: str,
         *,
+        self_identity: SelfIdentity,
         conversation_count: int,
         message_count: int,
         slice_count: int,
@@ -282,6 +321,13 @@ class DailyTraceRunner:
             target_date,
             [],
         )
+        delivery_status, delivery_target, delivery_error = _deliver_markdown_to_self(
+            self.dependencies.delivery_channel,
+            self_identity=self_identity,
+            markdown_path=Path(write_result.output_path),
+        )
+        if delivery_error:
+            warning_messages.append(delivery_error)
         status = (
             DailyRunStatus.SUCCESS_WITH_WARNINGS.value
             if warning_messages or skipped_slice_count
@@ -299,6 +345,9 @@ class DailyTraceRunner:
             status=status,
             output_path=write_result.output_path,
             error_summary="; ".join(warning_messages),
+            self_delivery_status=delivery_status,
+            self_delivery_target=delivery_target,
+            self_delivery_error=delivery_error,
         )
 
     def _failed_result(self, target_date: str, error_summary: str) -> DailyRunResult:
@@ -314,6 +363,9 @@ class DailyTraceRunner:
             status=DailyRunStatus.FAILED.value,
             output_path=None,
             error_summary=error_summary,
+            self_delivery_status="",
+            self_delivery_target="",
+            self_delivery_error="",
         )
 
     def _finish_run(
@@ -389,6 +441,7 @@ class DailyTraceRunner:
             validated_result = validate_batch_analysis_result(
                 batch_result,
                 {current_slice.slice_id: current_slice},
+                self_open_id=self_identity.open_id,
             )
             run_count += 1
             if retry_round == 0:
@@ -513,6 +566,35 @@ class DailyTraceRunner:
             encoding="utf-8",
         )
 
+    def _dump_merge_debug_artifacts(
+        self,
+        *,
+        target_date: str,
+        candidates: list[SourceBackedEventDraft],
+        output_payload: dict[str, object] | None = None,
+    ) -> None:
+        debug_root = self.config.conversation_debug_root
+        if debug_root is None:
+            return
+
+        merge_dir = debug_root / target_date / "_merge_day_candidates"
+        merge_dir.mkdir(parents=True, exist_ok=True)
+        input_payload = {
+            "target_date": target_date,
+            "candidates": [candidate.to_dict() for candidate in candidates],
+        }
+        (merge_dir / "input.json").write_text(
+            dump_json(input_payload, pretty=True) + "\n",
+            encoding="utf-8",
+        )
+        prompt = self.dependencies.analyzer.build_merge_prompt(target_date, candidates)
+        (merge_dir / "prompt.txt").write_text(prompt, encoding="utf-8")
+        if output_payload is not None:
+            (merge_dir / "output.json").write_text(
+                dump_json(output_payload, pretty=True) + "\n",
+                encoding="utf-8",
+            )
+
 
 def _safe_conversation_dir_name(slice_id: str) -> str:
     return slice_id.replace("/", "_").replace(":", "__")
@@ -526,3 +608,52 @@ def _conversation_slice_signature(conversation_slice: ConversationSlice) -> tupl
         tuple(message.message_id for message in conversation_slice.messages),
         tuple(block.attachment_id for block in conversation_slice.attachment_texts),
     )
+
+
+def _deliver_markdown_to_self(delivery_channel, *, self_identity, markdown_path: Path) -> tuple[str, str, str]:
+    try:
+        status, target = delivery_channel.deliver_to_self(
+            self_identity=self_identity,
+            markdown_path=markdown_path,
+        )
+        return status, target, ""
+    except DeliveryError as exc:
+        return "failed", self_identity.open_id, str(exc)
+
+
+def _attach_event_file_links(
+    events: list[WorkEvent],
+    *,
+    messages: list,
+    content_resolver,
+) -> list[WorkEvent]:
+    message_by_id = {message.message_id: message for message in messages}
+    attached: list[WorkEvent] = []
+
+    for event in events:
+        deduped: dict[str, EventFileLink] = {}
+        for message_id in event.source_message_ids:
+            message = message_by_id.get(message_id)
+            if message is None:
+                continue
+            for link in content_resolver.extract_links(message):
+                if link.url in deduped:
+                    continue
+                deduped[link.url] = EventFileLink(
+                    url=link.url,
+                    title=link.title,
+                    link_type=link.link_type,
+                )
+
+        attached.append(
+            type(event)(
+                date=event.date,
+                event_id=event.event_id,
+                title=event.title,
+                content=event.content,
+                source_message_ids=list(event.source_message_ids),
+                file_links=list(deduped.values()),
+            )
+        )
+
+    return attached

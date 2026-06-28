@@ -12,12 +12,20 @@ def batch_output_schema() -> dict[str, object]:
                     "properties": {
                         "topic": {"type": "string"},
                         "content": {"type": "string"},
+                        "action_label": {"type": "string"},
+                        "object_hint": {"type": "string"},
                         "source_message_ids": {
                             "type": "array",
                             "items": {"type": "string"},
                         },
                     },
-                    "required": ["topic", "content", "source_message_ids"],
+                    "required": [
+                        "topic",
+                        "content",
+                        "action_label",
+                        "object_hint",
+                        "source_message_ids",
+                    ],
                     "additionalProperties": False,
                 },
             },
@@ -71,6 +79,8 @@ def anchor_batch_output_schema() -> dict[str, object]:
                                         "properties": {
                                             "topic": {"type": "string"},
                                             "content": {"type": "string"},
+                                            "action_label": {"type": "string"},
+                                            "object_hint": {"type": "string"},
                                             "source_message_ids": {
                                                 "type": "array",
                                                 "items": {"type": "string"},
@@ -79,6 +89,8 @@ def anchor_batch_output_schema() -> dict[str, object]:
                                         "required": [
                                             "topic",
                                             "content",
+                                            "action_label",
+                                            "object_hint",
                                             "source_message_ids",
                                         ],
                                         "additionalProperties": False,
