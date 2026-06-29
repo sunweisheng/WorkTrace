@@ -1,0 +1,186 @@
+from __future__ import annotations
+
+import re
+from typing import Protocol
+
+from ..models import MergedEventDraft, SourceBackedEventDraft, WorkEvent
+from ..utils.text import choose_preferred_text, clean_text
+
+
+RETENTION_REASONS = {
+    "deliverable_updated",
+    "decision_made",
+    "issue_or_risk_found",
+    "follow_up_assigned",
+    "external_business_progress",
+    "substantive_approval",
+}
+
+GENERIC_OBJECT_HINTS = {
+    "审核",
+    "审批",
+    "会议",
+    "沟通",
+    "工作",
+    "事项",
+    "任务",
+    "安排",
+    "确认",
+    "同步",
+    "信息",
+}
+_PUNCTUATION_RE = re.compile(r"[\s，。！？、,.!?:：；;（）()【】\\[\\]《》<>\"'“”‘’`~\-_/]+")
+
+
+class RetentionCandidate(Protocol):
+    topic: str
+    content: str
+    object_hint: str
+    retention_reason: str
+    retention_detail: str
+
+
+class RetentionEvent(Protocol):
+    title: str
+    content: str
+    object_hint: str
+    retention_reason: str
+    retention_detail: str
+
+
+def filter_retained_candidate_drafts(
+    drafts: list[SourceBackedEventDraft],
+) -> tuple[list[SourceBackedEventDraft], list[str]]:
+    kept: list[SourceBackedEventDraft] = []
+    warnings: list[str] = []
+    for draft in drafts:
+        reason = retention_rejection_reason(draft)
+        if reason:
+            warnings.append(
+                f"Filtered low-retention event draft: {draft.topic or '(empty topic)'} ({reason})"
+            )
+            continue
+        kept.append(draft)
+    return kept, warnings
+
+
+def filter_retained_merged_drafts(
+    drafts: list[MergedEventDraft],
+) -> tuple[list[MergedEventDraft], list[str]]:
+    kept: list[MergedEventDraft] = []
+    warnings: list[str] = []
+    for draft in drafts:
+        reason = retention_rejection_reason(draft)
+        if reason:
+            warnings.append(
+                f"Filtered low-retention event draft: {draft.topic or '(empty topic)'} ({reason})"
+            )
+            continue
+        kept.append(draft)
+    return kept, warnings
+
+
+def filter_retained_work_events(
+    events: list[WorkEvent],
+) -> tuple[list[WorkEvent], list[str]]:
+    kept: list[WorkEvent] = []
+    warnings: list[str] = []
+    for event in events:
+        reason = retention_rejection_reason_for_event(
+            event,
+        )
+        if reason:
+            warnings.append(
+                f"Filtered low-retention event: {event.title or '(empty title)'} ({reason})"
+            )
+            continue
+        kept.append(event)
+    return kept, warnings
+
+
+def retention_rejection_reason(candidate: RetentionCandidate) -> str:
+    reason = clean_text(candidate.retention_reason)
+    detail = clean_text(candidate.retention_detail)
+    object_hint = clean_text(candidate.object_hint)
+    title = clean_text(candidate.topic)
+    content = clean_text(candidate.content)
+
+    if reason not in RETENTION_REASONS:
+        return "missing_or_invalid_retention_reason"
+    if _is_generic_object_hint(object_hint):
+        return "missing_or_generic_object_hint"
+    if not _has_specific_retention_detail(detail, title=title, content=content, object_hint=object_hint):
+        return "missing_or_generic_retention_detail"
+    return ""
+
+
+def retention_rejection_reason_for_event(
+    event: RetentionEvent,
+) -> str:
+    title = clean_text(event.title)
+    content = clean_text(event.content)
+    object_hint = clean_text(event.object_hint)
+    reason = clean_text(event.retention_reason)
+    detail = clean_text(event.retention_detail)
+
+    if reason not in RETENTION_REASONS:
+        return "missing_or_invalid_retention_reason"
+    if _is_generic_object_hint(object_hint):
+        return "missing_or_generic_object_hint"
+    if not _has_specific_retention_detail(detail, title=title, content=content, object_hint=object_hint):
+        return "missing_or_generic_retention_detail"
+    return ""
+
+
+def derive_retention_metadata_from_sources(
+    items: list[SourceBackedEventDraft],
+) -> tuple[str, str, str]:
+    return (
+        choose_preferred_text([item.object_hint for item in items]),
+        choose_preferred_text([item.retention_reason for item in items]),
+        choose_preferred_text([item.retention_detail for item in items]),
+    )
+
+
+def _is_generic_object_hint(value: str) -> bool:
+    compact = _normalized_compact(value)
+    if not compact:
+        return True
+    return compact in {_normalized_compact(item) for item in GENERIC_OBJECT_HINTS}
+
+
+def _has_specific_retention_detail(
+    detail: str,
+    *,
+    title: str,
+    content: str,
+    object_hint: str,
+) -> bool:
+    compact_detail = _normalized_compact(detail)
+    if len(compact_detail) < 6:
+        return False
+    if compact_detail in {
+        _normalized_compact(title),
+        _normalized_compact(content),
+        _normalized_compact(object_hint),
+    }:
+        return False
+    if _is_repeated_low_information(title, detail):
+        return False
+    return True
+
+
+def _is_repeated_low_information(title: str, content: str) -> bool:
+    compact_title = _normalized_compact(title)
+    compact_content = _normalized_compact(content)
+    if not compact_title or not compact_content:
+        return False
+    suffixes = ("工作", "事项", "任务", "相关工作", "相关事项")
+    return len(compact_content) <= 16 and (
+        compact_content == compact_title
+        or any(compact_content == compact_title + _normalized_compact(suffix) for suffix in suffixes)
+    )
+
+
+def _normalized_compact(value: str) -> str:
+    return _PUNCTUATION_RE.sub("", clean_text(value)).lower()

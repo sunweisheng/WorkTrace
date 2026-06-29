@@ -4,7 +4,7 @@
 
 新增 `merge-collected` 子命令，用于管理人员把多人提交的 WorkTrace Markdown 放入 `merge_inbox/YYYY/MM/DD/` 后，生成同目录 `_merged.md` 团队汇总文件。
 
-合并结果保持标准 WorkTrace Markdown 兼容，同时额外展示来源人员、来源事件 ID。相同原始 `event_id` 只有在标题和内容完全一致，或标题一致且内容一方包含另一方时，才先确定性归组；如果 `event_id` 相同但不满足该规则，则记录 warning 并交给 LLM 保守判断。其余事件也由 LLM 判断是否属于同一真实工作事件，并对每个合并组生成管理视角的综合描述。
+合并结果保持标准 WorkTrace Markdown 兼容，同时额外展示来源人员、来源事件 ID。相同原始 `event_id` 只有在标题和内容完全一致，或标题一致且内容一方包含另一方时，才先确定性归组；如果 `event_id` 相同但不满足该规则，则记录 warning 并交给 LLM 保守判断。其余事件也由 LLM 判断是否属于同一真实工作事件，并对每个合并组生成管理视角的综合描述。读取来源事件和写入最终 `_merged.md` 前，都会执行与个人日报一致的结构化保留门槛。
 
 ## Key Changes
 
@@ -12,8 +12,8 @@
 - 输入固定读取 `merge_inbox/YYYY/MM/DD/` 下 `.md` 文件，跳过 `_merged.md`、隐藏文件、非 Markdown、格式错误文件。
 - 人员名从文件名提取，固定格式为 `YYYY-MM-DD-姓名.md`，例如 `2026-06-29-张三.md` 提取为 `张三`。
 - 相同 `event_id` 只有在标题和内容完全一致，或标题一致且内容一方包含另一方时才作为确定性合并组；其它情况不锁死，交给 LLM 判断，并在 JSON 结果里记录 warning。
-- 多人合并 prompt 继续要求 LLM 不输出薪资、绩效、争吵、辱骂等敏感事项；本地最终结果可复用现有敏感关键词过滤作为兜底。
-- 输出 `_merged.md` 保留 WorkTrace 事件注释和标准字段，并新增来源人员、来源事件 ID 字段。
+- 多人合并 prompt 继续要求 LLM 不输出薪资、绩效、争吵、辱骂等敏感事项，并要求每个 group 输出 `object_hint`、`retention_reason`、`retention_detail`。
+- 输出 `_merged.md` 保留 WorkTrace 事件注释和标准字段，并新增来源人员、来源事件 ID 字段；保留元数据继续写入 Markdown，供追溯和后续汇总使用。
 - 新增 `config/merge_delivery.example.json`；实际配置 `config/merge_delivery.local.json` 加入 `.gitignore`。
 - 有本地飞书 Drive 文件夹配置时，在该文件夹下创建 `YYYY/MM/DD/` 目录结构并上传原始 `_merged.md`；无配置时只生成本地文件；上传失败只写 warning。
 
@@ -24,6 +24,7 @@
   - 只读取当前目录下的普通 `.md` 文件；跳过 `_merged.md`、隐藏文件、子目录和非 Markdown 文件。
   - 文件名必须匹配 `YYYY-MM-DD-姓名.md`。不匹配时跳过该文件并写 warning。
   - Markdown 解析复用现有 WorkTrace 标准格式：front matter 加 `<!-- worktrace:event:start event_id="..." -->` 事件块。坏文件跳过并写 warning，不影响其它文件。
+  - 解析出的来源事件必须通过结构化保留门槛；缺少保留理由、保留依据或具体对象的事件会被过滤，不进入 LLM 合并 prompt。
 
 - 事件身份与来源
   - 每条来源事件在本次合并中生成临时 `draft_id`，格式可由来源文件名、事件序号和原始 `event_id` 组成，用于 LLM 分组和结果校验。
@@ -39,13 +40,15 @@
 
 - LLM 合并协议
   - LLM 输入包含两部分：已锁定的 `deterministic_groups`，以及需要判断的剩余事件。
-  - LLM 必须返回 `groups`，每个 group 包含 `group_id`、`draft_ids`、`title`、`content`。
+  - LLM 必须返回 `groups`，每个 group 包含 `group_id`、`draft_ids`、`title`、`content`、`object_hint`、`retention_reason`、`retention_detail`。
   - Prompt 明确要求：确定性组不能拆分；剩余事件拿不准就分开；每个输入 `draft_id` 必须且只能出现一次；不要编造未出现的信息。
   - 如果 LLM 返回漏项、重复项、未知项或破坏确定性组，Python 侧修复为安全结果：有效组保留，漏项回退为单独事件，并记录 warning。
+  - 普通约时间、互通信息、泛泛完成审核/审批但无具体对象和结论的事件不应输出；如果输出，Python 写入前会再次过滤。
 
 - 敏感内容与失败策略
   - Prompt 继续要求 LLM 不输出薪资、绩效、争吵、辱骂等敏感事项。
   - Python 侧在最终结果上复用现有敏感关键词过滤作为兜底；被过滤的事件写 warning。
+  - Python 侧在读取来源事件后和写入 `_merged.md` 前都执行结构化保留门槛；被过滤的事件写 warning。
   - 空目录、无有效事件、全坏文件都生成空 `_merged.md`，返回 `success_with_warnings`。
   - LLM 协议错误导致本地无法形成安全结果时返回 `failed`；上传失败不影响本地结果，只写 warning。
 
@@ -72,7 +75,7 @@
 ## Test Plan
 
 - 单元测试覆盖人员名提取、标准 Markdown 解析、坏文件跳过、`_merged.md` 不参与输入、相同 `event_id` 且内容完全一致或包含时确定性合并、相同 `event_id` 但不满足确定性规则时交给 LLM 并产生 warning、输出包含来源信息、无上传配置不调用飞书。
-- 单元测试覆盖最终敏感兜底过滤，以及多人合并 prompt 包含敏感事项排除要求。
+- 单元测试覆盖最终敏感兜底过滤、结构化保留门槛，以及多人合并 prompt 包含敏感事项和保留元数据要求。
 - 集成测试覆盖 `merge-collected --date` 输出结构化 JSON、多个输入生成 `_merged.md`、坏文件不阻断有效合并、飞书配置存在时创建 `YYYY/MM/DD/` 并上传、旧 CLI 命令行为不变。
 - 空目录、无有效事件、全坏文件均返回成功带 warning，并生成空汇总或空结果。
 

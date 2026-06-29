@@ -23,6 +23,7 @@ from .models import (
     WorkEvent,
 )
 from .pipeline.sensitive_filter import filter_sensitive_merged_drafts
+from .pipeline.retention_filter import filter_retained_work_events
 from .stores.markdown import MarkdownEventStore
 from .utils.dates import now_iso
 from .utils.hashing import stable_event_id
@@ -58,6 +59,10 @@ class CollectedMergeRunner:
             self._read_source_events(target_date, input_dir)
         )
         warning_messages.extend(read_warnings)
+        source_events, retention_source_warnings = self._filter_retained_source_events(
+            source_events,
+        )
+        warning_messages.extend(retention_source_warnings)
 
         merged_events: list[WorkEvent] = []
         if source_events:
@@ -87,6 +92,10 @@ class CollectedMergeRunner:
                     merged_events,
                 )
                 warning_messages.extend(sensitive_warnings)
+                merged_events, retention_merged_warnings = filter_retained_work_events(
+                    merged_events,
+                )
+                warning_messages.extend(retention_merged_warnings)
             except (AnalyzerProtocolError, ValueError) as exc:
                 return CollectedMergeRunResult(
                     status=DailyRunStatus.FAILED.value,
@@ -216,6 +225,19 @@ class CollectedMergeRunner:
             )
         return deterministic_groups, warnings
 
+    def _filter_retained_source_events(
+        self,
+        source_events: list[CollectedSourceEvent],
+    ) -> tuple[list[CollectedSourceEvent], list[str]]:
+        events = [item.event for item in source_events]
+        kept_events, warnings = filter_retained_work_events(events)
+        kept_ids = {id(event) for event in kept_events}
+        return [
+            source_event
+            for source_event in source_events
+            if id(source_event.event) in kept_ids
+        ], warnings
+
     def _materialize_events(
         self,
         target_date: str,
@@ -253,6 +275,9 @@ class CollectedMergeRunner:
                     file_links=file_links,
                     source_people=source_people,
                     source_event_ids=source_event_ids,
+                    object_hint=group.object_hint,
+                    retention_reason=group.retention_reason,
+                    retention_detail=group.retention_detail,
                 )
             )
         return events
@@ -267,6 +292,9 @@ class CollectedMergeRunner:
                 date=target_date,
                 topic=event.title,
                 content=event.content,
+                object_hint=event.object_hint,
+                retention_reason=event.retention_reason,
+                retention_detail=event.retention_detail,
                 source_message_ids=[event.event_id],
                 source_conversation_ids=[],
             )
@@ -409,6 +437,9 @@ def repair_collected_merge_result(
                 draft_ids=normalized_ids,
                 title=group.title,
                 content=group.content,
+                object_hint=group.object_hint,
+                retention_reason=group.retention_reason,
+                retention_detail=group.retention_detail,
             )
         )
 
@@ -422,6 +453,9 @@ def repair_collected_merge_result(
                 draft_ids=[draft_id],
                 title=source_event.event.title,
                 content=source_event.event.content,
+                object_hint=source_event.event.object_hint,
+                retention_reason=source_event.event.retention_reason,
+                retention_detail=source_event.event.retention_detail,
             )
         )
 

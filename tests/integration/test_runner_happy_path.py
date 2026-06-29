@@ -59,6 +59,35 @@ class FakeResolver:
         return None
 
 
+def _draft(
+    *,
+    draft_id: str,
+    date: str = "2026-06-22",
+    topic: str,
+    content: str,
+    source_message_ids: list[str],
+    source_conversation_id: str = "oc_1",
+    source_slice_id: str,
+    object_hint: str | None = None,
+    retention_reason: str = "decision_made",
+    retention_detail: str | None = None,
+) -> SourceBackedEventDraft:
+    return SourceBackedEventDraft(
+        draft_id=draft_id,
+        date=date,
+        topic=topic,
+        content=content,
+        source_message_ids=source_message_ids,
+        source_conversation_id=source_conversation_id,
+        source_slice_id=source_slice_id,
+        confidence=0.9,
+        action_label="确认",
+        object_hint=object_hint or f"{topic}对象",
+        retention_reason=retention_reason,
+        retention_detail=retention_detail or f"确认{topic}的具体结果和后续安排。",
+    )
+
+
 class FakeAnalyzer:
     def build_batch_prompt(self, batch_input):
         return "batch prompt"
@@ -66,15 +95,15 @@ class FakeAnalyzer:
     def analyze_batch(self, target_date, batch_input):
         return BatchAnalysisResult(
             candidate_events=[
-                SourceBackedEventDraft(
+                _draft(
                     draft_id="draft-1",
-                    date="2026-06-22",
                     topic="发布推进",
                     content="完成发布沟通",
                     source_message_ids=["om_1"],
-                    source_conversation_id="oc_1",
                     source_slice_id=batch_input.slices[0].slice_id,
-                    confidence=0.9,
+                    object_hint="发布上线窗口",
+                    retention_reason="follow_up_assigned",
+                    retention_detail="确认发布沟通后的上线窗口安排。",
                 )
             ],
             context_requests=[],
@@ -203,15 +232,15 @@ def test_runner_groups_multiple_self_messages_in_same_conversation_into_one_llm_
             self.slice_counts.append(len(batch_input.slices))
             return BatchAnalysisResult(
                 candidate_events=[
-                    SourceBackedEventDraft(
+                    _draft(
                         draft_id="draft-1",
-                        date="2026-06-22",
                         topic="发布推进",
                         content="完成发布沟通",
                         source_message_ids=["om_1", "om_3"],
-                        source_conversation_id="oc_1",
                         source_slice_id=batch_input.slices[0].slice_id,
-                        confidence=0.9,
+                        object_hint="发布上线窗口",
+                        retention_reason="follow_up_assigned",
+                        retention_detail="补充并确认发布上线窗口安排。",
                     )
                 ],
                 context_requests=[],
@@ -247,25 +276,25 @@ def test_runner_keeps_distinct_events_with_same_source_message_ids_separate(
         def analyze_batch(self, target_date, batch_input):
             return BatchAnalysisResult(
                 candidate_events=[
-                    SourceBackedEventDraft(
+                    _draft(
                         draft_id="draft-1",
-                        date="2026-06-22",
                         topic="索取全国故障汇总",
                         content="要求获取本周全国故障汇总。",
                         source_message_ids=["om_1"],
-                        source_conversation_id="oc_1",
                         source_slice_id=batch_input.slices[0].slice_id,
-                        confidence=0.9,
+                        object_hint="全国故障汇总",
+                        retention_reason="deliverable_updated",
+                        retention_detail="要求补充本周全国故障汇总数据。",
                     ),
-                    SourceBackedEventDraft(
+                    _draft(
                         draft_id="draft-2",
-                        date="2026-06-22",
                         topic="权限重置确认",
                         content="郭海重置了被封的权限/账号，并确认已知晓。",
                         source_message_ids=["om_1"],
-                        source_conversation_id="oc_1",
                         source_slice_id=batch_input.slices[0].slice_id,
-                        confidence=0.9,
+                        object_hint="被封权限账号",
+                        retention_reason="issue_or_risk_found",
+                        retention_detail="确认被封权限账号已由郭海重置并知晓。",
                     ),
                 ],
                 context_requests=[],
@@ -309,25 +338,25 @@ def test_runner_excludes_configured_topics_before_merge(tmp_path: Path) -> None:
         def analyze_batch(self, target_date, batch_input):
             return BatchAnalysisResult(
                 candidate_events=[
-                    SourceBackedEventDraft(
+                    _draft(
                         draft_id="draft-1",
-                        date="2026-06-22",
                         topic="代码同步",
                         content="执行 git pull 操作，可能涉及代码更新同步。",
                         source_message_ids=["om_1"],
-                        source_conversation_id="oc_1",
                         source_slice_id=batch_input.slices[0].slice_id,
-                        confidence=0.9,
+                        object_hint="代码同步",
+                        retention_reason="deliverable_updated",
+                        retention_detail="执行 git pull 更新代码内容。",
                     ),
-                    SourceBackedEventDraft(
+                    _draft(
                         draft_id="draft-2",
-                        date="2026-06-22",
                         topic="权限重置确认",
                         content="郭海重置了被封的权限/账号，并确认已知晓。",
                         source_message_ids=["om_1"],
-                        source_conversation_id="oc_1",
                         source_slice_id=batch_input.slices[0].slice_id,
-                        confidence=0.9,
+                        object_hint="被封权限账号",
+                        retention_reason="issue_or_risk_found",
+                        retention_detail="确认被封权限账号已由郭海重置并知晓。",
                     ),
                 ],
                 context_requests=[],
@@ -358,6 +387,60 @@ def test_runner_excludes_configured_topics_before_merge(tmp_path: Path) -> None:
     assert "### 权限重置确认" in content
     assert "### 代码同步" not in content
     assert "执行 git pull 操作" not in content
+
+
+def test_runner_filters_low_retention_events_before_merge(tmp_path: Path) -> None:
+    class LowRetentionAnalyzer(FakeAnalyzer):
+        def analyze_batch(self, target_date, batch_input):
+            return BatchAnalysisResult(
+                candidate_events=[
+                    _draft(
+                        draft_id="draft-1",
+                        topic="完成审核",
+                        content="完成审核工作。",
+                        source_message_ids=["om_1"],
+                        source_slice_id=batch_input.slices[0].slice_id,
+                        object_hint="审核",
+                        retention_reason="substantive_approval",
+                        retention_detail="完成审核工作。",
+                    ),
+                    _draft(
+                        draft_id="draft-2",
+                        topic="合同审核",
+                        content="审核客户合同并反馈付款条款问题。",
+                        source_message_ids=["om_1"],
+                        source_slice_id=batch_input.slices[0].slice_id,
+                        object_hint="客户合同付款条款",
+                        retention_reason="substantive_approval",
+                        retention_detail="反馈客户合同付款条款问题。",
+                    ),
+                ],
+                context_requests=[],
+            )
+
+        def merge_day_candidates(self, target_date, candidates):
+            raise AssertionError("Only one retained candidate should skip merge")
+
+    config = RuntimeConfig(data_root=tmp_path / "data")
+    runner = DailyTraceRunner(
+        config=config,
+        dependencies=RuntimeDependencies(
+            chat_source=FakeSource(),
+            content_resolver=FakeResolver(),
+            analyzer=LowRetentionAnalyzer(),
+            delivery_channel=FakeDelivery(),
+            event_store=MarkdownEventStore(config=config),
+        ),
+    )
+
+    result = runner.run("2026-06-22")
+
+    assert result.status == DailyRunStatus.SUCCESS_WITH_WARNINGS.value
+    assert result.event_count == 1
+    assert result.output_path is not None
+    content = Path(result.output_path).read_text(encoding="utf-8")
+    assert "### 合同审核" in content
+    assert "### 完成审核" not in content
 
 
 def test_runner_sorts_events_by_source_message_time(tmp_path: Path) -> None:
@@ -400,25 +483,23 @@ def test_runner_sorts_events_by_source_message_time(tmp_path: Path) -> None:
         def analyze_batch(self, target_date, batch_input):
             return BatchAnalysisResult(
                 candidate_events=[
-                    SourceBackedEventDraft(
+                    _draft(
                         draft_id="draft-late",
-                        date="2026-06-22",
                         topic="较晚事件",
                         content="11点发生",
                         source_message_ids=["om_late"],
-                        source_conversation_id="oc_1",
                         source_slice_id=batch_input.slices[0].slice_id,
-                        confidence=0.9,
+                        object_hint="较晚事件结果",
+                        retention_detail="确认较晚事件在11点形成结果。",
                     ),
-                    SourceBackedEventDraft(
+                    _draft(
                         draft_id="draft-early",
-                        date="2026-06-22",
                         topic="较早事件",
                         content="9点发生",
                         source_message_ids=["om_early"],
-                        source_conversation_id="oc_1",
                         source_slice_id=batch_input.slices[0].slice_id,
-                        confidence=0.9,
+                        object_hint="较早事件结果",
+                        retention_detail="确认较早事件在9点形成结果。",
                     ),
                 ],
                 context_requests=[],

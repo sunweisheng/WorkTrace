@@ -6,6 +6,10 @@ from src.worktrace.pipeline.sensitive_filter import (
     filter_excluded_candidate_drafts,
     filter_sensitive_merged_drafts,
 )
+from src.worktrace.pipeline.retention_filter import (
+    filter_retained_candidate_drafts,
+    filter_retained_work_events,
+)
 
 
 def test_sensitive_filter_removes_salary_and_performance_drafts() -> None:
@@ -182,3 +186,76 @@ def test_sensitive_filter_keeps_non_excluded_topic_with_different_content() -> N
 
     assert [draft.topic for draft in kept] == ["索取故障数据"]
     assert warnings == []
+
+
+def test_retention_filter_removes_generic_review_completion() -> None:
+    drafts = [
+        SourceBackedEventDraft(
+            draft_id="d1",
+            date="2026-06-29",
+            topic="完成审核",
+            content="完成审核工作。",
+            source_message_ids=["m1"],
+            source_conversation_id="c1",
+            source_slice_id="s1",
+            confidence=0.9,
+            action_label="审核",
+            object_hint="审核",
+            retention_reason="substantive_approval",
+            retention_detail="完成审核工作。",
+        )
+    ]
+
+    kept, warnings = filter_retained_candidate_drafts(drafts)
+
+    assert kept == []
+    assert len(warnings) == 1
+
+
+def test_retention_filter_keeps_substantive_approval() -> None:
+    drafts = [
+        SourceBackedEventDraft(
+            draft_id="d1",
+            date="2026-06-29",
+            topic="合同审核",
+            content="审核客户合同并反馈付款条款问题。",
+            source_message_ids=["m1"],
+            source_conversation_id="c1",
+            source_slice_id="s1",
+            confidence=0.9,
+            action_label="审核",
+            object_hint="客户合同付款条款",
+            retention_reason="substantive_approval",
+            retention_detail="反馈客户合同中的付款条款问题。",
+        )
+    ]
+
+    kept, warnings = filter_retained_candidate_drafts(drafts)
+
+    assert [draft.topic for draft in kept] == ["合同审核"]
+    assert warnings == []
+
+
+def test_retention_filter_removes_event_missing_metadata_even_with_file_link() -> None:
+    from src.worktrace.models import EventFileLink, WorkEvent
+
+    events = [
+        WorkEvent(
+            date="2026-06-29",
+            event_id="evt1",
+            title="下午会议安排",
+            content="确认下午2点开会互通信息。",
+            file_links=[
+                EventFileLink(
+                    url="https://example.com/doc",
+                    title="会议文档",
+                    link_type="url",
+                )
+            ],
+        )
+    ]
+
+    kept, warnings = filter_retained_work_events(events)
+
+    assert kept == []
+    assert len(warnings) == 1

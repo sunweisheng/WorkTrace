@@ -43,7 +43,7 @@ class FeishuCliSelfDelivery(DeliveryChannel):
                     "im",
                     "+messages-send",
                     "--as",
-                    "user",
+                    "bot",
                     "--user-id",
                     self_identity.open_id,
                     "--file",

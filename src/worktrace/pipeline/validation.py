@@ -121,6 +121,8 @@ def validate_batch_analysis_result(
                 content=candidate.content,
                 action_label=(candidate.action_label or "").strip(),
                 object_hint=(candidate.object_hint or "").strip(),
+                retention_reason=(candidate.retention_reason or "").strip(),
+                retention_detail=(candidate.retention_detail or "").strip(),
                 source_message_ids=normalized_ids,
                 source_conversation_id=source_conversation_id,
                 source_slice_id=source_slice_id,
@@ -170,6 +172,9 @@ def validate_merged_event_drafts(
                 date=draft.date,
                 topic=draft.topic,
                 content=draft.content,
+                object_hint=draft.object_hint,
+                retention_reason=draft.retention_reason,
+                retention_detail=draft.retention_detail,
                 source_message_ids=ordered_ids,
                 source_conversation_ids=sorted(set(draft.source_conversation_ids)),
             )

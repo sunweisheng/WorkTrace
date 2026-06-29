@@ -20,6 +20,8 @@ def test_deliver_to_self_uses_date_and_display_name_for_uploaded_filename(
     captured: dict[str, Path] = {}
 
     def fake_runner(args, *, cwd=None):
+        assert args[args.index("--as") + 1] == "bot"
+        assert args[args.index("--user-id") + 1] == "ou_self"
         file_arg = args[args.index("--file") + 1]
         upload_path = Path(cwd) / file_arg
         captured["upload_path"] = upload_path

@@ -27,6 +27,13 @@ def merge_duplicate_drafts(
                 date=items[0].date,
                 topic=choose_preferred_text([item.topic for item in items]),
                 content=merge_content_texts([item.content for item in items]),
+                object_hint=choose_preferred_text([item.object_hint for item in items]),
+                retention_reason=choose_preferred_text(
+                    [item.retention_reason for item in items]
+                ),
+                retention_detail=choose_preferred_text(
+                    [item.retention_detail for item in items]
+                ),
                 source_message_ids=list(items[0].source_message_ids),
                 source_conversation_ids=sorted(
                     {cid for item in items for cid in item.source_conversation_ids}
@@ -57,6 +64,9 @@ def build_work_events(
                 title=draft.topic,
                 content=draft.content,
                 source_message_ids=list(draft.source_message_ids),
+                object_hint=draft.object_hint,
+                retention_reason=draft.retention_reason,
+                retention_detail=draft.retention_detail,
             )
         )
 

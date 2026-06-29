@@ -85,6 +85,9 @@ class MarkdownEventStore(EventStore):
             f"- 日期: {event.date}\n"
             f"- 事件标题: {event.title}\n"
             f"- 事件内容: {event.content}\n"
+            f"- 具体对象: {event.object_hint}\n"
+            f"- 保留理由: {event.retention_reason}\n"
+            f"- 保留依据: {event.retention_detail}\n"
             f"{source_lines}"
             f"- 涉及文件链接:\n{link_lines}\n"
             "<!-- worktrace:event:end -->"
@@ -131,6 +134,9 @@ class MarkdownEventStore(EventStore):
             block = body[event_id_end + 5:block_end].strip()
             title = self._extract_value(block, "- 事件标题: ")
             content = self._extract_value(block, "- 事件内容: ")
+            object_hint = self._extract_value(block, "- 具体对象: ")
+            retention_reason = self._extract_value(block, "- 保留理由: ")
+            retention_detail = self._extract_value(block, "- 保留依据: ")
             event_date = self._extract_value(block, "- 日期: ")
             source_people = self._parse_source_values(
                 self._extract_value(block, "- 来源人员: ")
@@ -148,6 +154,9 @@ class MarkdownEventStore(EventStore):
                     file_links=file_links,
                     source_people=source_people,
                     source_event_ids=source_event_ids,
+                    object_hint=object_hint,
+                    retention_reason=retention_reason,
+                    retention_detail=retention_detail,
                 )
             )
             cursor = block_end + len(end_marker)

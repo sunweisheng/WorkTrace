@@ -83,6 +83,10 @@ class LinkAnalyzer:
                     source_conversation_id="oc_1",
                     source_slice_id=batch_input.slices[0].slice_id,
                     confidence=0.9,
+                    action_label="确认",
+                    object_hint="发布方案",
+                    retention_reason="deliverable_updated",
+                    retention_detail="确认发布方案文档中的发布推进信息。",
                 )
             ],
             context_requests=[],
@@ -149,6 +153,9 @@ def test_runner_prefers_named_file_link_when_same_url_appears_multiple_times(tmp
         content="完成发布沟通",
         source_message_ids=["om_1"],
         file_links=[],
+        object_hint="发布方案",
+        retention_reason="deliverable_updated",
+        retention_detail="确认发布方案文档中的发布推进信息。",
     )
 
     attached = __import__("src.worktrace.runner", fromlist=["_attach_event_file_links"])._attach_event_file_links(
@@ -164,3 +171,4 @@ def test_runner_prefers_named_file_link_when_same_url_appears_multiple_times(tmp
             link_type="feishu_doc",
         )
     ]
+    assert attached[0].retention_reason == "deliverable_updated"

@@ -112,6 +112,10 @@ class RetryAnalyzer:
                     source_conversation_id="oc_1",
                     source_slice_id=batch_input.slices[0].slice_id,
                     confidence=0.9,
+                    action_label="确认",
+                    object_hint="附件上下文分析",
+                    retention_reason="decision_made",
+                    retention_detail="补充上下文后完成附件相关分析。",
                 )
             ],
             context_requests=[],

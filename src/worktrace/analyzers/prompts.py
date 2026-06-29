@@ -60,6 +60,12 @@ def build_batch_analysis_prompt(
             "topic 写短标题，content 写完整事项；如果有明确结果，直接融入 content，不要单独返回 result。",
             "action_label 只写主要动作标签，例如：回复、审批、催办、撰写、核对、跟进、同步、确认。",
             "object_hint 只写该事项的核心对象或主题，例如：提前付款、优惠券配置、汇报文档、上海点位签约方案。",
+            (
+                "retention_reason 必须从以下枚举选择：deliverable_updated、decision_made、"
+                "issue_or_risk_found、follow_up_assigned、external_business_progress、substantive_approval。"
+            ),
+            "retention_detail 用一句话说明该事件为什么值得长期沉淀，必须包含输入中真实出现的具体对象、结论、问题、待办或结果。",
+            "普通约时间、确认开会、互通信息、泛泛完成审核/审批但没有具体对象和结论的内容，不要输出 candidate_event。",
             "每条事项附上最相关的消息 id。",
             "只能使用输入里出现过的真实 message id，不要自造占位符 id。",
             "正例：本人要求他人汇报、本人审批、本人同步、本人催办、本人推进，都算与本人直接相关。",
@@ -73,6 +79,8 @@ def build_batch_analysis_prompt(
                     "content": "string",
                     "action_label": "string",
                     "object_hint": "string",
+                    "retention_reason": "deliverable_updated | decision_made | issue_or_risk_found | follow_up_assigned | external_business_progress | substantive_approval",
+                    "retention_detail": "string",
                     "source_message_ids": ["message_id"],
                 }
             ],
@@ -159,6 +167,12 @@ def build_collected_merge_prompt(
             "每个 group 必须返回管理人员可读的 title 和 content。",
             "title 要短，content 要综合保留来源中的关键事实、进展、结果和未决事项。",
             "不要编造输入中没有的信息，不要丢失关键事实。",
+            (
+                "每个 group 必须返回 object_hint、retention_reason、retention_detail；"
+                "retention_reason 只能是 deliverable_updated、decision_made、issue_or_risk_found、"
+                "follow_up_assigned、external_business_progress、substantive_approval。"
+            ),
+            "如果来源事件只是普通约时间、互通信息、泛泛完成审核/审批且无具体对象和结论，不要输出对应 group。",
             _build_confidential_rule(runtime_config),
             _build_non_work_sensitive_rule(runtime_config),
             "涉及上述敏感事项时，不要输出对应 group。",
@@ -171,6 +185,9 @@ def build_collected_merge_prompt(
                     "draft_ids": ["draft_id"],
                     "title": "string",
                     "content": "string",
+                    "object_hint": "string",
+                    "retention_reason": "deliverable_updated | decision_made | issue_or_risk_found | follow_up_assigned | external_business_progress | substantive_approval",
+                    "retention_detail": "string",
                 }
             ]
         },
@@ -222,6 +239,12 @@ def build_anchor_analysis_prompt(
             "每个 candidate_event 只表示一个主要动作。",
             "action_label 只写主要动作标签，例如：回复、审批、催办、撰写、核对、跟进、同步、确认。",
             "object_hint 只写该事项的核心对象或主题。",
+            (
+                "retention_reason 必须从以下枚举选择：deliverable_updated、decision_made、"
+                "issue_or_risk_found、follow_up_assigned、external_business_progress、substantive_approval。"
+            ),
+            "retention_detail 用一句话说明该事件为什么值得长期沉淀，必须包含输入中真实出现的具体对象、结论、问题、待办或结果。",
+            "普通约时间、确认开会、互通信息、泛泛完成审核/审批但没有具体对象和结论的内容，不要输出 candidate_event。",
             "如果窗口里有多个动作，就拆开。",
             "动作类型比共享名词更重要。",
             "同步/通知 与 核对/校验/执行/跟进，通常不是同一事件。",
@@ -244,6 +267,8 @@ def build_anchor_analysis_prompt(
                 "content": "string",
                 "action_label": "string",
                 "object_hint": "string",
+                "retention_reason": "deliverable_updated | decision_made | issue_or_risk_found | follow_up_assigned | external_business_progress | substantive_approval",
+                "retention_detail": "string",
                 "source_message_ids": ["message_id"],
             },
             "context_requests_item": {
@@ -286,6 +311,12 @@ def build_anchor_batch_analysis_prompt(
             "每个 candidate_event 只表示一个主要动作。",
             "action_label 只写主要动作标签，例如：回复、审批、催办、撰写、核对、跟进、同步、确认。",
             "object_hint 只写该事项的核心对象或主题。",
+            (
+                "retention_reason 必须从以下枚举选择：deliverable_updated、decision_made、"
+                "issue_or_risk_found、follow_up_assigned、external_business_progress、substantive_approval。"
+            ),
+            "retention_detail 用一句话说明该事件为什么值得长期沉淀，必须包含输入中真实出现的具体对象、结论、问题、待办或结果。",
+            "普通约时间、确认开会、互通信息、泛泛完成审核/审批但没有具体对象和结论的内容，不要输出 candidate_event。",
             "如果同一窗口有多个动作，就拆开。",
             "动作类型比共享名词更重要。",
             "同步/通知 与 核对/校验/执行/跟进，通常不是同一事件。",
@@ -311,6 +342,8 @@ def build_anchor_batch_analysis_prompt(
                             "content": "string",
                             "action_label": "string",
                             "object_hint": "string",
+                            "retention_reason": "deliverable_updated | decision_made | issue_or_risk_found | follow_up_assigned | external_business_progress | substantive_approval",
+                            "retention_detail": "string",
                             "source_message_ids": ["message_id"],
                         },
                         "context_requests_item": {
@@ -369,6 +402,12 @@ def build_anchor_expansion_prompt(
             "Use previous_analysis as prior state, but revise it when new context changes the conclusion.",
             "candidate_events should represent the latest consolidated judgment for this anchor_unit.",
             "Each candidate_event must still represent exactly one primary action or work thread.",
+            "Each candidate_event must include object_hint, retention_reason, and retention_detail.",
+            (
+                "retention_reason must be one of deliverable_updated, decision_made, issue_or_risk_found, "
+                "follow_up_assigned, external_business_progress, or substantive_approval."
+            ),
+            "Do not output ordinary scheduling, meeting-time confirmation, information catch-up, or generic approval/review completion without a concrete object and conclusion.",
             (
                 "If new context reveals that one previous candidate_event actually mixed multiple actions, split it into "
                 "multiple candidate_events."
@@ -406,6 +445,10 @@ def build_anchor_expansion_prompt(
                 {
                     "topic": "string",
                     "content": "string",
+                    "action_label": "string",
+                    "object_hint": "string",
+                    "retention_reason": "deliverable_updated | decision_made | issue_or_risk_found | follow_up_assigned | external_business_progress | substantive_approval",
+                    "retention_detail": "string",
                     "source_message_ids": ["message_id"],
                 }
             ],
@@ -546,6 +589,9 @@ def _serialize_collected_source_event_for_prompt(
         "event_id": source_event.event.event_id,
         "title": source_event.event.title,
         "content": source_event.event.content,
+        "object_hint": source_event.event.object_hint,
+        "retention_reason": source_event.event.retention_reason,
+        "retention_detail": source_event.event.retention_detail,
         "file_links": [
             {
                 "title": item.title,

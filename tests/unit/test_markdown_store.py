@@ -122,6 +122,9 @@ def test_markdown_store_roundtrip_keeps_collected_source_fields(tmp_path: Path) 
                 content="内容",
                 source_people=["张三", "李四"],
                 source_event_ids=["evt-a", "evt-b"],
+                object_hint="客户合同",
+                retention_reason="substantive_approval",
+                retention_detail="反馈客户合同付款条款问题。",
                 file_links=[],
             )
         ],
@@ -132,6 +135,9 @@ def test_markdown_store_roundtrip_keeps_collected_source_fields(tmp_path: Path) 
     assert loaded is not None
     assert loaded.events[0].source_people == ["张三", "李四"]
     assert loaded.events[0].source_event_ids == ["evt-a", "evt-b"]
+    assert loaded.events[0].object_hint == "客户合同"
+    assert loaded.events[0].retention_reason == "substantive_approval"
+    assert loaded.events[0].retention_detail == "反馈客户合同付款条款问题。"
 
 
 def test_markdown_store_preserves_event_order(tmp_path: Path) -> None:

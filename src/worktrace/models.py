@@ -417,6 +417,8 @@ class SourceBackedEventDraft:
     confidence: float
     action_label: str = ""
     object_hint: str = ""
+    retention_reason: str = ""
+    retention_detail: str = ""
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> SourceBackedEventDraft:
@@ -427,6 +429,8 @@ class SourceBackedEventDraft:
             content=str(data.get("content", "")),
             action_label=str(data.get("action_label", "")),
             object_hint=str(data.get("object_hint", "")),
+            retention_reason=str(data.get("retention_reason", "")),
+            retention_detail=str(data.get("retention_detail", "")),
             source_message_ids=_string_list(data.get("source_message_ids")),
             source_conversation_id=str(data.get("source_conversation_id", "")),
             source_slice_id=str(data.get("source_slice_id", "")),
@@ -441,6 +445,8 @@ class SourceBackedEventDraft:
             "content": self.content,
             "action_label": self.action_label,
             "object_hint": self.object_hint,
+            "retention_reason": self.retention_reason,
+            "retention_detail": self.retention_detail,
             "source_message_ids": list(self.source_message_ids),
             "source_conversation_id": self.source_conversation_id,
             "source_slice_id": self.source_slice_id,
@@ -600,6 +606,9 @@ class MergedEventDraft:
     content: str
     source_message_ids: list[str]
     source_conversation_ids: list[str]
+    object_hint: str = ""
+    retention_reason: str = ""
+    retention_detail: str = ""
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> MergedEventDraft:
@@ -609,6 +618,9 @@ class MergedEventDraft:
             content=str(data.get("content", "")),
             source_message_ids=_string_list(data.get("source_message_ids")),
             source_conversation_ids=_string_list(data.get("source_conversation_ids")),
+            object_hint=str(data.get("object_hint", "")),
+            retention_reason=str(data.get("retention_reason", "")),
+            retention_detail=str(data.get("retention_detail", "")),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -618,6 +630,9 @@ class MergedEventDraft:
             "content": self.content,
             "source_message_ids": list(self.source_message_ids),
             "source_conversation_ids": list(self.source_conversation_ids),
+            "object_hint": self.object_hint,
+            "retention_reason": self.retention_reason,
+            "retention_detail": self.retention_detail,
         }
 
 
@@ -669,6 +684,9 @@ class WorkEvent:
     file_links: list[EventFileLink] = field(default_factory=list)
     source_people: list[str] = field(default_factory=list)
     source_event_ids: list[str] = field(default_factory=list)
+    object_hint: str = ""
+    retention_reason: str = ""
+    retention_detail: str = ""
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> WorkEvent:
@@ -684,6 +702,9 @@ class WorkEvent:
             ],
             source_people=_string_list(data.get("source_people")),
             source_event_ids=_string_list(data.get("source_event_ids")),
+            object_hint=str(data.get("object_hint", "")),
+            retention_reason=str(data.get("retention_reason", "")),
+            retention_detail=str(data.get("retention_detail", "")),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -697,6 +718,9 @@ class WorkEvent:
             "file_links": [item.to_dict() for item in self.file_links],
             "source_people": list(self.source_people),
             "source_event_ids": list(self.source_event_ids),
+            "object_hint": self.object_hint,
+            "retention_reason": self.retention_reason,
+            "retention_detail": self.retention_detail,
         }
 
     @property
@@ -888,6 +912,9 @@ class CollectedMergeGroup:
     draft_ids: list[str]
     title: str
     content: str
+    object_hint: str = ""
+    retention_reason: str = ""
+    retention_detail: str = ""
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> CollectedMergeGroup:
@@ -896,6 +923,9 @@ class CollectedMergeGroup:
             draft_ids=_string_list(data.get("draft_ids")),
             title=str(data.get("title", data.get("topic", ""))),
             content=str(data.get("content", "")),
+            object_hint=str(data.get("object_hint", "")),
+            retention_reason=str(data.get("retention_reason", "")),
+            retention_detail=str(data.get("retention_detail", "")),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -904,6 +934,9 @@ class CollectedMergeGroup:
             "draft_ids": list(self.draft_ids),
             "title": self.title,
             "content": self.content,
+            "object_hint": self.object_hint,
+            "retention_reason": self.retention_reason,
+            "retention_detail": self.retention_detail,
         }
 
 

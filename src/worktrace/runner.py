@@ -26,6 +26,11 @@ from .pipeline.context_expansion import (
 from .pipeline.cross_conversation_merge import materialize_grouped_merged_drafts
 from .pipeline.event_merge import build_work_events
 from .pipeline.filtering import filter_messages
+from .pipeline.retention_filter import (
+    filter_retained_candidate_drafts,
+    filter_retained_merged_drafts,
+    filter_retained_work_events,
+)
 from .pipeline.sensitive_filter import (
     filter_excluded_candidate_drafts,
     filter_sensitive_merged_drafts,
@@ -166,6 +171,10 @@ class DailyTraceRunner:
                     filter_excluded_candidate_drafts(all_candidates, self.config)
                 )
                 warning_messages.extend(excluded_candidate_warnings)
+                all_candidates, retention_candidate_warnings = (
+                    filter_retained_candidate_drafts(all_candidates)
+                )
+                warning_messages.extend(retention_candidate_warnings)
 
                 if not all_candidates:
                     return self._finish_run(
@@ -260,6 +269,10 @@ class DailyTraceRunner:
                 self.config,
             )
             warning_messages.extend(sensitive_warnings)
+            merged_drafts, retention_merged_warnings = filter_retained_merged_drafts(
+                merged_drafts,
+            )
+            warning_messages.extend(retention_merged_warnings)
             event_build_started_at = perf_counter()
             events, merge_warnings = build_work_events(target_date, merged_drafts)
             events = _attach_event_file_links(
@@ -267,6 +280,8 @@ class DailyTraceRunner:
                 messages=filtered_messages,
                 content_resolver=self.dependencies.content_resolver,
             )
+            events, retention_event_warnings = filter_retained_work_events(events)
+            warning_messages.extend(retention_event_warnings)
             events = _sort_events_for_output(events, messages=filtered_messages)
             log_timing(
                 logger,
@@ -682,6 +697,11 @@ def _attach_event_file_links(
                 content=event.content,
                 source_message_ids=list(event.source_message_ids),
                 file_links=list(deduped.values()),
+                source_people=list(event.source_people),
+                source_event_ids=list(event.source_event_ids),
+                object_hint=event.object_hint,
+                retention_reason=event.retention_reason,
+                retention_detail=event.retention_detail,
             )
         )
 

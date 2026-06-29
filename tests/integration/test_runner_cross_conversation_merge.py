@@ -18,6 +18,34 @@ from src.worktrace.runner import DailyTraceRunner
 from src.worktrace.stores.markdown import MarkdownEventStore
 
 
+def _draft(
+    *,
+    draft_id: str,
+    topic: str,
+    content: str,
+    source_message_ids: list[str],
+    source_conversation_id: str,
+    source_slice_id: str,
+    object_hint: str,
+    retention_reason: str = "decision_made",
+    retention_detail: str,
+) -> SourceBackedEventDraft:
+    return SourceBackedEventDraft(
+        draft_id=draft_id,
+        date="2026-06-22",
+        topic=topic,
+        content=content,
+        source_message_ids=source_message_ids,
+        source_conversation_id=source_conversation_id,
+        source_slice_id=source_slice_id,
+        confidence=0.9,
+        action_label="确认",
+        object_hint=object_hint,
+        retention_reason=retention_reason,
+        retention_detail=retention_detail,
+    )
+
+
 class MergeSource:
     def get_self_identity(self):
         return SelfIdentity(open_id="ou_self", display_name="Me", source="fake")
@@ -102,15 +130,15 @@ class MergeAnalyzer:
         if message_id == "om_1":
             return BatchAnalysisResult(
                 candidate_events=[
-                    SourceBackedEventDraft(
+                    _draft(
                         draft_id="d1",
-                        date="2026-06-22",
                         topic="发布排期确认",
                         content="同步 release-123",
                         source_message_ids=["om_1"],
                         source_conversation_id="oc_1",
                         source_slice_id=batch_input.slices[0].slice_id,
-                        confidence=0.9,
+                        object_hint="release-123排期",
+                        retention_detail="同步 release-123 的排期确认信息。",
                     )
                 ],
                 context_requests=[],
@@ -118,30 +146,31 @@ class MergeAnalyzer:
         if message_id == "om_2":
             return BatchAnalysisResult(
                 candidate_events=[
-                    SourceBackedEventDraft(
+                    _draft(
                         draft_id="d2",
-                        date="2026-06-22",
                         topic="发布排期确认",
                         content="继续确认 release-123，已确认",
                         source_message_ids=["om_2"],
                         source_conversation_id="oc_2",
                         source_slice_id=batch_input.slices[0].slice_id,
-                        confidence=0.9,
+                        object_hint="release-123排期",
+                        retention_detail="继续确认 release-123 排期并形成已确认结果。",
                     )
                 ],
                 context_requests=[],
             )
         return BatchAnalysisResult(
             candidate_events=[
-                SourceBackedEventDraft(
+                _draft(
                     draft_id="d3",
-                    date="2026-06-22",
                     topic="合同沟通",
                     content="跟进 contract-888",
                     source_message_ids=["om_3"],
                     source_conversation_id="oc_3",
                     source_slice_id=batch_input.slices[0].slice_id,
-                    confidence=0.9,
+                    object_hint="contract-888合同",
+                    retention_reason="external_business_progress",
+                    retention_detail="跟进 contract-888 合同事项。",
                 )
             ],
             context_requests=[],
