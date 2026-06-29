@@ -5,7 +5,7 @@ import json
 from src.worktrace.cli import main
 from src.worktrace.config import RuntimeConfig
 from src.worktrace.constants import DailyRunStatus
-from src.worktrace.models import DailyRunResult
+from src.worktrace.models import CollectedMergeRunResult, DailyRunResult
 
 
 def test_cli_returns_structured_json_for_invalid_input(capsys) -> None:
@@ -178,3 +178,35 @@ def test_cli_debug_output_preserves_existing_debug_directory(capsys, tmp_path) -
     assert payload["status"] == DailyRunStatus.SUCCESS.value
     assert captured_config is not None
     assert captured_config.conversation_debug_root == existing_debug_root
+
+
+def test_cli_merge_collected_returns_structured_json(capsys, tmp_path) -> None:
+    def fake_run(*, target_date, config):
+        return CollectedMergeRunResult(
+            status=DailyRunStatus.SUCCESS.value,
+            target_date=target_date,
+            input_dir=str(tmp_path / "merge_inbox/2026/06/29"),
+            output_path=str(tmp_path / "merge_inbox/2026/06/29/_merged.md"),
+            source_file_count=2,
+            source_event_count=3,
+            merged_event_count=2,
+            skipped_file_count=0,
+            warning_messages=[],
+            upload_status="skipped",
+            upload_target="",
+            upload_error="",
+        )
+
+    exit_code = main(
+        ["merge-collected", "--date", "2026-06-29"],
+        config=RuntimeConfig(data_root=tmp_path / "data"),
+        collected_run_func=fake_run,
+    )
+
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+
+    assert exit_code == 0
+    assert payload["target_date"] == "2026-06-29"
+    assert payload["source_file_count"] == 2
+    assert payload["upload_status"] == "skipped"

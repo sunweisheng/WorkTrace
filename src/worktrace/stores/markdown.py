@@ -78,12 +78,14 @@ class MarkdownEventStore(EventStore):
 
     def _render_event(self, event: WorkEvent) -> str:
         link_lines = self._render_file_links(event.file_links)
+        source_lines = self._render_source_lines(event)
         return (
             f'<!-- worktrace:event:start event_id="{event.event_id}" -->\n'
             f"### {event.title}\n\n"
             f"- 日期: {event.date}\n"
             f"- 事件标题: {event.title}\n"
             f"- 事件内容: {event.content}\n"
+            f"{source_lines}"
             f"- 涉及文件链接:\n{link_lines}\n"
             "<!-- worktrace:event:end -->"
         ).strip()
@@ -130,6 +132,12 @@ class MarkdownEventStore(EventStore):
             title = self._extract_value(block, "- 事件标题: ")
             content = self._extract_value(block, "- 事件内容: ")
             event_date = self._extract_value(block, "- 日期: ")
+            source_people = self._parse_source_values(
+                self._extract_value(block, "- 来源人员: ")
+            )
+            source_event_ids = self._parse_source_values(
+                self._extract_value(block, "- 来源事件 ID: ")
+            )
             file_links = self._extract_file_links(block)
             events.append(
                 WorkEvent(
@@ -138,6 +146,8 @@ class MarkdownEventStore(EventStore):
                     title=title,
                     content=content,
                     file_links=file_links,
+                    source_people=source_people,
+                    source_event_ids=source_event_ids,
                 )
             )
             cursor = block_end + len(end_marker)
@@ -149,6 +159,26 @@ class MarkdownEventStore(EventStore):
             if line.startswith(prefix):
                 return line[len(prefix) :].strip()
         return ""
+
+    def _render_source_values(self, values: list[str]) -> str:
+        cleaned = [value.strip() for value in values if value.strip()]
+        if not cleaned:
+            return "无"
+        return "、".join(cleaned)
+
+    def _render_source_lines(self, event: WorkEvent) -> str:
+        if not event.source_people and not event.source_event_ids:
+            return ""
+        return (
+            f"- 来源人员: {self._render_source_values(event.source_people)}\n"
+            f"- 来源事件 ID: {self._render_source_values(event.source_event_ids)}\n"
+        )
+
+    def _parse_source_values(self, value: str) -> list[str]:
+        stripped = value.strip()
+        if not stripped or stripped == "无":
+            return []
+        return [item.strip() for item in stripped.split("、") if item.strip()]
 
     def _extract_file_links(self, block: str) -> list[EventFileLink]:
         lines = block.splitlines()

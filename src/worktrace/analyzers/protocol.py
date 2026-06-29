@@ -5,6 +5,7 @@ from ..models import (
     AnchorAnalysisResult,
     BatchAnalysisResult,
     BatchAnchorAnalysisResult,
+    CollectedMergeResult,
     CrossConversationGroupResult,
 )
 from ..pipeline.validation import expect_json_object
@@ -40,3 +41,11 @@ def parse_merge_payload(payload: object) -> CrossConversationGroupResult:
         return CrossConversationGroupResult.from_dict(data)
     except (KeyError, TypeError, ValueError) as exc:
         raise AnalyzerProtocolError("Invalid cross-conversation merge payload.") from exc
+
+
+def parse_collected_merge_payload(payload: object) -> CollectedMergeResult:
+    data = expect_json_object(payload, "Collected merge result")
+    try:
+        return CollectedMergeResult.from_dict(data)
+    except (KeyError, TypeError, ValueError) as exc:
+        raise AnalyzerProtocolError("Invalid collected merge payload.") from exc

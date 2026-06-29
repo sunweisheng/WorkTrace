@@ -11,6 +11,7 @@ from ..models import (
     AnchorAnalysisResult,
     AnchorUnit,
     AttachmentTextBlock,
+    CollectedSourceEvent,
     ConversationSlice,
     ContextRequest,
     NormalizedMessage,
@@ -127,6 +128,66 @@ def build_merge_prompt(target_date: str, candidates: list[SourceBackedEventDraft
                 "content": candidate.content,
             }
             for candidate in candidates
+        ],
+    }
+    return dump_json(protocol, pretty=True)
+
+
+def build_collected_merge_prompt(
+    target_date: str,
+    events: list[CollectedSourceEvent],
+    deterministic_groups: list[list[str]],
+    *,
+    config: RuntimeConfig | None = None,
+) -> str:
+    runtime_config = config or RuntimeConfig()
+    deterministic_ids = {
+        draft_id for group in deterministic_groups for draft_id in group
+    }
+    protocol = {
+        "instruction": (
+            "面向管理人员合并多人 WorkTrace 日报事件。"
+            "只返回一个 JSON 对象，包含 groups。"
+            "请给我简洁的答案，不要推理，跳过思考步骤。"
+            "直接作答，不要展示你的推理过程。"
+        ),
+        "rules": [
+            "每个输出 group 表示一个真实工作事件。",
+            "deterministic_groups 是 Python 已按相同原始 event_id 确定的合并组，必须原样保留，不要拆分，也不要把组内 draft_id 改到别的组。",
+            "remaining_events 中只有明显属于同一真实事件的事项才合并；拿不准就分开。",
+            "每个输入 draft_id 必须且只能出现在一个 group 里。",
+            "每个 group 必须返回管理人员可读的 title 和 content。",
+            "title 要短，content 要综合保留来源中的关键事实、进展、结果和未决事项。",
+            "不要编造输入中没有的信息，不要丢失关键事实。",
+            _build_confidential_rule(runtime_config),
+            _build_non_work_sensitive_rule(runtime_config),
+            "涉及上述敏感事项时，不要输出对应 group。",
+            "不要输出思考过程、推理摘要、分析说明或任何解释性文字。",
+        ],
+        "required_output_schema": {
+            "groups": [
+                {
+                    "group_id": "string",
+                    "draft_ids": ["draft_id"],
+                    "title": "string",
+                    "content": "string",
+                }
+            ]
+        },
+        "target_date": target_date,
+        "deterministic_groups": deterministic_groups,
+        "remaining_events": [
+            _serialize_collected_source_event_for_prompt(item)
+            for item in events
+            if item.draft_id not in deterministic_ids
+        ],
+        "deterministic_group_events": [
+            [
+                _serialize_collected_source_event_for_prompt(item)
+                for item in events
+                if item.draft_id in set(group)
+            ]
+            for group in deterministic_groups
         ],
     }
     return dump_json(protocol, pretty=True)
@@ -472,6 +533,26 @@ def serialize_cross_merge_candidate_for_prompt(
         "id": candidate.draft_id,
         "t": candidate.topic,
         "c": candidate.content,
+    }
+
+
+def _serialize_collected_source_event_for_prompt(
+    source_event: CollectedSourceEvent,
+) -> dict[str, object]:
+    return {
+        "draft_id": source_event.draft_id,
+        "person": source_event.person_name,
+        "source_file": source_event.source_file,
+        "event_id": source_event.event.event_id,
+        "title": source_event.event.title,
+        "content": source_event.event.content,
+        "file_links": [
+            {
+                "title": item.title,
+                "url": item.url,
+            }
+            for item in source_event.event.file_links
+        ],
     }
 
 

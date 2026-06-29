@@ -2,6 +2,8 @@
 
 这份说明是写给第一次使用 WorkTrace 的员工看的，默认你不是开发者，也不需要先懂代码。
 
+本文只介绍个人日报流程：从你自己的飞书聊天中生成当天工作事件 Markdown。管理人员合并多人已生成 Markdown 的团队汇总流程，见 [collected-people-merge-plan.md](/Users/sunweisheng/Documents/GitHub/WorkTrace/docs/collected-people-merge-plan.md)。
+
 如果你只关心三件事，可以先看这三句：
 
 1. WorkTrace 的目标是帮你整理“和你自己直接相关的工作事件”

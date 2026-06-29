@@ -14,7 +14,7 @@ from .config import (
 from .constants import DailyRunStatus
 from .errors import InvalidInputError
 from .logging_utils import configure_logging
-from .models import DailyRunResult, PreflightResult
+from .models import CollectedMergeRunResult, DailyRunResult, PreflightResult
 from .preflight import run_preflight_checks
 from .runner import run_daily_trace
 from .utils.json_io import dump_json
@@ -22,6 +22,9 @@ from .utils.json_io import dump_json
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(prog="python -m src.worktrace.cli", add_help=True)
+    subparsers = parser.add_subparsers(dest="command")
+    merge_parser = subparsers.add_parser("merge-collected")
+    merge_parser.add_argument("--date", dest="target_date", required=True)
     parser.add_argument("--date", dest="target_date", required=False)
     parser.add_argument("--preflight", dest="preflight_only", action="store_true")
     parser.add_argument("--debug-output", dest="debug_output", action="store_true")
@@ -90,6 +93,16 @@ def run_target_day(
     return run_daily_trace(target_date, config)
 
 
+def run_collected_merge(
+    *,
+    target_date: str,
+    config: RuntimeConfig,
+):
+    from .collected_merge import CollectedMergeRunner
+
+    return CollectedMergeRunner(config=config).run(target_date)
+
+
 def apply_cli_overrides(config: RuntimeConfig, args: argparse.Namespace) -> RuntimeConfig:
     if not args.debug_output or config.conversation_debug_root is not None:
         return config
@@ -105,13 +118,26 @@ def execute(
     config: RuntimeConfig = DEFAULT_CONFIG,
     preflight_func=run_preflight_checks,
     run_func=run_target_day,
-) -> tuple[DailyRunResult | PreflightResult, int]:
+    collected_run_func=run_collected_merge,
+) -> tuple[DailyRunResult | PreflightResult | CollectedMergeRunResult, int]:
     logger = configure_logging()
 
     args = parse_args(argv)
     file_config = load_runtime_config_overrides(config, cwd=Path.cwd())
     blacklist_config = load_conversation_blacklist_overrides(file_config, cwd=Path.cwd())
     effective_config = apply_cli_overrides(blacklist_config, args)
+    if args.command == "merge-collected":
+        try:
+            target_date = validate_target_date(args.target_date)
+        except InvalidInputError as exc:
+            return build_invalid_input_result(args.target_date, str(exc)), 2
+        result = collected_run_func(target_date=target_date, config=replace(effective_config))
+        if result.status == DailyRunStatus.INVALID_INPUT.value:
+            return result, 2
+        if result.status == DailyRunStatus.FAILED.value:
+            return result, 1
+        return result, 0
+
     if args.preflight_only:
         report = preflight_func(effective_config, cwd=Path.cwd())
         result = PreflightResult(
@@ -155,12 +181,14 @@ def main(
     config: RuntimeConfig = DEFAULT_CONFIG,
     preflight_func=run_preflight_checks,
     run_func=run_target_day,
+    collected_run_func=run_collected_merge,
 ) -> int:
     result, exit_code = execute(
         argv,
         config=config,
         preflight_func=preflight_func,
         run_func=run_func,
+        collected_run_func=collected_run_func,
     )
     sys.stdout.write(dump_json(result.to_dict(), pretty=True))
     sys.stdout.write("\n")

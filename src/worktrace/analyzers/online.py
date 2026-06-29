@@ -21,20 +21,29 @@ from ..models import (
     AnchorUnit,
     BatchAnalysisResult,
     BatchAnchorAnalysisResult,
+    CollectedMergeResult,
+    CollectedSourceEvent,
     CrossConversationGroupResult,
     SourceBackedEventDraft,
 )
 from ..utils.json_io import parse_json_value_from_text
 from .base import Analyzer
-from .output_schemas import anchor_batch_output_schema, batch_output_schema, merge_output_schema
+from .output_schemas import (
+    anchor_batch_output_schema,
+    batch_output_schema,
+    collected_merge_output_schema,
+    merge_output_schema,
+)
 from .prompts import (
     build_anchor_batch_analysis_prompt,
     build_batch_analysis_prompt,
+    build_collected_merge_prompt,
     build_merge_prompt,
 )
 from .protocol import (
     parse_anchor_batch_analysis_payload,
     parse_batch_analysis_payload,
+    parse_collected_merge_payload,
     parse_merge_payload,
 )
 
@@ -306,6 +315,24 @@ class OnlineLLMAnalyzer(Analyzer):
         )
         self.last_merge_payload = payload
         return parse_merge_payload(payload)
+
+    def merge_collected_events(
+        self,
+        target_date: str,
+        events: list[CollectedSourceEvent],
+        deterministic_groups: list[list[str]],
+    ) -> CollectedMergeResult:
+        payload = self._invoke_online(
+            build_collected_merge_prompt(
+                target_date,
+                events,
+                deterministic_groups,
+                config=self.config,
+            ),
+            output_schema=collected_merge_output_schema(),
+        )
+        self.last_collected_merge_payload = payload
+        return parse_collected_merge_payload(payload)
 
     def _invoke_online(
         self,

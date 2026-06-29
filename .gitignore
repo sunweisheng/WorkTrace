@@ -156,6 +156,10 @@ venv/
 ENV/
 env.bak/
 venv.bak/
+config/merge_delivery.local.json
+merge_inbox/**/*
+!merge_inbox/
+!merge_inbox/README.md
 
 # Spyder project settings
 .spyderproject

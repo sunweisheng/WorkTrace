@@ -667,6 +667,8 @@ class WorkEvent:
     content: str
     source_message_ids: list[str] = field(default_factory=list)
     file_links: list[EventFileLink] = field(default_factory=list)
+    source_people: list[str] = field(default_factory=list)
+    source_event_ids: list[str] = field(default_factory=list)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> WorkEvent:
@@ -680,6 +682,8 @@ class WorkEvent:
                 EventFileLink.from_dict(item)
                 for item in _dict_list(data.get("file_links"))
             ],
+            source_people=_string_list(data.get("source_people")),
+            source_event_ids=_string_list(data.get("source_event_ids")),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -691,6 +695,8 @@ class WorkEvent:
             "content": self.content,
             "source_message_ids": list(self.source_message_ids),
             "file_links": [item.to_dict() for item in self.file_links],
+            "source_people": list(self.source_people),
+            "source_event_ids": list(self.source_event_ids),
         }
 
     @property
@@ -857,6 +863,117 @@ class DailyRunResult:
             "self_delivery_status": self.self_delivery_status,
             "self_delivery_target": self.self_delivery_target,
             "self_delivery_error": self.self_delivery_error,
+        }
+
+
+@dataclass(frozen=True)
+class CollectedSourceEvent:
+    draft_id: str
+    person_name: str
+    source_file: str
+    event: WorkEvent
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "draft_id": self.draft_id,
+            "person_name": self.person_name,
+            "source_file": self.source_file,
+            "event": self.event.to_dict(),
+        }
+
+
+@dataclass(frozen=True)
+class CollectedMergeGroup:
+    group_id: str
+    draft_ids: list[str]
+    title: str
+    content: str
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> CollectedMergeGroup:
+        return cls(
+            group_id=str(data.get("group_id", "")),
+            draft_ids=_string_list(data.get("draft_ids")),
+            title=str(data.get("title", data.get("topic", ""))),
+            content=str(data.get("content", "")),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "group_id": self.group_id,
+            "draft_ids": list(self.draft_ids),
+            "title": self.title,
+            "content": self.content,
+        }
+
+
+@dataclass(frozen=True)
+class CollectedMergeResult:
+    groups: list[CollectedMergeGroup] = field(default_factory=list)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> CollectedMergeResult:
+        return cls(
+            groups=[
+                CollectedMergeGroup.from_dict(item)
+                for item in _dict_list(data.get("groups"))
+            ]
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "groups": [item.to_dict() for item in self.groups],
+        }
+
+
+@dataclass(frozen=True)
+class CollectedMergeRunResult:
+    status: str
+    target_date: str
+    input_dir: str
+    output_path: str | None
+    source_file_count: int
+    source_event_count: int
+    merged_event_count: int
+    skipped_file_count: int
+    warning_messages: list[str] = field(default_factory=list)
+    upload_status: str = ""
+    upload_target: str = ""
+    upload_error: str = ""
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> CollectedMergeRunResult:
+        return cls(
+            status=str(data["status"]),
+            target_date=str(data["target_date"]),
+            input_dir=str(data["input_dir"]),
+            output_path=(
+                None if data.get("output_path") is None else str(data["output_path"])
+            ),
+            source_file_count=int(data.get("source_file_count", 0)),
+            source_event_count=int(data.get("source_event_count", 0)),
+            merged_event_count=int(data.get("merged_event_count", 0)),
+            skipped_file_count=int(data.get("skipped_file_count", 0)),
+            warning_messages=_string_list(data.get("warning_messages")),
+            upload_status=str(data.get("upload_status", "")),
+            upload_target=str(data.get("upload_target", "")),
+            upload_error=str(data.get("upload_error", "")),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "status": self.status,
+            "target_date": self.target_date,
+            "input_dir": self.input_dir,
+            "output_path": self.output_path,
+            "source_file_count": self.source_file_count,
+            "source_event_count": self.source_event_count,
+            "merged_event_count": self.merged_event_count,
+            "skipped_file_count": self.skipped_file_count,
+            "warning_messages": list(self.warning_messages),
+            "upload_status": self.upload_status,
+            "upload_target": self.upload_target,
+            "upload_error": self.upload_error,
         }
 
 

@@ -149,3 +149,30 @@ def merge_output_schema() -> dict[str, object]:
         "required": ["groups"],
         "additionalProperties": True,
     }
+
+
+def collected_merge_output_schema() -> dict[str, object]:
+    return {
+        "type": "object",
+        "properties": {
+            "groups": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "group_id": {"type": "string"},
+                        "draft_ids": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                        },
+                        "title": {"type": "string"},
+                        "content": {"type": "string"},
+                    },
+                    "required": ["group_id", "draft_ids", "title", "content"],
+                    "additionalProperties": False,
+                },
+            },
+        },
+        "required": ["groups"],
+        "additionalProperties": False,
+    }

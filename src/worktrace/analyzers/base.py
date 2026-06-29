@@ -7,6 +7,8 @@ from ..models import (
     AnchorUnit,
     BatchAnalysisResult,
     BatchAnchorAnalysisResult,
+    CollectedMergeResult,
+    CollectedSourceEvent,
     CrossConversationGroupResult,
     SourceBackedEventDraft,
 )
@@ -47,4 +49,13 @@ class Analyzer(ABC):
         target_date: str,
         candidates: list[SourceBackedEventDraft],
     ) -> CrossConversationGroupResult:
+        raise NotImplementedError
+
+    @abstractmethod
+    def merge_collected_events(
+        self,
+        target_date: str,
+        events: list[CollectedSourceEvent],
+        deterministic_groups: list[list[str]],
+    ) -> CollectedMergeResult:
         raise NotImplementedError
