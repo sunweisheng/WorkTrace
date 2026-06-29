@@ -18,6 +18,7 @@ DEFAULT_LLM_SLEEP_MAX_ENV_VAR = "WORKTRACE_LLM_SLEEP_MAX_SECONDS"
 DEFAULT_LLM_REASONING_EFFORT_ENV_VAR = "WORKTRACE_LLM_REASONING_EFFORT"
 DEFAULT_LLM_ENV_FILE_NAME = ".env"
 DEFAULT_EVENT_RULES_FILE_NAME = "config/event_rules.json"
+DEFAULT_CONVERSATION_BLACKLIST_FILE_NAME = "config/conversation_blacklist.json"
 
 
 @dataclass(frozen=True)
@@ -235,25 +236,61 @@ def load_runtime_config_overrides(
     )
 
 
+def load_conversation_blacklist_overrides(
+    config: RuntimeConfig,
+    *,
+    cwd: Path | None = None,
+) -> RuntimeConfig:
+    blacklist_path = (cwd or Path.cwd()) / config.conversation_blacklist_file_name
+    try:
+        payload = json.loads(blacklist_path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return config
+    except json.JSONDecodeError as exc:
+        raise ValueError(
+            f"Invalid conversation blacklist config: {blacklist_path} is not valid JSON."
+        ) from exc
+
+    if not isinstance(payload, dict):
+        raise ValueError(
+            f"Invalid conversation blacklist config: {blacklist_path} must contain a JSON object."
+        )
+
+    excluded_conversation_ids = _read_string_list(
+        payload,
+        key="excluded_conversation_ids",
+        fallback=config.excluded_conversation_ids,
+        file_path=blacklist_path,
+        error_prefix="Invalid conversation blacklist config",
+    )
+
+    deduped_ids = tuple(dict.fromkeys(excluded_conversation_ids))
+    if deduped_ids == config.excluded_conversation_ids:
+        return config
+
+    return replace(config, excluded_conversation_ids=deduped_ids)
+
+
 def _read_string_list(
     payload: dict[str, object],
     *,
     key: str,
     fallback: tuple[str, ...],
     file_path: Path,
+    error_prefix: str = "Invalid event rules config",
 ) -> tuple[str, ...]:
     raw_value = payload.get(key)
     if raw_value is None:
         return fallback
     if not isinstance(raw_value, list):
         raise ValueError(
-            f"Invalid event rules config: {file_path} field `{key}` must be a list."
+            f"{error_prefix}: {file_path} field `{key}` must be a list."
         )
     values: list[str] = []
     for item in raw_value:
         if not isinstance(item, str):
             raise ValueError(
-                f"Invalid event rules config: {file_path} field `{key}` must contain only strings."
+                f"{error_prefix}: {file_path} field `{key}` must contain only strings."
             )
         cleaned = item.strip()
         if cleaned:
@@ -312,6 +349,7 @@ class RuntimeConfig:
         "git pull",
         "聆听大老板电话",
     )
+    excluded_conversation_ids: tuple[str, ...] = ()
     data_root: Path = field(default_factory=lambda: Path("data"))
     cache_root: Path | None = None
     conversation_debug_root: Path | None = None
@@ -327,6 +365,7 @@ class RuntimeConfig:
     llm_reasoning_effort_env_var: str = DEFAULT_LLM_REASONING_EFFORT_ENV_VAR
     llm_env_file_name: str = DEFAULT_LLM_ENV_FILE_NAME
     event_rules_file_name: str = DEFAULT_EVENT_RULES_FILE_NAME
+    conversation_blacklist_file_name: str = DEFAULT_CONVERSATION_BLACKLIST_FILE_NAME
     llm_stream_enabled: bool = False
     llm_tls_verify: bool = False
     llm_sleep_min_seconds: float = 1.0

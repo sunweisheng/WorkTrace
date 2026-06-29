@@ -5,7 +5,12 @@ import sys
 from dataclasses import replace
 from pathlib import Path
 
-from .config import DEFAULT_CONFIG, RuntimeConfig, load_runtime_config_overrides
+from .config import (
+    DEFAULT_CONFIG,
+    RuntimeConfig,
+    load_conversation_blacklist_overrides,
+    load_runtime_config_overrides,
+)
 from .constants import DailyRunStatus
 from .errors import InvalidInputError
 from .logging_utils import configure_logging
@@ -105,7 +110,8 @@ def execute(
 
     args = parse_args(argv)
     file_config = load_runtime_config_overrides(config, cwd=Path.cwd())
-    effective_config = apply_cli_overrides(file_config, args)
+    blacklist_config = load_conversation_blacklist_overrides(file_config, cwd=Path.cwd())
+    effective_config = apply_cli_overrides(blacklist_config, args)
     if args.preflight_only:
         report = preflight_func(effective_config, cwd=Path.cwd())
         result = PreflightResult(

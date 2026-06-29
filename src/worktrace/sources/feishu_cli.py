@@ -58,6 +58,7 @@ class FeishuCliChatSource(ChatSource):
         self_identity: SelfIdentity,
     ) -> list[ConversationRef]:
         started_at = perf_counter()
+        excluded_conversation_ids = set(self.config.excluded_conversation_ids)
         start, end = day_bounds(target_date, self.config.timezone)
         payload = self._run_json(
             (
@@ -83,6 +84,8 @@ class FeishuCliChatSource(ChatSource):
                 continue
             if not is_same_target_date(message.send_time, target_date, self.config.timezone):
                 continue
+            if message.conversation_id in excluded_conversation_ids:
+                continue
             conversations.setdefault(
                 message.conversation_id,
                 ConversationRef(
@@ -107,11 +110,17 @@ class FeishuCliChatSource(ChatSource):
         conversation_ids: list[str],
     ) -> list[NormalizedMessage]:
         started_at = perf_counter()
+        excluded_conversation_ids = set(self.config.excluded_conversation_ids)
+        filtered_conversation_ids = [
+            conversation_id
+            for conversation_id in conversation_ids
+            if conversation_id not in excluded_conversation_ids
+        ]
         start, end = day_bounds(target_date, self.config.timezone)
         messages: list[NormalizedMessage] = []
         page_count = 0
 
-        for conversation_id in conversation_ids:
+        for conversation_id in filtered_conversation_ids:
             page_token = ""
             while True:
                 page_count += 1
@@ -155,7 +164,7 @@ class FeishuCliChatSource(ChatSource):
             "chat_source.fetch_conversation_messages",
             started_at,
             target_date=target_date,
-            conversation_count=len(conversation_ids),
+            conversation_count=len(filtered_conversation_ids),
             page_count=page_count,
             message_count=len(results),
         )

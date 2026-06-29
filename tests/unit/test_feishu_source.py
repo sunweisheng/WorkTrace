@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import json
+from types import SimpleNamespace
+
 from src.worktrace.config import RuntimeConfig
+from src.worktrace.models import SelfIdentity
 from src.worktrace.sources.feishu_cli import FeishuCliChatSource
 
 
@@ -88,3 +92,77 @@ def test_parse_content_prefers_named_link_when_url_repeats() -> None:
             "link_type": "feishu_doc",
         }
     ]
+
+
+def test_list_target_conversations_skips_blacklisted_conversation_ids() -> None:
+    def fake_runner(args):
+        assert args[2] == "+messages-search"
+        payload = {
+            "items": [
+                {
+                    "chat_id": "oc_blocked",
+                    "chat_name": "黑名单会话",
+                    "message_id": "om_1",
+                    "sender_open_id": "ou_self",
+                    "send_time": "2026-06-29T09:00:00+08:00",
+                    "text": "同步一下",
+                },
+                {
+                    "chat_id": "oc_allowed",
+                    "chat_name": "正常会话",
+                    "message_id": "om_2",
+                    "sender_open_id": "ou_self",
+                    "send_time": "2026-06-29T10:00:00+08:00",
+                    "text": "继续推进",
+                },
+            ]
+        }
+        return SimpleNamespace(returncode=0, stdout=json.dumps(payload), stderr="")
+
+    source = FeishuCliChatSource(
+        config=RuntimeConfig(excluded_conversation_ids=("oc_blocked",)),
+        command_runner=fake_runner,
+    )
+
+    results = source.list_target_conversations(
+        "2026-06-29",
+        SelfIdentity(open_id="ou_self", display_name="self", source="test"),
+    )
+
+    assert [item.conversation_id for item in results] == ["oc_allowed"]
+
+
+def test_fetch_conversation_messages_skips_blacklisted_conversation_ids() -> None:
+    calls: list[tuple[str, ...]] = []
+
+    def fake_runner(args):
+        calls.append(tuple(args))
+        chat_id = args[args.index("--chat-id") + 1]
+        payload = {
+            "items": [
+                {
+                    "chat_id": chat_id,
+                    "chat_name": f"name-{chat_id}",
+                    "message_id": f"om-{chat_id}",
+                    "sender_open_id": "ou_self",
+                    "send_time": "2026-06-29T11:00:00+08:00",
+                    "text": "消息正文",
+                }
+            ]
+        }
+        return SimpleNamespace(returncode=0, stdout=json.dumps(payload), stderr="")
+
+    source = FeishuCliChatSource(
+        config=RuntimeConfig(excluded_conversation_ids=("oc_blocked",)),
+        command_runner=fake_runner,
+    )
+
+    results = source.fetch_conversation_messages(
+        "2026-06-29",
+        ["oc_blocked", "oc_allowed"],
+    )
+
+    assert [item.conversation_id for item in results] == ["oc_allowed"]
+    assert len(calls) == 1
+    assert "--chat-id" in calls[0]
+    assert calls[0][calls[0].index("--chat-id") + 1] == "oc_allowed"

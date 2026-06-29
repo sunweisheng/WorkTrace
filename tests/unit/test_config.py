@@ -6,6 +6,7 @@ import pytest
 
 from src.worktrace.config import (
     RuntimeConfig,
+    load_conversation_blacklist_overrides,
     load_runtime_config_overrides,
     load_online_llm_settings,
     parse_dotenv_lines,
@@ -168,6 +169,58 @@ def test_load_runtime_config_overrides_rejects_invalid_rule_file(tmp_path: Path)
         load_runtime_config_overrides(RuntimeConfig(), cwd=tmp_path)
 
     assert "event rules config" in str(exc_info.value)
+
+
+def test_load_conversation_blacklist_overrides_reads_ids_and_dedupes(tmp_path: Path) -> None:
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    (config_dir / "conversation_blacklist.json").write_text(
+        (
+            "{\n"
+            '  "excluded_conversation_ids": [" oc_1 ", "", "oc_2", "oc_1"]\n'
+            "}\n"
+        ),
+        encoding="utf-8",
+    )
+
+    config = load_conversation_blacklist_overrides(RuntimeConfig(), cwd=tmp_path)
+
+    assert config.excluded_conversation_ids == ("oc_1", "oc_2")
+
+
+def test_load_conversation_blacklist_overrides_uses_defaults_when_file_missing(
+    tmp_path: Path,
+) -> None:
+    config = load_conversation_blacklist_overrides(RuntimeConfig(), cwd=tmp_path)
+
+    assert config.excluded_conversation_ids == ()
+
+
+def test_load_conversation_blacklist_overrides_rejects_invalid_json(tmp_path: Path) -> None:
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    (config_dir / "conversation_blacklist.json").write_text("{bad", encoding="utf-8")
+
+    with pytest.raises(ValueError) as exc_info:
+        load_conversation_blacklist_overrides(RuntimeConfig(), cwd=tmp_path)
+
+    assert "conversation blacklist config" in str(exc_info.value)
+
+
+def test_load_conversation_blacklist_overrides_rejects_invalid_list_shape(
+    tmp_path: Path,
+) -> None:
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    (config_dir / "conversation_blacklist.json").write_text(
+        '{"excluded_conversation_ids":["oc_1", 2]}',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError) as exc_info:
+        load_conversation_blacklist_overrides(RuntimeConfig(), cwd=tmp_path)
+
+    assert "conversation blacklist config" in str(exc_info.value)
 
 
 def test_load_online_llm_settings_rejects_invalid_sleep_range(tmp_path: Path) -> None:

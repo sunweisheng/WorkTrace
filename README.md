@@ -225,6 +225,18 @@ WORKTRACE_LLM_SLEEP_MAX_SECONDS=2
 
 这两项都适合后续手动增删。这里建议只放“精确匹配、且确认应排除”的词，避免误伤正常工作事件。
 
+如果需要彻底排除某些会话，不让它们进入会话信息提取链路，请单独维护 [config/conversation_blacklist.json](/Users/sunweisheng/Documents/GitHub/WorkTrace/config/conversation_blacklist.json)：
+
+```json
+{
+  "excluded_conversation_ids": [
+    "oc_be07388984c344d1b2d68c4a92b74c81"
+  ]
+}
+```
+
+命中黑名单的会话会在“目标会话发现”阶段被直接跳过，不会继续进入消息拉取、会话切片、LLM 提炼和跨会话合并。
+
 环境变量会覆盖 `.env` 中的同名项，因此也可以在 CI 或个人 shell 中单独注入。
 
 如果缺少 `WORKTRACE_LLM_BASE_URL`、`WORKTRACE_LLM_MODEL` 或 `WORKTRACE_LLM_API_KEY`，当前 preflight 会直接失败，并明确要求用户先在本地补齐配置；未配置时不得继续运行 WorkTrace。
