@@ -61,3 +61,5 @@ def test_runner_empty_day_is_success(tmp_path: Path) -> None:
 
     assert result.status == DailyRunStatus.SUCCESS.value
     assert result.event_count == 0
+    assert result.output_path is not None
+    assert Path(result.output_path).name == "2026-06-22-Me.md"

@@ -11,6 +11,12 @@ def clean_text(value: str) -> str:
     return "\n".join(line.rstrip() for line in value.strip().splitlines()).strip()
 
 
+def sanitize_filename_component(value: str) -> str:
+    sanitized = re.sub(r'[\\/:*?"<>|\r\n]+', "_", value.strip())
+    sanitized = re.sub(r"\s+", "_", sanitized)
+    return sanitized.strip(" ._")
+
+
 def extract_urls(value: str) -> list[str]:
     return list(OrderedDict.fromkeys(URL_RE.findall(value or "")))
 

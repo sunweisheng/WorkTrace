@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import re
 import shutil
 import subprocess
 from dataclasses import dataclass
@@ -9,6 +8,7 @@ from typing import Any, Sequence
 
 from ..errors import DeliveryError
 from ..models import SelfIdentity
+from ..utils.text import sanitize_filename_component
 from .base import DeliveryChannel
 
 _DELIVERY_COPY_DIRNAME = ".self_delivery"
@@ -113,13 +113,10 @@ class FeishuCliSelfDelivery(DeliveryChannel):
         self_identity: SelfIdentity,
     ) -> str:
         date_part = markdown_path.stem.strip() or "worktrace"
-        display_name = self._sanitize_filename_component(self_identity.display_name)
+        display_name = sanitize_filename_component(self_identity.display_name)
         if not display_name:
-            display_name = self._sanitize_filename_component(self_identity.open_id) or "self"
+            display_name = sanitize_filename_component(self_identity.open_id) or "self"
+        if date_part.endswith(f"-{display_name}"):
+            return f"{date_part}{markdown_path.suffix or '.md'}"
         suffix = markdown_path.suffix or ".md"
         return f"{date_part}-{display_name}{suffix}"
-
-    def _sanitize_filename_component(self, value: str) -> str:
-        sanitized = re.sub(r'[\\/:*?"<>|\r\n]+', "_", value.strip())
-        sanitized = re.sub(r"\s+", "_", sanitized)
-        return sanitized.strip(" ._")

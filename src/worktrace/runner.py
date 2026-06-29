@@ -296,6 +296,7 @@ class DailyTraceRunner:
             write_result = self.dependencies.event_store.replace_day(
                 target_date,
                 events,
+                owner_display_name=self_identity.display_name,
             )
             log_timing(
                 logger,
@@ -359,6 +360,7 @@ class DailyTraceRunner:
         write_result = self.dependencies.event_store.replace_day(
             target_date,
             [],
+            owner_display_name=self_identity.display_name,
         )
         delivery_status, delivery_target, delivery_error = _deliver_markdown_to_self(
             self.dependencies.delivery_channel,

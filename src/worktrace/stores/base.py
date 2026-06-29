@@ -11,6 +11,8 @@ class EventStore(ABC):
         self,
         target_date: str,
         events: list[WorkEvent],
+        *,
+        owner_display_name: str = "",
     ) -> StoreWriteResult:
         raise NotImplementedError
 

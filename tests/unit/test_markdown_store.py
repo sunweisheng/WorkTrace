@@ -76,6 +76,41 @@ def test_markdown_store_renders_public_event_fields(tmp_path: Path) -> None:
     assert "  - 无" in content
 
 
+def test_markdown_store_uses_owner_display_name_in_filename(tmp_path: Path) -> None:
+    store = MarkdownEventStore(config=RuntimeConfig(data_root=tmp_path / "data"))
+
+    write_result = store.replace_day(
+        "2026-06-22",
+        [],
+        owner_display_name="孙 伟/盛",
+    )
+
+    assert Path(write_result.output_path).name == "2026-06-22-孙_伟_盛.md"
+
+
+def test_markdown_store_reads_owner_named_day_by_date(tmp_path: Path) -> None:
+    store = MarkdownEventStore(config=RuntimeConfig(data_root=tmp_path / "data"))
+    store.replace_day(
+        "2026-06-22",
+        [
+            WorkEvent(
+                date="2026-06-22",
+                event_id="evt1",
+                title="主题",
+                content="内容",
+                source_message_ids=["om_1"],
+                file_links=[],
+            )
+        ],
+        owner_display_name="孙伟盛",
+    )
+
+    loaded = store.read_day("2026-06-22")
+
+    assert loaded is not None
+    assert loaded.events[0].event_id == "evt1"
+
+
 def test_markdown_store_roundtrip_keeps_file_links(tmp_path: Path) -> None:
     store = MarkdownEventStore(config=RuntimeConfig(data_root=tmp_path / "data"))
     store.replace_day(

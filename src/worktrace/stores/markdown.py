@@ -8,6 +8,7 @@ from ..config import RuntimeConfig
 from ..errors import StoreWriteError
 from ..models import DayDocument, EventFileLink, StoreWriteResult, WorkEvent
 from ..utils.dates import now_iso
+from ..utils.text import sanitize_filename_component
 from .base import EventStore
 
 
@@ -19,8 +20,13 @@ class MarkdownEventStore(EventStore):
         self,
         target_date: str,
         events: list[WorkEvent],
+        *,
+        owner_display_name: str = "",
     ) -> StoreWriteResult:
-        output_path = self.build_output_path(target_date)
+        output_path = self.build_output_path(
+            target_date,
+            owner_display_name=owner_display_name,
+        )
         output_path.parent.mkdir(parents=True, exist_ok=True)
         temp_path = output_path.parent / f".{output_path.stem}.tmp.md"
         generated_at = now_iso(self.config.timezone)
@@ -48,12 +54,24 @@ class MarkdownEventStore(EventStore):
     def read_day(self, target_date: str) -> DayDocument | None:
         output_path = self.build_output_path(target_date)
         if not output_path.exists():
+            output_path = self._find_existing_day_path(target_date)
+        if output_path is None:
             return None
         return self.parse_day_document(output_path.read_text(encoding="utf-8"))
 
-    def build_output_path(self, target_date: str) -> Path:
+    def build_output_path(self, target_date: str, *, owner_display_name: str = "") -> Path:
         year, month, _day = target_date.split("-")
-        return self.config.data_root / year / month / f"{target_date}.md"
+        owner_part = sanitize_filename_component(owner_display_name)
+        filename = f"{target_date}-{owner_part}.md" if owner_part else f"{target_date}.md"
+        return self.config.data_root / year / month / filename
+
+    def _find_existing_day_path(self, target_date: str) -> Path | None:
+        year, month, _day = target_date.split("-")
+        day_dir = self.config.data_root / year / month
+        if not day_dir.exists():
+            return None
+        matches = sorted(day_dir.glob(f"{target_date}-*.md"))
+        return matches[0] if matches else None
 
     def render_day_document(self, day_doc: DayDocument) -> str:
         front_matter = "\n".join(

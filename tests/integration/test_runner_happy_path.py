@@ -136,6 +136,7 @@ def test_runner_happy_path(tmp_path: Path) -> None:
     assert result.status == DailyRunStatus.SUCCESS.value
     assert result.event_count == 1
     assert result.output_path is not None
+    assert Path(result.output_path).name == "2026-06-22-Me.md"
     assert result.self_delivery_status == "success"
     assert result.self_delivery_target == "ou_self"
     assert not (tmp_path / "data" / "debug" / "conversations").exists()

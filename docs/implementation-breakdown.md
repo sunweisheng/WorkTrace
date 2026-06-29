@@ -17,7 +17,7 @@
 7. 汇总全日 `candidate_events`
 8. `merge_day_candidates(...)` 做跨会话分组
 9. Python 物化 `MergedEventDraft` 并构建最终 `WorkEvent`
-10. `stores/markdown.py` 覆盖写入 `data/YYYY/MM/YYYY-MM-DD.md`
+10. `stores/markdown.py` 覆盖写入 `data/YYYY/MM/YYYY-MM-DD-姓名.md`
 
 ## 3. 当前关键模块
 
