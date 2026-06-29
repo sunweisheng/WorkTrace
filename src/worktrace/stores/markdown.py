@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from ..config import RuntimeConfig
 from ..errors import StoreWriteError
@@ -10,6 +11,23 @@ from ..models import DayDocument, EventFileLink, StoreWriteResult, WorkEvent
 from ..utils.dates import now_iso
 from ..utils.text import sanitize_filename_component
 from .base import EventStore
+
+
+SENSITIVE_QUERY_KEYS = {
+    "access_token",
+    "api_key",
+    "apikey",
+    "auth",
+    "authorization",
+    "code",
+    "key",
+    "passwd",
+    "password",
+    "secret",
+    "signature",
+    "sign",
+    "token",
+}
 
 
 @dataclass
@@ -117,9 +135,41 @@ class MarkdownEventStore(EventStore):
 
         lines: list[str] = []
         for link in file_links:
-            label = link.title.strip() or link.url
-            lines.append(f"  - [{label}]({link.url})")
+            safe_url = self._redact_sensitive_query_params(link.url)
+            label = link.title.strip() or safe_url
+            if label == link.url:
+                label = safe_url
+            lines.append(f"  - [{label}]({safe_url})")
         return "\n".join(lines)
+
+    def _redact_sensitive_query_params(self, value: str) -> str:
+        try:
+            parts = urlsplit(value)
+        except ValueError:
+            return value
+        if not parts.query:
+            return value
+
+        changed = False
+        query_pairs: list[tuple[str, str]] = []
+        for key, raw_value in parse_qsl(parts.query, keep_blank_values=True):
+            if key.lower() in SENSITIVE_QUERY_KEYS:
+                query_pairs.append((key, "REDACTED"))
+                changed = True
+            else:
+                query_pairs.append((key, raw_value))
+        if not changed:
+            return value
+
+        return urlunsplit(
+            (
+                parts.scheme,
+                parts.netloc,
+                parts.path,
+                urlencode(query_pairs, doseq=True),
+                parts.fragment,
+            )
+        )
 
     def parse_day_document(self, markdown_text: str) -> DayDocument:
         if not markdown_text.startswith("---\n"):

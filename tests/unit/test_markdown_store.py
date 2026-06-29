@@ -76,6 +76,40 @@ def test_markdown_store_renders_public_event_fields(tmp_path: Path) -> None:
     assert "  - 无" in content
 
 
+def test_markdown_store_redacts_sensitive_link_query_params(tmp_path: Path) -> None:
+    store = MarkdownEventStore(config=RuntimeConfig(data_root=tmp_path / "data"))
+    write_result = store.replace_day(
+        "2026-06-22",
+        [
+            WorkEvent(
+                date="2026-06-22",
+                event_id="evt1",
+                title="主题",
+                content="内容",
+                source_message_ids=["om_1"],
+                file_links=[
+                    EventFileLink(
+                        url=(
+                            "https://s2adb.gydev.cn/"
+                            "?password=secret-value&view=traffic&token=abc"
+                        ),
+                        title="",
+                        link_type="normal",
+                    )
+                ],
+            )
+        ],
+    )
+
+    content = Path(write_result.output_path).read_text(encoding="utf-8")
+
+    assert "secret-value" not in content
+    assert "token=abc" not in content
+    assert "password=REDACTED" in content
+    assert "token=REDACTED" in content
+    assert "view=traffic" in content
+
+
 def test_markdown_store_uses_owner_display_name_in_filename(tmp_path: Path) -> None:
     store = MarkdownEventStore(config=RuntimeConfig(data_root=tmp_path / "data"))
 
