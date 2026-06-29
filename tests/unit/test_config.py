@@ -6,6 +6,7 @@ import pytest
 
 from src.worktrace.config import (
     RuntimeConfig,
+    load_runtime_config_overrides,
     load_online_llm_settings,
     parse_dotenv_lines,
 )
@@ -120,6 +121,53 @@ def test_load_online_llm_settings_reads_stream_tls_and_sleep_overrides(tmp_path:
     assert settings.reasoning_effort == "none"
     assert settings.sleep_min_seconds == 1.5
     assert settings.sleep_max_seconds == 2.5
+
+
+def test_load_runtime_config_overrides_reads_excluded_event_rules_from_local_env(
+    tmp_path: Path,
+) -> None:
+    rules_dir = tmp_path / "config"
+    rules_dir.mkdir()
+    (rules_dir / "event_rules.json").write_text(
+        (
+            "{\n"
+            '  "excluded_event_topics": ["代码同步", "工作面谈安排", "故障数据同步"],\n'
+            '  "excluded_event_content_signatures": ["git pull", "聆听大老板电话"]\n'
+            "}\n"
+        ),
+        encoding="utf-8",
+    )
+
+    config = load_runtime_config_overrides(RuntimeConfig(), cwd=tmp_path)
+
+    assert config.excluded_event_topics == (
+        "代码同步",
+        "工作面谈安排",
+        "故障数据同步",
+    )
+    assert config.excluded_event_content_signatures == (
+        "git pull",
+        "聆听大老板电话",
+    )
+
+
+def test_load_runtime_config_overrides_uses_defaults_when_rule_file_missing(
+    tmp_path: Path,
+) -> None:
+    config = load_runtime_config_overrides(RuntimeConfig(), cwd=tmp_path)
+
+    assert config.excluded_event_topics == RuntimeConfig().excluded_event_topics
+
+
+def test_load_runtime_config_overrides_rejects_invalid_rule_file(tmp_path: Path) -> None:
+    rules_dir = tmp_path / "config"
+    rules_dir.mkdir()
+    (rules_dir / "event_rules.json").write_text('{"excluded_event_topics":"bad"}', encoding="utf-8")
+
+    with pytest.raises(ValueError) as exc_info:
+        load_runtime_config_overrides(RuntimeConfig(), cwd=tmp_path)
+
+    assert "event rules config" in str(exc_info.value)
 
 
 def test_load_online_llm_settings_rejects_invalid_sleep_range(tmp_path: Path) -> None:

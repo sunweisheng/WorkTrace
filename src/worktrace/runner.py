@@ -26,7 +26,10 @@ from .pipeline.context_expansion import (
 from .pipeline.cross_conversation_merge import materialize_grouped_merged_drafts
 from .pipeline.event_merge import build_work_events
 from .pipeline.filtering import filter_messages
-from .pipeline.sensitive_filter import filter_sensitive_merged_drafts
+from .pipeline.sensitive_filter import (
+    filter_excluded_candidate_drafts,
+    filter_sensitive_merged_drafts,
+)
 from .pipeline.validation import (
     normalize_cross_conversation_groups_with_fallback,
     validate_batch_analysis_result,
@@ -159,6 +162,26 @@ class DailyTraceRunner:
         merged_drafts: list[MergedEventDraft] = []
         if all_candidates:
             try:
+                all_candidates, excluded_candidate_warnings = (
+                    filter_excluded_candidate_drafts(all_candidates, self.config)
+                )
+                warning_messages.extend(excluded_candidate_warnings)
+
+                if not all_candidates:
+                    return self._finish_run(
+                        run_started_at,
+                        self._write_empty_day(
+                            target_date,
+                            self_identity=self_identity,
+                            conversation_count=len(conversations),
+                            message_count=len(messages),
+                            slice_count=len(conversation_slices),
+                            batch_count=analyzed_batch_count,
+                            warning_messages=warning_messages,
+                            skipped_slice_count=skipped_slice_count,
+                        ),
+                    )
+
                 if len(all_candidates) == 1:
                     merged_drafts = materialize_grouped_merged_drafts(
                         all_candidates,
@@ -244,6 +267,7 @@ class DailyTraceRunner:
                 messages=filtered_messages,
                 content_resolver=self.dependencies.content_resolver,
             )
+            events = _sort_events_for_output(events, messages=filtered_messages)
             log_timing(
                 logger,
                 "runner.stage.completed",
@@ -637,13 +661,18 @@ def _attach_event_file_links(
             if message is None:
                 continue
             for link in content_resolver.extract_links(message):
-                if link.url in deduped:
-                    continue
-                deduped[link.url] = EventFileLink(
+                existing = deduped.get(link.url)
+                candidate = EventFileLink(
                     url=link.url,
                     title=link.title,
                     link_type=link.link_type,
                 )
+                if existing is None:
+                    deduped[link.url] = candidate
+                    continue
+                if existing.title.strip() or not candidate.title.strip():
+                    continue
+                deduped[link.url] = candidate
 
         attached.append(
             type(event)(
@@ -657,3 +686,19 @@ def _attach_event_file_links(
         )
 
     return attached
+
+
+def _sort_events_for_output(events: list[WorkEvent], *, messages: list) -> list[WorkEvent]:
+    message_by_id = {message.message_id: message for message in messages}
+
+    def _event_sort_key(event: WorkEvent) -> tuple[str, str, str]:
+        source_times = [
+            message_by_id[message_id].send_time
+            for message_id in event.source_message_ids
+            if message_id in message_by_id
+        ]
+        first_time = min(source_times) if source_times else ""
+        first_message_id = event.source_message_ids[0] if event.source_message_ids else ""
+        return (first_time, first_message_id, event.event_id)
+
+    return sorted(events, key=_event_sort_key)

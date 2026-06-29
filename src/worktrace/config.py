@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass, field
+import json
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Mapping
 
@@ -16,6 +17,7 @@ DEFAULT_LLM_SLEEP_MIN_ENV_VAR = "WORKTRACE_LLM_SLEEP_MIN_SECONDS"
 DEFAULT_LLM_SLEEP_MAX_ENV_VAR = "WORKTRACE_LLM_SLEEP_MAX_SECONDS"
 DEFAULT_LLM_REASONING_EFFORT_ENV_VAR = "WORKTRACE_LLM_REASONING_EFFORT"
 DEFAULT_LLM_ENV_FILE_NAME = ".env"
+DEFAULT_EVENT_RULES_FILE_NAME = "config/event_rules.json"
 
 
 @dataclass(frozen=True)
@@ -59,7 +61,7 @@ def load_local_env_file(path: Path) -> dict[str, str]:
         return {}
 
 
-def _read_llm_env_values(
+def _read_local_env_values(
     config: RuntimeConfig,
     *,
     cwd: Path | None = None,
@@ -72,7 +74,6 @@ def _read_llm_env_values(
     merged: dict[str, str] = dict(file_values)
     merged.update(env)
     return merged
-
 
 def build_missing_llm_config_message(config: RuntimeConfig, missing_keys: list[str]) -> str:
     missing = ", ".join(missing_keys)
@@ -111,7 +112,7 @@ def load_online_llm_settings(
     cwd: Path | None = None,
     environ: Mapping[str, str] | None = None,
 ) -> OnlineLLMSettings:
-    values = _read_llm_env_values(config, cwd=cwd, environ=environ)
+    values = _read_local_env_values(config, cwd=cwd, environ=environ)
     required_keys = [
         config.llm_base_url_env_var,
         config.llm_model_env_var,
@@ -187,6 +188,79 @@ def load_online_llm_settings(
     )
 
 
+def load_runtime_config_overrides(
+    config: RuntimeConfig,
+    *,
+    cwd: Path | None = None,
+) -> RuntimeConfig:
+    rules_path = (cwd or Path.cwd()) / config.event_rules_file_name
+    try:
+        payload = json.loads(rules_path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return config
+    except json.JSONDecodeError as exc:
+        raise ValueError(
+            f"Invalid event rules config: {rules_path} is not valid JSON."
+        ) from exc
+
+    if not isinstance(payload, dict):
+        raise ValueError(
+            f"Invalid event rules config: {rules_path} must contain a JSON object."
+        )
+
+    excluded_event_topics = _read_string_list(
+        payload,
+        key="excluded_event_topics",
+        fallback=config.excluded_event_topics,
+        file_path=rules_path,
+    )
+    excluded_event_content_signatures = _read_string_list(
+        payload,
+        key="excluded_event_content_signatures",
+        fallback=config.excluded_event_content_signatures,
+        file_path=rules_path,
+    )
+
+    if (
+        excluded_event_topics == config.excluded_event_topics
+        and excluded_event_content_signatures
+        == config.excluded_event_content_signatures
+    ):
+        return config
+
+    return replace(
+        config,
+        excluded_event_topics=excluded_event_topics,
+        excluded_event_content_signatures=excluded_event_content_signatures,
+    )
+
+
+def _read_string_list(
+    payload: dict[str, object],
+    *,
+    key: str,
+    fallback: tuple[str, ...],
+    file_path: Path,
+) -> tuple[str, ...]:
+    raw_value = payload.get(key)
+    if raw_value is None:
+        return fallback
+    if not isinstance(raw_value, list):
+        raise ValueError(
+            f"Invalid event rules config: {file_path} field `{key}` must be a list."
+        )
+    values: list[str] = []
+    for item in raw_value:
+        if not isinstance(item, str):
+            raise ValueError(
+                f"Invalid event rules config: {file_path} field `{key}` must contain only strings."
+            )
+        cleaned = item.strip()
+        if cleaned:
+            values.append(cleaned)
+    return tuple(values)
+
+
 @dataclass(frozen=True)
 class RuntimeConfig:
     timezone: str = "Asia/Shanghai"
@@ -228,6 +302,16 @@ class RuntimeConfig:
         "骂人",
         "对骂",
     )
+    excluded_event_topics: tuple[str, ...] = (
+        "代码同步",
+        "工作面谈安排",
+        "故障数据同步",
+    )
+    excluded_event_content_signatures: tuple[str, ...] = (
+        "本周发给哈尔滨的故障数据",
+        "git pull",
+        "聆听大老板电话",
+    )
     data_root: Path = field(default_factory=lambda: Path("data"))
     cache_root: Path | None = None
     conversation_debug_root: Path | None = None
@@ -242,6 +326,7 @@ class RuntimeConfig:
     llm_sleep_max_env_var: str = DEFAULT_LLM_SLEEP_MAX_ENV_VAR
     llm_reasoning_effort_env_var: str = DEFAULT_LLM_REASONING_EFFORT_ENV_VAR
     llm_env_file_name: str = DEFAULT_LLM_ENV_FILE_NAME
+    event_rules_file_name: str = DEFAULT_EVENT_RULES_FILE_NAME
     llm_stream_enabled: bool = False
     llm_tls_verify: bool = False
     llm_sleep_min_seconds: float = 1.0

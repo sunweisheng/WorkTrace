@@ -1,0 +1,12 @@
+{
+  "excluded_event_topics": [
+    "代码同步",
+    "工作面谈安排",
+    "故障数据同步"
+  ],
+  "excluded_event_content_signatures": [
+    "git pull",
+    "聆听大老板电话",
+    "本周发给哈尔滨的故障数据"
+  ]
+}

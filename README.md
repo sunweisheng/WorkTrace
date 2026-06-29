@@ -206,6 +206,25 @@ WORKTRACE_LLM_SLEEP_MIN_SECONDS=1
 WORKTRACE_LLM_SLEEP_MAX_SECONDS=2
 ```
 
+如果需要精确排除某些事件标题或内容特征，请单独维护规则文件 [config/event_rules.json](/Users/sunweisheng/Documents/GitHub/WorkTrace/config/event_rules.json)：
+
+```json
+{
+  "excluded_event_topics": [
+    "代码同步",
+    "工作面谈安排",
+    "故障数据同步"
+  ],
+  "excluded_event_content_signatures": [
+    "git pull",
+    "聆听大老板电话",
+    "本周发给哈尔滨的故障数据"
+  ]
+}
+```
+
+这两项都适合后续手动增删。这里建议只放“精确匹配、且确认应排除”的词，避免误伤正常工作事件。
+
 环境变量会覆盖 `.env` 中的同名项，因此也可以在 CI 或个人 shell 中单独注入。
 
 如果缺少 `WORKTRACE_LLM_BASE_URL`、`WORKTRACE_LLM_MODEL` 或 `WORKTRACE_LLM_API_KEY`，当前 preflight 会直接失败，并明确要求用户先在本地补齐配置；未配置时不得继续运行 WorkTrace。

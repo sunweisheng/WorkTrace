@@ -437,35 +437,57 @@ class FeishuCliChatSource(ChatSource):
         text_parts: list[str] = []
         links: list[dict[str, Any]] = []
         attachments: list[dict[str, Any]] = []
+        self._collect_content_parts(content, text_parts, links, attachments)
 
-        for key in ("text", "title", "content", "summary"):
-            value = content.get(key)
-            if isinstance(value, str):
+        return {
+            "text": clean_text("\n".join(part for part in text_parts if part)),
+            "links": self._dedupe_link_dicts([item for item in links if item.get("url")]),
+            "attachments": self._dedupe_attachment_dicts(
+                [item for item in attachments if item.get("attachment_id")]
+            ),
+        }
+
+    def _collect_content_parts(
+        self,
+        node: Any,
+        text_parts: list[str],
+        links: list[dict[str, Any]],
+        attachments: list[dict[str, Any]],
+    ) -> None:
+        if isinstance(node, list):
+            for item in node:
+                self._collect_content_parts(item, text_parts, links, attachments)
+            return
+
+        if not isinstance(node, dict):
+            return
+
+        href = node.get("href") or node.get("url")
+        if href:
+            label = str(node.get("text") or node.get("title") or "").strip()
+            if label:
+                text_parts.append(label)
+            links.append(
+                {
+                    "url": str(href),
+                    "title": label,
+                    "link_type": "feishu_doc"
+                    if "feishu" in str(href) or "larksuite" in str(href)
+                    else "normal",
+                }
+            )
+
+        for key in ("text", "title", "summary"):
+            value = node.get(key)
+            if isinstance(value, str) and value and not href:
                 text_parts.append(value)
 
-        if isinstance(content.get("lines"), list):
-            for line in content["lines"]:
-                if not isinstance(line, list):
-                    continue
-                for block in line:
-                    if not isinstance(block, dict):
-                        continue
-                    if isinstance(block.get("text"), str):
-                        text_parts.append(block["text"])
-                    href = block.get("href") or block.get("url")
-                    if href:
-                        links.append(
-                            {
-                                "url": str(href),
-                                "title": str(block.get("text") or block.get("title") or ""),
-                                "link_type": "feishu_doc"
-                                if "feishu" in str(href) or "larksuite" in str(href)
-                                else "normal",
-                            }
-                        )
+        content_value = node.get("content")
+        if isinstance(content_value, str):
+            text_parts.append(content_value)
 
-        if isinstance(content.get("attachments"), list):
-            for item in content["attachments"]:
+        if isinstance(node.get("attachments"), list):
+            for item in node["attachments"]:
                 if not isinstance(item, dict):
                     continue
                 attachments.append(
@@ -479,15 +501,30 @@ class FeishuCliChatSource(ChatSource):
                     }
                 )
 
-        attachments.extend(self._extract_media_attachments(content))
+        attachments.extend(self._extract_media_attachments(node))
 
-        return {
-            "text": clean_text("\n".join(part for part in text_parts if part)),
-            "links": [item for item in links if item.get("url")],
-            "attachments": self._dedupe_attachment_dicts(
-                [item for item in attachments if item.get("attachment_id")]
-            ),
-        }
+        for key, value in node.items():
+            if key in {
+                "text",
+                "title",
+                "summary",
+                "href",
+                "url",
+                "attachments",
+                "file_key",
+                "image_key",
+                "audio_key",
+                "video_key",
+                "file_name",
+                "name",
+                "mime_type",
+                "mimeType",
+                "file_size",
+                "size",
+            }:
+                continue
+            if isinstance(value, (dict, list)):
+                self._collect_content_parts(value, text_parts, links, attachments)
 
     def _extract_media_attachments(self, content: dict[str, Any]) -> list[dict[str, Any]]:
         media_specs = [
@@ -521,6 +558,22 @@ class FeishuCliChatSource(ChatSource):
             if not isinstance(attachment_id, str) or not attachment_id:
                 continue
             deduped[attachment_id] = item
+        return list(deduped.values())
+
+    def _dedupe_link_dicts(self, links: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        deduped: dict[str, dict[str, Any]] = {}
+        for item in links:
+            url = item.get("url")
+            if not isinstance(url, str) or not url:
+                continue
+            existing = deduped.get(url)
+            if existing is None:
+                deduped[url] = item
+                continue
+            existing_title = str(existing.get("title") or "").strip()
+            candidate_title = str(item.get("title") or "").strip()
+            if not existing_title and candidate_title:
+                deduped[url] = item
         return list(deduped.values())
 
     def _dedupe_and_sort(self, messages: list[NormalizedMessage]) -> list[NormalizedMessage]:

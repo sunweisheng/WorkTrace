@@ -26,7 +26,7 @@ class MarkdownEventStore(EventStore):
         generated_at = now_iso(self.config.timezone)
         day_doc = DayDocument(
             date=target_date,
-            events=sorted(events, key=lambda item: item.event_id),
+            events=list(events),
             generated_at=generated_at,
         )
         markdown = self.render_day_document(day_doc)
@@ -142,7 +142,7 @@ class MarkdownEventStore(EventStore):
             )
             cursor = block_end + len(end_marker)
 
-        return sorted(events, key=lambda item: item.event_id)
+        return events
 
     def _extract_value(self, block: str, prefix: str) -> str:
         for line in block.splitlines():

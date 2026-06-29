@@ -17,16 +17,17 @@ def merge_duplicate_drafts(
     grouped: dict[tuple[str, ...], list[MergedEventDraft]] = defaultdict(list)
 
     for draft in drafts:
-        grouped[tuple(draft.source_message_ids)].append(draft)
+        topic_key = " ".join(draft.topic.split())
+        grouped[(tuple(draft.source_message_ids), topic_key)].append(draft)
 
     merged: list[MergedEventDraft] = []
-    for message_ids, items in grouped.items():
+    for (_group_key, items) in grouped.items():
         merged.append(
             MergedEventDraft(
                 date=items[0].date,
                 topic=choose_preferred_text([item.topic for item in items]),
                 content=merge_content_texts([item.content for item in items]),
-                source_message_ids=list(message_ids),
+                source_message_ids=list(items[0].source_message_ids),
                 source_conversation_ids=sorted(
                     {cid for item in items for cid in item.source_conversation_ids}
                 ),
@@ -45,7 +46,7 @@ def build_work_events(
     seen_event_ids: set[str] = set()
 
     for draft in merged_drafts:
-        event_id = stable_event_id(target_date, draft.source_message_ids)
+        event_id = stable_event_id(target_date, draft.source_message_ids, draft.content)
         if event_id in seen_event_ids:
             raise ValueError(f"Unresolvable event_id collision: {event_id}")
         seen_event_ids.add(event_id)

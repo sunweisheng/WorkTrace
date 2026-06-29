@@ -21,6 +21,13 @@ def test_readme_mentions_local_online_llm_configuration() -> None:
     assert "/no_think" in content
 
 
+def test_readme_mentions_event_rules_file() -> None:
+    content = Path("README.md").read_text(encoding="utf-8")
+
+    assert "config/event_rules.json" in content
+    assert "精确排除" in content
+
+
 def test_skill_mentions_first_run_configuration_requirement() -> None:
     content = Path("SKILL.md").read_text(encoding="utf-8")
 

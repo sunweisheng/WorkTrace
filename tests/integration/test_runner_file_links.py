@@ -8,12 +8,15 @@ from src.worktrace.factories import RuntimeDependencies
 from src.worktrace.models import (
     BatchAnalysisResult,
     ConversationRef,
+    EventFileLink,
     LinkMeta,
     NormalizedMessage,
     SelfIdentity,
     SourceBackedEventDraft,
+    WorkEvent,
 )
 from src.worktrace.runner import DailyTraceRunner
+from src.worktrace.resolvers.feishu_message import FeishuMessageContentResolver
 from src.worktrace.stores.markdown import MarkdownEventStore
 
 
@@ -114,3 +117,50 @@ def test_runner_attaches_file_links_from_source_messages(tmp_path: Path) -> None
 
     content = Path(result.output_path).read_text(encoding="utf-8")
     assert "[发布方案](https://foo.feishu.cn/docx/abc)" in content
+
+
+def test_runner_prefers_named_file_link_when_same_url_appears_multiple_times(tmp_path: Path) -> None:
+    resolver = FeishuMessageContentResolver(config=RuntimeConfig(data_root=tmp_path / "data"))
+    message = NormalizedMessage(
+        conversation_id="oc_1",
+        conversation_name="项目群",
+        message_id="om_1",
+        sender_open_id="ou_self",
+        sender_name="Me",
+        send_time="2026-06-22T10:00:00+08:00",
+        message_type="text",
+        text="https://foo.feishu.cn/docx/abc",
+        reply_to_message_id=None,
+        quote_message_id=None,
+        links=[
+            LinkMeta(
+                url="https://foo.feishu.cn/docx/abc",
+                title="发布方案",
+                link_type="feishu_doc",
+            )
+        ],
+        attachments=[],
+        is_system=False,
+    )
+    event = WorkEvent(
+        date="2026-06-22",
+        event_id="evt1",
+        title="发布推进",
+        content="完成发布沟通",
+        source_message_ids=["om_1"],
+        file_links=[],
+    )
+
+    attached = __import__("src.worktrace.runner", fromlist=["_attach_event_file_links"])._attach_event_file_links(
+        [event],
+        messages=[message],
+        content_resolver=resolver,
+    )
+
+    assert attached[0].file_links == [
+        EventFileLink(
+            url="https://foo.feishu.cn/docx/abc",
+            title="发布方案",
+            link_type="feishu_doc",
+        )
+    ]

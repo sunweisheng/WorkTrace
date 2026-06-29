@@ -104,3 +104,33 @@ def test_markdown_store_roundtrip_keeps_file_links(tmp_path: Path) -> None:
     assert loaded.events[0].title == "主题"
     assert loaded.events[0].source_message_ids == []
     assert loaded.events[0].file_links[0].url == "https://foo.feishu.cn/docx/abc"
+
+
+def test_markdown_store_preserves_event_order(tmp_path: Path) -> None:
+    store = MarkdownEventStore(config=RuntimeConfig(data_root=tmp_path / "data"))
+    store.replace_day(
+        "2026-06-22",
+        [
+            WorkEvent(
+                date="2026-06-22",
+                event_id="evt_b",
+                title="后发生",
+                content="内容二",
+                source_message_ids=["om_2"],
+                file_links=[],
+            ),
+            WorkEvent(
+                date="2026-06-22",
+                event_id="evt_a",
+                title="先发生",
+                content="内容一",
+                source_message_ids=["om_1"],
+                file_links=[],
+            ),
+        ],
+    )
+
+    loaded = store.read_day("2026-06-22")
+
+    assert loaded is not None
+    assert [event.title for event in loaded.events] == ["后发生", "先发生"]
