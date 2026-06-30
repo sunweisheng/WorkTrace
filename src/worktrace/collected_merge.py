@@ -14,6 +14,7 @@ from .errors import AnalyzerProtocolError, StoreWriteError
 from .factories import AnalyzerFactory
 from .models import (
     CollectedMergeGroup,
+    CollectedMergeOutput,
     CollectedMergeResult,
     CollectedMergeRunResult,
     CollectedSourceEvent,
@@ -51,12 +52,84 @@ class CollectedMergeRunner:
 
     def run(self, target_date: str) -> CollectedMergeRunResult:
         input_dir = self.build_input_dir(target_date)
+        child_dirs = (
+            [
+                child
+                for child in sorted(input_dir.iterdir())
+                if child.is_dir() and not child.name.startswith(".")
+            ]
+            if input_dir.exists()
+            else []
+        )
+        outputs = [
+            self._run_one_directory(
+                target_date,
+                input_dir,
+                upload_parts=list(target_date.split("-")),
+                ignored_subdirectories={child.name for child in child_dirs},
+            )
+        ]
+        for child in child_dirs:
+            outputs.append(
+                self._run_one_directory(
+                    target_date,
+                    child,
+                    upload_parts=[*target_date.split("-"), child.name],
+                    ignored_subdirectories=set(),
+                )
+            )
+
+        warning_messages = [
+            warning
+            for output in outputs
+            for warning in output.warning_messages
+        ]
+        failed_outputs = [output for output in outputs if output.output_path is None]
+        if failed_outputs:
+            status = DailyRunStatus.FAILED.value
+        elif warning_messages:
+            status = DailyRunStatus.SUCCESS_WITH_WARNINGS.value
+        else:
+            status = DailyRunStatus.SUCCESS.value
+
+        first_output = outputs[0]
+        upload_errors = [
+            output.upload_error for output in outputs if output.upload_error
+        ]
+        return CollectedMergeRunResult(
+            status=status,
+            target_date=target_date,
+            input_dir=str(input_dir.resolve()),
+            output_path=first_output.output_path,
+            source_file_count=sum(output.source_file_count for output in outputs),
+            source_event_count=sum(output.source_event_count for output in outputs),
+            merged_event_count=sum(output.merged_event_count for output in outputs),
+            skipped_file_count=sum(output.skipped_file_count for output in outputs),
+            warning_messages=warning_messages,
+            upload_status=summarize_upload_status(outputs),
+            upload_target=first_output.upload_target,
+            upload_error="; ".join(upload_errors),
+            outputs=outputs,
+        )
+
+    def _run_one_directory(
+        self,
+        target_date: str,
+        input_dir: Path,
+        *,
+        upload_parts: list[str],
+        ignored_subdirectories: set[str],
+    ) -> CollectedMergeOutput:
         output_path = input_dir / "_merged.md"
         warning_messages: list[str] = []
         skipped_file_count = 0
 
         source_events, source_file_count, skipped_file_count, read_warnings = (
-            self._read_source_events(target_date, input_dir)
+            self._read_source_events(
+                target_date,
+                input_dir,
+                ignored_subdirectories=ignored_subdirectories,
+            )
         )
         warning_messages.extend(read_warnings)
         source_events, retention_source_warnings = self._filter_retained_source_events(
@@ -97,9 +170,7 @@ class CollectedMergeRunner:
                 )
                 warning_messages.extend(retention_merged_warnings)
             except (AnalyzerProtocolError, ValueError) as exc:
-                return CollectedMergeRunResult(
-                    status=DailyRunStatus.FAILED.value,
-                    target_date=target_date,
+                return CollectedMergeOutput(
                     input_dir=str(input_dir.resolve()),
                     output_path=None,
                     source_file_count=source_file_count,
@@ -125,20 +196,13 @@ class CollectedMergeRunner:
             raise StoreWriteError(f"Failed to write merged markdown: {output_path}") from exc
 
         upload_status, upload_target, upload_error = self._upload_if_configured(
-            target_date,
             output_path,
+            upload_parts,
         )
         if upload_error:
             warning_messages.append(upload_error)
 
-        status = (
-            DailyRunStatus.SUCCESS_WITH_WARNINGS.value
-            if warning_messages
-            else DailyRunStatus.SUCCESS.value
-        )
-        return CollectedMergeRunResult(
-            status=status,
-            target_date=target_date,
+        return CollectedMergeOutput(
             input_dir=str(input_dir.resolve()),
             output_path=str(output_path.resolve()),
             source_file_count=source_file_count,
@@ -159,16 +223,24 @@ class CollectedMergeRunner:
         self,
         target_date: str,
         input_dir: Path,
+        *,
+        ignored_subdirectories: set[str] | None = None,
     ) -> tuple[list[CollectedSourceEvent], int, int, list[str]]:
         warnings: list[str] = []
         source_events: list[CollectedSourceEvent] = []
         source_file_count = 0
         skipped_file_count = 0
+        ignored_subdirectories = ignored_subdirectories or set()
 
         if not input_dir.exists():
             return [], 0, 0, [f"Input directory does not exist: {input_dir}"]
 
         for path in sorted(input_dir.iterdir()):
+            if path.is_dir() and not path.name.startswith("."):
+                if path.name not in ignored_subdirectories:
+                    skipped_file_count += 1
+                    warnings.append(f"Skipped nested input directory: {path.name}")
+                continue
             if should_skip_input_file(path):
                 continue
             if path.suffix != ".md":
@@ -308,8 +380,8 @@ class CollectedMergeRunner:
 
     def _upload_if_configured(
         self,
-        target_date: str,
         output_path: Path,
+        upload_parts: list[str],
     ) -> tuple[str, str, str]:
         try:
             delivery_config = load_merge_delivery_config(self.cwd)
@@ -317,10 +389,9 @@ class CollectedMergeRunner:
             if not folder_url:
                 return ("skipped", "", "")
 
-            year, month, day = target_date.split("-")
             target_folder = ensure_drive_folder_path(
                 folder_url,
-                [year, month, day],
+                upload_parts,
                 command_runner=self.command_runner,
                 cwd=self.cwd,
             )
@@ -358,6 +429,17 @@ def extract_person_name_from_filename(filename: str) -> str:
 
 def should_skip_input_file(path: Path) -> bool:
     return path.name == "_merged.md" or path.name.startswith(".") or path.is_dir()
+
+
+def summarize_upload_status(outputs: list[CollectedMergeOutput]) -> str:
+    statuses = {output.upload_status for output in outputs if output.upload_status}
+    if "failed" in statuses:
+        return "failed"
+    if "success" in statuses:
+        return "success"
+    if "skipped" in statuses:
+        return "skipped"
+    return ""
 
 
 def build_collected_draft_id(filename: str, index: int, event_id: str) -> str:

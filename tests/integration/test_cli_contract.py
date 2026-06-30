@@ -5,7 +5,11 @@ import json
 from src.worktrace.cli import main
 from src.worktrace.config import RuntimeConfig
 from src.worktrace.constants import DailyRunStatus
-from src.worktrace.models import CollectedMergeRunResult, DailyRunResult
+from src.worktrace.models import (
+    CollectedMergeOutput,
+    CollectedMergeRunResult,
+    DailyRunResult,
+)
 
 
 def test_cli_returns_structured_json_for_invalid_input(capsys) -> None:
@@ -195,6 +199,18 @@ def test_cli_merge_collected_returns_structured_json(capsys, tmp_path) -> None:
             upload_status="skipped",
             upload_target="",
             upload_error="",
+            outputs=[
+                CollectedMergeOutput(
+                    input_dir=str(tmp_path / "merge_inbox/2026/06/29/项目A"),
+                    output_path=str(tmp_path / "merge_inbox/2026/06/29/项目A/_merged.md"),
+                    source_file_count=1,
+                    source_event_count=1,
+                    merged_event_count=1,
+                    skipped_file_count=0,
+                    warning_messages=[],
+                    upload_status="skipped",
+                )
+            ],
         )
 
     exit_code = main(
@@ -210,3 +226,4 @@ def test_cli_merge_collected_returns_structured_json(capsys, tmp_path) -> None:
     assert payload["target_date"] == "2026-06-29"
     assert payload["source_file_count"] == 2
     assert payload["upload_status"] == "skipped"
+    assert payload["outputs"][0]["source_event_count"] == 1

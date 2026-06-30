@@ -960,6 +960,51 @@ class CollectedMergeResult:
 
 
 @dataclass(frozen=True)
+class CollectedMergeOutput:
+    input_dir: str
+    output_path: str | None
+    source_file_count: int
+    source_event_count: int
+    merged_event_count: int
+    skipped_file_count: int
+    warning_messages: list[str] = field(default_factory=list)
+    upload_status: str = ""
+    upload_target: str = ""
+    upload_error: str = ""
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> CollectedMergeOutput:
+        return cls(
+            input_dir=str(data["input_dir"]),
+            output_path=(
+                None if data.get("output_path") is None else str(data["output_path"])
+            ),
+            source_file_count=int(data.get("source_file_count", 0)),
+            source_event_count=int(data.get("source_event_count", 0)),
+            merged_event_count=int(data.get("merged_event_count", 0)),
+            skipped_file_count=int(data.get("skipped_file_count", 0)),
+            warning_messages=_string_list(data.get("warning_messages")),
+            upload_status=str(data.get("upload_status", "")),
+            upload_target=str(data.get("upload_target", "")),
+            upload_error=str(data.get("upload_error", "")),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "input_dir": self.input_dir,
+            "output_path": self.output_path,
+            "source_file_count": self.source_file_count,
+            "source_event_count": self.source_event_count,
+            "merged_event_count": self.merged_event_count,
+            "skipped_file_count": self.skipped_file_count,
+            "warning_messages": list(self.warning_messages),
+            "upload_status": self.upload_status,
+            "upload_target": self.upload_target,
+            "upload_error": self.upload_error,
+        }
+
+
+@dataclass(frozen=True)
 class CollectedMergeRunResult:
     status: str
     target_date: str
@@ -973,6 +1018,7 @@ class CollectedMergeRunResult:
     upload_status: str = ""
     upload_target: str = ""
     upload_error: str = ""
+    outputs: list[CollectedMergeOutput] = field(default_factory=list)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> CollectedMergeRunResult:
@@ -991,6 +1037,10 @@ class CollectedMergeRunResult:
             upload_status=str(data.get("upload_status", "")),
             upload_target=str(data.get("upload_target", "")),
             upload_error=str(data.get("upload_error", "")),
+            outputs=[
+                CollectedMergeOutput.from_dict(item)
+                for item in _dict_list(data.get("outputs"))
+            ],
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -1007,6 +1057,7 @@ class CollectedMergeRunResult:
             "upload_status": self.upload_status,
             "upload_target": self.upload_target,
             "upload_error": self.upload_error,
+            "outputs": [item.to_dict() for item in self.outputs],
         }
 
 

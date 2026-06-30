@@ -2,26 +2,27 @@
 
 ## Summary
 
-新增 `merge-collected` 子命令，用于管理人员把多人提交的 WorkTrace Markdown 放入 `merge_inbox/YYYY/MM/DD/` 后，生成同目录 `_merged.md` 团队汇总文件。
+新增 `merge-collected` 子命令，用于管理人员把多人提交的 WorkTrace Markdown 放入 `merge_inbox/YYYY/MM/DD/` 后，生成同目录 `_merged.md` 团队汇总文件。日期目录下如存在一级子目录，也会按子目录分别合并，各自生成子目录内的 `_merged.md`。
 
 合并结果保持标准 WorkTrace Markdown 兼容，同时额外展示来源人员、来源事件 ID。相同原始 `event_id` 只有在标题和内容完全一致，或标题一致且内容一方包含另一方时，才先确定性归组；如果 `event_id` 相同但不满足该规则，则记录 warning 并交给 LLM 保守判断。其余事件也由 LLM 判断是否属于同一真实工作事件，并对每个合并组生成管理视角的综合描述。读取来源事件和写入最终 `_merged.md` 前，都会执行与个人日报一致的结构化保留门槛。
 
 ## Key Changes
 
 - 新增 CLI：`python -m src.worktrace.cli merge-collected --date YYYY-MM-DD`，旧命令 `python -m src.worktrace.cli --date YYYY-MM-DD` 行为不变。
-- 输入固定读取 `merge_inbox/YYYY/MM/DD/` 下 `.md` 文件，跳过 `_merged.md`、隐藏文件、非 Markdown、格式错误文件。
+- 输入固定读取 `merge_inbox/YYYY/MM/DD/` 及其一级子目录当前层的 `.md` 文件，跳过 `_merged.md`、隐藏文件、非 Markdown、格式错误文件。
 - 人员名从文件名提取，固定格式为 `YYYY-MM-DD-姓名.md`，例如 `2026-06-29-张三.md` 提取为 `张三`。
 - 相同 `event_id` 只有在标题和内容完全一致，或标题一致且内容一方包含另一方时才作为确定性合并组；其它情况不锁死，交给 LLM 判断，并在 JSON 结果里记录 warning。
 - 多人合并 prompt 继续要求 LLM 不输出薪资、绩效、争吵、辱骂等敏感事项，并要求每个 group 输出 `object_hint`、`retention_reason`、`retention_detail`。
 - 输出 `_merged.md` 保留 WorkTrace 事件注释和标准字段，并新增来源人员、来源事件 ID 字段；保留元数据继续写入 Markdown，供追溯和后续汇总使用。
 - 新增 `config/merge_delivery.example.json`；实际配置 `config/merge_delivery.local.json` 加入 `.gitignore`。
-- 有本地飞书 Drive 文件夹配置时，在该文件夹下创建 `YYYY/MM/DD/` 目录结构并上传原始 `_merged.md`；无配置时只生成本地文件；上传失败只写 warning。
+- 有本地飞书 Drive 文件夹配置时，根目录结果上传到 `YYYY/MM/DD/`，子目录结果上传到 `YYYY/MM/DD/<子目录名>/`；无配置时只生成本地文件；上传失败只写 warning。
 
 ## Design Details
 
 - 读取阶段
   - 输入目录由 `--date` 拆成 `merge_inbox/YYYY/MM/DD/`，例如 `2026-06-29` 对应 `merge_inbox/2026/06/29/`。
-  - 只读取当前目录下的普通 `.md` 文件；跳过 `_merged.md`、隐藏文件、子目录和非 Markdown 文件。
+  - 日期根目录始终作为一个合并范围；日期目录下的每个一级子目录也作为独立合并范围。
+  - 每个合并范围只读取当前目录下的普通 `.md` 文件；跳过 `_merged.md`、隐藏文件、子目录和非 Markdown 文件，不递归更深层目录。
   - 文件名必须匹配 `YYYY-MM-DD-姓名.md`。不匹配时跳过该文件并写 warning。
   - Markdown 解析复用现有 WorkTrace 标准格式：front matter 加 `<!-- worktrace:event:start event_id="..." -->` 事件块。坏文件跳过并写 warning，不影响其它文件。
   - 解析出的来源事件必须通过结构化保留门槛；缺少保留理由、保留依据或具体对象的事件会被过滤，不进入 LLM 合并 prompt。
@@ -70,7 +71,8 @@
 ```
 
 - JSON 执行结果包含：
-  `status`、`target_date`、`input_dir`、`output_path`、`source_file_count`、`source_event_count`、`merged_event_count`、`skipped_file_count`、`warning_messages`、`upload_status`、`upload_target`、`upload_error`。
+  `status`、`target_date`、`input_dir`、`output_path`、`source_file_count`、`source_event_count`、`merged_event_count`、`skipped_file_count`、`warning_messages`、`upload_status`、`upload_target`、`upload_error`、`outputs`。
+- `outputs` 逐项记录每个合并范围的 `input_dir`、`output_path`、`source_file_count`、`source_event_count`、`merged_event_count`、`skipped_file_count`、`warning_messages`、`upload_status`、`upload_target`、`upload_error`。
 
 ## Test Plan
 
