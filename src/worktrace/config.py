@@ -221,11 +221,25 @@ def load_runtime_config_overrides(
         fallback=config.excluded_event_content_signatures,
         file_path=rules_path,
     )
+    confidential_event_keywords = _read_string_list(
+        payload,
+        key="confidential_event_keywords",
+        fallback=config.confidential_event_keywords,
+        file_path=rules_path,
+    )
+    non_work_sensitive_keywords = _read_string_list(
+        payload,
+        key="non_work_sensitive_keywords",
+        fallback=config.non_work_sensitive_keywords,
+        file_path=rules_path,
+    )
 
     if (
         excluded_event_topics == config.excluded_event_topics
         and excluded_event_content_signatures
         == config.excluded_event_content_signatures
+        and confidential_event_keywords == config.confidential_event_keywords
+        and non_work_sensitive_keywords == config.non_work_sensitive_keywords
     ):
         return config
 
@@ -233,6 +247,8 @@ def load_runtime_config_overrides(
         config,
         excluded_event_topics=excluded_event_topics,
         excluded_event_content_signatures=excluded_event_content_signatures,
+        confidential_event_keywords=confidential_event_keywords,
+        non_work_sensitive_keywords=non_work_sensitive_keywords,
     )
 
 
@@ -313,42 +329,10 @@ class RuntimeConfig:
     analyzer_timeout_seconds: int = 180
     codex_stdin_mode: bool = False
     anchor_batch_size: int = 3
-    confidential_event_keywords: tuple[str, ...] = (
-        "工资",
-        "薪资",
-        "薪酬",
-        "绩效",
-        "绩效考核",
-        "绩效评定",
-        "绩效评级",
-        "奖金",
-        "调薪",
-        "涨薪",
-        "降薪",
-        "薪级",
-        "年终奖",
-    )
-    non_work_sensitive_keywords: tuple[str, ...] = (
-        "吵架",
-        "辱骂",
-        "侮辱",
-        "调情",
-        "情绪发泄",
-        "情绪化发泄",
-        "互骂",
-        "骂人",
-        "对骂",
-    )
-    excluded_event_topics: tuple[str, ...] = (
-        "代码同步",
-        "工作面谈安排",
-        "故障数据同步",
-    )
-    excluded_event_content_signatures: tuple[str, ...] = (
-        "本周发给哈尔滨的故障数据",
-        "git pull",
-        "聆听大老板电话",
-    )
+    confidential_event_keywords: tuple[str, ...] = ()
+    non_work_sensitive_keywords: tuple[str, ...] = ()
+    excluded_event_topics: tuple[str, ...] = ()
+    excluded_event_content_signatures: tuple[str, ...] = ()
     excluded_conversation_ids: tuple[str, ...] = ()
     data_root: Path = field(default_factory=lambda: Path("data"))
     cache_root: Path | None = None

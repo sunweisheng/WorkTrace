@@ -12,7 +12,7 @@ from src.worktrace.pipeline.retention_filter import (
 )
 
 
-def test_sensitive_filter_removes_salary_and_performance_drafts() -> None:
+def test_merged_filter_does_not_remove_configured_sensitive_keywords() -> None:
     drafts = [
         MergedEventDraft(
             date="2026-06-23",
@@ -32,12 +32,11 @@ def test_sensitive_filter_removes_salary_and_performance_drafts() -> None:
 
     kept, warnings = filter_sensitive_merged_drafts(drafts, RuntimeConfig())
 
-    assert len(kept) == 1
-    assert kept[0].topic == "项目发布推进"
-    assert len(warnings) == 1
+    assert [draft.topic for draft in kept] == ["工资调整沟通", "项目发布推进"]
+    assert warnings == []
 
 
-def test_sensitive_filter_removes_quarrel_and_abuse_drafts() -> None:
+def test_merged_filter_does_not_remove_non_work_sensitive_keywords() -> None:
     drafts = [
         MergedEventDraft(
             date="2026-06-23",
@@ -57,12 +56,11 @@ def test_sensitive_filter_removes_quarrel_and_abuse_drafts() -> None:
 
     kept, warnings = filter_sensitive_merged_drafts(drafts, RuntimeConfig())
 
-    assert len(kept) == 1
-    assert kept[0].topic == "需求评审推进"
-    assert len(warnings) == 1
+    assert [draft.topic for draft in kept] == ["团队吵架记录", "需求评审推进"]
+    assert warnings == []
 
 
-def test_sensitive_filter_uses_runtime_config_keywords() -> None:
+def test_merged_filter_ignores_sensitive_runtime_config_keywords() -> None:
     drafts = [
         MergedEventDraft(
             date="2026-06-23",
@@ -79,11 +77,11 @@ def test_sensitive_filter_uses_runtime_config_keywords() -> None:
     )
     kept, warnings = filter_sensitive_merged_drafts(drafts, config)
 
-    assert kept == []
-    assert len(warnings) == 1
+    assert [draft.topic for draft in kept] == ["股权方案沟通"]
+    assert warnings == []
 
 
-def test_sensitive_filter_removes_excluded_operational_noise_drafts() -> None:
+def test_merged_filter_removes_excluded_operational_noise_drafts() -> None:
     drafts = [
         MergedEventDraft(
             date="2026-06-23",
@@ -114,8 +112,12 @@ def test_sensitive_filter_removes_excluded_operational_noise_drafts() -> None:
             source_conversation_ids=["c4"],
         ),
     ]
+    config = RuntimeConfig(
+        excluded_event_topics=("代码同步", "工作面谈安排", "故障数据同步"),
+        excluded_event_content_signatures=("git pull", "聆听大老板电话"),
+    )
 
-    kept, warnings = filter_sensitive_merged_drafts(drafts, RuntimeConfig())
+    kept, warnings = filter_sensitive_merged_drafts(drafts, config)
 
     assert [draft.topic for draft in kept] == ["需求评审推进"]
     assert len(warnings) == 3
@@ -145,7 +147,8 @@ def test_excluded_candidate_filter_removes_only_exact_topics() -> None:
         ),
     ]
 
-    kept, warnings = filter_excluded_candidate_drafts(drafts, RuntimeConfig())
+    config = RuntimeConfig(excluded_event_topics=("代码同步",))
+    kept, warnings = filter_excluded_candidate_drafts(drafts, config)
 
     assert [draft.topic for draft in kept] == ["索取故障数据"]
     assert len(warnings) == 1
@@ -165,13 +168,39 @@ def test_excluded_candidate_filter_removes_signature_even_when_topic_changes() -
         )
     ]
 
-    kept, warnings = filter_excluded_candidate_drafts(drafts, RuntimeConfig())
+    config = RuntimeConfig(excluded_event_content_signatures=("git pull",))
+    kept, warnings = filter_excluded_candidate_drafts(drafts, config)
 
     assert kept == []
     assert len(warnings) == 1
 
 
-def test_sensitive_filter_keeps_non_excluded_topic_with_different_content() -> None:
+def test_merged_filter_removes_signature_even_when_topic_changes() -> None:
+    drafts = [
+        MergedEventDraft(
+            date="2026-06-23",
+            topic="代码拉取",
+            content="孙维晟指示执行 git pull 操作。",
+            source_message_ids=["m1"],
+            source_conversation_ids=["c1"],
+        ),
+        MergedEventDraft(
+            date="2026-06-23",
+            topic="需求评审推进",
+            content="确认需求变更范围和上线排期。",
+            source_message_ids=["m2"],
+            source_conversation_ids=["c2"],
+        ),
+    ]
+    config = RuntimeConfig(excluded_event_content_signatures=("git pull",))
+
+    kept, warnings = filter_sensitive_merged_drafts(drafts, config)
+
+    assert [draft.topic for draft in kept] == ["需求评审推进"]
+    assert len(warnings) == 1
+
+
+def test_merged_filter_keeps_non_excluded_topic_with_different_content() -> None:
     drafts = [
         MergedEventDraft(
             date="2026-06-23",

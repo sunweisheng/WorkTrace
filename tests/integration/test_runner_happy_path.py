@@ -119,7 +119,11 @@ class FakeDelivery:
 
 
 def test_runner_happy_path(tmp_path: Path) -> None:
-    config = RuntimeConfig(data_root=tmp_path / "data")
+    config = RuntimeConfig(
+        data_root=tmp_path / "data",
+        excluded_event_topics=("代码同步",),
+        excluded_event_content_signatures=("git pull",),
+    )
     runner = DailyTraceRunner(
         config=config,
         dependencies=RuntimeDependencies(
@@ -309,7 +313,11 @@ def test_runner_keeps_distinct_events_with_same_source_message_ids_separate(
                 ]
             )
 
-    config = RuntimeConfig(data_root=tmp_path / "data")
+    config = RuntimeConfig(
+        data_root=tmp_path / "data",
+        excluded_event_topics=("代码同步",),
+        excluded_event_content_signatures=("git pull",),
+    )
     runner = DailyTraceRunner(
         config=config,
         dependencies=RuntimeDependencies(
@@ -366,7 +374,11 @@ def test_runner_excludes_configured_topics_before_merge(tmp_path: Path) -> None:
         def merge_day_candidates(self, target_date, candidates):
             raise AssertionError("Excluded topics should be filtered before merge")
 
-    config = RuntimeConfig(data_root=tmp_path / "data")
+    config = RuntimeConfig(
+        data_root=tmp_path / "data",
+        excluded_event_topics=("代码同步",),
+        excluded_event_content_signatures=("git pull",),
+    )
     runner = DailyTraceRunner(
         config=config,
         dependencies=RuntimeDependencies(

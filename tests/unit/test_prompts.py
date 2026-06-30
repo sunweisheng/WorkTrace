@@ -173,9 +173,55 @@ def test_batch_prompt_uses_original_message_ids_and_slim_rules(tmp_path: Path) -
     assert "不要自造占位符 id。" in prompt
     assert '"slice_id": "slice-1"' in prompt
     assert '"conversation_id": "oc_1"' in prompt
-    assert "涉及工资、薪资、薪酬、绩效、绩效考核、绩效评定、绩效评级、奖金、调薪、涨薪、降薪、薪级、年终奖等工作保密信息，不要提炼为事项。" in prompt
-    assert "涉及吵架、辱骂、侮辱、调情、情绪发泄、情绪化发泄、互骂、骂人、对骂等非工作敏感内容，不要提炼为事项。" in prompt
+    assert "等工作保密信息，不要提炼为事项。" not in prompt
+    assert "等非工作敏感内容，不要提炼为事项。" not in prompt
     assert "按会话 slice 独立提炼，不要串会话信息。" not in prompt
+
+
+def test_batch_prompt_uses_configured_sensitive_keywords(tmp_path: Path) -> None:
+    config = RuntimeConfig(
+        data_root=tmp_path / "data",
+        confidential_event_keywords=("工资", "薪资"),
+        non_work_sensitive_keywords=("吵架",),
+    )
+    message = NormalizedMessage(
+        conversation_id="oc_1",
+        conversation_name="项目群",
+        message_id="om_1",
+        sender_open_id="ou_1",
+        sender_name="Alice",
+        send_time="2026-06-22T10:00:00+08:00",
+        message_type="text",
+        text="推进发布",
+        reply_to_message_id=None,
+        quote_message_id=None,
+        links=[],
+        attachments=[],
+        is_system=False,
+    )
+    conversation_slice = ConversationSlice(
+        slice_id="slice-1",
+        conversation_id="oc_1",
+        conversation_name="",
+        anchor_message_ids=["om_1"],
+        in_day_message_ids=["om_1"],
+        messages=[message],
+        attachment_texts=[],
+    )
+    batch = AnalysisBatch(
+        target_date="2026-06-22",
+        batch_id="conversation-001",
+        retry_round=0,
+        estimated_tokens=0,
+        self_open_id="ou_self",
+        self_display_name="Me",
+        slices=[conversation_slice],
+    )
+
+    prompt = build_batch_analysis_prompt(batch, config=config)
+
+    assert "涉及工资、薪资等工作保密信息，不要提炼为事项。" in prompt
+    assert "涉及吵架等非工作敏感内容，不要提炼为事项。" in prompt
 
 
 def test_anchor_prompt_serialization_is_compact(tmp_path: Path) -> None:

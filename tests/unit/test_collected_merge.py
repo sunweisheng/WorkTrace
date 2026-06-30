@@ -291,7 +291,10 @@ def test_collected_merge_prompt_contains_sensitive_rules() -> None:
             )
         ],
         [],
-        config=RuntimeConfig(),
+        config=RuntimeConfig(
+            confidential_event_keywords=("工资", "薪资", "薪酬"),
+            non_work_sensitive_keywords=("吵架", "辱骂"),
+        ),
     )
 
     assert "涉及工资、薪资、薪酬" in prompt

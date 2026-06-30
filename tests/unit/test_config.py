@@ -132,6 +132,8 @@ def test_load_runtime_config_overrides_reads_excluded_event_rules_from_local_env
     (rules_dir / "event_rules.json").write_text(
         (
             "{\n"
+            '  "confidential_event_keywords": ["工资", "薪资"],\n'
+            '  "non_work_sensitive_keywords": ["吵架"],\n'
             '  "excluded_event_topics": ["代码同步", "工作面谈安排", "故障数据同步"],\n'
             '  "excluded_event_content_signatures": ["git pull", "聆听大老板电话"]\n'
             "}\n"
@@ -150,6 +152,8 @@ def test_load_runtime_config_overrides_reads_excluded_event_rules_from_local_env
         "git pull",
         "聆听大老板电话",
     )
+    assert config.confidential_event_keywords == ("工资", "薪资")
+    assert config.non_work_sensitive_keywords == ("吵架",)
 
 
 def test_load_runtime_config_overrides_uses_defaults_when_rule_file_missing(
@@ -158,6 +162,8 @@ def test_load_runtime_config_overrides_uses_defaults_when_rule_file_missing(
     config = load_runtime_config_overrides(RuntimeConfig(), cwd=tmp_path)
 
     assert config.excluded_event_topics == RuntimeConfig().excluded_event_topics
+    assert config.confidential_event_keywords == ()
+    assert config.non_work_sensitive_keywords == ()
 
 
 def test_load_runtime_config_overrides_rejects_invalid_rule_file(tmp_path: Path) -> None:

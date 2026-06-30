@@ -1,12 +1,30 @@
 {
-  "excluded_event_topics": [
-    "代码同步",
-    "工作面谈安排",
-    "故障数据同步"
+  "confidential_event_keywords": [
+    "工资",
+    "薪资",
+    "薪酬",
+    "绩效",
+    "绩效考核",
+    "绩效评定",
+    "绩效评级",
+    "奖金",
+    "调薪",
+    "涨薪",
+    "降薪",
+    "薪级",
+    "年终奖"
   ],
-  "excluded_event_content_signatures": [
-    "git pull",
-    "聆听大老板电话",
-    "本周发给哈尔滨的故障数据"
-  ]
+  "non_work_sensitive_keywords": [
+    "吵架",
+    "辱骂",
+    "侮辱",
+    "调情",
+    "情绪发泄",
+    "情绪化发泄",
+    "互骂",
+    "骂人",
+    "对骂"
+  ],
+  "excluded_event_topics": [],
+  "excluded_event_content_signatures": []
 }

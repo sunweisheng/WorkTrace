@@ -830,11 +830,15 @@ def _format_prompt_time(value: str, config: RuntimeConfig) -> str:
 
 
 def _build_confidential_rule(config: RuntimeConfig) -> str:
+    if not config.confidential_event_keywords:
+        return ""
     joined = "、".join(config.confidential_event_keywords)
     return f"涉及{joined}等工作保密信息，不要提炼为事项。"
 
 
 def _build_non_work_sensitive_rule(config: RuntimeConfig) -> str:
+    if not config.non_work_sensitive_keywords:
+        return ""
     joined = "、".join(config.non_work_sensitive_keywords)
     return f"涉及{joined}等非工作敏感内容，不要提炼为事项。"
 
