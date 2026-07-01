@@ -58,7 +58,6 @@ def build_batch_analysis_prompt(
         "rules": [
             "只提炼工作事项。",
             "只提炼与本人直接相关的工作事项。",
-            "不要输出思考过程、推理摘要、分析说明或任何解释性文字。",
             "本人信息见 input.self；只有事项明确由本人发起、本人负责、本人审批、本人催办、本人汇报、本人跟进，或他人明确要求本人推进/处理时，才提炼。",
             "如果事项主体明显是他人的工作、他人的进展、他人的承诺，而本人只是参与了会话或说过别的话，不要提炼。",
             "如果只是同群讨论背景信息、但没有明确落到本人，也不要提炼。",
@@ -117,7 +116,6 @@ def build_merge_prompt(target_date: str, candidates: list[SourceBackedEventDraft
         ),
         "rules": [
             "只把明显属于同一真实事件的事项分到一起。",
-            "不要输出思考过程、推理摘要、分析说明或任何解释性文字。",
             "如果拿不准，宁可分开。",
             "背景相同不等于同一事件。",
             "动作类型不同通常不是同一事件。",
@@ -186,7 +184,6 @@ def build_collected_merge_prompt(
             _build_confidential_rule(runtime_config),
             _build_non_work_sensitive_rule(runtime_config),
             "涉及上述敏感事项时，不要输出对应 group。",
-            "不要输出思考过程、推理摘要、分析说明或任何解释性文字。",
         ],
         "required_output_schema": {
             "groups": [
@@ -242,7 +239,6 @@ def build_anchor_analysis_prompt(
                 f"{AnchorStatus.NEEDS_ATTACHMENT_TEXT.value}、{AnchorStatus.NOT_WORK_RELATED.value}、"
                 f"{AnchorStatus.UNCERTAIN.value}。"
             ),
-            "不要输出思考过程、推理摘要、分析说明或任何解释性文字。",
             "只抽取工作事件。",
             "咨询类事件、流程审核类事件、团建活动组织类事件、技能培训类事件，默认不要提炼；这类事项对后续公司级长期事件沉淀价值较低。",
             *LOW_RETENTION_EVENT_RULES,
@@ -314,7 +310,6 @@ def build_anchor_batch_analysis_prompt(
         ),
         "rules": [
             "每个 anchor unit 独立判断，不要串信息。",
-            "不要输出思考过程、推理摘要、分析说明或任何解释性文字。",
             "每个 result 必须包含 anchor_unit_id 和 analysis。",
             "只抽取工作事件。",
             "咨询类事件、流程审核类事件、团建活动组织类事件、技能培训类事件，默认不要提炼；这类事项对后续公司级长期事件沉淀价值较低。",
@@ -394,58 +389,56 @@ def build_anchor_expansion_prompt(
     runtime_config = config or RuntimeConfig()
     protocol = {
         "instruction": (
-            "You are continuing analysis of one anchor-focused chat window after Python "
-            "expanded the context. Return only one JSON object with keys anchor_status, "
-            "candidate_events, context_requests, and needs_cross_anchor_merge. "
-            "Do not return markdown, explanations, or extra keys. "
-            "Give concise answers, do not reason aloud, and skip thinking steps. "
-            "Answer directly and do not show your reasoning process."
+            "在 Python 扩展上下文后，继续分析一个锚点聊天窗口。"
+            "只返回一个 JSON 对象，包含 anchor_status、candidate_events、"
+            "context_requests 和 needs_cross_anchor_merge。"
+            "不要返回 markdown、解释或额外字段。"
+            "请给我简洁的答案，不要推理，跳过思考步骤。"
+            "直接作答，不要展示你的推理过程。"
         ),
         "rules": [
             (
-                "anchor_status must be one of "
-                f"{AnchorStatus.COMPLETED.value}, "
-                f"{AnchorStatus.NEEDS_MORE_CONTEXT.value}, "
-                f"{AnchorStatus.NEEDS_ATTACHMENT_TEXT.value}, "
-                f"{AnchorStatus.NOT_WORK_RELATED.value}, "
-                f"{AnchorStatus.UNCERTAIN.value}."
+                "anchor_status 只能是 "
+                f"{AnchorStatus.COMPLETED.value}、"
+                f"{AnchorStatus.NEEDS_MORE_CONTEXT.value}、"
+                f"{AnchorStatus.NEEDS_ATTACHMENT_TEXT.value}、"
+                f"{AnchorStatus.NOT_WORK_RELATED.value}、"
+                f"{AnchorStatus.UNCERTAIN.value}。"
             ),
-            "Do not output chain-of-thought, reasoning summary, analysis notes, or any explanation text.",
-            "Use previous_analysis as prior state, but revise it when new context changes the conclusion.",
-            "candidate_events should represent the latest consolidated judgment for this anchor_unit.",
-            "Each candidate_event must still represent exactly one primary action or work thread.",
-            "Each candidate_event must include object_hint, retention_reason, and retention_detail.",
-            "Do not output private meals, dinner scheduling, farewell meals, coworker reputation praise, or interpersonal small talk as candidate_events.",
-            "Do not output generic review/approval completion without a concrete business object, approval conclusion, issue, risk, amount, customer, project, document, or follow-up action.",
+            "把 previous_analysis 作为先前状态；如果新上下文改变结论，必须修正。",
+            "candidate_events 应表示当前 anchor_unit 的最新综合判断。",
+            "每个 candidate_event 仍然只能表示一个主要动作或工作线索。",
+            "每个 candidate_event 必须包含 object_hint、retention_reason 和 retention_detail。",
+            "私人饭局、约饭、离职告别聚餐、同事口碑评价、人际寒暄，不要输出 candidate_event。",
+            "泛泛完成审核/审批但没有具体业务对象、审批结论、问题、风险、金额、客户、项目、文档或后续动作，不要输出 candidate_event。",
             (
-                "retention_reason must be one of deliverable_updated, decision_made, issue_or_risk_found, "
-                "follow_up_assigned, external_business_progress, or substantive_approval."
+                "retention_reason 必须是 deliverable_updated、decision_made、issue_or_risk_found、"
+                "follow_up_assigned、external_business_progress 或 substantive_approval。"
             ),
-            "Do not output ordinary scheduling, meeting-time confirmation, information catch-up, or generic approval/review completion without a concrete object and conclusion.",
+            "普通日程安排、会议时间确认、互通信息、没有具体对象和结论的泛泛审核/审批完成，不要输出 candidate_event。",
             (
-                "If new context reveals that one previous candidate_event actually mixed multiple actions, split it into "
-                "multiple candidate_events."
-            ),
-            (
-                "Action type matters more than shared background nouns. Notification/sync, review/check, execution, "
-                "design, approval, payment follow-up, and document editing are usually different events."
+                "如果新上下文显示某个先前 candidate_event 实际混合了多个动作，"
+                "应拆成多个 candidate_events。"
             ),
             (
-                "If one part is mainly about notifying or syncing information, and another part is mainly about checking, "
-                "validating, executing, or following up, keep them as separate candidate_events unless the text clearly "
-                "shows they are the same continuous action."
+                "动作类型比共享背景名词更重要。通知/同步、审核/核对、执行、设计、"
+                "审批、付款跟进、文档编辑通常是不同事件。"
             ),
             (
-                "If content includes a result, that result must belong only to the same candidate_event's primary action. "
-                "If the newly added context shows that the result belongs to another action, move it or split the event instead of keeping them mixed."
+                "如果一部分主要是通知或同步信息，另一部分主要是检查、校验、执行或跟进，"
+                "除非文本清楚表明它们是同一个连续动作，否则应保留为不同 candidate_events。"
             ),
             (
-                "For example, 'already synced to the boss / no reply so assume acknowledged' belongs to the sync action, "
-                "not to a separate coupon configuration checking action."
+                "如果 content 包含结果，该结果只能归属于同一个 candidate_event 的主要动作。"
+                "如果新增上下文显示结果属于另一个动作，应移动或拆分事件，不要混在一起。"
             ),
-            "Only request more context when the newly added messages or attachment texts still do not resolve the event.",
-            "needs_cross_anchor_merge should be true only when the event likely spans other anchor windows or conversations.",
-            "If there is an explicit result, merge it into content instead of returning a separate result field.",
+            (
+                "例如：已同步给老板、老板未回复可视为已知悉，属于同步动作，"
+                "不属于单独的优惠券配置核对动作。"
+            ),
+            "只有新增消息或附件正文仍无法解决事件判断时，才请求更多上下文。",
+            "只有事件可能跨其他锚点窗口或会话时，needs_cross_anchor_merge 才设为 true。",
+            "如果有明确结果，直接融入 content，不要单独返回 result。",
         ],
         "required_output_schema": {
             "anchor_status": (

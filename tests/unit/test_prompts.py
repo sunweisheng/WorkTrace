@@ -173,7 +173,6 @@ def test_batch_prompt_uses_original_message_ids_and_slim_rules(tmp_path: Path) -
     assert '"id": "om_2"' in prompt
     assert "每条事项附上最相关的消息 id。" in prompt
     assert "如果有明确结果，直接融入 content，不要单独返回 result。" in prompt
-    assert "不要输出思考过程、推理摘要、分析说明或任何解释性文字。" in prompt
     assert "请给我简洁的答案，不要推理，跳过思考步骤。" in prompt
     assert "直接作答，不要展示你的推理过程。" in prompt
     assert "不要自造占位符 id。" in prompt
@@ -280,7 +279,6 @@ def test_anchor_prompt_serialization_is_compact(tmp_path: Path) -> None:
     assert "私人饭局、约饭、离职告别聚餐、同事口碑评价、人际寒暄，不要提炼为事项。" in prompt
     assert "泛泛完成审核/审批/工作审核/审核任务但没有具体业务对象、审批结论、问题、风险、金额、客户、项目、文档或后续动作，不要提炼为事项。" in prompt
     assert "不要单独返回 result" in prompt
-    assert "不要输出思考过程、推理摘要、分析说明或任何解释性文字。" in prompt
     assert "请给我简洁的答案，不要推理，跳过思考步骤。" in prompt
     assert "直接作答，不要展示你的推理过程。" in prompt
 
@@ -370,10 +368,73 @@ def test_anchor_expansion_prompt_includes_previous_result_and_expansion(tmp_path
     assert '"trigger_requests"' in prompt
     assert '"attachment_texts"' in prompt
     assert AnchorStatus.NEEDS_ATTACHMENT_TEXT.value in prompt
-    assert "If new context reveals that one previous candidate_event actually mixed multiple actions" in prompt
-    assert "result must belong only to the same candidate_event's primary action." in prompt
-    assert "Do not output private meals, dinner scheduling, farewell meals, coworker reputation praise, or interpersonal small talk as candidate_events." in prompt
-    assert "Do not output generic review/approval completion without a concrete business object, approval conclusion, issue, risk, amount, customer, project, document, or follow-up action." in prompt
+    assert "如果新上下文显示某个先前 candidate_event 实际混合了多个动作" in prompt
+    assert "该结果只能归属于同一个 candidate_event 的主要动作" in prompt
+    assert "私人饭局、约饭、离职告别聚餐、同事口碑评价、人际寒暄，不要输出 candidate_event。" in prompt
+    assert "泛泛完成审核/审批但没有具体业务对象、审批结论、问题、风险、金额、客户、项目、文档或后续动作，不要输出 candidate_event。" in prompt
+    assert "Do not output private meals" not in prompt
+    assert "If new context reveals" not in prompt
+
+
+def test_prompts_do_not_include_removed_reasoning_summary_rule(tmp_path: Path) -> None:
+    config = RuntimeConfig(data_root=tmp_path / "data")
+    message = NormalizedMessage(
+        conversation_id="oc_1",
+        conversation_name="项目群",
+        message_id="om_1",
+        sender_open_id="ou_1",
+        sender_name="Alice",
+        send_time="2026-06-22T10:00:00+08:00",
+        message_type="text",
+        text="推进发布",
+        reply_to_message_id=None,
+        quote_message_id=None,
+        links=[],
+        attachments=[],
+        is_system=False,
+    )
+    conversation_slice = ConversationSlice(
+        slice_id="slice-1",
+        conversation_id="oc_1",
+        conversation_name="",
+        anchor_message_ids=["om_1"],
+        in_day_message_ids=["om_1"],
+        messages=[message],
+        attachment_texts=[],
+    )
+    batch = AnalysisBatch(
+        target_date="2026-06-22",
+        batch_id="conversation-001",
+        retry_round=0,
+        estimated_tokens=0,
+        self_open_id="ou_self",
+        self_display_name="Me",
+        slices=[conversation_slice],
+    )
+    anchor_unit = AnchorUnit(
+        anchor_unit_id="oc_1:om_1",
+        conversation_id="oc_1",
+        conversation_name="项目群",
+        anchor_message_ids=["om_1"],
+        in_day_message_ids=["om_1"],
+        base_message_ids=["om_1"],
+        messages=[message],
+        reply_relation_ids=[],
+        quote_relation_ids=[],
+        attachment_refs=[],
+    )
+
+    prompts = [
+        build_batch_analysis_prompt(batch, config=config),
+        build_merge_prompt("2026-06-22", []),
+        build_anchor_analysis_prompt("2026-06-22", anchor_unit, config=config),
+        build_anchor_batch_analysis_prompt("2026-06-22", [anchor_unit], config=config),
+    ]
+
+    assert all(
+        "不要输出思考过程、推理摘要、分析说明或任何解释性文字。" not in prompt
+        for prompt in prompts
+    )
 
 
 def test_anchor_batch_prompt_includes_low_retention_rules(tmp_path: Path) -> None:
