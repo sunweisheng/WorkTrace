@@ -241,6 +241,62 @@ def test_retention_filter_removes_generic_review_completion() -> None:
     assert len(warnings) == 1
 
 
+def test_retention_filter_removes_personal_social_reputation_event() -> None:
+    drafts = [
+        SourceBackedEventDraft(
+            draft_id="d1",
+            date="2026-06-30",
+            topic="团队口碑反馈",
+            content=(
+                "梁媛媛提到产品团队对其口碑评价良好，并约定今晚在公司旁边"
+                "吃辣味牛蛙火锅，饭后直接坐地铁回去准备述职报告材料。"
+            ),
+            source_message_ids=["m1"],
+            source_conversation_id="c1",
+            source_slice_id="s1",
+            confidence=0.9,
+            action_label="跟进",
+            object_hint="团队口碑反馈",
+            retention_reason="follow_up_assigned",
+            retention_detail="确定今晚与公司同事梁媛媛在公司附近吃辣味牛蛙火锅。",
+        )
+    ]
+
+    kept, warnings = filter_retained_candidate_drafts(drafts)
+
+    assert kept == []
+    assert len(warnings) == 1
+    assert "personal_social_or_reputation_event" in warnings[0]
+
+
+def test_retention_filter_removes_generic_review_with_named_submitter() -> None:
+    drafts = [
+        SourceBackedEventDraft(
+            draft_id="d1",
+            date="2026-06-29",
+            topic="完成工作审核",
+            content="孙维晟完成了郭海提交的工作审核，并同步了审核结果。",
+            source_message_ids=["m1"],
+            source_conversation_id="c1",
+            source_slice_id="s1",
+            confidence=0.9,
+            action_label="审核",
+            object_hint="工作审核",
+            retention_reason="substantive_approval",
+            retention_detail=(
+                "2026-06-29 12:30 孙维晟完成审核任务，"
+                "该事项涉及具体业务审批动作的闭环。"
+            ),
+        )
+    ]
+
+    kept, warnings = filter_retained_candidate_drafts(drafts)
+
+    assert kept == []
+    assert len(warnings) == 1
+    assert "generic_review_completion" in warnings[0]
+
+
 def test_retention_filter_keeps_substantive_approval() -> None:
     drafts = [
         SourceBackedEventDraft(
@@ -262,6 +318,30 @@ def test_retention_filter_keeps_substantive_approval() -> None:
     kept, warnings = filter_retained_candidate_drafts(drafts)
 
     assert [draft.topic for draft in kept] == ["合同审核"]
+    assert warnings == []
+
+
+def test_retention_filter_keeps_specific_payment_approval_rejection() -> None:
+    drafts = [
+        SourceBackedEventDraft(
+            draft_id="d1",
+            date="2026-06-29",
+            topic="项目付款审批",
+            content="审批某项目付款申请，并驳回缺少发票附件的问题。",
+            source_message_ids=["m1"],
+            source_conversation_id="c1",
+            source_slice_id="s1",
+            confidence=0.9,
+            action_label="审批",
+            object_hint="项目付款申请",
+            retention_reason="substantive_approval",
+            retention_detail="驳回某项目付款申请中缺少发票附件的问题。",
+        )
+    ]
+
+    kept, warnings = filter_retained_candidate_drafts(drafts)
+
+    assert [draft.topic for draft in kept] == ["项目付款审批"]
     assert warnings == []
 
 

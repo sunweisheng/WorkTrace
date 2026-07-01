@@ -19,6 +19,11 @@ RETENTION_REASONS = {
 GENERIC_OBJECT_HINTS = {
     "审核",
     "审批",
+    "工作审核",
+    "审核任务",
+    "业务审批",
+    "审核结果",
+    "审批结果",
     "会议",
     "沟通",
     "工作",
@@ -30,6 +35,65 @@ GENERIC_OBJECT_HINTS = {
     "信息",
 }
 _PUNCTUATION_RE = re.compile(r"[\s，。！？、,.!?:：；;（）()【】\\[\\]《》<>\"'“”‘’`~\-_/]+")
+_PERSONAL_SOCIAL_KEYWORDS = (
+    "约饭",
+    "吃饭",
+    "聚餐",
+    "饭局",
+    "火锅",
+    "牛蛙",
+    "告别",
+    "离职前",
+    "口碑",
+    "评价不错",
+    "评价良好",
+    "人际",
+    "寒暄",
+    "回家",
+    "收拾东西",
+)
+_GENERIC_REVIEW_KEYWORDS = (
+    "完成审核",
+    "完成审批",
+    "完成了审核",
+    "完成了审批",
+    "工作审核",
+    "审核任务",
+    "业务审批",
+    "审核结果",
+    "审批结果",
+    "同步审核",
+    "同步审批",
+    "闭环",
+)
+_SUBSTANTIVE_WORK_KEYWORDS = (
+    "合同",
+    "付款",
+    "发票",
+    "客户",
+    "项目",
+    "文档",
+    "方案",
+    "需求",
+    "发布",
+    "上线",
+    "数据",
+    "金额",
+    "条款",
+    "风险",
+    "问题",
+    "缺少",
+    "缺失",
+    "驳回",
+    "拒绝",
+    "通过",
+    "批准",
+    "补充",
+    "修改",
+    "调整",
+    "结论",
+    "排期",
+)
 
 
 class RetentionCandidate(Protocol):
@@ -107,6 +171,10 @@ def retention_rejection_reason(candidate: RetentionCandidate) -> str:
 
     if reason not in RETENTION_REASONS:
         return "missing_or_invalid_retention_reason"
+    if _is_personal_social_or_reputation_event(title, content, detail):
+        return "personal_social_or_reputation_event"
+    if _is_generic_review_completion(title, content, detail, object_hint):
+        return "generic_review_completion"
     if _is_generic_object_hint(object_hint):
         return "missing_or_generic_object_hint"
     if not _has_specific_retention_detail(detail, title=title, content=content, object_hint=object_hint):
@@ -125,6 +193,10 @@ def retention_rejection_reason_for_event(
 
     if reason not in RETENTION_REASONS:
         return "missing_or_invalid_retention_reason"
+    if _is_personal_social_or_reputation_event(title, content, detail):
+        return "personal_social_or_reputation_event"
+    if _is_generic_review_completion(title, content, detail, object_hint):
+        return "generic_review_completion"
     if _is_generic_object_hint(object_hint):
         return "missing_or_generic_object_hint"
     if not _has_specific_retention_detail(detail, title=title, content=content, object_hint=object_hint):
@@ -147,6 +219,36 @@ def _is_generic_object_hint(value: str) -> bool:
     if not compact:
         return True
     return compact in {_normalized_compact(item) for item in GENERIC_OBJECT_HINTS}
+
+
+def _is_personal_social_or_reputation_event(
+    title: str,
+    content: str,
+    detail: str,
+) -> bool:
+    combined = _normalized_compact(" ".join([title, content, detail]))
+    if not any(_normalized_compact(keyword) in combined for keyword in _PERSONAL_SOCIAL_KEYWORDS):
+        return False
+    return not _has_substantive_work_signal(combined)
+
+
+def _is_generic_review_completion(
+    title: str,
+    content: str,
+    detail: str,
+    object_hint: str,
+) -> bool:
+    combined = _normalized_compact(" ".join([title, content, detail, object_hint]))
+    if not any(_normalized_compact(keyword) in combined for keyword in _GENERIC_REVIEW_KEYWORDS):
+        return False
+    return not _has_substantive_work_signal(combined)
+
+
+def _has_substantive_work_signal(compact_text: str) -> bool:
+    return any(
+        _normalized_compact(keyword) in compact_text
+        for keyword in _SUBSTANTIVE_WORK_KEYWORDS
+    )
 
 
 def _has_specific_retention_detail(

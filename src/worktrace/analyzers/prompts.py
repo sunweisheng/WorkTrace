@@ -33,6 +33,15 @@ _WHITESPACE_RE = re.compile(r"[ \t]+")
 _BLANK_LINE_RE = re.compile(r"\n{3,}")
 
 
+LOW_RETENTION_EVENT_RULES = [
+    "私人饭局、约饭、离职告别聚餐、同事口碑评价、人际寒暄，不要提炼为事项。",
+    "泛泛完成审核/审批/工作审核/审核任务但没有具体业务对象、审批结论、问题、风险、金额、客户、项目、文档或后续动作，不要提炼为事项。",
+    "反例：产品同事评价不错，今晚在公司旁边吃牛蛙火锅，饭后回去准备述职材料，不要输出 candidate_event。",
+    "反例：完成了郭海提交的工作审核，并同步审核结果，不要输出 candidate_event。",
+    "正例：审核客户合同并反馈付款条款问题，可以输出 candidate_event。",
+]
+
+
 def build_batch_analysis_prompt(
     batch: AnalysisBatch,
     *,
@@ -54,6 +63,7 @@ def build_batch_analysis_prompt(
             "如果事项主体明显是他人的工作、他人的进展、他人的承诺，而本人只是参与了会话或说过别的话，不要提炼。",
             "如果只是同群讨论背景信息、但没有明确落到本人，也不要提炼。",
             "咨询类事件、流程审核类事件、团建活动组织类事件、技能培训类事件，默认不要提炼；这类事项对后续公司级长期事件沉淀价值较低。",
+            *LOW_RETENTION_EVENT_RULES,
             _build_confidential_rule(runtime_config),
             _build_non_work_sensitive_rule(runtime_config),
             "一件事写一条；如果有多件事就拆开。",
@@ -235,6 +245,7 @@ def build_anchor_analysis_prompt(
             "不要输出思考过程、推理摘要、分析说明或任何解释性文字。",
             "只抽取工作事件。",
             "咨询类事件、流程审核类事件、团建活动组织类事件、技能培训类事件，默认不要提炼；这类事项对后续公司级长期事件沉淀价值较低。",
+            *LOW_RETENTION_EVENT_RULES,
             "每个 candidate_event 只能落在当前 anchor_unit 内。",
             "每个 candidate_event 只表示一个主要动作。",
             "action_label 只写主要动作标签，例如：回复、审批、催办、撰写、核对、跟进、同步、确认。",
@@ -307,6 +318,7 @@ def build_anchor_batch_analysis_prompt(
             "每个 result 必须包含 anchor_unit_id 和 analysis。",
             "只抽取工作事件。",
             "咨询类事件、流程审核类事件、团建活动组织类事件、技能培训类事件，默认不要提炼；这类事项对后续公司级长期事件沉淀价值较低。",
+            *LOW_RETENTION_EVENT_RULES,
             "每个 candidate_event 只能留在自己的 anchor_unit 内。",
             "每个 candidate_event 只表示一个主要动作。",
             "action_label 只写主要动作标签，例如：回复、审批、催办、撰写、核对、跟进、同步、确认。",
@@ -403,6 +415,8 @@ def build_anchor_expansion_prompt(
             "candidate_events should represent the latest consolidated judgment for this anchor_unit.",
             "Each candidate_event must still represent exactly one primary action or work thread.",
             "Each candidate_event must include object_hint, retention_reason, and retention_detail.",
+            "Do not output private meals, dinner scheduling, farewell meals, coworker reputation praise, or interpersonal small talk as candidate_events.",
+            "Do not output generic review/approval completion without a concrete business object, approval conclusion, issue, risk, amount, customer, project, document, or follow-up action.",
             (
                 "retention_reason must be one of deliverable_updated, decision_made, issue_or_risk_found, "
                 "follow_up_assigned, external_business_progress, or substantive_approval."

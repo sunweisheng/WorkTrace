@@ -4,6 +4,7 @@ from pathlib import Path
 
 from src.worktrace.analyzers.prompts import (
     build_anchor_analysis_prompt,
+    build_anchor_batch_analysis_prompt,
     build_anchor_expansion_prompt,
     build_batch_analysis_prompt,
     build_merge_prompt,
@@ -161,6 +162,11 @@ def test_batch_prompt_uses_original_message_ids_and_slim_rules(tmp_path: Path) -
     assert "如果事项主体明显是他人的工作、他人的进展、他人的承诺，而本人只是参与了会话或说过别的话，不要提炼。" in prompt
     assert "如果只是同群讨论背景信息、但没有明确落到本人，也不要提炼。" in prompt
     assert "咨询类事件、流程审核类事件、团建活动组织类事件、技能培训类事件，默认不要提炼；这类事项对后续公司级长期事件沉淀价值较低。" in prompt
+    assert "私人饭局、约饭、离职告别聚餐、同事口碑评价、人际寒暄，不要提炼为事项。" in prompt
+    assert "泛泛完成审核/审批/工作审核/审核任务但没有具体业务对象、审批结论、问题、风险、金额、客户、项目、文档或后续动作，不要提炼为事项。" in prompt
+    assert "产品同事评价不错，今晚在公司旁边吃牛蛙火锅，饭后回去准备述职材料，不要输出 candidate_event。" in prompt
+    assert "完成了郭海提交的工作审核，并同步审核结果，不要输出 candidate_event。" in prompt
+    assert "审核客户合同并反馈付款条款问题，可以输出 candidate_event。" in prompt
     assert "正例：本人要求他人汇报、本人审批、本人同步、本人催办、本人推进，都算与本人直接相关。" in prompt
     assert "反例：他人之间讨论自己的工作、自己的承诺、自己的处理进度，即使本人在该会话里发过言，也不算与本人直接相关。" in prompt
     assert '"id": "om_1"' in prompt
@@ -271,6 +277,8 @@ def test_anchor_prompt_serialization_is_compact(tmp_path: Path) -> None:
     assert "每个 candidate_event 只表示一个主要动作。" in prompt
     assert "例如：已同步给老板、老板未回复可视为已知悉" in prompt
     assert "咨询类事件、流程审核类事件、团建活动组织类事件、技能培训类事件，默认不要提炼；这类事项对后续公司级长期事件沉淀价值较低。" in prompt
+    assert "私人饭局、约饭、离职告别聚餐、同事口碑评价、人际寒暄，不要提炼为事项。" in prompt
+    assert "泛泛完成审核/审批/工作审核/审核任务但没有具体业务对象、审批结论、问题、风险、金额、客户、项目、文档或后续动作，不要提炼为事项。" in prompt
     assert "不要单独返回 result" in prompt
     assert "不要输出思考过程、推理摘要、分析说明或任何解释性文字。" in prompt
     assert "请给我简洁的答案，不要推理，跳过思考步骤。" in prompt
@@ -364,6 +372,49 @@ def test_anchor_expansion_prompt_includes_previous_result_and_expansion(tmp_path
     assert AnchorStatus.NEEDS_ATTACHMENT_TEXT.value in prompt
     assert "If new context reveals that one previous candidate_event actually mixed multiple actions" in prompt
     assert "result must belong only to the same candidate_event's primary action." in prompt
+    assert "Do not output private meals, dinner scheduling, farewell meals, coworker reputation praise, or interpersonal small talk as candidate_events." in prompt
+    assert "Do not output generic review/approval completion without a concrete business object, approval conclusion, issue, risk, amount, customer, project, document, or follow-up action." in prompt
+
+
+def test_anchor_batch_prompt_includes_low_retention_rules(tmp_path: Path) -> None:
+    config = RuntimeConfig(data_root=tmp_path / "data")
+    message = NormalizedMessage(
+        conversation_id="oc_1",
+        conversation_name="项目群",
+        message_id="om_1",
+        sender_open_id="ou_1",
+        sender_name="Alice",
+        send_time="2026-06-22T10:00:00+08:00",
+        message_type="text",
+        text="推进发布",
+        reply_to_message_id=None,
+        quote_message_id=None,
+        links=[],
+        attachments=[],
+        is_system=False,
+    )
+    anchor_unit = AnchorUnit(
+        anchor_unit_id="oc_1:om_1",
+        conversation_id="oc_1",
+        conversation_name="项目群",
+        anchor_message_ids=["om_1"],
+        in_day_message_ids=["om_1"],
+        base_message_ids=["om_1"],
+        messages=[message],
+        reply_relation_ids=[],
+        quote_relation_ids=[],
+        attachment_refs=[],
+    )
+
+    prompt = build_anchor_batch_analysis_prompt(
+        "2026-06-22",
+        [anchor_unit],
+        config=config,
+    )
+
+    assert "私人饭局、约饭、离职告别聚餐、同事口碑评价、人际寒暄，不要提炼为事项。" in prompt
+    assert "泛泛完成审核/审批/工作审核/审核任务但没有具体业务对象、审批结论、问题、风险、金额、客户、项目、文档或后续动作，不要提炼为事项。" in prompt
+    assert "完成了郭海提交的工作审核，并同步审核结果，不要输出 candidate_event。" in prompt
 
 
 def test_media_messages_are_compressed_for_prompt(tmp_path: Path) -> None:
