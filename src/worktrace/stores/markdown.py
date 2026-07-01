@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
@@ -37,6 +38,8 @@ RETENTION_REASON_LABELS = {
     "external_business_progress": "外部业务有实质进展",
     "substantive_approval": "完成有实质内容的审批",
 }
+
+INTERNAL_FEISHU_ID_RE = re.compile(r"\b(?:om|oc|ou)_[A-Za-z0-9_-]+\b")
 
 
 @dataclass
@@ -131,20 +134,27 @@ class MarkdownEventStore(EventStore):
         link_lines = self._render_file_links(event.file_links)
         source_lines = self._render_source_lines(event)
         retention_reason_label = self._render_retention_reason(event.retention_reason)
+        title = self._redact_internal_ids(event.title)
+        content = self._redact_internal_ids(event.content)
+        object_hint = self._redact_internal_ids(event.object_hint)
+        retention_detail = self._redact_internal_ids(event.retention_detail)
         return (
             f'<!-- worktrace:event:start event_id="{event.event_id}" -->\n'
             f"<!-- worktrace:retention_reason: {event.retention_reason} -->\n"
-            f"### {index}. {event.title}\n\n"
+            f"### {index}. {title}\n\n"
             f"- **日期**: {event.date}\n"
-            f"- **事件标题**: {event.title}\n"
-            f"- **内容**: {event.content}\n"
-            f"- **具体对象**: {event.object_hint}\n"
+            f"- **事件标题**: {title}\n"
+            f"- **内容**: {content}\n"
+            f"- **具体对象**: {object_hint}\n"
             f"- **保留理由**: {retention_reason_label}\n"
-            f"- **保留依据**: {event.retention_detail}\n"
+            f"- **保留依据**: {retention_detail}\n"
             f"{source_lines}"
             f"- **涉及文件**:\n{link_lines}\n"
             "<!-- worktrace:event:end -->"
         ).strip()
+
+    def _redact_internal_ids(self, value: str) -> str:
+        return INTERNAL_FEISHU_ID_RE.sub("[内部消息ID已隐藏]", value)
 
     def _render_retention_reason(self, value: str) -> str:
         stripped = value.strip()

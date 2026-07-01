@@ -35,8 +35,10 @@ _BLANK_LINE_RE = re.compile(r"\n{3,}")
 
 LOW_RETENTION_EVENT_RULES = [
     "私人饭局、约饭、离职告别聚餐、同事口碑评价、人际寒暄，不要提炼为事项。",
+    "个人请假、家庭原因、孩子学校证明、个人行程报备，不要提炼为工作事件。",
     "泛泛完成审核/审批/工作审核/审核任务但没有具体业务对象、审批结论、问题、风险、金额、客户、项目、文档或后续动作，不要提炼为事项。",
     "反例：产品同事评价不错，今晚在公司旁边吃牛蛙火锅，饭后回去准备述职材料，不要输出 candidate_event。",
+    "反例：本人明天晚到，需去学校为孩子开证明，不要输出 candidate_event。",
     "反例：完成了郭海提交的工作审核，并同步审核结果，不要输出 candidate_event。",
     "正例：审核客户合同并反馈付款条款问题，可以输出 candidate_event。",
 ]
@@ -48,7 +50,8 @@ RETENTION_COMPLETENESS_RULE = (
 
 RETENTION_DETAIL_EVIDENCE_RULE = (
     "retention_detail 表示保留依据/来源证据，用一句话写清楚来源会话、"
-    "发起人或确认人、关键动作或结论；不要只写泛泛的价值判断。"
+    "发起人或确认人、关键动作或结论；不要只写泛泛的价值判断，"
+    "不要写 message id、open_id、conversation_id 或 om_/ou_/oc_ 等内部标识。"
 )
 
 
@@ -423,7 +426,7 @@ def build_anchor_expansion_prompt(
             "每个 candidate_event 仍然只能表示一个主要动作或工作线索。",
             "每个 candidate_event 必须包含 object_hint、retention_reason 和 retention_detail。",
             RETENTION_COMPLETENESS_RULE,
-            "私人饭局、约饭、离职告别聚餐、同事口碑评价、人际寒暄，不要输出 candidate_event。",
+            *LOW_RETENTION_EVENT_RULES,
             "泛泛完成审核/审批但没有具体业务对象、审批结论、问题、风险、金额、客户、项目、文档或后续动作，不要输出 candidate_event。",
             (
                 "retention_reason 必须是 deliverable_updated、decision_made、issue_or_risk_found、"

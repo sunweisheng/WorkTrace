@@ -126,6 +126,37 @@ def test_markdown_store_redacts_sensitive_link_query_params(tmp_path: Path) -> N
     assert "view=traffic" in content
 
 
+def test_markdown_store_redacts_internal_feishu_ids_from_public_fields(tmp_path: Path) -> None:
+    store = MarkdownEventStore(config=RuntimeConfig(data_root=tmp_path / "data"))
+    write_result = store.replace_day(
+        "2026-06-22",
+        [
+            WorkEvent(
+                date="2026-06-22",
+                event_id="evt1",
+                title="主题 om_x100b6b297bcd9080c42690b1af9082a",
+                content="内容来自 oc_abc123 和 ou_user123。",
+                object_hint="对象 om_x100b6b291342b4bcc49febe75b30fbd",
+                retention_reason="decision_made",
+                retention_detail=(
+                    "张三在消息 om_x100b6b297bcd9080c42690b1af9082a 中确认结论。"
+                ),
+                source_message_ids=["om_x100b6b297bcd9080c42690b1af9082a"],
+                file_links=[],
+            )
+        ],
+    )
+
+    content = Path(write_result.output_path).read_text(encoding="utf-8")
+
+    assert "om_x100b6b297bcd9080c42690b1af9082a" not in content
+    assert "om_x100b6b291342b4bcc49febe75b30fbd" not in content
+    assert "oc_abc123" not in content
+    assert "ou_user123" not in content
+    assert "[内部消息ID已隐藏]" in content
+    assert '<!-- worktrace:event:start event_id="evt1" -->' in content
+
+
 def test_markdown_store_uses_owner_display_name_in_filename(tmp_path: Path) -> None:
     store = MarkdownEventStore(config=RuntimeConfig(data_root=tmp_path / "data"))
 

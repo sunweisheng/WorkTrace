@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from src.worktrace.config import RuntimeConfig
-from src.worktrace.models import MergedEventDraft, SourceBackedEventDraft
+from src.worktrace.models import MergedEventDraft, SourceBackedEventDraft, WorkEvent
 from src.worktrace.pipeline.sensitive_filter import (
     filter_excluded_candidate_drafts,
     filter_sensitive_merged_drafts,
@@ -267,6 +267,76 @@ def test_retention_filter_removes_personal_social_reputation_event() -> None:
     assert kept == []
     assert len(warnings) == 1
     assert "personal_social_or_reputation_event" in warnings[0]
+
+
+def test_retention_filter_removes_personal_privacy_leave_event() -> None:
+    drafts = [
+        SourceBackedEventDraft(
+            draft_id="d1",
+            date="2026-06-30",
+            topic="明日行程报备",
+            content="本人明天上午晚到，需前往学校为孩子开具相关证明。",
+            source_message_ids=["m1"],
+            source_conversation_id="c1",
+            source_slice_id="s1",
+            confidence=0.9,
+            action_label="报备",
+            object_hint="个人请假/外出事由",
+            retention_reason="follow_up_assigned",
+            retention_detail="本人告知老板及同事次日行程安排及原因。",
+        )
+    ]
+
+    kept, warnings = filter_retained_candidate_drafts(drafts)
+
+    assert kept == []
+    assert len(warnings) == 1
+    assert "personal_privacy_or_leave_event" in warnings[0]
+
+
+def test_retention_filter_removes_personal_privacy_leave_work_event() -> None:
+    events = [
+        WorkEvent(
+            date="2026-06-30",
+            event_id="evt1",
+            title="明日行程报备",
+            content="本人明天上午晚到，需前往学校为孩子开具相关证明。",
+            object_hint="个人请假/外出事由",
+            retention_reason="follow_up_assigned",
+            retention_detail="本人告知老板及同事次日行程安排及原因。",
+            source_message_ids=["m1"],
+        )
+    ]
+
+    kept, warnings = filter_retained_work_events(events)
+
+    assert kept == []
+    assert len(warnings) == 1
+    assert "personal_privacy_or_leave_event" in warnings[0]
+
+
+def test_retention_filter_keeps_business_site_visit_event() -> None:
+    drafts = [
+        SourceBackedEventDraft(
+            draft_id="d1",
+            date="2026-06-30",
+            topic="客户现场设备验收",
+            content="明日去客户现场完成设备验收，并同步验收结论。",
+            source_message_ids=["m1"],
+            source_conversation_id="c1",
+            source_slice_id="s1",
+            confidence=0.9,
+            action_label="验收",
+            object_hint="客户现场设备验收",
+            retention_reason="external_business_progress",
+            retention_detail="确认明日到客户现场完成设备验收并同步结论。",
+        )
+    ]
+
+    kept, warnings = filter_retained_candidate_drafts(drafts)
+
+    assert [draft.topic for draft in kept] == ["客户现场设备验收"]
+    assert warnings == []
 
 
 def test_retention_filter_removes_generic_review_with_named_submitter() -> None:

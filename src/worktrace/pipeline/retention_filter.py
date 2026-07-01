@@ -52,6 +52,32 @@ _PERSONAL_SOCIAL_KEYWORDS = (
     "回家",
     "收拾东西",
 )
+_PERSONAL_LEAVE_OR_TRAVEL_KEYWORDS = (
+    "请假",
+    "晚到",
+    "晚来",
+    "迟到",
+    "外出",
+    "行程报备",
+    "不在公司",
+    "个人事由",
+    "私事",
+    "家事",
+)
+_PERSONAL_PRIVATE_REASON_KEYWORDS = (
+    "孩子",
+    "学校",
+    "证明",
+    "医院",
+    "家里",
+    "家庭",
+    "个人隐私",
+)
+_PERSONAL_PRIVACY_OBJECT_HINTS = (
+    "个人请假",
+    "个人外出事由",
+    "个人请假/外出事由",
+)
 _GENERIC_REVIEW_KEYWORDS = (
     "完成审核",
     "完成审批",
@@ -171,6 +197,8 @@ def retention_rejection_reason(candidate: RetentionCandidate) -> str:
 
     if reason not in RETENTION_REASONS:
         return "missing_or_invalid_retention_reason"
+    if _is_personal_privacy_or_leave_event(title, content, detail, object_hint):
+        return "personal_privacy_or_leave_event"
     if _is_personal_social_or_reputation_event(title, content, detail):
         return "personal_social_or_reputation_event"
     if _is_generic_review_completion(title, content, detail, object_hint):
@@ -193,6 +221,8 @@ def retention_rejection_reason_for_event(
 
     if reason not in RETENTION_REASONS:
         return "missing_or_invalid_retention_reason"
+    if _is_personal_privacy_or_leave_event(title, content, detail, object_hint):
+        return "personal_privacy_or_leave_event"
     if _is_personal_social_or_reputation_event(title, content, detail):
         return "personal_social_or_reputation_event"
     if _is_generic_review_completion(title, content, detail, object_hint):
@@ -230,6 +260,31 @@ def _is_personal_social_or_reputation_event(
     if not any(_normalized_compact(keyword) in combined for keyword in _PERSONAL_SOCIAL_KEYWORDS):
         return False
     return not _has_substantive_work_signal(combined)
+
+
+def _is_personal_privacy_or_leave_event(
+    title: str,
+    content: str,
+    detail: str,
+    object_hint: str,
+) -> bool:
+    compact_object = _normalized_compact(object_hint)
+    if compact_object and any(
+        _normalized_compact(keyword) in compact_object
+        for keyword in _PERSONAL_PRIVACY_OBJECT_HINTS
+    ):
+        return True
+
+    combined = _normalized_compact(" ".join([title, content, detail, object_hint]))
+    has_leave_signal = any(
+        _normalized_compact(keyword) in combined
+        for keyword in _PERSONAL_LEAVE_OR_TRAVEL_KEYWORDS
+    )
+    has_private_reason = any(
+        _normalized_compact(keyword) in combined
+        for keyword in _PERSONAL_PRIVATE_REASON_KEYWORDS
+    )
+    return has_leave_signal and has_private_reason
 
 
 def _is_generic_review_completion(
