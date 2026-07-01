@@ -15,9 +15,12 @@
 5. `conversation_first_pass.py` 按会话生成 `ConversationSlice`
 6. 每个会话切片单独调用一次 analyzer，必要时按 `context_requests` 扩窗重跑
 7. 汇总全日 `candidate_events`
-8. `merge_day_candidates(...)` 做跨会话分组
-9. Python 物化 `MergedEventDraft` 并构建最终 `WorkEvent`
-10. `stores/markdown.py` 覆盖写入 `data/YYYY/MM/YYYY-MM-DD-姓名.md`
+8. Python 先按精确排除规则和结构化保留门槛过滤候选事件
+9. `merge_day_candidates(...)` 做跨会话分组
+10. Python 物化 `MergedEventDraft`，再次执行精确排除和结构化保留门槛
+11. Python 构建最终 `WorkEvent`，聚合涉及文件并排序
+12. `stores/markdown.py` 覆盖写入 `data/YYYY/MM/YYYY-MM-DD-姓名.md`
+13. 通过飞书 CLI 机器人身份把当天 Markdown 文件发送给当前登录用户自己
 
 ## 3. 当前关键模块
 
@@ -35,6 +38,8 @@
   负责最终事件构建与去重。
 - `src/worktrace/stores/markdown.py`
   负责 Markdown 读写。
+- `src/worktrace/collected_merge.py`
+  负责管理人员收集多人 Markdown 后的同日团队汇总合并。
 
 ## 4. 当前配置
 
@@ -50,6 +55,19 @@
 - `prompt_attachment_char_limit = 800`
 - `analyzer_timeout_seconds = 180`
 - `codex_stdin_mode = False`
+- `llm_sleep_min_seconds = 1.0`
+- `llm_sleep_max_seconds = 2.0`
+- `llm_reasoning_effort = "none"`
+
+当前运行时还会从本地配置文件读取以下覆盖项：
+
+- `config/event_rules.json`
+  - `confidential_event_keywords`
+  - `non_work_sensitive_keywords`
+  - `excluded_event_topics`
+  - `excluded_event_content_signatures`
+- `config/conversation_blacklist.json`
+  - `excluded_conversation_ids`
 
 以下配置当前只在锚点实验路径使用：
 
@@ -58,9 +76,10 @@
 
 ## 5. 当前接口约束
 
-- `EventStore.replace_day(...)` 当前签名是 `replace_day(target_date, events)`。
+- `EventStore.replace_day(...)` 当前签名是 `replace_day(target_date, events, *, owner_display_name="")`，个人日报用 `owner_display_name` 生成 `YYYY-MM-DD-姓名.md`。
 - `Analyzer` 当前只承担会话分析、锚点批量分析和日级 merge。
 - 主流程当前只输出结构化事件，不再生成管理者总结。
+- 管理人员汇总入口为 `python -m src.worktrace.cli merge-collected --date YYYY-MM-DD`，读取 `merge_inbox/YYYY/MM/DD/` 及其一级子目录，每个合并范围生成本目录 `_merged.md`。
 
 ## 6. 已移除的旧路径
 

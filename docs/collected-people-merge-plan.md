@@ -2,7 +2,7 @@
 
 ## Summary
 
-新增 `merge-collected` 子命令，用于管理人员把多人提交的 WorkTrace Markdown 放入 `merge_inbox/YYYY/MM/DD/` 后，生成同目录 `_merged.md` 团队汇总文件。日期目录下如存在一级子目录，也会按子目录分别合并，各自生成子目录内的 `_merged.md`。
+新增 `merge-collected` 子命令，用于管理人员把多人提交的 WorkTrace Markdown 放入 `merge_inbox/YYYY/MM/DD/` 后，把日期根目录和一级子目录分别作为独立合并范围，各自生成本目录 `_merged.md` 团队汇总文件。
 
 合并结果保持标准 WorkTrace Markdown 兼容，同时额外展示来源人员、来源事件 ID。相同原始 `event_id` 只有在标题和内容完全一致，或标题一致且内容一方包含另一方时，才先确定性归组；如果 `event_id` 相同但不满足该规则，则记录 warning 并交给 LLM 保守判断。其余事件也由 LLM 判断是否属于同一真实工作事件，并对每个合并组生成管理视角的综合描述。读取来源事件和写入最终 `_merged.md` 前，都会执行与个人日报一致的结构化保留门槛。
 

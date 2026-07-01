@@ -43,7 +43,7 @@
 
 当前 [runner.py](/Users/sunweisheng/Documents/GitHub/WorkTrace/src/worktrace/runner.py) 中，在 `build_work_events(...)` 之后直接调用：
 
-- `event_store.replace_day(target_date, events)`
+- `event_store.replace_day(target_date, events, owner_display_name=self_identity.display_name)`
 
 主流程已经不再调用任何“管理者总结”方法。
 
@@ -60,9 +60,9 @@
 
 当前 [stores/base.py](/Users/sunweisheng/Documents/GitHub/WorkTrace/src/worktrace/stores/base.py) 中：
 
-- `replace_day(...)` 只接收 `target_date` 和 `events`
+- `replace_day(...)` 接收 `target_date`、`events` 和可选 `owner_display_name`
 
-当前 store 接口不再承载任何额外总结层输入。
+当前 store 接口不再承载任何额外总结层输入；`owner_display_name` 只用于个人日报文件名。
 
 ## 4. 输出模型变化
 
