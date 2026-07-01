@@ -29,6 +29,15 @@ SENSITIVE_QUERY_KEYS = {
     "token",
 }
 
+RETENTION_REASON_LABELS = {
+    "deliverable_updated": "交付物有更新",
+    "decision_made": "形成明确决策",
+    "issue_or_risk_found": "发现问题或风险",
+    "follow_up_assigned": "形成后续跟进任务",
+    "external_business_progress": "外部业务有实质进展",
+    "substantive_approval": "完成有实质内容的审批",
+}
+
 
 @dataclass
 class MarkdownEventStore(EventStore):
@@ -101,33 +110,47 @@ class MarkdownEventStore(EventStore):
             ]
         )
 
-        event_blocks = "\n\n".join(self._render_event(event) for event in day_doc.events)
+        event_blocks = "\n\n".join(
+            self._render_event(index, event)
+            for index, event in enumerate(day_doc.events, start=1)
+        )
         if not event_blocks:
             event_blocks = "_当天没有提炼出需要保留的工作事件。_"
 
         return (
             f"---\n{front_matter}\n---\n\n"
-            f"# WorkTrace {day_doc.date}\n\n"
-            "## 每日工作事件\n\n"
-            f"{event_blocks}\n"
+            f"# 工作事件日报 · {day_doc.date}\n\n"
+            "## 事件列表\n\n"
+            f"{event_blocks}\n\n"
+            f"生成时间: {day_doc.generated_at}\n"
+            "来源: 飞书沟通记录自动整理\n"
+            "隐私声明: 仅含与本人直接相关的工作事件，不含原始聊天记录\n"
         )
 
-    def _render_event(self, event: WorkEvent) -> str:
+    def _render_event(self, index: int, event: WorkEvent) -> str:
         link_lines = self._render_file_links(event.file_links)
         source_lines = self._render_source_lines(event)
+        retention_reason_label = self._render_retention_reason(event.retention_reason)
         return (
             f'<!-- worktrace:event:start event_id="{event.event_id}" -->\n'
-            f"### {event.title}\n\n"
-            f"- 日期: {event.date}\n"
-            f"- 事件标题: {event.title}\n"
-            f"- 事件内容: {event.content}\n"
-            f"- 具体对象: {event.object_hint}\n"
-            f"- 保留理由: {event.retention_reason}\n"
-            f"- 保留依据: {event.retention_detail}\n"
+            f"<!-- worktrace:retention_reason: {event.retention_reason} -->\n"
+            f"### {index}. {event.title}\n\n"
+            f"- **日期**: {event.date}\n"
+            f"- **事件标题**: {event.title}\n"
+            f"- **内容**: {event.content}\n"
+            f"- **具体对象**: {event.object_hint}\n"
+            f"- **保留理由**: {retention_reason_label}\n"
+            f"- **保留依据**: {event.retention_detail}\n"
             f"{source_lines}"
-            f"- 涉及文件链接:\n{link_lines}\n"
+            f"- **涉及文件**:\n{link_lines}\n"
             "<!-- worktrace:event:end -->"
         ).strip()
+
+    def _render_retention_reason(self, value: str) -> str:
+        stripped = value.strip()
+        if not stripped:
+            return ""
+        return RETENTION_REASON_LABELS.get(stripped, stripped)
 
     def _render_file_links(self, file_links: list[EventFileLink]) -> str:
         if not file_links:
@@ -200,12 +223,32 @@ class MarkdownEventStore(EventStore):
             event_id = body[event_id_start:event_id_end]
             block_end = body.find(end_marker, event_id_end)
             block = body[event_id_end + 5:block_end].strip()
-            title = self._extract_value(block, "- 事件标题: ")
-            content = self._extract_value(block, "- 事件内容: ")
-            object_hint = self._extract_value(block, "- 具体对象: ")
-            retention_reason = self._extract_value(block, "- 保留理由: ")
-            retention_detail = self._extract_value(block, "- 保留依据: ")
-            event_date = self._extract_value(block, "- 日期: ")
+            title = self._extract_value(
+                block,
+                "- **事件标题**: ",
+                "- 事件标题: ",
+            )
+            content = self._extract_value(
+                block,
+                "- **内容**: ",
+                "- 事件内容: ",
+            )
+            object_hint = self._extract_value(
+                block,
+                "- **具体对象**: ",
+                "- 具体对象: ",
+            )
+            retention_reason = self._extract_retention_reason(block)
+            retention_detail = self._extract_value(
+                block,
+                "- **保留依据**: ",
+                "- 保留依据: ",
+            )
+            event_date = self._extract_value(
+                block,
+                "- **日期**: ",
+                "- 日期: ",
+            )
             source_people = self._parse_source_values(
                 self._extract_value(block, "- 来源人员: ")
             )
@@ -231,11 +274,19 @@ class MarkdownEventStore(EventStore):
 
         return events
 
-    def _extract_value(self, block: str, prefix: str) -> str:
+    def _extract_value(self, block: str, *prefixes: str) -> str:
         for line in block.splitlines():
-            if line.startswith(prefix):
-                return line[len(prefix) :].strip()
+            for prefix in prefixes:
+                if line.startswith(prefix):
+                    return line[len(prefix) :].strip()
         return ""
+
+    def _extract_retention_reason(self, block: str) -> str:
+        marker = "<!-- worktrace:retention_reason: "
+        for line in block.splitlines():
+            if line.startswith(marker) and line.endswith(" -->"):
+                return line[len(marker) : -len(" -->")].strip()
+        return self._extract_value(block, "- 保留理由: ", "- **保留理由**: ")
 
     def _render_source_values(self, values: list[str]) -> str:
         cleaned = [value.strip() for value in values if value.strip()]
@@ -262,7 +313,7 @@ class MarkdownEventStore(EventStore):
         collected: list[EventFileLink] = []
         in_section = False
         for line in lines:
-            if line.startswith("- 涉及文件链接:"):
+            if line.startswith("- 涉及文件链接:") or line.startswith("- **涉及文件**:"):
                 in_section = True
                 continue
             if not in_section:

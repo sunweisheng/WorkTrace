@@ -340,7 +340,7 @@ data/debug/conversations/<target_date>/
 - `action_label` 是候选事项的主要动作标签，例如 `回复 / 催办 / 撰写 / 同步`
 - `object_hint` 是候选事项的核心对象提示，例如 `提前付款 / 汇报文档 / 优惠券配置`
 
-`action_label` 只作为内部语义字段使用。`object_hint`、`retention_reason`、`retention_detail` 会写入 Markdown，用于解释事件为什么值得沉淀，并供管理人员多人汇总继续执行同一套保留门槛。
+`action_label` 只作为内部语义字段使用。`object_hint`、`retention_reason`、`retention_detail` 会继续参与 Markdown 写入和多人汇总保留门槛。其中 `retention_reason` 是机器可读枚举，Markdown 展示层会翻译成中文保留理由；`retention_detail` 是保留依据/来源证据，应写清来源会话、发起人或确认人、关键动作或结论。
 
 ### 10.3 `source_message_ids` 的来源与规范化
 
@@ -380,7 +380,7 @@ data/debug/conversations/<target_date>/
 - `retention_reason`
 - `retention_detail`
 
-`retention_reason` 只能取固定枚举：`deliverable_updated`、`decision_made`、`issue_or_risk_found`、`follow_up_assigned`、`external_business_progress`、`substantive_approval`。普通约时间、确认开会、互通信息、泛泛完成审核/审批但没有具体对象和结论的内容，应在 LLM 阶段不输出；如果仍输出，Python 会按结构化门槛过滤。
+`retention_reason` 只能取固定枚举：`deliverable_updated`、`decision_made`、`issue_or_risk_found`、`follow_up_assigned`、`external_business_progress`、`substantive_approval`。`retention_detail` 表示保留依据/来源证据，不应只写泛泛价值判断。普通约时间、确认开会、互通信息、泛泛完成审核/审批但没有具体对象和结论的内容，应在 LLM 阶段不输出；如果仍输出，Python 会按结构化门槛过滤。
 
 其中：
 

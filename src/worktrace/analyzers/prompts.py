@@ -41,6 +41,16 @@ LOW_RETENTION_EVENT_RULES = [
     "正例：审核客户合同并反馈付款条款问题，可以输出 candidate_event。",
 ]
 
+RETENTION_COMPLETENESS_RULE = (
+    "只有同时具备具体对象、保留理由、保留依据的工作事件才输出；"
+    "缺少任一项时，不要输出 candidate_event。"
+)
+
+RETENTION_DETAIL_EVIDENCE_RULE = (
+    "retention_detail 表示保留依据/来源证据，用一句话写清楚来源会话、"
+    "发起人或确认人、关键动作或结论；不要只写泛泛的价值判断。"
+)
+
 
 def build_batch_analysis_prompt(
     batch: AnalysisBatch,
@@ -63,6 +73,7 @@ def build_batch_analysis_prompt(
             "如果只是同群讨论背景信息、但没有明确落到本人，也不要提炼。",
             "咨询类事件、流程审核类事件、团建活动组织类事件、技能培训类事件，默认不要提炼；这类事项对后续公司级长期事件沉淀价值较低。",
             *LOW_RETENTION_EVENT_RULES,
+            RETENTION_COMPLETENESS_RULE,
             _build_confidential_rule(runtime_config),
             _build_non_work_sensitive_rule(runtime_config),
             "一件事写一条；如果有多件事就拆开。",
@@ -73,7 +84,7 @@ def build_batch_analysis_prompt(
                 "retention_reason 必须从以下枚举选择：deliverable_updated、decision_made、"
                 "issue_or_risk_found、follow_up_assigned、external_business_progress、substantive_approval。"
             ),
-            "retention_detail 用一句话说明该事件为什么值得长期沉淀，必须包含输入中真实出现的具体对象、结论、问题、待办或结果。",
+            RETENTION_DETAIL_EVIDENCE_RULE,
             "普通约时间、确认开会、互通信息、泛泛完成审核/审批但没有具体对象和结论的内容，不要输出 candidate_event。",
             "每条事项附上最相关的消息 id。",
             "只能使用输入里出现过的真实 message id，不要自造占位符 id。",
@@ -242,6 +253,7 @@ def build_anchor_analysis_prompt(
             "只抽取工作事件。",
             "咨询类事件、流程审核类事件、团建活动组织类事件、技能培训类事件，默认不要提炼；这类事项对后续公司级长期事件沉淀价值较低。",
             *LOW_RETENTION_EVENT_RULES,
+            RETENTION_COMPLETENESS_RULE,
             "每个 candidate_event 只能落在当前 anchor_unit 内。",
             "每个 candidate_event 只表示一个主要动作。",
             "action_label 只写主要动作标签，例如：回复、审批、催办、撰写、核对、跟进、同步、确认。",
@@ -250,7 +262,7 @@ def build_anchor_analysis_prompt(
                 "retention_reason 必须从以下枚举选择：deliverable_updated、decision_made、"
                 "issue_or_risk_found、follow_up_assigned、external_business_progress、substantive_approval。"
             ),
-            "retention_detail 用一句话说明该事件为什么值得长期沉淀，必须包含输入中真实出现的具体对象、结论、问题、待办或结果。",
+            RETENTION_DETAIL_EVIDENCE_RULE,
             "普通约时间、确认开会、互通信息、泛泛完成审核/审批但没有具体对象和结论的内容，不要输出 candidate_event。",
             "如果窗口里有多个动作，就拆开。",
             "动作类型比共享名词更重要。",
@@ -314,6 +326,7 @@ def build_anchor_batch_analysis_prompt(
             "只抽取工作事件。",
             "咨询类事件、流程审核类事件、团建活动组织类事件、技能培训类事件，默认不要提炼；这类事项对后续公司级长期事件沉淀价值较低。",
             *LOW_RETENTION_EVENT_RULES,
+            RETENTION_COMPLETENESS_RULE,
             "每个 candidate_event 只能留在自己的 anchor_unit 内。",
             "每个 candidate_event 只表示一个主要动作。",
             "action_label 只写主要动作标签，例如：回复、审批、催办、撰写、核对、跟进、同步、确认。",
@@ -322,7 +335,7 @@ def build_anchor_batch_analysis_prompt(
                 "retention_reason 必须从以下枚举选择：deliverable_updated、decision_made、"
                 "issue_or_risk_found、follow_up_assigned、external_business_progress、substantive_approval。"
             ),
-            "retention_detail 用一句话说明该事件为什么值得长期沉淀，必须包含输入中真实出现的具体对象、结论、问题、待办或结果。",
+            RETENTION_DETAIL_EVIDENCE_RULE,
             "普通约时间、确认开会、互通信息、泛泛完成审核/审批但没有具体对象和结论的内容，不要输出 candidate_event。",
             "如果同一窗口有多个动作，就拆开。",
             "动作类型比共享名词更重要。",
@@ -409,12 +422,14 @@ def build_anchor_expansion_prompt(
             "candidate_events 应表示当前 anchor_unit 的最新综合判断。",
             "每个 candidate_event 仍然只能表示一个主要动作或工作线索。",
             "每个 candidate_event 必须包含 object_hint、retention_reason 和 retention_detail。",
+            RETENTION_COMPLETENESS_RULE,
             "私人饭局、约饭、离职告别聚餐、同事口碑评价、人际寒暄，不要输出 candidate_event。",
             "泛泛完成审核/审批但没有具体业务对象、审批结论、问题、风险、金额、客户、项目、文档或后续动作，不要输出 candidate_event。",
             (
                 "retention_reason 必须是 deliverable_updated、decision_made、issue_or_risk_found、"
                 "follow_up_assigned、external_business_progress 或 substantive_approval。"
             ),
+            RETENTION_DETAIL_EVIDENCE_RULE,
             "普通日程安排、会议时间确认、互通信息、没有具体对象和结论的泛泛审核/审批完成，不要输出 candidate_event。",
             (
                 "如果新上下文显示某个先前 candidate_event 实际混合了多个动作，"

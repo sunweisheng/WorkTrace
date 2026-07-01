@@ -164,6 +164,9 @@ def test_batch_prompt_uses_original_message_ids_and_slim_rules(tmp_path: Path) -
     assert "咨询类事件、流程审核类事件、团建活动组织类事件、技能培训类事件，默认不要提炼；这类事项对后续公司级长期事件沉淀价值较低。" in prompt
     assert "私人饭局、约饭、离职告别聚餐、同事口碑评价、人际寒暄，不要提炼为事项。" in prompt
     assert "泛泛完成审核/审批/工作审核/审核任务但没有具体业务对象、审批结论、问题、风险、金额、客户、项目、文档或后续动作，不要提炼为事项。" in prompt
+    assert "只有同时具备具体对象、保留理由、保留依据的工作事件才输出" in prompt
+    assert "retention_detail 表示保留依据/来源证据" in prompt
+    assert "不要只写泛泛的价值判断" in prompt
     assert "产品同事评价不错，今晚在公司旁边吃牛蛙火锅，饭后回去准备述职材料，不要输出 candidate_event。" in prompt
     assert "完成了郭海提交的工作审核，并同步审核结果，不要输出 candidate_event。" in prompt
     assert "审核客户合同并反馈付款条款问题，可以输出 candidate_event。" in prompt
@@ -278,6 +281,8 @@ def test_anchor_prompt_serialization_is_compact(tmp_path: Path) -> None:
     assert "咨询类事件、流程审核类事件、团建活动组织类事件、技能培训类事件，默认不要提炼；这类事项对后续公司级长期事件沉淀价值较低。" in prompt
     assert "私人饭局、约饭、离职告别聚餐、同事口碑评价、人际寒暄，不要提炼为事项。" in prompt
     assert "泛泛完成审核/审批/工作审核/审核任务但没有具体业务对象、审批结论、问题、风险、金额、客户、项目、文档或后续动作，不要提炼为事项。" in prompt
+    assert "只有同时具备具体对象、保留理由、保留依据的工作事件才输出" in prompt
+    assert "retention_detail 表示保留依据/来源证据" in prompt
     assert "不要单独返回 result" in prompt
     assert "请给我简洁的答案，不要推理，跳过思考步骤。" in prompt
     assert "直接作答，不要展示你的推理过程。" in prompt
@@ -372,6 +377,8 @@ def test_anchor_expansion_prompt_includes_previous_result_and_expansion(tmp_path
     assert "该结果只能归属于同一个 candidate_event 的主要动作" in prompt
     assert "私人饭局、约饭、离职告别聚餐、同事口碑评价、人际寒暄，不要输出 candidate_event。" in prompt
     assert "泛泛完成审核/审批但没有具体业务对象、审批结论、问题、风险、金额、客户、项目、文档或后续动作，不要输出 candidate_event。" in prompt
+    assert "只有同时具备具体对象、保留理由、保留依据的工作事件才输出" in prompt
+    assert "retention_detail 表示保留依据/来源证据" in prompt
     assert "Do not output private meals" not in prompt
     assert "If new context reveals" not in prompt
 
@@ -475,6 +482,8 @@ def test_anchor_batch_prompt_includes_low_retention_rules(tmp_path: Path) -> Non
 
     assert "私人饭局、约饭、离职告别聚餐、同事口碑评价、人际寒暄，不要提炼为事项。" in prompt
     assert "泛泛完成审核/审批/工作审核/审核任务但没有具体业务对象、审批结论、问题、风险、金额、客户、项目、文档或后续动作，不要提炼为事项。" in prompt
+    assert "只有同时具备具体对象、保留理由、保留依据的工作事件才输出" in prompt
+    assert "retention_detail 表示保留依据/来源证据" in prompt
     assert "完成了郭海提交的工作审核，并同步审核结果，不要输出 candidate_event。" in prompt
 
 

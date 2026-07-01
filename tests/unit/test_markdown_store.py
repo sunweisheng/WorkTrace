@@ -39,6 +39,9 @@ def test_markdown_store_renders_public_event_fields(tmp_path: Path) -> None:
                 event_id="evt1",
                 title="主题一",
                 content="内容一",
+                object_hint="项目一",
+                retention_reason="decision_made",
+                retention_detail="张三在项目群确认主题一的处理结论。",
                 source_message_ids=["om_1"],
                 file_links=[
                     EventFileLink(
@@ -53,6 +56,9 @@ def test_markdown_store_renders_public_event_fields(tmp_path: Path) -> None:
                 event_id="evt2",
                 title="主题二",
                 content="内容二",
+                object_hint="项目二",
+                retention_reason="follow_up_assigned",
+                retention_detail="李四在项目群安排继续跟进主题二。",
                 source_message_ids=["om_2"],
                 file_links=[],
             ),
@@ -61,19 +67,29 @@ def test_markdown_store_renders_public_event_fields(tmp_path: Path) -> None:
 
     content = Path(write_result.output_path).read_text(encoding="utf-8")
 
-    assert "## 每日工作事件" in content
-    assert "### 主题一" in content
-    assert "- 日期: 2026-06-22" in content
-    assert "- 事件标题: 主题一" in content
-    assert "- 事件内容: 内容一" in content
+    assert "# 工作事件日报 · 2026-06-22" in content
+    assert "## 事件列表" in content
+    assert "<!-- worktrace:event:start event_id=\"evt1\" -->" in content
+    assert "<!-- worktrace:retention_reason: decision_made -->" in content
+    assert "### 1. 主题一" in content
+    assert "- **日期**: 2026-06-22" in content
+    assert "- **事件标题**: 主题一" in content
+    assert "- **内容**: 内容一" in content
+    assert "- **具体对象**: 项目一" in content
+    assert "- **保留理由**: 形成明确决策" in content
+    assert "- **保留依据**: 张三在项目群确认主题一的处理结论。" in content
     assert "- 来源人员:" not in content
     assert "- 来源事件 ID:" not in content
-    assert "- 涉及文件链接:" in content
+    assert "- **涉及文件**:" in content
     assert "[方案一](https://foo.feishu.cn/docx/abc)" in content
-    assert "### 主题二" in content
-    assert "- 事件标题: 主题二" in content
-    assert "- 事件内容: 内容二" in content
+    assert "### 2. 主题二" in content
+    assert "- **事件标题**: 主题二" in content
+    assert "- **内容**: 内容二" in content
+    assert "- **保留理由**: 形成后续跟进任务" in content
     assert "  - 无" in content
+    assert "生成时间:" in content
+    assert "来源: 飞书沟通记录自动整理" in content
+    assert "隐私声明: 仅含与本人直接相关的工作事件，不含原始聊天记录" in content
 
 
 def test_markdown_store_redacts_sensitive_link_query_params(tmp_path: Path) -> None:

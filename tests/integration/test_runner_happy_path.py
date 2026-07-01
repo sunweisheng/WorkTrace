@@ -336,8 +336,8 @@ def test_runner_keeps_distinct_events_with_same_source_message_ids_separate(
     assert result.output_path is not None
 
     content = Path(result.output_path).read_text(encoding="utf-8")
-    assert "### 索取全国故障汇总" in content
-    assert "### 权限重置确认" in content
+    assert "### 1. 索取全国故障汇总" in content
+    assert "### 2. 权限重置确认" in content
     assert "要求获取本周全国故障汇总。" in content
     assert "郭海重置了被封的权限/账号，并确认已知晓。" in content
 
@@ -397,8 +397,8 @@ def test_runner_excludes_configured_topics_before_merge(tmp_path: Path) -> None:
     assert result.output_path is not None
 
     content = Path(result.output_path).read_text(encoding="utf-8")
-    assert "### 权限重置确认" in content
-    assert "### 代码同步" not in content
+    assert "### 1. 权限重置确认" in content
+    assert "代码同步" not in content
     assert "执行 git pull 操作" not in content
 
 
@@ -452,8 +452,8 @@ def test_runner_filters_low_retention_events_before_merge(tmp_path: Path) -> Non
     assert result.event_count == 1
     assert result.output_path is not None
     content = Path(result.output_path).read_text(encoding="utf-8")
-    assert "### 合同审核" in content
-    assert "### 完成审核" not in content
+    assert "### 1. 合同审核" in content
+    assert "完成审核" not in content
 
 
 def test_runner_sorts_events_by_source_message_time(tmp_path: Path) -> None:
@@ -544,7 +544,7 @@ def test_runner_sorts_events_by_source_message_time(tmp_path: Path) -> None:
     assert result.output_path is not None
 
     content = Path(result.output_path).read_text(encoding="utf-8")
-    assert content.index("### 较早事件") < content.index("### 较晚事件")
+    assert content.index("### 1. 较早事件") < content.index("### 2. 较晚事件")
 
 
 def test_runner_passes_self_identity_into_batch_input(tmp_path: Path) -> None:
