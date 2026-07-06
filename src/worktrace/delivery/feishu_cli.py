@@ -8,6 +8,11 @@ from typing import Any, Sequence
 
 from ..errors import DeliveryError
 from ..models import SelfIdentity
+from ..utils.filenames import (
+    build_merged_markdown_filename,
+    build_personal_markdown_filename,
+    parse_worktrace_markdown_filename,
+)
 from ..utils.text import sanitize_filename_component
 from .base import DeliveryChannel
 
@@ -112,11 +117,17 @@ class FeishuCliSelfDelivery(DeliveryChannel):
         markdown_path: Path,
         self_identity: SelfIdentity,
     ) -> str:
-        date_part = markdown_path.stem.strip() or "worktrace"
         display_name = sanitize_filename_component(self_identity.display_name)
         if not display_name:
             display_name = sanitize_filename_component(self_identity.open_id) or "self"
-        if date_part.endswith(f"-{display_name}"):
-            return f"{date_part}{markdown_path.suffix or '.md'}"
+        parsed = parse_worktrace_markdown_filename(markdown_path.name)
         suffix = markdown_path.suffix or ".md"
+        if parsed.target_date:
+            if parsed.is_merged:
+                return build_merged_markdown_filename(parsed.target_date, display_name)
+            return build_personal_markdown_filename(parsed.target_date, display_name)
+
+        date_part = markdown_path.stem.strip() or "worktrace"
+        if date_part.endswith(f"-{display_name}"):
+            return f"{date_part}{suffix}"
         return f"{date_part}-{display_name}{suffix}"

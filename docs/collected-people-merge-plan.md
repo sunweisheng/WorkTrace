@@ -2,34 +2,33 @@
 
 ## Summary
 
-新增 `merge-collected` 子命令，用于管理人员把多人提交的 WorkTrace Markdown 放入 `merge_inbox/YYYY/MM/DD/` 后，把日期根目录和一级子目录分别作为独立合并范围，各自生成本目录 `_merged.md` 团队汇总文件。
+新增 `merge-collected` 子命令，用于管理人员把多人提交的 WorkTrace Markdown 放入 `merge_inbox/YYYY/MM/DD/` 后，把日期根目录和一级子目录分别作为独立合并范围，各自生成本目录 `YYYY-MM-DD-登录人姓名-merged.md` 团队汇总文件。
 
-合并结果保持标准 WorkTrace Markdown 兼容，同时额外展示来源人员、来源事件 ID。相同原始 `event_id` 只有在标题和内容完全一致，或标题一致且内容一方包含另一方时，才先确定性归组；如果 `event_id` 相同但不满足该规则，则记录 warning 并交给 LLM 保守判断。其余事件也由 LLM 判断是否属于同一真实工作事件，并对每个合并组生成管理视角的综合描述。读取来源事件和写入最终 `_merged.md` 前，都会执行与个人日报一致的结构化保留门槛。
+合并结果保持标准 WorkTrace Markdown 兼容，同时额外展示来源人员、来源事件 ID。相同原始 `event_id` 只有在标题和内容完全一致，或标题一致且内容一方包含另一方时，才先确定性归组；如果 `event_id` 相同但不满足该规则，则记录 warning 并交给 LLM 保守判断。其余事件也由 LLM 判断是否属于同一真实工作事件，并对每个合并组生成管理视角的综合描述。读取来源事件和写入最终团队汇总文件前，都会执行与个人日报一致的结构化保留门槛。
 
 ## Key Changes
 
 - 新增 CLI：`python -m src.worktrace.cli merge-collected --date YYYY-MM-DD`，旧命令 `python -m src.worktrace.cli --date YYYY-MM-DD` 行为不变。
-- 输入固定读取 `merge_inbox/YYYY/MM/DD/` 及其一级子目录当前层的 `.md` 文件，跳过 `_merged.md`、隐藏文件、非 Markdown、格式错误文件。
-- 人员名从文件名提取，固定格式为 `YYYY-MM-DD-姓名.md`，例如 `2026-06-29-张三.md` 提取为 `张三`。
+- 输入固定读取 `merge_inbox/YYYY/MM/DD/` 及其一级子目录当前层的 `.md` 文件，跳过旧 `_merged.md`、新 `*-merged.md`、隐藏文件、非 Markdown、格式错误文件。
+- 人员名从文件名提取，只要能识别出日期和姓名成分即可，例如 `2026-06-29-张三.md`、`张三-2026-06-29.md`、`张三_2026-06-29.md` 都可识别为 `张三`。
 - 相同 `event_id` 只有在标题和内容完全一致，或标题一致且内容一方包含另一方时才作为确定性合并组；其它情况不锁死，交给 LLM 判断，并在 JSON 结果里记录 warning。
 - 多人合并 prompt 继续要求 LLM 不输出薪资、绩效、争吵、辱骂等敏感事项，并要求每个 group 输出 `object_hint`、`retention_reason`、`retention_detail`。
-- 输出 `_merged.md` 保留 WorkTrace 事件注释和标准字段，并新增来源人员、来源事件 ID 字段；保留元数据继续写入 Markdown，供追溯和后续汇总使用。
-- 新增 `config/merge_delivery.example.json`；实际配置 `config/merge_delivery.local.json` 加入 `.gitignore`。
-- 有本地飞书 Drive 文件夹配置时，根目录结果上传到 `YYYY/MM/DD/`，子目录结果上传到 `YYYY/MM/DD/<子目录名>/`；无配置时只生成本地文件；上传失败只写 warning。
+- 输出 `YYYY-MM-DD-登录人姓名-merged.md` 保留 WorkTrace 事件注释和标准字段，并新增来源人员、来源事件 ID 字段；保留元数据继续写入 Markdown，供追溯和后续汇总使用。
+- 每个生成的团队汇总文件都会通过飞书 CLI 机器人身份发送给当前登录用户自己；发送失败只写 warning，不影响本地文件。
 
 ## Design Details
 
 - 读取阶段
   - 输入目录由 `--date` 拆成 `merge_inbox/YYYY/MM/DD/`，例如 `2026-06-29` 对应 `merge_inbox/2026/06/29/`。
   - 日期根目录始终作为一个合并范围；日期目录下的每个一级子目录也作为独立合并范围。
-  - 每个合并范围只读取当前目录下的普通 `.md` 文件；跳过 `_merged.md`、隐藏文件、子目录和非 Markdown 文件，不递归更深层目录。
-  - 文件名必须匹配 `YYYY-MM-DD-姓名.md`。不匹配时跳过该文件并写 warning。
+  - 每个合并范围只读取当前目录下的普通 `.md` 文件；跳过旧 `_merged.md`、新 `*-merged.md`、隐藏文件、子目录和非 Markdown 文件，不递归更深层目录。
+  - 文件名只要能识别出 `YYYY-MM-DD` 和姓名成分即可；顺序可前可后。不匹配时跳过该文件并写 warning。
   - Markdown 解析复用现有 WorkTrace 标准格式：front matter 加 `<!-- worktrace:event:start event_id="..." -->` 事件块。坏文件跳过并写 warning，不影响其它文件。
   - 解析出的来源事件必须通过结构化保留门槛；缺少保留理由、保留依据或具体对象的事件会被过滤，不进入 LLM 合并 prompt。
 
 - 事件身份与来源
   - 每条来源事件在本次合并中生成临时 `draft_id`，格式可由来源文件名、事件序号和原始 `event_id` 组成，用于 LLM 分组和结果校验。
-  - 最终 `_merged.md` 的事件使用新的汇总 `event_id`，由日期、合并组内 `draft_id`、LLM 生成的标题和内容稳定生成。
+  - 最终团队汇总文件的事件使用新的汇总 `event_id`，由日期、合并组内 `draft_id`、LLM 生成的标题和内容稳定生成。
   - 最终事件保留 `来源人员` 和 `来源事件 ID`。普通个人日报不渲染空来源字段，避免影响旧命令输出。
 
 - 确定性合并规则
@@ -49,36 +48,28 @@
 - 敏感内容与失败策略
   - Prompt 继续按 `config/event_rules.json` 中的敏感关键词要求 LLM 不输出薪资、绩效、争吵、辱骂等敏感事项。
   - Python 侧不再按敏感关键词过滤最终事件；精确排除规则会在来源事件阶段和合并后事件阶段都检查。
-  - Python 侧在读取来源事件后和写入 `_merged.md` 前都执行结构化保留门槛；被过滤的事件写 warning。
-  - 空目录、无有效事件、全坏文件都生成空 `_merged.md`，返回 `success_with_warnings`。
+  - Python 侧在读取来源事件后和写入团队汇总文件前都执行结构化保留门槛；被过滤的事件写 warning。
+  - 空目录、无有效事件、全坏文件都生成空团队汇总文件，返回 `success_with_warnings`。
   - LLM 协议错误导致本地无法形成安全结果时返回 `failed`；上传失败不影响本地结果，只写 warning。
 
-- 飞书上传
-  - `config/merge_delivery.local.json` 存放真实 Drive 目标目录，不提交 Git。
-  - 配置存在时，以配置目录为汇总根目录，按日期创建 `YYYY/MM/DD/` 三级目录，再上传原始 `_merged.md` 文件。
-  - 配置不存在时 `upload_status=skipped`；上传或建目录失败时 `upload_status=failed`，本地 `_merged.md` 保留。
+- 飞书自发送
+  - 管理人员汇总与个人日报一样，都会通过飞书 CLI 机器人身份把结果文件发送给当前登录用户自己。
+  - 若一次运行生成多个汇总文件，则根目录结果和各一级子目录结果都会分别发送。
+  - 发送失败时 `self_delivery_status=failed`，本地文件保留，整体结果降级为 `success_with_warnings`。
 
 ## Public Interfaces
 
 - CLI：
   `python -m src.worktrace.cli merge-collected --date YYYY-MM-DD`
-- 本地配置示例：
-
-```json
-{
-  "feishu_drive_folder_url": "https://example.feishu.cn/drive/folder/..."
-}
-```
-
 - JSON 执行结果包含：
-  `status`、`target_date`、`input_dir`、`output_path`、`source_file_count`、`source_event_count`、`merged_event_count`、`skipped_file_count`、`warning_messages`、`upload_status`、`upload_target`、`upload_error`、`outputs`。
-- `outputs` 逐项记录每个合并范围的 `input_dir`、`output_path`、`source_file_count`、`source_event_count`、`merged_event_count`、`skipped_file_count`、`warning_messages`、`upload_status`、`upload_target`、`upload_error`。
+  `status`、`target_date`、`input_dir`、`output_path`、`source_file_count`、`source_event_count`、`merged_event_count`、`skipped_file_count`、`warning_messages`、`self_delivery_status`、`self_delivery_target`、`self_delivery_error`、`outputs`。
+- `outputs` 逐项记录每个合并范围的 `input_dir`、`output_path`、`source_file_count`、`source_event_count`、`merged_event_count`、`skipped_file_count`、`warning_messages`、`self_delivery_status`、`self_delivery_target`、`self_delivery_error`。
 
 ## Test Plan
 
-- 单元测试覆盖人员名提取、标准 Markdown 解析、坏文件跳过、`_merged.md` 不参与输入、相同 `event_id` 且内容完全一致或包含时确定性合并、相同 `event_id` 但不满足确定性规则时交给 LLM 并产生 warning、输出包含来源信息、无上传配置不调用飞书。
+- 单元测试覆盖人员名提取、标准 Markdown 解析、坏文件跳过、旧 `_merged.md` 与新 `*-merged.md` 不参与输入、相同 `event_id` 且内容完全一致或包含时确定性合并、相同 `event_id` 但不满足确定性规则时交给 LLM 并产生 warning、输出包含来源信息、多人合并结果会自发送。
 - 单元测试覆盖最终敏感兜底过滤、结构化保留门槛，以及多人合并 prompt 包含敏感事项和保留元数据要求。
-- 集成测试覆盖 `merge-collected --date` 输出结构化 JSON、多个输入生成 `_merged.md`、坏文件不阻断有效合并、飞书配置存在时创建 `YYYY/MM/DD/` 并上传、旧 CLI 命令行为不变。
+- 集成测试覆盖 `merge-collected --date` 输出结构化 JSON、多个输入生成 `YYYY-MM-DD-登录人姓名-merged.md`、坏文件不阻断有效合并、多人合并自发送结果、旧 CLI 命令行为不变。
 - 空目录、无有效事件、全坏文件均返回成功带 warning，并生成空汇总或空结果。
 
 ## Assumptions
@@ -86,5 +77,4 @@
 - 输入来自各人员已生成的 WorkTrace Markdown，不重新读取原始聊天。
 - 管理汇总允许展示来源人员名和来源事件 ID。
 - v1 只处理同一天多人合并，不做跨天合并。
-- v1 只上传原始 `.md` 文件到飞书 Drive 文件夹，不导入为在线文档。
 - LLM 合并规则保守，拿不准就分开。

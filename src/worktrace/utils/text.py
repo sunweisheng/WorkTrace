@@ -5,10 +5,18 @@ from collections import OrderedDict
 
 
 URL_RE = re.compile(r"https?://[^\s)>\]]+")
+_SENTENCE_FINAL_MA_RE = re.compile(r"妈(?P<suffix>[\"'”’」』）)\]】》>\s。！？；!?;….]*)$")
 
 
 def clean_text(value: str) -> str:
-    return "\n".join(line.rstrip() for line in value.strip().splitlines()).strip()
+    return "\n".join(
+        normalize_sentence_final_ma(line.rstrip())
+        for line in value.strip().splitlines()
+    ).strip()
+
+
+def normalize_sentence_final_ma(value: str) -> str:
+    return _SENTENCE_FINAL_MA_RE.sub(r"吗\g<suffix>", value)
 
 
 def sanitize_filename_component(value: str) -> str:

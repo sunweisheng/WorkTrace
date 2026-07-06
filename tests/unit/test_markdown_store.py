@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from src.worktrace.config import RuntimeConfig
-from src.worktrace.models import EventFileLink, WorkEvent
+from src.worktrace.models import DayDocument, EventFileLink, WorkEvent
 from src.worktrace.stores.markdown import MarkdownEventStore
 
 
@@ -190,6 +190,83 @@ def test_markdown_store_reads_owner_named_day_by_date(tmp_path: Path) -> None:
 
     assert loaded is not None
     assert loaded.events[0].event_id == "evt1"
+
+
+def test_markdown_store_reads_day_when_filename_order_varies(tmp_path: Path) -> None:
+    store = MarkdownEventStore(config=RuntimeConfig(data_root=tmp_path / "data"))
+    manual_path = tmp_path / "data" / "2026" / "06" / "孙伟盛-2026-06-22.md"
+    manual_path.parent.mkdir(parents=True, exist_ok=True)
+    manual_path.write_text(
+        store.render_day_document(
+            DayDocument(
+                date="2026-06-22",
+                events=[
+                    WorkEvent(
+                        date="2026-06-22",
+                        event_id="evt1",
+                        title="主题",
+                        content="内容",
+                        source_message_ids=["om_1"],
+                        file_links=[],
+                    )
+                ],
+                generated_at="2026-06-22T20:00:00+08:00",
+            )
+        ),
+        encoding="utf-8",
+    )
+
+    loaded = store.read_day("2026-06-22")
+
+    assert loaded is not None
+    assert loaded.events[0].event_id == "evt1"
+
+
+def test_markdown_store_ignores_merged_markdown_when_reading_day(tmp_path: Path) -> None:
+    store = MarkdownEventStore(config=RuntimeConfig(data_root=tmp_path / "data"))
+    merged_path = tmp_path / "data" / "2026" / "06" / "管理者-2026-06-22-merged.md"
+    merged_path.parent.mkdir(parents=True, exist_ok=True)
+    merged_path.write_text(
+        store.render_day_document(
+            DayDocument(
+                date="2026-06-22",
+                events=[],
+                generated_at="2026-06-22T20:00:00+08:00",
+            )
+        ),
+        encoding="utf-8",
+    )
+
+    loaded = store.read_day("2026-06-22")
+
+    assert loaded is None
+
+
+def test_markdown_store_corrects_sentence_final_ma_in_public_fields(tmp_path: Path) -> None:
+    store = MarkdownEventStore(config=RuntimeConfig(data_root=tmp_path / "data"))
+    write_result = store.replace_day(
+        "2026-06-22",
+        [
+            WorkEvent(
+                date="2026-06-22",
+                event_id="evt1",
+                title="今天上线妈",
+                content="已经同步产品妈。",
+                object_hint="上线确认妈",
+                retention_reason="decision_made",
+                retention_detail="张三最后确认可以发版妈？",
+                source_message_ids=["om_1"],
+                file_links=[],
+            )
+        ],
+    )
+
+    content = Path(write_result.output_path).read_text(encoding="utf-8")
+
+    assert "今天上线吗" in content
+    assert "已经同步产品吗。" in content
+    assert "上线确认吗" in content
+    assert "张三最后确认可以发版吗？" in content
 
 
 def test_markdown_store_roundtrip_keeps_file_links(tmp_path: Path) -> None:

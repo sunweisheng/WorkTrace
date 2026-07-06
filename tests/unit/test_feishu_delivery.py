@@ -71,6 +71,56 @@ def test_deliver_to_self_does_not_append_display_name_twice(tmp_path: Path) -> N
     assert target == "ou_self"
 
 
+def test_deliver_to_self_normalizes_reversed_date_name_filename(tmp_path: Path) -> None:
+    markdown_path = tmp_path / "data" / "2026" / "06" / "孙伟盛-2026-06-29.md"
+    markdown_path.parent.mkdir(parents=True)
+    markdown_path.write_text("# WorkTrace\n", encoding="utf-8")
+
+    def fake_runner(args, *, cwd=None):
+        file_arg = args[args.index("--file") + 1]
+        assert Path(file_arg).name == "2026-06-29-孙伟盛.md"
+        return SimpleNamespace(returncode=0, stderr="")
+
+    delivery = FeishuCliSelfDelivery(command_runner=fake_runner, cwd=tmp_path)
+
+    status, target = delivery.deliver_to_self(
+        self_identity=SelfIdentity(
+            open_id="ou_self",
+            display_name="孙伟盛",
+            source="lark-cli",
+        ),
+        markdown_path=markdown_path,
+    )
+
+    assert status == "success"
+    assert target == "ou_self"
+
+
+def test_deliver_to_self_normalizes_merged_filename(tmp_path: Path) -> None:
+    markdown_path = tmp_path / "merge_inbox" / "2026" / "06" / "29" / "管理者-2026-06-29-merged.md"
+    markdown_path.parent.mkdir(parents=True)
+    markdown_path.write_text("# WorkTrace\n", encoding="utf-8")
+
+    def fake_runner(args, *, cwd=None):
+        file_arg = args[args.index("--file") + 1]
+        assert Path(file_arg).name == "2026-06-29-管理者-merged.md"
+        return SimpleNamespace(returncode=0, stderr="")
+
+    delivery = FeishuCliSelfDelivery(command_runner=fake_runner, cwd=tmp_path)
+
+    status, target = delivery.deliver_to_self(
+        self_identity=SelfIdentity(
+            open_id="ou_self",
+            display_name="管理者",
+            source="lark-cli",
+        ),
+        markdown_path=markdown_path,
+    )
+
+    assert status == "success"
+    assert target == "ou_self"
+
+
 def test_deliver_to_self_cleans_up_temp_copy_when_send_fails(tmp_path: Path) -> None:
     markdown_path = tmp_path / "data" / "2026" / "06" / "2026-06-29.md"
     markdown_path.parent.mkdir(parents=True)

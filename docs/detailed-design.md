@@ -12,7 +12,7 @@
 
 WorkTrace 的当前目标是：从飞书中提取“目标日期内本人至少发过 1 条消息”的会话内容，结合 LLM 做语义分析，生成仅保留公共工作信息的事件清单，写入本地 Markdown 文件，并通过飞书 CLI 机器人身份发送给员工自己，方便后续自行审阅、回顾和转发。
 
-管理人员汇总模式的目标是：在不重新读取员工原始聊天的前提下，合并多人已经生成的 WorkTrace Markdown，形成团队视角 `_merged.md`；日期目录下的一级子目录可作为独立合并范围分别生成 `_merged.md`。
+管理人员汇总模式的目标是：在不重新读取员工原始聊天的前提下，合并多人已经生成的 WorkTrace Markdown，形成团队视角 `YYYY-MM-DD-登录人姓名-merged.md`；日期目录下的一级子目录可作为独立合并范围分别生成自己的团队汇总文件，并发送给当前登录用户自己。
 
 ### 2.2 当前范围
 
@@ -179,10 +179,10 @@ WorkTrace 当前采用六层结构：
 
 - `--date` 为必填参数
 - 输入目录固定为 `merge_inbox/YYYY/MM/DD/`
-- 输入文件名固定为 `YYYY-MM-DD-姓名.md`
+- 输入文件名只要能识别出 `YYYY-MM-DD` 和姓名成分即可，例如 `YYYY-MM-DD-姓名.md`、`姓名-YYYY-MM-DD.md`、`姓名_YYYY-MM-DD.md`
 - 日期根目录始终作为一个合并范围；日期目录下每个一级子目录也作为独立合并范围
-- 每个合并范围只读取当前层普通 `.md` 文件，跳过 `_merged.md`、隐藏文件、非 Markdown 文件和更深层目录
-- 输出文件固定为各合并范围本目录 `_merged.md`
+- 每个合并范围只读取当前层普通 `.md` 文件，跳过旧 `_merged.md`、新 `*-merged.md`、隐藏文件、非 Markdown 文件和更深层目录
+- 输出文件固定为各合并范围本目录 `YYYY-MM-DD-登录人姓名-merged.md`
 - `stdout` 返回 `CollectedMergeRunResult` 的 machine-readable JSON，其中 `outputs` 逐项记录每个合并范围
 
 退出码约定如下：

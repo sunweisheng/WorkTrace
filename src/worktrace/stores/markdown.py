@@ -10,7 +10,11 @@ from ..config import RuntimeConfig
 from ..errors import StoreWriteError
 from ..models import DayDocument, EventFileLink, StoreWriteResult, WorkEvent
 from ..utils.dates import now_iso
-from ..utils.text import sanitize_filename_component
+from ..utils.filenames import (
+    build_personal_markdown_filename,
+    parse_worktrace_markdown_filename,
+)
+from ..utils.text import normalize_sentence_final_ma
 from .base import EventStore
 
 
@@ -91,8 +95,7 @@ class MarkdownEventStore(EventStore):
 
     def build_output_path(self, target_date: str, *, owner_display_name: str = "") -> Path:
         year, month, _day = target_date.split("-")
-        owner_part = sanitize_filename_component(owner_display_name)
-        filename = f"{target_date}-{owner_part}.md" if owner_part else f"{target_date}.md"
+        filename = build_personal_markdown_filename(target_date, owner_display_name)
         return self.config.data_root / year / month / filename
 
     def _find_existing_day_path(self, target_date: str) -> Path | None:
@@ -100,8 +103,20 @@ class MarkdownEventStore(EventStore):
         day_dir = self.config.data_root / year / month
         if not day_dir.exists():
             return None
-        matches = sorted(day_dir.glob(f"{target_date}-*.md"))
-        return matches[0] if matches else None
+        candidates: list[tuple[int, str, Path]] = []
+        for path in sorted(day_dir.glob("*.md")):
+            parsed = parse_worktrace_markdown_filename(path.name)
+            if parsed.target_date != target_date or parsed.is_merged:
+                continue
+            score = 2
+            if parsed.stem == target_date:
+                score = 0
+            elif parsed.stem.startswith(f"{target_date}-"):
+                score = 1
+            candidates.append((score, path.name, path))
+        if not candidates:
+            return None
+        return sorted(candidates)[0][2]
 
     def render_day_document(self, day_doc: DayDocument) -> str:
         front_matter = "\n".join(
@@ -134,10 +149,10 @@ class MarkdownEventStore(EventStore):
         link_lines = self._render_file_links(event.file_links)
         source_lines = self._render_source_lines(event)
         retention_reason_label = self._render_retention_reason(event.retention_reason)
-        title = self._redact_internal_ids(event.title)
-        content = self._redact_internal_ids(event.content)
-        object_hint = self._redact_internal_ids(event.object_hint)
-        retention_detail = self._redact_internal_ids(event.retention_detail)
+        title = self._normalize_public_text(event.title)
+        content = self._normalize_public_text(event.content)
+        object_hint = self._normalize_public_text(event.object_hint)
+        retention_detail = self._normalize_public_text(event.retention_detail)
         return (
             f'<!-- worktrace:event:start event_id="{event.event_id}" -->\n'
             f"<!-- worktrace:retention_reason: {event.retention_reason} -->\n"
@@ -155,6 +170,9 @@ class MarkdownEventStore(EventStore):
 
     def _redact_internal_ids(self, value: str) -> str:
         return INTERNAL_FEISHU_ID_RE.sub("[内部消息ID已隐藏]", value)
+
+    def _normalize_public_text(self, value: str) -> str:
+        return normalize_sentence_final_ma(self._redact_internal_ids(value))
 
     def _render_retention_reason(self, value: str) -> str:
         stripped = value.strip()

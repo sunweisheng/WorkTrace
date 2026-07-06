@@ -968,9 +968,9 @@ class CollectedMergeOutput:
     merged_event_count: int
     skipped_file_count: int
     warning_messages: list[str] = field(default_factory=list)
-    upload_status: str = ""
-    upload_target: str = ""
-    upload_error: str = ""
+    self_delivery_status: str = ""
+    self_delivery_target: str = ""
+    self_delivery_error: str = ""
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> CollectedMergeOutput:
@@ -984,9 +984,15 @@ class CollectedMergeOutput:
             merged_event_count=int(data.get("merged_event_count", 0)),
             skipped_file_count=int(data.get("skipped_file_count", 0)),
             warning_messages=_string_list(data.get("warning_messages")),
-            upload_status=str(data.get("upload_status", "")),
-            upload_target=str(data.get("upload_target", "")),
-            upload_error=str(data.get("upload_error", "")),
+            self_delivery_status=str(
+                data.get("self_delivery_status", data.get("upload_status", ""))
+            ),
+            self_delivery_target=str(
+                data.get("self_delivery_target", data.get("upload_target", ""))
+            ),
+            self_delivery_error=str(
+                data.get("self_delivery_error", data.get("upload_error", ""))
+            ),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -998,9 +1004,9 @@ class CollectedMergeOutput:
             "merged_event_count": self.merged_event_count,
             "skipped_file_count": self.skipped_file_count,
             "warning_messages": list(self.warning_messages),
-            "upload_status": self.upload_status,
-            "upload_target": self.upload_target,
-            "upload_error": self.upload_error,
+            "self_delivery_status": self.self_delivery_status,
+            "self_delivery_target": self.self_delivery_target,
+            "self_delivery_error": self.self_delivery_error,
         }
 
 
@@ -1015,9 +1021,9 @@ class CollectedMergeRunResult:
     merged_event_count: int
     skipped_file_count: int
     warning_messages: list[str] = field(default_factory=list)
-    upload_status: str = ""
-    upload_target: str = ""
-    upload_error: str = ""
+    self_delivery_status: str = ""
+    self_delivery_target: str = ""
+    self_delivery_error: str = ""
     outputs: list[CollectedMergeOutput] = field(default_factory=list)
 
     @classmethod
@@ -1034,9 +1040,15 @@ class CollectedMergeRunResult:
             merged_event_count=int(data.get("merged_event_count", 0)),
             skipped_file_count=int(data.get("skipped_file_count", 0)),
             warning_messages=_string_list(data.get("warning_messages")),
-            upload_status=str(data.get("upload_status", "")),
-            upload_target=str(data.get("upload_target", "")),
-            upload_error=str(data.get("upload_error", "")),
+            self_delivery_status=str(
+                data.get("self_delivery_status", data.get("upload_status", ""))
+            ),
+            self_delivery_target=str(
+                data.get("self_delivery_target", data.get("upload_target", ""))
+            ),
+            self_delivery_error=str(
+                data.get("self_delivery_error", data.get("upload_error", ""))
+            ),
             outputs=[
                 CollectedMergeOutput.from_dict(item)
                 for item in _dict_list(data.get("outputs"))
@@ -1054,9 +1066,9 @@ class CollectedMergeRunResult:
             "merged_event_count": self.merged_event_count,
             "skipped_file_count": self.skipped_file_count,
             "warning_messages": list(self.warning_messages),
-            "upload_status": self.upload_status,
-            "upload_target": self.upload_target,
-            "upload_error": self.upload_error,
+            "self_delivery_status": self.self_delivery_status,
+            "self_delivery_target": self.self_delivery_target,
+            "self_delivery_error": self.self_delivery_error,
             "outputs": [item.to_dict() for item in self.outputs],
         }
 

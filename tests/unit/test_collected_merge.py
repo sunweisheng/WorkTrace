@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 from src.worktrace.collected_merge import (
@@ -9,6 +8,7 @@ from src.worktrace.collected_merge import (
 )
 from src.worktrace.analyzers.prompts import build_collected_merge_prompt
 from src.worktrace.config import RuntimeConfig
+from src.worktrace.errors import DeliveryError
 from src.worktrace.models import (
     CollectedMergeGroup,
     CollectedMergeOutput,
@@ -16,9 +16,11 @@ from src.worktrace.models import (
     CollectedMergeRunResult,
     CollectedSourceEvent,
     DayDocument,
+    SelfIdentity,
 )
-from src.worktrace.stores.markdown import MarkdownEventStore
 from src.worktrace.models import WorkEvent
+from src.worktrace.stores.markdown import MarkdownEventStore
+from tests.helpers import NullDelivery
 
 
 class FakeAnalyzer:
@@ -83,9 +85,36 @@ def _write_day_doc(path: Path, events: list[WorkEvent], tmp_path: Path) -> None:
     )
 
 
+def _fake_self_identity() -> SelfIdentity:
+    return SelfIdentity(open_id="ou_manager", display_name="管理者", source="test")
+
+
+def _unexpected_command(args, *, cwd=None):
+    raise AssertionError(f"Unexpected command: {args}")
+
+
+def _build_runner(
+    tmp_path: Path,
+    *,
+    analyzer=None,
+    delivery_channel=None,
+    command_runner=None,
+) -> CollectedMergeRunner:
+    return CollectedMergeRunner(
+        config=RuntimeConfig(data_root=tmp_path / "data"),
+        analyzer=analyzer or FakeAnalyzer(),
+        cwd=tmp_path,
+        command_runner=command_runner or _unexpected_command,
+        delivery_channel=delivery_channel or NullDelivery(),
+        self_identity_resolver=_fake_self_identity,
+    )
+
+
 def test_extract_person_name_from_date_first_filename() -> None:
     assert extract_person_name_from_filename("2026-06-29-张三.md") == "张三"
-    assert extract_person_name_from_filename("张三-2026-06-29.md") == ""
+    assert extract_person_name_from_filename("张三-2026-06-29.md") == "张三"
+    assert extract_person_name_from_filename("张三_2026-06-29.md") == "张三"
+    assert extract_person_name_from_filename("张三-2026-06-29-merged.md") == ""
 
 
 def test_collected_merge_reads_sources_and_renders_source_fields(tmp_path: Path) -> None:
@@ -132,23 +161,21 @@ def test_collected_merge_reads_sources_and_renders_source_fields(tmp_path: Path)
     (inbox / "bad.md").write_text("bad", encoding="utf-8")
 
     analyzer = FakeAnalyzer()
-    result = CollectedMergeRunner(
-        config=RuntimeConfig(data_root=tmp_path / "data"),
-        analyzer=analyzer,
-        cwd=tmp_path,
-    ).run("2026-06-29")
+    result = _build_runner(tmp_path, analyzer=analyzer).run("2026-06-29")
 
-    assert result.output_path == str((inbox / "_merged.md").resolve())
+    assert result.output_path == str((inbox / "2026-06-29-管理者-merged.md").resolve())
     assert result.source_file_count == 3
     assert result.source_event_count == 2
     assert result.skipped_file_count == 1
+    assert result.self_delivery_status == "success"
+    assert result.self_delivery_target == "ou_manager"
     assert analyzer.calls[0]["deterministic_groups"] == [
         [
             "2026-06-29-张三.md#1:evt-shared",
             "2026-06-29-李四.md#1:evt-shared",
         ]
     ]
-    content = (inbox / "_merged.md").read_text(encoding="utf-8")
+    content = Path(result.output_path).read_text(encoding="utf-8")
     assert "- 来源人员: 张三、李四" in content
     assert "- 来源事件 ID: evt-shared" in content
     assert "项目排期确认" in content
@@ -196,21 +223,18 @@ def test_collected_merge_runs_root_and_first_level_subdirectories(
     )
 
     analyzer = FakeAnalyzer()
-    result = CollectedMergeRunner(
-        config=RuntimeConfig(data_root=tmp_path / "data"),
-        analyzer=analyzer,
-        cwd=tmp_path,
-    ).run("2026-06-29")
+    result = _build_runner(tmp_path, analyzer=analyzer).run("2026-06-29")
 
     assert len(analyzer.calls) == 3
     assert len(result.outputs) == 3
     assert result.source_file_count == 3
     assert result.source_event_count == 3
     assert result.merged_event_count == 3
-    assert result.output_path == str((inbox / "_merged.md").resolve())
-    assert (inbox / "_merged.md").exists()
-    assert (inbox / "项目A" / "_merged.md").exists()
-    assert (inbox / "项目B" / "_merged.md").exists()
+    assert result.output_path == str((inbox / "2026-06-29-管理者-merged.md").resolve())
+    assert (inbox / "2026-06-29-管理者-merged.md").exists()
+    assert (inbox / "项目A" / "2026-06-29-管理者-merged.md").exists()
+    assert (inbox / "项目B" / "2026-06-29-管理者-merged.md").exists()
+    assert [output.self_delivery_status for output in result.outputs] == ["success"] * 3
     assert [Path(output.input_dir).name for output in result.outputs] == [
         "29",
         "项目A",
@@ -241,11 +265,7 @@ def test_collected_merge_does_not_group_same_event_id_across_subdirectories(
         )
 
     analyzer = FakeAnalyzer()
-    result = CollectedMergeRunner(
-        config=RuntimeConfig(data_root=tmp_path / "data"),
-        analyzer=analyzer,
-        cwd=tmp_path,
-    ).run("2026-06-29")
+    result = _build_runner(tmp_path, analyzer=analyzer).run("2026-06-29")
 
     assert len(analyzer.calls) == 2
     assert all(call["deterministic_groups"] == [] for call in analyzer.calls)
@@ -272,11 +292,7 @@ def test_collected_merge_skips_nested_directories_inside_group(
     )
     (inbox / "项目A" / "更深目录").mkdir()
 
-    result = CollectedMergeRunner(
-        config=RuntimeConfig(data_root=tmp_path / "data"),
-        analyzer=FakeAnalyzer(),
-        cwd=tmp_path,
-    ).run("2026-06-29")
+    result = _build_runner(tmp_path).run("2026-06-29")
 
     assert result.skipped_file_count == 1
     assert any(
@@ -318,11 +334,7 @@ def test_collected_merge_does_not_lock_same_event_id_with_divergent_content(
         )
 
     analyzer = FakeAnalyzer()
-    result = CollectedMergeRunner(
-        config=RuntimeConfig(data_root=tmp_path / "data"),
-        analyzer=analyzer,
-        cwd=tmp_path,
-    ).run("2026-06-29")
+    result = _build_runner(tmp_path, analyzer=analyzer).run("2026-06-29")
 
     assert analyzer.calls[0]["deterministic_groups"] == []
     assert any(
@@ -332,11 +344,7 @@ def test_collected_merge_does_not_lock_same_event_id_with_divergent_content(
 
 
 def test_collected_merge_empty_directory_succeeds_with_warning(tmp_path: Path) -> None:
-    result = CollectedMergeRunner(
-        config=RuntimeConfig(data_root=tmp_path / "data"),
-        analyzer=FakeAnalyzer(),
-        cwd=tmp_path,
-    ).run("2026-06-29")
+    result = _build_runner(tmp_path).run("2026-06-29")
 
     assert result.status == "success_with_warnings"
     assert result.source_event_count == 0
@@ -344,7 +352,7 @@ def test_collected_merge_empty_directory_succeeds_with_warning(tmp_path: Path) -
     assert Path(result.output_path or "").exists()
 
 
-def test_collected_merge_upload_creates_date_folder_structure(tmp_path: Path) -> None:
+def test_collected_merge_delivers_root_result_to_self(tmp_path: Path) -> None:
     inbox = tmp_path / "merge_inbox" / "2026" / "06" / "29"
     inbox.mkdir(parents=True)
     source_store = MarkdownEventStore(config=RuntimeConfig(data_root=tmp_path / "unused"))
@@ -366,42 +374,24 @@ def test_collected_merge_upload_creates_date_folder_structure(tmp_path: Path) ->
         ),
         encoding="utf-8",
     )
-    config_dir = tmp_path / "config"
-    config_dir.mkdir()
-    (config_dir / "merge_delivery.local.json").write_text(
-        json.dumps({"feishu_drive_folder_url": "root-folder"}),
-        encoding="utf-8",
-    )
-    commands = []
 
-    def fake_command(args, *, cwd):
-        commands.append(args)
+    delivered: list[str] = []
 
-        class Result:
-            returncode = 0
-            stdout = json.dumps({"url": f"folder-{len(commands)}"})
-            stderr = ""
+    class CapturingDelivery:
+        def deliver_to_self(self, *, self_identity, markdown_path):
+            delivered.append(markdown_path.name)
+            return ("success", self_identity.open_id)
 
-        return Result()
-
-    result = CollectedMergeRunner(
-        config=RuntimeConfig(data_root=tmp_path / "data"),
-        analyzer=FakeAnalyzer(),
-        cwd=tmp_path,
-        command_runner=fake_command,
+    result = _build_runner(
+        tmp_path,
+        delivery_channel=CapturingDelivery(),
     ).run("2026-06-29")
 
-    assert result.upload_status == "success"
-    assert [cmd[2] for cmd in commands[:3]] == [
-        "+folders-create",
-        "+folders-create",
-        "+folders-create",
-    ]
-    assert [cmd[-1] for cmd in commands[:3]] == ["2026", "06", "29"]
-    assert commands[-1][2] == "+upload"
+    assert result.self_delivery_status == "success"
+    assert delivered == ["2026-06-29-管理者-merged.md"]
 
 
-def test_collected_merge_upload_creates_subdirectory_folder_structure(
+def test_collected_merge_delivers_all_outputs_to_self(
     tmp_path: Path,
 ) -> None:
     inbox = tmp_path / "merge_inbox" / "2026" / "06" / "29"
@@ -431,53 +421,43 @@ def test_collected_merge_upload_creates_subdirectory_folder_structure(
         ],
         tmp_path,
     )
-    config_dir = tmp_path / "config"
-    config_dir.mkdir()
-    (config_dir / "merge_delivery.local.json").write_text(
-        json.dumps({"feishu_drive_folder_url": "root-folder"}),
-        encoding="utf-8",
-    )
-    commands = []
+    delivered: list[str] = []
 
-    def fake_command(args, *, cwd):
-        commands.append(args)
+    class CapturingDelivery:
+        def deliver_to_self(self, *, self_identity, markdown_path):
+            delivered.append(str(markdown_path.relative_to(tmp_path)))
+            return ("success", self_identity.open_id)
 
-        class Result:
-            returncode = 0
-            stdout = json.dumps({"url": f"folder-{len(commands)}"})
-            stderr = ""
-
-        return Result()
-
-    result = CollectedMergeRunner(
-        config=RuntimeConfig(data_root=tmp_path / "data"),
-        analyzer=FakeAnalyzer(),
-        cwd=tmp_path,
-        command_runner=fake_command,
+    result = _build_runner(
+        tmp_path,
+        delivery_channel=CapturingDelivery(),
     ).run("2026-06-29")
 
-    folder_names = [cmd[-1] for cmd in commands if cmd[2] == "+folders-create"]
-    assert folder_names == ["2026", "06", "29", "2026", "06", "29", "项目A"]
-    assert result.upload_status == "success"
-    assert [output.upload_status for output in result.outputs] == ["success", "success"]
+    assert result.self_delivery_status == "success"
+    assert [output.self_delivery_status for output in result.outputs] == ["success", "success"]
+    assert delivered == [
+        "merge_inbox/2026/06/29/2026-06-29-管理者-merged.md",
+        "merge_inbox/2026/06/29/项目A/2026-06-29-管理者-merged.md",
+    ]
 
 
-def test_collected_merge_bad_upload_config_only_warns(tmp_path: Path) -> None:
+def test_collected_merge_delivery_failure_only_warns(tmp_path: Path) -> None:
     inbox = tmp_path / "merge_inbox" / "2026" / "06" / "29"
     inbox.mkdir(parents=True)
-    config_dir = tmp_path / "config"
-    config_dir.mkdir()
-    (config_dir / "merge_delivery.local.json").write_text("{bad", encoding="utf-8")
 
-    result = CollectedMergeRunner(
-        config=RuntimeConfig(data_root=tmp_path / "data"),
-        analyzer=FakeAnalyzer(),
-        cwd=tmp_path,
+    class FailingDelivery:
+        def deliver_to_self(self, *, self_identity, markdown_path):
+            raise DeliveryError("delivery failed")
+
+    result = _build_runner(
+        tmp_path,
+        delivery_channel=FailingDelivery(),
     ).run("2026-06-29")
 
     assert result.status == "success_with_warnings"
-    assert result.upload_status == "failed"
-    assert "Failed to upload merged markdown" in result.upload_error
+    assert result.self_delivery_status == "failed"
+    assert result.self_delivery_target == "ou_manager"
+    assert "delivery failed" in result.self_delivery_error
 
 
 def test_collected_merge_prompt_contains_sensitive_rules() -> None:
@@ -548,15 +528,11 @@ def test_collected_merge_filters_low_retention_source_events_before_prompt(
     )
 
     analyzer = FakeAnalyzer()
-    result = CollectedMergeRunner(
-        config=RuntimeConfig(data_root=tmp_path / "data"),
-        analyzer=analyzer,
-        cwd=tmp_path,
-    ).run("2026-06-29")
+    result = _build_runner(tmp_path, analyzer=analyzer).run("2026-06-29")
 
     assert result.source_event_count == 1
     assert [event.event.title for event in analyzer.calls[0]["events"]] == ["需求评审"]
-    content = (inbox / "_merged.md").read_text(encoding="utf-8")
+    content = (inbox / "2026-06-29-管理者-merged.md").read_text(encoding="utf-8")
     assert "下午会议安排" not in content
 
 
@@ -604,14 +580,10 @@ def test_collected_merge_filters_group_missing_retention_reason(tmp_path: Path) 
         encoding="utf-8",
     )
 
-    result = CollectedMergeRunner(
-        config=RuntimeConfig(data_root=tmp_path / "data"),
-        analyzer=MissingRetentionAnalyzer(),
-        cwd=tmp_path,
-    ).run("2026-06-29")
+    result = _build_runner(tmp_path, analyzer=MissingRetentionAnalyzer()).run("2026-06-29")
 
     assert result.merged_event_count == 0
-    content = (inbox / "_merged.md").read_text(encoding="utf-8")
+    content = (inbox / "2026-06-29-管理者-merged.md").read_text(encoding="utf-8")
     assert "_当天没有提炼出需要保留的工作事件。_" in content
 
 
@@ -620,23 +592,26 @@ def test_collected_merge_run_result_round_trips_outputs(tmp_path: Path) -> None:
         status="success",
         target_date="2026-06-29",
         input_dir=str(tmp_path / "merge_inbox/2026/06/29"),
-        output_path=str(tmp_path / "merge_inbox/2026/06/29/_merged.md"),
+        output_path=str(tmp_path / "merge_inbox/2026/06/29/2026-06-29-管理者-merged.md"),
         source_file_count=3,
         source_event_count=4,
         merged_event_count=2,
         skipped_file_count=1,
         warning_messages=[],
-        upload_status="skipped",
+        self_delivery_status="success",
+        self_delivery_target="ou_manager",
         outputs=[
             CollectedMergeOutput(
                 input_dir=str(tmp_path / "merge_inbox/2026/06/29/项目A"),
-                output_path=str(tmp_path / "merge_inbox/2026/06/29/项目A/_merged.md"),
+                output_path=str(
+                    tmp_path / "merge_inbox/2026/06/29/项目A/2026-06-29-管理者-merged.md"
+                ),
                 source_file_count=1,
                 source_event_count=2,
                 merged_event_count=1,
                 skipped_file_count=0,
                 warning_messages=["warning"],
-                upload_status="skipped",
+                self_delivery_status="success",
             )
         ],
     )

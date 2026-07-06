@@ -190,25 +190,30 @@ def test_cli_merge_collected_returns_structured_json(capsys, tmp_path) -> None:
             status=DailyRunStatus.SUCCESS.value,
             target_date=target_date,
             input_dir=str(tmp_path / "merge_inbox/2026/06/29"),
-            output_path=str(tmp_path / "merge_inbox/2026/06/29/_merged.md"),
+            output_path=str(
+                tmp_path / "merge_inbox/2026/06/29/2026-06-29-管理者-merged.md"
+            ),
             source_file_count=2,
             source_event_count=3,
             merged_event_count=2,
             skipped_file_count=0,
             warning_messages=[],
-            upload_status="skipped",
-            upload_target="",
-            upload_error="",
+            self_delivery_status="success",
+            self_delivery_target="ou_manager",
+            self_delivery_error="",
             outputs=[
                 CollectedMergeOutput(
                     input_dir=str(tmp_path / "merge_inbox/2026/06/29/项目A"),
-                    output_path=str(tmp_path / "merge_inbox/2026/06/29/项目A/_merged.md"),
+                    output_path=str(
+                        tmp_path
+                        / "merge_inbox/2026/06/29/项目A/2026-06-29-管理者-merged.md"
+                    ),
                     source_file_count=1,
                     source_event_count=1,
                     merged_event_count=1,
                     skipped_file_count=0,
                     warning_messages=[],
-                    upload_status="skipped",
+                    self_delivery_status="success",
                 )
             ],
         )
@@ -225,5 +230,5 @@ def test_cli_merge_collected_returns_structured_json(capsys, tmp_path) -> None:
     assert exit_code == 0
     assert payload["target_date"] == "2026-06-29"
     assert payload["source_file_count"] == 2
-    assert payload["upload_status"] == "skipped"
+    assert payload["self_delivery_status"] == "success"
     assert payload["outputs"][0]["source_event_count"] == 1

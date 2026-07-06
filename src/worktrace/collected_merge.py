@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import re
 import subprocess
 from collections import defaultdict
 from dataclasses import dataclass
@@ -10,7 +9,8 @@ from typing import Any, Sequence
 
 from .config import RuntimeConfig
 from .constants import DailyRunStatus
-from .errors import AnalyzerProtocolError, StoreWriteError
+from .delivery.feishu_cli import FeishuCliSelfDelivery
+from .errors import AnalyzerProtocolError, DeliveryError, StoreWriteError
 from .factories import AnalyzerFactory
 from .models import (
     CollectedMergeGroup,
@@ -21,17 +21,18 @@ from .models import (
     DayDocument,
     EventFileLink,
     MergedEventDraft,
+    SelfIdentity,
     WorkEvent,
 )
 from .pipeline.sensitive_filter import filter_sensitive_merged_drafts
 from .pipeline.retention_filter import filter_retained_work_events
 from .stores.markdown import MarkdownEventStore
 from .utils.dates import now_iso
+from .utils.filenames import (
+    build_merged_markdown_filename,
+    parse_worktrace_markdown_filename,
+)
 from .utils.hashing import stable_event_id
-from .utils.json_io import load_json_object
-
-MERGE_DELIVERY_CONFIG = "config/merge_delivery.local.json"
-_FILENAME_RE = re.compile(r"^\d{4}-\d{2}-\d{2}-(?P<name>.+)\.md$")
 
 
 @dataclass
@@ -40,6 +41,8 @@ class CollectedMergeRunner:
     analyzer: Any | None = None
     cwd: Path | None = None
     command_runner: Any | None = None
+    delivery_channel: Any | None = None
+    self_identity_resolver: Any | None = None
 
     def __post_init__(self) -> None:
         if self.cwd is None:
@@ -48,10 +51,35 @@ class CollectedMergeRunner:
             self.analyzer = AnalyzerFactory.create_default(self.config)
         if self.command_runner is None:
             self.command_runner = self._run_command
+        if self.delivery_channel is None:
+            self.delivery_channel = FeishuCliSelfDelivery(
+                command_runner=self.command_runner,
+                cwd=self.cwd,
+            )
+        if self.self_identity_resolver is None:
+            self.self_identity_resolver = self._resolve_self_identity
         self.store = MarkdownEventStore(config=self.config)
 
     def run(self, target_date: str) -> CollectedMergeRunResult:
         input_dir = self.build_input_dir(target_date)
+        try:
+            self_identity = self.self_identity_resolver()
+        except (OSError, ValueError, StoreWriteError) as exc:
+            return CollectedMergeRunResult(
+                status=DailyRunStatus.FAILED.value,
+                target_date=target_date,
+                input_dir=str(input_dir.resolve()),
+                output_path=None,
+                source_file_count=0,
+                source_event_count=0,
+                merged_event_count=0,
+                skipped_file_count=0,
+                warning_messages=[str(exc)],
+                self_delivery_status="",
+                self_delivery_target="",
+                self_delivery_error="",
+                outputs=[],
+            )
         child_dirs = (
             [
                 child
@@ -65,7 +93,7 @@ class CollectedMergeRunner:
             self._run_one_directory(
                 target_date,
                 input_dir,
-                upload_parts=list(target_date.split("-")),
+                self_identity=self_identity,
                 ignored_subdirectories={child.name for child in child_dirs},
             )
         ]
@@ -74,7 +102,7 @@ class CollectedMergeRunner:
                 self._run_one_directory(
                     target_date,
                     child,
-                    upload_parts=[*target_date.split("-"), child.name],
+                    self_identity=self_identity,
                     ignored_subdirectories=set(),
                 )
             )
@@ -93,8 +121,8 @@ class CollectedMergeRunner:
             status = DailyRunStatus.SUCCESS.value
 
         first_output = outputs[0]
-        upload_errors = [
-            output.upload_error for output in outputs if output.upload_error
+        delivery_errors = [
+            output.self_delivery_error for output in outputs if output.self_delivery_error
         ]
         return CollectedMergeRunResult(
             status=status,
@@ -106,9 +134,9 @@ class CollectedMergeRunner:
             merged_event_count=sum(output.merged_event_count for output in outputs),
             skipped_file_count=sum(output.skipped_file_count for output in outputs),
             warning_messages=warning_messages,
-            upload_status=summarize_upload_status(outputs),
-            upload_target=first_output.upload_target,
-            upload_error="; ".join(upload_errors),
+            self_delivery_status=summarize_self_delivery_status(outputs),
+            self_delivery_target=first_output.self_delivery_target,
+            self_delivery_error="; ".join(delivery_errors),
             outputs=outputs,
         )
 
@@ -117,10 +145,13 @@ class CollectedMergeRunner:
         target_date: str,
         input_dir: Path,
         *,
-        upload_parts: list[str],
+        self_identity: SelfIdentity,
         ignored_subdirectories: set[str],
     ) -> CollectedMergeOutput:
-        output_path = input_dir / "_merged.md"
+        output_path = input_dir / build_merged_markdown_filename(
+            target_date,
+            self_identity.display_name or self_identity.open_id,
+        )
         warning_messages: list[str] = []
         skipped_file_count = 0
 
@@ -195,12 +226,15 @@ class CollectedMergeRunner:
         except OSError as exc:
             raise StoreWriteError(f"Failed to write merged markdown: {output_path}") from exc
 
-        upload_status, upload_target, upload_error = self._upload_if_configured(
-            output_path,
-            upload_parts,
+        self_delivery_status, self_delivery_target, self_delivery_error = (
+            _deliver_markdown_to_self(
+                self.delivery_channel,
+                self_identity=self_identity,
+                markdown_path=output_path,
+            )
         )
-        if upload_error:
-            warning_messages.append(upload_error)
+        if self_delivery_error:
+            warning_messages.append(self_delivery_error)
 
         return CollectedMergeOutput(
             input_dir=str(input_dir.resolve()),
@@ -210,9 +244,9 @@ class CollectedMergeRunner:
             merged_event_count=len(merged_events),
             skipped_file_count=skipped_file_count,
             warning_messages=warning_messages,
-            upload_status=upload_status,
-            upload_target=upload_target,
-            upload_error=upload_error,
+            self_delivery_status=self_delivery_status,
+            self_delivery_target=self_delivery_target,
+            self_delivery_error=self_delivery_error,
         )
 
     def build_input_dir(self, target_date: str) -> Path:
@@ -247,7 +281,7 @@ class CollectedMergeRunner:
                 skipped_file_count += 1
                 continue
             source_file_count += 1
-            person_name = extract_person_name_from_filename(path.name)
+            person_name = extract_person_name_from_filename(path.name, target_date=target_date)
             if not person_name:
                 skipped_file_count += 1
                 warnings.append(f"Skipped invalid source filename: {path.name}")
@@ -378,32 +412,21 @@ class CollectedMergeRunner:
             event for event in events if (event.title, event.content) in kept_keys
         ], warnings
 
-    def _upload_if_configured(
-        self,
-        output_path: Path,
-        upload_parts: list[str],
-    ) -> tuple[str, str, str]:
+    def _resolve_self_identity(self) -> SelfIdentity:
+        result = self.command_runner(("lark-cli", "auth", "status"), cwd=self.cwd)
+        if getattr(result, "returncode", 1) != 0:
+            stderr = (getattr(result, "stderr", "") or "").strip()
+            raise StoreWriteError(stderr or "Failed to resolve current Feishu user identity.")
         try:
-            delivery_config = load_merge_delivery_config(self.cwd)
-            folder_url = delivery_config.get("feishu_drive_folder_url", "").strip()
-            if not folder_url:
-                return ("skipped", "", "")
-
-            target_folder = ensure_drive_folder_path(
-                folder_url,
-                upload_parts,
-                command_runner=self.command_runner,
-                cwd=self.cwd,
-            )
-            upload_markdown_to_drive(
-                output_path,
-                target_folder,
-                command_runner=self.command_runner,
-                cwd=self.cwd,
-            )
-            return ("success", target_folder, "")
-        except Exception as exc:  # noqa: BLE001 - upload errors are non-fatal warnings.
-            return ("failed", "", f"Failed to upload merged markdown: {exc}")
+            payload = json.loads(getattr(result, "stdout", "") or "")
+        except json.JSONDecodeError as exc:
+            raise StoreWriteError("lark-cli auth status did not return valid JSON.") from exc
+        user = payload.get("identities", {}).get("user", {})
+        open_id = str(user.get("openId") or "").strip()
+        display_name = str(user.get("userName") or open_id).strip()
+        if payload.get("identity") != "user" or not open_id:
+            raise StoreWriteError("Failed to resolve current Feishu user identity.")
+        return SelfIdentity(open_id=open_id, display_name=display_name, source="lark-cli")
 
     def _run_command(
         self,
@@ -420,25 +443,32 @@ class CollectedMergeRunner:
         )
 
 
-def extract_person_name_from_filename(filename: str) -> str:
-    match = _FILENAME_RE.match(filename)
-    if not match:
+def extract_person_name_from_filename(filename: str, *, target_date: str = "") -> str:
+    parsed = parse_worktrace_markdown_filename(filename)
+    if parsed.suffix != ".md" or parsed.is_merged:
         return ""
-    return match.group("name").strip()
+    if not parsed.target_date or not parsed.owner_name:
+        return ""
+    if target_date and parsed.target_date != target_date:
+        return ""
+    return parsed.owner_name.strip()
 
 
 def should_skip_input_file(path: Path) -> bool:
-    return path.name == "_merged.md" or path.name.startswith(".") or path.is_dir()
+    if path.name == "_merged.md" or path.name.startswith(".") or path.is_dir():
+        return True
+    parsed = parse_worktrace_markdown_filename(path.name)
+    return parsed.suffix == ".md" and parsed.is_merged
 
 
-def summarize_upload_status(outputs: list[CollectedMergeOutput]) -> str:
-    statuses = {output.upload_status for output in outputs if output.upload_status}
+def summarize_self_delivery_status(outputs: list[CollectedMergeOutput]) -> str:
+    statuses = {
+        output.self_delivery_status for output in outputs if output.self_delivery_status
+    }
     if "failed" in statuses:
         return "failed"
     if "success" in statuses:
         return "success"
-    if "skipped" in statuses:
-        return "skipped"
     return ""
 
 
@@ -557,94 +587,6 @@ def repair_collected_merge_result(
     return CollectedMergeResult(groups=groups), warnings
 
 
-def load_merge_delivery_config(cwd: Path) -> dict[str, str]:
-    path = cwd / MERGE_DELIVERY_CONFIG
-    try:
-        payload = load_json_object(path.read_text(encoding="utf-8"))
-    except FileNotFoundError:
-        return {}
-    if not isinstance(payload.get("feishu_drive_folder_url", ""), str):
-        raise ValueError(f"Invalid merge delivery config: {path}")
-    return {"feishu_drive_folder_url": payload.get("feishu_drive_folder_url", "")}
-
-
-def ensure_drive_folder_path(
-    root_folder_url: str,
-    parts: list[str],
-    *,
-    command_runner: Any,
-    cwd: Path,
-) -> str:
-    current = root_folder_url
-    for part in parts:
-        result = command_runner(
-            (
-                "lark-cli",
-                "drive",
-                "+folders-create",
-                "--as",
-                "user",
-                "--parent-folder",
-                current,
-                "--name",
-                part,
-            ),
-            cwd=cwd,
-        )
-        if getattr(result, "returncode", 1) != 0:
-            stderr = (getattr(result, "stderr", "") or "").strip()
-            raise RuntimeError(stderr or f"Failed to create Drive folder: {part}")
-        current = _extract_drive_target(getattr(result, "stdout", "") or "") or current
-    return current
-
-
-def upload_markdown_to_drive(
-    markdown_path: Path,
-    target_folder: str,
-    *,
-    command_runner: Any,
-    cwd: Path,
-) -> None:
-    result = command_runner(
-        (
-            "lark-cli",
-            "drive",
-            "+upload",
-            "--as",
-            "user",
-            "--folder",
-            target_folder,
-            "--file",
-            str(markdown_path),
-        ),
-        cwd=cwd,
-    )
-    if getattr(result, "returncode", 1) != 0:
-        stderr = (getattr(result, "stderr", "") or "").strip()
-        raise RuntimeError(stderr or "Failed to upload markdown to Drive.")
-
-
-def _extract_drive_target(stdout: str) -> str:
-    stripped = stdout.strip()
-    if not stripped:
-        return ""
-    try:
-        payload = json.loads(stripped)
-    except json.JSONDecodeError:
-        return stripped
-    for key in ("url", "folder_url", "token", "folder_token"):
-        value = payload.get(key)
-        if isinstance(value, str) and value.strip():
-            return value.strip()
-    data = payload.get("data")
-    if isinstance(data, dict):
-        for key in ("url", "folder_url", "token", "folder_token"):
-            value = data.get(key)
-            if isinstance(value, str) and value.strip():
-                return value.strip()
-    return stripped
-
-
 def _merge_file_links(source_events: list[CollectedSourceEvent]) -> list[EventFileLink]:
     seen: set[tuple[str, str]] = set()
     links: list[EventFileLink] = []
@@ -668,3 +610,19 @@ def _dedupe(values: list[str]) -> list[str]:
         seen.add(stripped)
         result.append(stripped)
     return result
+
+
+def _deliver_markdown_to_self(
+    delivery_channel: Any,
+    *,
+    self_identity: SelfIdentity,
+    markdown_path: Path,
+) -> tuple[str, str, str]:
+    try:
+        status, target = delivery_channel.deliver_to_self(
+            self_identity=self_identity,
+            markdown_path=markdown_path,
+        )
+        return status, target, ""
+    except DeliveryError as exc:
+        return "failed", self_identity.open_id, str(exc)

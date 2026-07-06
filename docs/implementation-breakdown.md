@@ -79,7 +79,7 @@
 - `EventStore.replace_day(...)` 当前签名是 `replace_day(target_date, events, *, owner_display_name="")`，个人日报用 `owner_display_name` 生成 `YYYY-MM-DD-姓名.md`。
 - `Analyzer` 当前只承担会话分析、锚点批量分析和日级 merge。
 - 主流程当前只输出结构化事件，不再生成管理者总结。
-- 管理人员汇总入口为 `python -m src.worktrace.cli merge-collected --date YYYY-MM-DD`，读取 `merge_inbox/YYYY/MM/DD/` 及其一级子目录，每个合并范围生成本目录 `_merged.md`。
+- 管理人员汇总入口为 `python -m src.worktrace.cli merge-collected --date YYYY-MM-DD`，读取 `merge_inbox/YYYY/MM/DD/` 及其一级子目录，每个合并范围生成本目录 `YYYY-MM-DD-登录人姓名-merged.md`，并通过飞书机器人发送给当前登录用户自己。
 
 ## 6. 已移除的旧路径
 

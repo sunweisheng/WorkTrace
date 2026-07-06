@@ -94,6 +94,23 @@ def test_parse_content_prefers_named_link_when_url_repeats() -> None:
     ]
 
 
+def test_normalize_message_corrects_sentence_final_ma() -> None:
+    source = FeishuCliChatSource(config=RuntimeConfig())
+
+    message = source._normalize_message(  # noqa: SLF001 - unit test on parser contract
+        {
+            "chat_id": "oc_1",
+            "chat_name": "项目群",
+            "message_id": "om_1",
+            "sender_open_id": "ou_self",
+            "send_time": "2026-06-29T09:00:00+08:00",
+            "text": "今天能发版妈？",
+        }
+    )
+
+    assert message.text == "今天能发版吗？"
+
+
 def test_list_target_conversations_skips_blacklisted_conversation_ids() -> None:
     def fake_runner(args):
         assert args[2] == "+messages-search"
