@@ -26,5 +26,7 @@
     "对骂"
   ],
   "excluded_event_topics": [],
-  "excluded_event_content_signatures": []
+  "excluded_event_content_signatures": [
+    "绩效"
+  ]
 }

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -175,6 +176,12 @@ def test_load_runtime_config_overrides_rejects_invalid_rule_file(tmp_path: Path)
         load_runtime_config_overrides(RuntimeConfig(), cwd=tmp_path)
 
     assert "event rules config" in str(exc_info.value)
+
+
+def test_repo_event_rules_exclude_performance_related_events() -> None:
+    payload = json.loads(Path("config/event_rules.json").read_text(encoding="utf-8"))
+
+    assert "绩效" in payload["excluded_event_content_signatures"]
 
 
 def test_load_conversation_blacklist_overrides_reads_ids_and_dedupes(tmp_path: Path) -> None:
