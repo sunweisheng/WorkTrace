@@ -419,6 +419,7 @@ class SourceBackedEventDraft:
     object_hint: str = ""
     retention_reason: str = ""
     retention_detail: str = ""
+    referenced_link_ids: list[str] = field(default_factory=list)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> SourceBackedEventDraft:
@@ -431,6 +432,7 @@ class SourceBackedEventDraft:
             object_hint=str(data.get("object_hint", "")),
             retention_reason=str(data.get("retention_reason", "")),
             retention_detail=str(data.get("retention_detail", "")),
+            referenced_link_ids=_string_list(data.get("referenced_link_ids")),
             source_message_ids=_string_list(data.get("source_message_ids")),
             source_conversation_id=str(data.get("source_conversation_id", "")),
             source_slice_id=str(data.get("source_slice_id", "")),
@@ -447,6 +449,7 @@ class SourceBackedEventDraft:
             "object_hint": self.object_hint,
             "retention_reason": self.retention_reason,
             "retention_detail": self.retention_detail,
+            "referenced_link_ids": list(self.referenced_link_ids),
             "source_message_ids": list(self.source_message_ids),
             "source_conversation_id": self.source_conversation_id,
             "source_slice_id": self.source_slice_id,
@@ -609,6 +612,7 @@ class MergedEventDraft:
     object_hint: str = ""
     retention_reason: str = ""
     retention_detail: str = ""
+    referenced_link_ids: list[str] = field(default_factory=list)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> MergedEventDraft:
@@ -621,6 +625,7 @@ class MergedEventDraft:
             object_hint=str(data.get("object_hint", "")),
             retention_reason=str(data.get("retention_reason", "")),
             retention_detail=str(data.get("retention_detail", "")),
+            referenced_link_ids=_string_list(data.get("referenced_link_ids")),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -633,6 +638,7 @@ class MergedEventDraft:
             "object_hint": self.object_hint,
             "retention_reason": self.retention_reason,
             "retention_detail": self.retention_detail,
+            "referenced_link_ids": list(self.referenced_link_ids),
         }
 
 
@@ -687,6 +693,7 @@ class WorkEvent:
     object_hint: str = ""
     retention_reason: str = ""
     retention_detail: str = ""
+    referenced_link_ids: list[str] = field(default_factory=list)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> WorkEvent:
@@ -705,6 +712,7 @@ class WorkEvent:
             object_hint=str(data.get("object_hint", "")),
             retention_reason=str(data.get("retention_reason", "")),
             retention_detail=str(data.get("retention_detail", "")),
+            referenced_link_ids=_string_list(data.get("referenced_link_ids")),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -721,6 +729,7 @@ class WorkEvent:
             "object_hint": self.object_hint,
             "retention_reason": self.retention_reason,
             "retention_detail": self.retention_detail,
+            "referenced_link_ids": list(self.referenced_link_ids),
         }
 
     @property

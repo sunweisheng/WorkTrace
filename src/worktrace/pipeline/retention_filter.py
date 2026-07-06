@@ -92,6 +92,19 @@ _GENERIC_REVIEW_KEYWORDS = (
     "同步审批",
     "闭环",
 )
+_APPROVAL_ACTION_KEYWORDS = (
+    "审批",
+    "审核",
+)
+_ADMIN_APPROVAL_KEYWORDS = (
+    "加班",
+    "考勤",
+    "补卡",
+    "请假",
+    "调休",
+    "外出报备",
+    "出勤",
+)
 _SUBSTANTIVE_WORK_KEYWORDS = (
     "合同",
     "付款",
@@ -201,6 +214,8 @@ def retention_rejection_reason(candidate: RetentionCandidate) -> str:
         return "personal_privacy_or_leave_event"
     if _is_personal_social_or_reputation_event(title, content, detail):
         return "personal_social_or_reputation_event"
+    if _is_administrative_approval_event(title, content, detail, object_hint):
+        return "administrative_approval_event"
     if _is_generic_review_completion(title, content, detail, object_hint):
         return "generic_review_completion"
     if _is_generic_object_hint(object_hint):
@@ -225,6 +240,8 @@ def retention_rejection_reason_for_event(
         return "personal_privacy_or_leave_event"
     if _is_personal_social_or_reputation_event(title, content, detail):
         return "personal_social_or_reputation_event"
+    if _is_administrative_approval_event(title, content, detail, object_hint):
+        return "administrative_approval_event"
     if _is_generic_review_completion(title, content, detail, object_hint):
         return "generic_review_completion"
     if _is_generic_object_hint(object_hint):
@@ -295,6 +312,27 @@ def _is_generic_review_completion(
 ) -> bool:
     combined = _normalized_compact(" ".join([title, content, detail, object_hint]))
     if not any(_normalized_compact(keyword) in combined for keyword in _GENERIC_REVIEW_KEYWORDS):
+        return False
+    return not _has_substantive_work_signal(combined)
+
+
+def _is_administrative_approval_event(
+    title: str,
+    content: str,
+    detail: str,
+    object_hint: str,
+) -> bool:
+    combined = _normalized_compact(" ".join([title, content, detail, object_hint]))
+    has_review_signal = any(
+        _normalized_compact(keyword) in combined
+        for keyword in (_GENERIC_REVIEW_KEYWORDS + _APPROVAL_ACTION_KEYWORDS)
+    )
+    if not has_review_signal:
+        return False
+    has_admin_signal = any(
+        _normalized_compact(keyword) in combined for keyword in _ADMIN_APPROVAL_KEYWORDS
+    )
+    if not has_admin_signal:
         return False
     return not _has_substantive_work_signal(combined)
 

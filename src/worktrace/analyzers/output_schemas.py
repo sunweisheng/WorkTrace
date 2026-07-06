@@ -26,6 +26,10 @@ def batch_output_schema() -> dict[str, object]:
                             ],
                         },
                         "retention_detail": {"type": "string"},
+                        "referenced_link_ids": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                        },
                         "source_message_ids": {
                             "type": "array",
                             "items": {"type": "string"},
@@ -38,6 +42,7 @@ def batch_output_schema() -> dict[str, object]:
                         "object_hint",
                         "retention_reason",
                         "retention_detail",
+                        "referenced_link_ids",
                         "source_message_ids",
                     ],
                     "additionalProperties": False,
@@ -107,6 +112,10 @@ def anchor_batch_output_schema() -> dict[str, object]:
                                                 ],
                                             },
                                             "retention_detail": {"type": "string"},
+                                            "referenced_link_ids": {
+                                                "type": "array",
+                                                "items": {"type": "string"},
+                                            },
                                             "source_message_ids": {
                                                 "type": "array",
                                                 "items": {"type": "string"},
@@ -119,6 +128,7 @@ def anchor_batch_output_schema() -> dict[str, object]:
                                             "object_hint",
                                             "retention_reason",
                                             "retention_detail",
+                                            "referenced_link_ids",
                                             "source_message_ids",
                                         ],
                                         "additionalProperties": False,

@@ -11,6 +11,7 @@ from urllib.parse import urlparse
 from ..config import RuntimeConfig
 from ..constants import LinkType
 from ..models import AttachmentTextBlock, LinkMeta, NormalizedMessage
+from ..utils.link_refs import classify_link_type, collect_message_links
 from ..utils.text import clean_text, extract_urls
 from .base import ContentResolver
 
@@ -37,26 +38,22 @@ class FeishuMessageContentResolver(ContentResolver):
         return "\n".join(part for part in parts if part).strip()
 
     def extract_links(self, message: NormalizedMessage) -> list[LinkMeta]:
-        explicit = list(message.links)
-        known_urls = {item.url for item in explicit}
-
-        for url in extract_urls(message.text):
-            if url in known_urls:
-                continue
-            explicit.append(
+        links: list[LinkMeta] = []
+        for item in collect_message_links(message):
+            title = item.title
+            if not title:
+                title = self._resolve_link_title(item.url)
+            links.append(
                 LinkMeta(
-                    url=url,
-                    title=self._resolve_link_title(url),
-                    link_type=self._classify_link_type(url),
+                    url=item.url,
+                    title=title,
+                    link_type=item.link_type,
                 )
             )
-        return explicit
+        return links
 
     def _classify_link_type(self, url: str) -> str:
-        host = urlparse(url).netloc.lower()
-        if "feishu" in host or "larksuite" in host:
-            return LinkType.FEISHU_DOC.value
-        return LinkType.NORMAL.value
+        return classify_link_type(url)
 
     def _resolve_link_title(self, url: str) -> str:
         if self._classify_link_type(url) != LinkType.FEISHU_DOC.value:

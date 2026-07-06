@@ -164,6 +164,7 @@ def test_batch_prompt_uses_original_message_ids_and_slim_rules(tmp_path: Path) -
     assert "咨询类事件、流程审核类事件、团建活动组织类事件、技能培训类事件，默认不要提炼；这类事项对后续公司级长期事件沉淀价值较低。" in prompt
     assert "私人饭局、约饭、离职告别聚餐、同事口碑评价、人际寒暄，不要提炼为事项。" in prompt
     assert "个人请假、家庭原因、孩子学校证明、个人行程报备，不要提炼为工作事件。" in prompt
+    assert "加班、请假、补卡、考勤、调休、外出报备等行政流程审批，不要提炼为工作事项。" in prompt
     assert "泛泛完成审核/审批/工作审核/审核任务但没有具体业务对象、审批结论、问题、风险、金额、客户、项目、文档或后续动作，不要提炼为事项。" in prompt
     assert "只有同时具备具体对象、保留理由、保留依据的工作事件才输出" in prompt
     assert "retention_detail 表示保留依据/来源证据" in prompt
@@ -178,6 +179,8 @@ def test_batch_prompt_uses_original_message_ids_and_slim_rules(tmp_path: Path) -
     assert '"id": "om_1"' in prompt
     assert '"id": "om_2"' in prompt
     assert "每条事项附上最相关的消息 id。" in prompt
+    assert "referenced_link_ids" in prompt
+    assert "只能从对应 source_message_ids 的 links 里选择 referenced_link_ids" in prompt
     assert "如果有明确结果，直接融入 content，不要单独返回 result。" in prompt
     assert "请给我简洁的答案，不要推理，跳过思考步骤。" in prompt
     assert "直接作答，不要展示你的推理过程。" in prompt
@@ -603,7 +606,22 @@ def test_html_and_links_are_compressed_for_prompt(tmp_path: Path) -> None:
         "详情见 文档[链接]\n"
         "辛苦各位"
     )
-    assert "links" not in payload
+    assert payload["links"] == [
+        {
+            "link_id": "om_text#link1",
+            "message_id": "om_text",
+            "url": "https://ipadnexsg1.feishu.cn/share/base/form/shrcnok4ix8nmUPSbcOWJTnDijc",
+            "title": "",
+            "link_type": "feishu_doc",
+        },
+        {
+            "link_id": "om_text#link2",
+            "message_id": "om_text",
+            "url": "https://ipadnexsg1.feishu.cn/docx/JNX6dcjnzoAj1nxL8e4cImFznUb",
+            "title": "",
+            "link_type": "feishu_doc",
+        },
+    ]
     assert "attachments" not in payload
 
 
@@ -689,6 +707,15 @@ def test_feishu_doc_link_uses_title_placeholder(tmp_path: Path) -> None:
     payload = serialize_message_for_prompt(message, config)
 
     assert payload["x"] == "[飞书文档: 支付方案V2]"
+    assert payload["links"] == [
+        {
+            "link_id": "om_doc#link1",
+            "message_id": "om_doc",
+            "url": "https://ipadnexsg1.feishu.cn/docx/abc",
+            "title": "支付方案V2",
+            "link_type": "feishu_doc",
+        }
+    ]
 
 
 def test_post_with_images_and_text_keeps_text_summary(tmp_path: Path) -> None:

@@ -87,6 +87,7 @@ class LinkAnalyzer:
                     object_hint="发布方案",
                     retention_reason="deliverable_updated",
                     retention_detail="确认发布方案文档中的发布推进信息。",
+                    referenced_link_ids=["om_1#link1"],
                 )
             ],
             context_requests=[],
@@ -152,6 +153,7 @@ def test_runner_prefers_named_file_link_when_same_url_appears_multiple_times(tmp
         title="发布推进",
         content="完成发布沟通",
         source_message_ids=["om_1"],
+        referenced_link_ids=["om_1#link1"],
         file_links=[],
         object_hint="发布方案",
         retention_reason="deliverable_updated",
@@ -172,3 +174,274 @@ def test_runner_prefers_named_file_link_when_same_url_appears_multiple_times(tmp
         )
     ]
     assert attached[0].retention_reason == "deliverable_updated"
+
+
+def test_runner_attaches_only_llm_selected_link(tmp_path: Path) -> None:
+    resolver = FeishuMessageContentResolver(config=RuntimeConfig(data_root=tmp_path / "data"))
+    message = NormalizedMessage(
+        conversation_id="oc_1",
+        conversation_name="项目群",
+        message_id="om_1",
+        sender_open_id="ou_self",
+        sender_name="Me",
+        send_time="2026-06-22T10:00:00+08:00",
+        message_type="text",
+        text="方案A https://foo.feishu.cn/docx/abc 方案B https://foo.feishu.cn/docx/def",
+        reply_to_message_id=None,
+        quote_message_id=None,
+        links=[
+            LinkMeta(
+                url="https://foo.feishu.cn/docx/abc",
+                title="方案A",
+                link_type="feishu_doc",
+            ),
+            LinkMeta(
+                url="https://foo.feishu.cn/docx/def",
+                title="方案B",
+                link_type="feishu_doc",
+            ),
+        ],
+        attachments=[],
+        is_system=False,
+    )
+    event = WorkEvent(
+        date="2026-06-22",
+        event_id="evt1",
+        title="发布推进",
+        content="完成发布沟通",
+        source_message_ids=["om_1"],
+        referenced_link_ids=["om_1#link2"],
+        file_links=[],
+        object_hint="发布方案",
+        retention_reason="deliverable_updated",
+        retention_detail="确认发布方案文档中的发布推进信息。",
+    )
+
+    attached = __import__("src.worktrace.runner", fromlist=["_attach_event_file_links"])._attach_event_file_links(
+        [event],
+        messages=[message],
+        content_resolver=resolver,
+    )
+
+    assert attached[0].file_links == [
+        EventFileLink(
+            url="https://foo.feishu.cn/docx/def",
+            title="方案B",
+            link_type="feishu_doc",
+        )
+    ]
+
+
+def test_runner_keeps_selected_bare_url_when_event_text_supports_it(tmp_path: Path) -> None:
+    resolver = FeishuMessageContentResolver(config=RuntimeConfig(data_root=tmp_path / "data"))
+    message = NormalizedMessage(
+        conversation_id="oc_1",
+        conversation_name="项目群",
+        message_id="om_1",
+        sender_open_id="ou_self",
+        sender_name="Me",
+        send_time="2026-06-22T10:00:00+08:00",
+        message_type="text",
+        text="https://github.com/sunweisheng/WorkTrace",
+        reply_to_message_id=None,
+        quote_message_id=None,
+        links=[],
+        attachments=[],
+        is_system=False,
+    )
+    event = WorkEvent(
+        date="2026-06-22",
+        event_id="evt1",
+        title="WorkTrace v1.0.5 发布",
+        content="发布 WorkTrace 新版本。",
+        source_message_ids=["om_1"],
+        referenced_link_ids=["om_1#link1"],
+        file_links=[],
+        object_hint="WorkTrace 发布",
+        retention_reason="deliverable_updated",
+        retention_detail="同步 WorkTrace 新版本发布。",
+    )
+
+    attached = __import__("src.worktrace.runner", fromlist=["_attach_event_file_links"])._attach_event_file_links(
+        [event],
+        messages=[message],
+        content_resolver=resolver,
+    )
+
+    assert attached[0].file_links == [
+        EventFileLink(
+            url="https://github.com/sunweisheng/WorkTrace",
+            title="",
+            link_type="normal",
+        )
+    ]
+
+
+def test_runner_drops_nonexistent_referenced_link_ids(tmp_path: Path) -> None:
+    class InvalidLinkAnalyzer(LinkAnalyzer):
+        def analyze_batch(self, target_date, batch_input):
+            return BatchAnalysisResult(
+                candidate_events=[
+                    SourceBackedEventDraft(
+                        draft_id="draft-1",
+                        date="2026-06-22",
+                        topic="发布推进",
+                        content="完成发布沟通",
+                        source_message_ids=["om_1"],
+                        source_conversation_id="oc_1",
+                        source_slice_id=batch_input.slices[0].slice_id,
+                        confidence=0.9,
+                        action_label="确认",
+                        object_hint="发布方案",
+                        retention_reason="deliverable_updated",
+                        retention_detail="确认发布方案文档中的发布推进信息。",
+                        referenced_link_ids=["om_1#link9"],
+                    )
+                ],
+                context_requests=[],
+            )
+
+    config = RuntimeConfig(data_root=tmp_path / "data")
+    runner = DailyTraceRunner(
+        config=config,
+        dependencies=RuntimeDependencies(
+            chat_source=LinkSource(),
+            content_resolver=LinkResolver(),
+            analyzer=InvalidLinkAnalyzer(),
+            delivery_channel=LinkDelivery(),
+            event_store=MarkdownEventStore(config=config),
+        ),
+    )
+
+    result = runner.run("2026-06-22")
+
+    assert result.status == DailyRunStatus.SUCCESS.value
+    assert result.output_path is not None
+    content = Path(result.output_path).read_text(encoding="utf-8")
+    assert "[发布方案](https://foo.feishu.cn/docx/abc)" not in content
+    assert "  - 无" in content
+
+
+def test_runner_drops_referenced_links_outside_source_message_ids(tmp_path: Path) -> None:
+    class MultiMessageSource(LinkSource):
+        def fetch_conversation_messages(self, target_date, conversation_ids):
+            return [
+                NormalizedMessage(
+                    conversation_id="oc_1",
+                    conversation_name="项目群",
+                    message_id="om_1",
+                    sender_open_id="ou_self",
+                    sender_name="Me",
+                    send_time="2026-06-22T10:00:00+08:00",
+                    message_type="text",
+                    text="推进发布",
+                    reply_to_message_id=None,
+                    quote_message_id=None,
+                    links=[],
+                    attachments=[],
+                    is_system=False,
+                ),
+                NormalizedMessage(
+                    conversation_id="oc_1",
+                    conversation_name="项目群",
+                    message_id="om_2",
+                    sender_open_id="ou_other",
+                    sender_name="Alice",
+                    send_time="2026-06-22T10:01:00+08:00",
+                    message_type="text",
+                    text="请看文档 https://foo.feishu.cn/docx/abc",
+                    reply_to_message_id=None,
+                    quote_message_id=None,
+                    links=[
+                        LinkMeta(
+                            url="https://foo.feishu.cn/docx/abc",
+                            title="发布方案",
+                            link_type="feishu_doc",
+                        )
+                    ],
+                    attachments=[],
+                    is_system=False,
+                ),
+            ]
+
+    class CrossMessageLinkAnalyzer(LinkAnalyzer):
+        def analyze_batch(self, target_date, batch_input):
+            return BatchAnalysisResult(
+                candidate_events=[
+                    SourceBackedEventDraft(
+                        draft_id="draft-1",
+                        date="2026-06-22",
+                        topic="发布推进",
+                        content="完成发布沟通",
+                        source_message_ids=["om_1"],
+                        source_conversation_id="oc_1",
+                        source_slice_id=batch_input.slices[0].slice_id,
+                        confidence=0.9,
+                        action_label="确认",
+                        object_hint="发布方案",
+                        retention_reason="deliverable_updated",
+                        retention_detail="确认发布推进安排。",
+                        referenced_link_ids=["om_2#link1"],
+                    )
+                ],
+                context_requests=[],
+            )
+
+    config = RuntimeConfig(data_root=tmp_path / "data")
+    runner = DailyTraceRunner(
+        config=config,
+        dependencies=RuntimeDependencies(
+            chat_source=MultiMessageSource(),
+            content_resolver=LinkResolver(),
+            analyzer=CrossMessageLinkAnalyzer(),
+            delivery_channel=LinkDelivery(),
+            event_store=MarkdownEventStore(config=config),
+        ),
+    )
+
+    result = runner.run("2026-06-22")
+
+    assert result.status == DailyRunStatus.SUCCESS.value
+    assert result.output_path is not None
+    content = Path(result.output_path).read_text(encoding="utf-8")
+    assert "[发布方案](https://foo.feishu.cn/docx/abc)" not in content
+    assert "  - 无" in content
+
+
+def test_runner_drops_selected_link_without_event_text_support(tmp_path: Path) -> None:
+    resolver = FeishuMessageContentResolver(config=RuntimeConfig(data_root=tmp_path / "data"))
+    message = NormalizedMessage(
+        conversation_id="oc_1",
+        conversation_name="项目群",
+        message_id="om_1",
+        sender_open_id="ou_self",
+        sender_name="Me",
+        send_time="2026-06-22T10:00:00+08:00",
+        message_type="text",
+        text="https://skills.gydev.cn/space/global/worktrace",
+        reply_to_message_id=None,
+        quote_message_id=None,
+        links=[],
+        attachments=[],
+        is_system=False,
+    )
+    event = WorkEvent(
+        date="2026-06-22",
+        event_id="evt1",
+        title="哈尔滨项目协议签署情况同步",
+        content="同步哈尔滨项目协议签署和法务安排。",
+        source_message_ids=["om_1"],
+        referenced_link_ids=["om_1#link1"],
+        file_links=[],
+        object_hint="哈尔滨项目协议",
+        retention_reason="decision_made",
+        retention_detail="同步哈尔滨项目协议沟通结论。",
+    )
+
+    attached = __import__("src.worktrace.runner", fromlist=["_attach_event_file_links"])._attach_event_file_links(
+        [event],
+        messages=[message],
+        content_resolver=resolver,
+    )
+
+    assert attached[0].file_links == []

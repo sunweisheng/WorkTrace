@@ -5,6 +5,7 @@ from ..models import (
     SourceBackedEventDraft,
     WorkEvent,
 )
+from ..utils.link_refs import sort_referenced_link_ids
 from ..utils.hashing import stable_event_id
 from ..utils.text import choose_preferred_text, merge_content_texts
 
@@ -33,6 +34,14 @@ def merge_duplicate_drafts(
                 ),
                 retention_detail=choose_preferred_text(
                     [item.retention_detail for item in items]
+                ),
+                referenced_link_ids=sort_referenced_link_ids(
+                    [
+                        link_id
+                        for item in items
+                        for link_id in item.referenced_link_ids
+                    ],
+                    message_order=list(items[0].source_message_ids),
                 ),
                 source_message_ids=list(items[0].source_message_ids),
                 source_conversation_ids=sorted(
@@ -64,6 +73,7 @@ def build_work_events(
                 title=draft.topic,
                 content=draft.content,
                 source_message_ids=list(draft.source_message_ids),
+                referenced_link_ids=list(draft.referenced_link_ids),
                 object_hint=draft.object_hint,
                 retention_reason=draft.retention_reason,
                 retention_detail=draft.retention_detail,

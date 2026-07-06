@@ -367,6 +367,84 @@ def test_retention_filter_removes_generic_review_with_named_submitter() -> None:
     assert "generic_review_completion" in warnings[0]
 
 
+def test_retention_filter_removes_overtime_approval() -> None:
+    drafts = [
+        SourceBackedEventDraft(
+            draft_id="d1",
+            date="2026-07-06",
+            topic="高建星6月加班审批",
+            content="已审批高建星6月份的加班申请。",
+            source_message_ids=["m1"],
+            source_conversation_id="c1",
+            source_slice_id="s1",
+            confidence=0.9,
+            action_label="审批",
+            object_hint="高建星6月加班审批",
+            retention_reason="substantive_approval",
+            retention_detail="郎晓妹提醒待审批高建星6月加班，孙维晟回复确认并执行审批。",
+        )
+    ]
+
+    kept, warnings = filter_retained_candidate_drafts(drafts)
+
+    assert kept == []
+    assert len(warnings) == 1
+    assert "administrative_approval_event" in warnings[0]
+
+
+def test_retention_filter_removes_leave_or_attendance_approvals() -> None:
+    drafts = [
+        SourceBackedEventDraft(
+            draft_id="d1",
+            date="2026-07-06",
+            topic="请假审批",
+            content="审批请假申请。",
+            source_message_ids=["m1"],
+            source_conversation_id="c1",
+            source_slice_id="s1",
+            confidence=0.9,
+            action_label="审批",
+            object_hint="请假申请",
+            retention_reason="substantive_approval",
+            retention_detail="完成请假审批流程。",
+        ),
+        SourceBackedEventDraft(
+            draft_id="d2",
+            date="2026-07-06",
+            topic="补卡审批",
+            content="完成补卡审批。",
+            source_message_ids=["m2"],
+            source_conversation_id="c1",
+            source_slice_id="s1",
+            confidence=0.9,
+            action_label="审批",
+            object_hint="补卡申请",
+            retention_reason="substantive_approval",
+            retention_detail="完成补卡流程审批。",
+        ),
+        SourceBackedEventDraft(
+            draft_id="d3",
+            date="2026-07-06",
+            topic="外出报备审批",
+            content="确认外出报备流程。",
+            source_message_ids=["m3"],
+            source_conversation_id="c1",
+            source_slice_id="s1",
+            confidence=0.9,
+            action_label="审批",
+            object_hint="外出报备",
+            retention_reason="substantive_approval",
+            retention_detail="完成外出报备审批。",
+        ),
+    ]
+
+    kept, warnings = filter_retained_candidate_drafts(drafts)
+
+    assert kept == []
+    assert len(warnings) == 3
+    assert all("administrative_approval_event" in warning for warning in warnings)
+
+
 def test_retention_filter_keeps_substantive_approval() -> None:
     drafts = [
         SourceBackedEventDraft(

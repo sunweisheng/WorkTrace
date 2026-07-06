@@ -114,6 +114,7 @@ def test_model_roundtrip(sample_message: NormalizedMessage) -> None:
         content="同步发布安排并附带方案文档",
         action_label="同步",
         object_hint="发布安排",
+        referenced_link_ids=["om_001#link1"],
         source_message_ids=["om_001"],
         source_conversation_id="oc_123",
         source_slice_id="slice-001",
@@ -133,6 +134,7 @@ def test_model_roundtrip(sample_message: NormalizedMessage) -> None:
         date="2026-06-22",
         topic="发布推进",
         content="完成发布沟通",
+        referenced_link_ids=["om_001#link1"],
         source_message_ids=["om_001"],
         source_conversation_ids=["oc_123"],
     )
@@ -142,6 +144,7 @@ def test_model_roundtrip(sample_message: NormalizedMessage) -> None:
         title="发布推进",
         content="完成发布沟通",
         source_message_ids=["om_001"],
+        referenced_link_ids=["om_001#link1"],
         file_links=[
             EventFileLink(
                 url="https://example.feishu.cn/docx/abc",
@@ -212,6 +215,43 @@ def test_json_helpers_roundtrip() -> None:
     text = dump_json(raw)
 
     assert load_json_object(text) == raw
+
+
+def test_event_models_default_referenced_link_ids_are_empty() -> None:
+    draft = SourceBackedEventDraft.from_dict(
+        {
+            "draft_id": "draft-001",
+            "date": "2026-06-22",
+            "topic": "发布推进",
+            "content": "完成发布沟通",
+            "source_message_ids": ["om_1"],
+            "source_conversation_id": "oc_1",
+            "source_slice_id": "slice-1",
+            "confidence": 0.9,
+        }
+    )
+    merged = MergedEventDraft.from_dict(
+        {
+            "date": "2026-06-22",
+            "topic": "发布推进",
+            "content": "完成发布沟通",
+            "source_message_ids": ["om_1"],
+            "source_conversation_ids": ["oc_1"],
+        }
+    )
+    event = WorkEvent.from_dict(
+        {
+            "date": "2026-06-22",
+            "event_id": "evt1",
+            "title": "发布推进",
+            "content": "完成发布沟通",
+            "source_message_ids": ["om_1"],
+        }
+    )
+
+    assert draft.referenced_link_ids == []
+    assert merged.referenced_link_ids == []
+    assert event.referenced_link_ids == []
 
 
 def test_constants_are_string_enums() -> None:

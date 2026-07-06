@@ -401,6 +401,7 @@ class CollectedMergeRunner:
                 object_hint=event.object_hint,
                 retention_reason=event.retention_reason,
                 retention_detail=event.retention_detail,
+                referenced_link_ids=[],
                 source_message_ids=[event.event_id],
                 source_conversation_ids=[],
             )

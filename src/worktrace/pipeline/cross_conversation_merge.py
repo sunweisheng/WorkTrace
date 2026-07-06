@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from ..models import MergedEventDraft, SourceBackedEventDraft
 from .retention_filter import derive_retention_metadata_from_sources
+from ..utils.link_refs import sort_referenced_link_ids
 from ..utils.text import choose_preferred_text, merge_content_texts
 
 
@@ -29,6 +30,20 @@ def materialize_grouped_merged_drafts(
                 object_hint=object_hint,
                 retention_reason=retention_reason,
                 retention_detail=retention_detail,
+                referenced_link_ids=sort_referenced_link_ids(
+                    [
+                        link_id
+                        for item in items
+                        for link_id in item.referenced_link_ids
+                    ],
+                    message_order=sorted(
+                        {
+                            message_id
+                            for item in items
+                            for message_id in item.source_message_ids
+                        }
+                    ),
+                ),
                 source_message_ids=sorted(
                     {
                         message_id

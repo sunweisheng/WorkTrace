@@ -17,6 +17,7 @@ from ..models import (
     NormalizedMessage,
     SourceBackedEventDraft,
 )
+from ..utils.link_refs import build_message_link_candidates
 from ..utils.json_io import dump_json
 from ..utils.text import clean_text
 
@@ -36,6 +37,7 @@ _BLANK_LINE_RE = re.compile(r"\n{3,}")
 LOW_RETENTION_EVENT_RULES = [
     "私人饭局、约饭、离职告别聚餐、同事口碑评价、人际寒暄，不要提炼为事项。",
     "个人请假、家庭原因、孩子学校证明、个人行程报备，不要提炼为工作事件。",
+    "加班、请假、补卡、考勤、调休、外出报备等行政流程审批，不要提炼为工作事项。",
     "泛泛完成审核/审批/工作审核/审核任务但没有具体业务对象、审批结论、问题、风险、金额、客户、项目、文档或后续动作，不要提炼为事项。",
     "反例：产品同事评价不错，今晚在公司旁边吃牛蛙火锅，饭后回去准备述职材料，不要输出 candidate_event。",
     "反例：本人明天晚到，需去学校为孩子开证明，不要输出 candidate_event。",
@@ -91,6 +93,7 @@ def build_batch_analysis_prompt(
             "普通约时间、确认开会、互通信息、泛泛完成审核/审批但没有具体对象和结论的内容，不要输出 candidate_event。",
             "每条事项附上最相关的消息 id。",
             "只能使用输入里出现过的真实 message id，不要自造占位符 id。",
+            "如需给事项挂涉及文件，只能从对应 source_message_ids 的 links 里选择 referenced_link_ids；拿不准就返回空数组。",
             "正例：本人要求他人汇报、本人审批、本人同步、本人催办、本人推进，都算与本人直接相关。",
             "反例：他人之间讨论自己的工作、自己的承诺、自己的处理进度，即使本人在该会话里发过言，也不算与本人直接相关。",
             "拿不准就用 context_requests，不要猜。",
@@ -104,6 +107,7 @@ def build_batch_analysis_prompt(
                     "object_hint": "string",
                     "retention_reason": "deliverable_updated | decision_made | issue_or_risk_found | follow_up_assigned | external_business_progress | substantive_approval",
                     "retention_detail": "string",
+                    "referenced_link_ids": ["message_id#link1"],
                     "source_message_ids": ["message_id"],
                 }
             ],
@@ -267,6 +271,7 @@ def build_anchor_analysis_prompt(
             ),
             RETENTION_DETAIL_EVIDENCE_RULE,
             "普通约时间、确认开会、互通信息、泛泛完成审核/审批但没有具体对象和结论的内容，不要输出 candidate_event。",
+            "如需给事项挂涉及文件，只能从对应 source_message_ids 的 links 里选择 referenced_link_ids；拿不准就返回空数组。",
             "如果窗口里有多个动作，就拆开。",
             "动作类型比共享名词更重要。",
             "同步/通知 与 核对/校验/执行/跟进，通常不是同一事件。",
@@ -291,6 +296,7 @@ def build_anchor_analysis_prompt(
                 "object_hint": "string",
                 "retention_reason": "deliverable_updated | decision_made | issue_or_risk_found | follow_up_assigned | external_business_progress | substantive_approval",
                 "retention_detail": "string",
+                "referenced_link_ids": ["message_id#link1"],
                 "source_message_ids": ["message_id"],
             },
             "context_requests_item": {
@@ -340,6 +346,7 @@ def build_anchor_batch_analysis_prompt(
             ),
             RETENTION_DETAIL_EVIDENCE_RULE,
             "普通约时间、确认开会、互通信息、泛泛完成审核/审批但没有具体对象和结论的内容，不要输出 candidate_event。",
+            "如需给事项挂涉及文件，只能从对应 source_message_ids 的 links 里选择 referenced_link_ids；拿不准就返回空数组。",
             "如果同一窗口有多个动作，就拆开。",
             "动作类型比共享名词更重要。",
             "同步/通知 与 核对/校验/执行/跟进，通常不是同一事件。",
@@ -367,6 +374,7 @@ def build_anchor_batch_analysis_prompt(
                             "object_hint": "string",
                             "retention_reason": "deliverable_updated | decision_made | issue_or_risk_found | follow_up_assigned | external_business_progress | substantive_approval",
                             "retention_detail": "string",
+                            "referenced_link_ids": ["message_id#link1"],
                             "source_message_ids": ["message_id"],
                         },
                         "context_requests_item": {
@@ -434,6 +442,7 @@ def build_anchor_expansion_prompt(
             ),
             RETENTION_DETAIL_EVIDENCE_RULE,
             "普通日程安排、会议时间确认、互通信息、没有具体对象和结论的泛泛审核/审批完成，不要输出 candidate_event。",
+            "如需给事项挂涉及文件，只能从对应 source_message_ids 的 links 里选择 referenced_link_ids；拿不准就返回空数组。",
             (
                 "如果新上下文显示某个先前 candidate_event 实际混合了多个动作，"
                 "应拆成多个 candidate_events。"
@@ -474,6 +483,7 @@ def build_anchor_expansion_prompt(
                     "object_hint": "string",
                     "retention_reason": "deliverable_updated | decision_made | issue_or_risk_found | follow_up_assigned | external_business_progress | substantive_approval",
                     "retention_detail": "string",
+                    "referenced_link_ids": ["message_id#link1"],
                     "source_message_ids": ["message_id"],
                 }
             ],
@@ -652,6 +662,18 @@ def serialize_message_for_prompt(
         "s": message.sender_name or message.sender_open_id or "",
         "x": compressed_text,
     }
+    links = [
+        {
+            "link_id": item.link_id,
+            "message_id": item.message_id,
+            "url": item.url,
+            "title": item.title,
+            "link_type": item.link_type,
+        }
+        for item in build_message_link_candidates(message)
+    ]
+    if links:
+        serialized["links"] = links
     return serialized
 
 

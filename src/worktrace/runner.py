@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import logging
 from pathlib import Path
+import re
 from time import perf_counter
 
 from .config import RuntimeConfig
@@ -41,10 +42,29 @@ from .pipeline.validation import (
     validate_cross_conversation_groups,
     validate_merged_event_drafts,
 )
+from .utils.link_refs import build_message_link_id
 from .models import AnalysisBatch, BatchAnalysisResult, ConversationSlice, SelfIdentity
 from .utils.json_io import dump_json
 
 logger = logging.getLogger("worktrace")
+_LINK_TEXT_TOKEN_RE = re.compile(r"[A-Za-z0-9_]{2,}|[\u4e00-\u9fff]{2,}")
+_GENERIC_LINK_HINT_TOKENS = {
+    "https",
+    "http",
+    "www",
+    "github",
+    "feishu",
+    "larksuite",
+    "docx",
+    "wiki",
+    "share",
+    "base",
+    "form",
+    "space",
+    "global",
+    "com",
+    "cn",
+}
 
 
 @dataclass
@@ -668,28 +688,31 @@ def _attach_event_file_links(
     messages: list,
     content_resolver,
 ) -> list[WorkEvent]:
-    message_by_id = {message.message_id: message for message in messages}
+    link_by_id: dict[str, EventFileLink] = {}
+    for message in messages:
+        for index, link in enumerate(content_resolver.extract_links(message), start=1):
+            link_by_id[build_message_link_id(message.message_id, index)] = EventFileLink(
+                url=link.url,
+                title=link.title,
+                link_type=link.link_type,
+            )
     attached: list[WorkEvent] = []
 
     for event in events:
         deduped: dict[str, EventFileLink] = {}
-        for message_id in event.source_message_ids:
-            message = message_by_id.get(message_id)
-            if message is None:
+        for link_id in event.referenced_link_ids:
+            link = link_by_id.get(link_id)
+            if link is None:
                 continue
-            for link in content_resolver.extract_links(message):
-                existing = deduped.get(link.url)
-                candidate = EventFileLink(
-                    url=link.url,
-                    title=link.title,
-                    link_type=link.link_type,
-                )
-                if existing is None:
-                    deduped[link.url] = candidate
-                    continue
-                if existing.title.strip() or not candidate.title.strip():
-                    continue
-                deduped[link.url] = candidate
+            if not _event_supports_link(event, link):
+                continue
+            existing = deduped.get(link.url)
+            if existing is None:
+                deduped[link.url] = link
+                continue
+            if existing.title.strip() or not link.title.strip():
+                continue
+            deduped[link.url] = link
 
         attached.append(
             type(event)(
@@ -704,10 +727,39 @@ def _attach_event_file_links(
                 object_hint=event.object_hint,
                 retention_reason=event.retention_reason,
                 retention_detail=event.retention_detail,
+                referenced_link_ids=list(event.referenced_link_ids),
             )
         )
 
     return attached
+
+
+def _event_supports_link(event: WorkEvent, link: EventFileLink) -> bool:
+    evidence_text = " ".join(
+        [
+            event.title,
+            event.content,
+            event.object_hint,
+            event.retention_detail,
+        ]
+    ).lower()
+    if not evidence_text.strip():
+        return False
+
+    for token in _link_evidence_tokens(link):
+        if token in evidence_text:
+            return True
+    return False
+
+
+def _link_evidence_tokens(link: EventFileLink) -> list[str]:
+    evidence_source = link.title.strip() or link.url
+    tokens = [token.lower() for token in _LINK_TEXT_TOKEN_RE.findall(evidence_source)]
+    return [
+        token
+        for token in tokens
+        if token not in _GENERIC_LINK_HINT_TOKENS and len(token.strip()) >= 2
+    ]
 
 
 def _sort_events_for_output(events: list[WorkEvent], *, messages: list) -> list[WorkEvent]:

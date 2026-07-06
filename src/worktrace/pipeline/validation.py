@@ -13,6 +13,7 @@ from ..models import (
     MergedEventDraft,
     SourceBackedEventDraft,
 )
+from ..utils.link_refs import build_message_link_candidates, sort_referenced_link_ids
 from ..utils.hashing import stable_event_id
 
 
@@ -97,6 +98,11 @@ def validate_batch_analysis_result(
         )
         if not normalized_ids:
             continue
+        referenced_link_ids = _filter_valid_referenced_link_ids(
+            candidate.referenced_link_ids,
+            conversation_slice=conversation_slice,
+            source_message_ids=normalized_ids,
+        )
 
         draft_id = candidate.draft_id.strip()
         date = candidate.date.strip()
@@ -123,6 +129,7 @@ def validate_batch_analysis_result(
                 object_hint=(candidate.object_hint or "").strip(),
                 retention_reason=(candidate.retention_reason or "").strip(),
                 retention_detail=(candidate.retention_detail or "").strip(),
+                referenced_link_ids=referenced_link_ids,
                 source_message_ids=normalized_ids,
                 source_conversation_id=source_conversation_id,
                 source_slice_id=source_slice_id,
@@ -175,6 +182,14 @@ def validate_merged_event_drafts(
                 object_hint=draft.object_hint,
                 retention_reason=draft.retention_reason,
                 retention_detail=draft.retention_detail,
+                referenced_link_ids=sort_referenced_link_ids(
+                    [
+                        link_id
+                        for link_id in draft.referenced_link_ids
+                        if _link_id_belongs_to_messages(link_id, ordered_ids)
+                    ],
+                    message_order=ordered_ids,
+                ),
                 source_message_ids=ordered_ids,
                 source_conversation_ids=sorted(set(draft.source_conversation_ids)),
             )
@@ -227,6 +242,35 @@ def validate_cross_conversation_groups(
     raise AnalyzerProtocolError(
         "Cross-conversation merge groups are invalid: " + "; ".join(details)
     )
+
+
+def _filter_valid_referenced_link_ids(
+    referenced_link_ids: list[str],
+    *,
+    conversation_slice: ConversationSlice,
+    source_message_ids: list[str],
+) -> list[str]:
+    allowed_message_ids = set(source_message_ids)
+    allowed_link_ids = {
+        item.link_id
+        for message in conversation_slice.messages
+        if message.message_id in allowed_message_ids
+        for item in build_message_link_candidates(message)
+    }
+    return [
+        link_id
+        for link_id in sort_referenced_link_ids(
+            [link_id for link_id in referenced_link_ids if link_id in allowed_link_ids],
+            message_order=source_message_ids,
+        )
+    ]
+
+
+def _link_id_belongs_to_messages(link_id: str, message_ids: list[str]) -> bool:
+    for candidate_message_id in message_ids:
+        if link_id.startswith(f"{candidate_message_id}#link"):
+            return True
+    return False
 
 
 def normalize_cross_conversation_groups_with_fallback(
