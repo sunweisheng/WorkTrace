@@ -905,6 +905,7 @@ class CollectedSourceEvent:
     person_name: str
     source_file: str
     event: WorkEvent
+    is_merge_owner_source: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -912,6 +913,7 @@ class CollectedSourceEvent:
             "person_name": self.person_name,
             "source_file": self.source_file,
             "event": self.event.to_dict(),
+            "is_merge_owner_source": self.is_merge_owner_source,
         }
 
 

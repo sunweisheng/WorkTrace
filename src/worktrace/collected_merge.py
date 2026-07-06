@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import subprocess
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -167,6 +167,12 @@ class CollectedMergeRunner:
             source_events,
         )
         warning_messages.extend(retention_source_warnings)
+        source_events, owner_source_warnings = self._mark_merge_owner_sources(
+            source_events,
+            merge_owner_person=self_identity.display_name,
+            input_dir=input_dir,
+        )
+        warning_messages.extend(owner_source_warnings)
 
         merged_events: list[WorkEvent] = []
         if source_events:
@@ -343,6 +349,34 @@ class CollectedMergeRunner:
             for source_event in source_events
             if id(source_event.event) in kept_ids
         ], warnings
+
+    def _mark_merge_owner_sources(
+        self,
+        source_events: list[CollectedSourceEvent],
+        *,
+        merge_owner_person: str,
+        input_dir: Path,
+    ) -> tuple[list[CollectedSourceEvent], list[str]]:
+        owner_name = merge_owner_person.strip()
+        if not source_events or not owner_name:
+            return source_events, []
+
+        marked_events = [
+            replace(
+                source_event,
+                is_merge_owner_source=source_event.person_name.strip() == owner_name,
+            )
+            for source_event in source_events
+        ]
+        if any(event.is_merge_owner_source for event in marked_events):
+            return marked_events, []
+
+        warning = (
+            "No merge-owner personal event markdown matched current user "
+            f"'{owner_name}' in directory: {input_dir.resolve()}; "
+            "falling back to standard collected merge."
+        )
+        return marked_events, [warning]
 
     def _materialize_events(
         self,

@@ -4,13 +4,14 @@
 
 新增 `merge-collected` 子命令，用于管理人员把多人提交的 WorkTrace Markdown 放入 `merge_inbox/YYYY/MM/DD/` 后，把日期根目录和一级子目录分别作为独立合并范围，各自生成本目录 `YYYY-MM-DD-登录人姓名-merged.md` 团队汇总文件。
 
-合并结果保持标准 WorkTrace Markdown 兼容，同时额外展示来源人员、来源事件 ID。相同原始 `event_id` 只有在标题和内容完全一致，或标题一致且内容一方包含另一方时，才先确定性归组；如果 `event_id` 相同但不满足该规则，则记录 warning 并交给 LLM 保守判断。其余事件也由 LLM 判断是否属于同一真实工作事件，并对每个合并组生成管理视角的综合描述。读取来源事件和写入最终团队汇总文件前，都会执行与个人日报一致的结构化保留门槛。
+合并结果保持标准 WorkTrace Markdown 兼容，同时额外展示来源人员、来源事件 ID。相同原始 `event_id` 只有在标题和内容完全一致，或标题一致且内容一方包含另一方时，才先确定性归组；如果 `event_id` 相同但不满足该规则，则记录 warning 并交给 LLM 保守判断。其余事件也由 LLM 判断是否属于同一真实工作事件，并对每个合并组生成管理视角的综合描述。若某个合并组包含“当前登录用户自己的个人事件 MD”来源，则最终内容以该来源为主，其他来源仅作不冲突补充。读取来源事件和写入最终团队汇总文件前，都会执行与个人日报一致的结构化保留门槛。
 
 ## Key Changes
 
 - 新增 CLI：`python -m src.worktrace.cli merge-collected --date YYYY-MM-DD`，旧命令 `python -m src.worktrace.cli --date YYYY-MM-DD` 行为不变。
 - 输入固定读取 `merge_inbox/YYYY/MM/DD/` 及其一级子目录当前层的 `.md` 文件，跳过旧 `_merged.md`、新 `*-merged.md`、隐藏文件、非 Markdown、格式错误文件。
 - 人员名从文件名提取，只要能识别出日期和姓名成分即可，例如 `2026-06-29-张三.md`、`张三-2026-06-29.md`、`张三_2026-06-29.md` 都可识别为 `张三`。
+- 若来源文件名中的姓名与当前登录用户姓名精确匹配，则该来源事件被标记为“合并人来源”；若当前目录没有匹配到合并人来源，则写 warning 并回退为普通多人合并。
 - 相同 `event_id` 只有在标题和内容完全一致，或标题一致且内容一方包含另一方时才作为确定性合并组；其它情况不锁死，交给 LLM 判断，并在 JSON 结果里记录 warning。
 - 多人合并 prompt 继续要求 LLM 不输出薪资、绩效、争吵、辱骂等敏感事项，并要求每个 group 输出 `object_hint`、`retention_reason`、`retention_detail`。
 - 输出 `YYYY-MM-DD-登录人姓名-merged.md` 保留 WorkTrace 事件注释和标准字段，并新增来源人员、来源事件 ID 字段；保留元数据继续写入 Markdown，供追溯和后续汇总使用。
@@ -40,8 +41,10 @@
 
 - LLM 合并协议
   - LLM 输入包含两部分：已锁定的 `deterministic_groups`，以及需要判断的剩余事件。
+  - 每条来源事件都会带上是否为“合并人来源”的标记；LLM 仍负责判断哪些事项属于同一真实事件。
   - LLM 必须返回 `groups`，每个 group 包含 `group_id`、`draft_ids`、`title`、`content`、`object_hint`、`retention_reason`、`retention_detail`。
   - Prompt 明确要求：确定性组不能拆分；剩余事件拿不准就分开；每个输入 `draft_id` 必须且只能出现一次；不要编造未出现的信息。
+  - 若某个 group 含有“合并人来源”，最终 `title`、`content`、`object_hint`、`retention_reason`、`retention_detail` 都以该来源为主，其它来源只能补充不冲突的信息，不能改写该来源中已明确的版本、结论、进展、结果或待办指向。
   - 如果 LLM 返回漏项、重复项、未知项或破坏确定性组，Python 侧修复为安全结果：有效组保留，漏项回退为单独事件，并记录 warning。
   - 普通约时间、互通信息、泛泛完成审核/审批但无具体对象和结论的事件不应输出；如果输出，Python 写入前会再次过滤。
 
@@ -68,6 +71,7 @@
 ## Test Plan
 
 - 单元测试覆盖人员名提取、标准 Markdown 解析、坏文件跳过、旧 `_merged.md` 与新 `*-merged.md` 不参与输入、相同 `event_id` 且内容完全一致或包含时确定性合并、相同 `event_id` 但不满足确定性规则时交给 LLM 并产生 warning、输出包含来源信息、多人合并结果会自发送。
+- 单元测试覆盖“合并人来源”识别、未匹配到合并人来源时的 warning，以及相同事项中合并人版本优先信号会被送入 LLM prompt。
 - 单元测试覆盖最终敏感兜底过滤、结构化保留门槛，以及多人合并 prompt 包含敏感事项和保留元数据要求。
 - 集成测试覆盖 `merge-collected --date` 输出结构化 JSON、多个输入生成 `YYYY-MM-DD-登录人姓名-merged.md`、坏文件不阻断有效合并、多人合并自发送结果、旧 CLI 命令行为不变。
 - 空目录、无有效事件、全坏文件均返回成功带 warning，并生成空汇总或空结果。
@@ -77,4 +81,5 @@
 - 输入来自各人员已生成的 WorkTrace Markdown，不重新读取原始聊天。
 - 管理汇总允许展示来源人员名和来源事件 ID。
 - v1 只处理同一天多人合并，不做跨天合并。
+- “合并人自己的个人事件 MD” 识别规则固定为：来源文件名中的姓名与当前登录用户名精确匹配。
 - LLM 合并规则保守，拿不准就分开。

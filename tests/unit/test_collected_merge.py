@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from src.worktrace.collected_merge import (
@@ -181,6 +182,49 @@ def test_collected_merge_reads_sources_and_renders_source_fields(tmp_path: Path)
     assert "项目排期确认" in content
 
 
+def test_collected_merge_marks_merge_owner_sources(tmp_path: Path) -> None:
+    inbox = tmp_path / "merge_inbox" / "2026" / "06" / "29"
+    _write_day_doc(
+        inbox / "2026-06-29-管理者.md",
+        [
+            _event(
+                event_id="evt-owner",
+                title="版本升级",
+                content="管理者确认升级到 1.0.5。",
+                object_hint="WorkTrace技能1.0.5版本安装",
+                retention_detail="管理者本人确认 WorkTrace 技能升级到 1.0.5。",
+            )
+        ],
+        tmp_path,
+    )
+    _write_day_doc(
+        inbox / "2026-06-29-张三.md",
+        [
+            _event(
+                event_id="evt-peer",
+                title="版本升级",
+                content="张三提到升级到 1.0.4。",
+                object_hint="WorkTrace技能1.0.4版本安装",
+                retention_detail="张三提到 WorkTrace 技能升级到 1.0.4。",
+            )
+        ],
+        tmp_path,
+    )
+
+    analyzer = FakeAnalyzer()
+    result = _build_runner(tmp_path, analyzer=analyzer).run("2026-06-29")
+
+    owner_flags = {
+        event.person_name: event.is_merge_owner_source
+        for event in analyzer.calls[0]["events"]
+    }
+    assert owner_flags == {"管理者": True, "张三": False}
+    assert not any(
+        "falling back to standard collected merge" in warning
+        for warning in result.warning_messages
+    )
+
+
 def test_collected_merge_runs_root_and_first_level_subdirectories(
     tmp_path: Path,
 ) -> None:
@@ -343,6 +387,65 @@ def test_collected_merge_does_not_lock_same_event_id_with_divergent_content(
     )
 
 
+def test_collected_merge_warns_when_merge_owner_source_is_missing(tmp_path: Path) -> None:
+    inbox = tmp_path / "merge_inbox" / "2026" / "06" / "29"
+    _write_day_doc(
+        inbox / "2026-06-29-张三.md",
+        [
+            _event(
+                event_id="evt-a",
+                title="项目排期",
+                content="张三确认项目排期。",
+                object_hint="项目排期",
+                retention_detail="张三形成项目排期确认结果。",
+            )
+        ],
+        tmp_path,
+    )
+
+    result = _build_runner(tmp_path).run("2026-06-29")
+
+    assert any(
+        "No merge-owner personal event markdown matched current user '管理者'" in warning
+        for warning in result.warning_messages
+    )
+
+
+def test_collected_merge_keeps_owner_flag_on_divergent_same_event_id(tmp_path: Path) -> None:
+    inbox = tmp_path / "merge_inbox" / "2026" / "06" / "29"
+    for person, content in [
+        ("管理者", "升级 WorkTrace 技能到 1.0.5。"),
+        ("张三", "升级 WorkTrace 技能到 1.0.4。"),
+    ]:
+        _write_day_doc(
+            inbox / f"2026-06-29-{person}.md",
+            [
+                _event(
+                    event_id="evt-shared",
+                    title="WorkTrace技能安装",
+                    content=content,
+                    object_hint="WorkTrace技能版本安装",
+                    retention_reason="follow_up_assigned",
+                    retention_detail=f"{person}确认 WorkTrace 技能安装版本信息。",
+                )
+            ],
+            tmp_path,
+        )
+
+    analyzer = FakeAnalyzer()
+    result = _build_runner(tmp_path, analyzer=analyzer).run("2026-06-29")
+
+    assert analyzer.calls[0]["deterministic_groups"] == []
+    owner_events = [
+        event for event in analyzer.calls[0]["events"] if event.is_merge_owner_source
+    ]
+    assert [event.person_name for event in owner_events] == ["管理者"]
+    assert any(
+        "Same event_id has divergent content: evt-shared" in warning
+        for warning in result.warning_messages
+    )
+
+
 def test_collected_merge_empty_directory_succeeds_with_warning(tmp_path: Path) -> None:
     result = _build_runner(tmp_path).run("2026-06-29")
 
@@ -468,6 +571,7 @@ def test_collected_merge_prompt_contains_sensitive_rules() -> None:
                 draft_id="d1",
                 person_name="张三",
                 source_file="2026-06-29-张三.md",
+                is_merge_owner_source=True,
                 event=WorkEvent(
                     date="2026-06-29",
                     event_id="evt1",
@@ -486,10 +590,86 @@ def test_collected_merge_prompt_contains_sensitive_rules() -> None:
         ),
     )
 
+    payload = json.loads(prompt)
+
+    assert payload["merge_owner_person"] == "张三"
+    assert payload["remaining_events"][0]["is_merge_owner_source"] is True
     assert "涉及工资、薪资、薪酬" in prompt
     assert "涉及吵架、辱骂" in prompt
     assert "不要输出对应 group" in prompt
     assert "retention_reason" in prompt
+    assert "以该来源事件为主" in prompt
+    assert "最终 group 必须以 1.0.5 为主事实" in prompt
+
+
+def test_collected_merge_owner_signal_can_drive_final_version_output(
+    tmp_path: Path,
+) -> None:
+    class OwnerPreferringAnalyzer(FakeAnalyzer):
+        def merge_collected_events(self, target_date, events, deterministic_groups):
+            self.calls.append(
+                {
+                    "target_date": target_date,
+                    "events": events,
+                    "deterministic_groups": deterministic_groups,
+                }
+            )
+            owner_event = next(event for event in events if event.is_merge_owner_source)
+            peer_events = [event for event in events if not event.is_merge_owner_source]
+            peer_clause = ""
+            if peer_events:
+                peer_clause = f"；其他成员也已反馈安装情况：{peer_events[0].event.content}"
+            return CollectedMergeResult(
+                groups=[
+                    CollectedMergeGroup(
+                        group_id="g1",
+                        draft_ids=[event.draft_id for event in events],
+                        title=owner_event.event.title,
+                        content=owner_event.event.content + peer_clause,
+                        object_hint=owner_event.event.object_hint,
+                        retention_reason=owner_event.event.retention_reason,
+                        retention_detail=owner_event.event.retention_detail,
+                    )
+                ]
+            )
+
+    inbox = tmp_path / "merge_inbox" / "2026" / "06" / "29"
+    _write_day_doc(
+        inbox / "2026-06-29-张三.md",
+        [
+            _event(
+                event_id="evt-staff",
+                title="WorkTrace技能安装",
+                content="普通员工提到升级到 1.0.4。",
+                object_hint="WorkTrace技能1.0.4版本安装",
+                retention_reason="follow_up_assigned",
+                retention_detail="普通员工提到 WorkTrace 技能升级到 1.0.4。",
+            )
+        ],
+        tmp_path,
+    )
+    _write_day_doc(
+        inbox / "2026-06-29-管理者.md",
+        [
+            _event(
+                event_id="evt-owner",
+                title="WorkTrace技能安装",
+                content="管理者要求全体成员升级到 1.0.5，并生成30日事件文件。",
+                object_hint="WorkTrace技能1.0.5版本安装与30日事件文件生成",
+                retention_reason="follow_up_assigned",
+                retention_detail="管理者本人明确要求升级到 1.0.5 并产出30日事件文件。",
+            )
+        ],
+        tmp_path,
+    )
+
+    analyzer = OwnerPreferringAnalyzer()
+    result = _build_runner(tmp_path, analyzer=analyzer).run("2026-06-29")
+
+    assert any(event.is_merge_owner_source for event in analyzer.calls[0]["events"])
+    content = Path(result.output_path or "").read_text(encoding="utf-8")
+    assert "1.0.5" in content
+    assert "WorkTrace技能1.0.5版本安装与30日事件文件生成" in content
 
 
 def test_collected_merge_filters_low_retention_source_events_before_prompt(

@@ -178,6 +178,14 @@ def build_collected_merge_prompt(
     deterministic_ids = {
         draft_id for group in deterministic_groups for draft_id in group
     }
+    merge_owner_person = next(
+        (
+            item.person_name
+            for item in events
+            if item.is_merge_owner_source and item.person_name.strip()
+        ),
+        "",
+    )
     protocol = {
         "instruction": (
             "面向管理人员合并多人 WorkTrace 日报事件。"
@@ -193,6 +201,18 @@ def build_collected_merge_prompt(
             "每个 group 必须返回管理人员可读的 title 和 content。",
             "title 要短，content 要综合保留来源中的关键事实、进展、结果和未决事项。",
             "不要编造输入中没有的信息，不要丢失关键事实。",
+            "是否属于同一真实事件仍由你判断，不要依赖 Python 预先给出同题结论。",
+            (
+                "如果某个 group 中包含 is_merge_owner_source=true 的来源事件，"
+                "最终 title、content、object_hint、retention_reason、retention_detail "
+                "都必须以该来源事件为主，其他来源只能补充不冲突的信息，"
+                "不能覆盖其中已明确写出的版本号、结论、进展、结果或待办指向。"
+            ),
+            (
+                "反例：普通员工写 WorkTrace 技能升级到 1.0.4，"
+                "合并人来源写升级到 1.0.5；如果你判断它们属于同一真实事件，"
+                "最终 group 必须以 1.0.5 为主事实，不能改回 1.0.4。"
+            ),
             (
                 "每个 group 必须返回 object_hint、retention_reason、retention_detail；"
                 "retention_reason 只能是 deliverable_updated、decision_made、issue_or_risk_found、"
@@ -217,6 +237,7 @@ def build_collected_merge_prompt(
             ]
         },
         "target_date": target_date,
+        "merge_owner_person": merge_owner_person,
         "deterministic_groups": deterministic_groups,
         "remaining_events": [
             _serialize_collected_source_event_for_prompt(item)
@@ -621,6 +642,7 @@ def _serialize_collected_source_event_for_prompt(
         "draft_id": source_event.draft_id,
         "person": source_event.person_name,
         "source_file": source_event.source_file,
+        "is_merge_owner_source": source_event.is_merge_owner_source,
         "event_id": source_event.event.event_id,
         "title": source_event.event.title,
         "content": source_event.event.content,
