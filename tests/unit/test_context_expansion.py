@@ -8,6 +8,8 @@ from src.worktrace.models import (
     AttachmentMeta,
     ContextRequest,
     ConversationSlice,
+    LinkMeta,
+    LinkedFileTextBlock,
     NormalizedMessage,
 )
 from src.worktrace.pipeline.context_expansion import expand_slice_context
@@ -145,3 +147,72 @@ def test_expand_slice_context_ignores_empty_related_request(tmp_path: Path) -> N
 
     assert expanded == conversation_slice
     assert chat_source.calls == []
+
+
+def test_expand_slice_context_loads_linked_file_texts(tmp_path: Path) -> None:
+    class FakeResolver:
+        def to_text(self, message):
+            return message.text
+
+        def extract_links(self, message):
+            return list(message.links)
+
+        def load_attachment_text_if_needed(self, message, attachment_ids, hint):
+            return []
+
+        def load_link_text_if_needed(self, message, link_ids, hint):
+            return [
+                LinkedFileTextBlock(
+                    link_id=link_ids[0],
+                    message_id=message.message_id,
+                    title="方案",
+                    url="https://foo.feishu.cn/docx/abc",
+                    text=f"文档正文: {hint}",
+                )
+            ]
+
+    config = RuntimeConfig(data_root=tmp_path / "data")
+    chat_source = FakeChatSource()
+    message = NormalizedMessage(
+        conversation_id="oc_1",
+        conversation_name="项目群",
+        message_id="om_1",
+        sender_open_id="ou_self",
+        sender_name="Me",
+        send_time="2026-06-22T10:00:00+08:00",
+        message_type="text",
+        text="请看文档",
+        reply_to_message_id=None,
+        quote_message_id=None,
+        links=[LinkMeta(url="https://foo.feishu.cn/docx/abc", title="方案", link_type="feishu_doc")],
+        attachments=[],
+        is_system=False,
+    )
+    conversation_slice = ConversationSlice(
+        slice_id="slice-1",
+        conversation_id="oc_1",
+        conversation_name="项目群",
+        anchor_message_ids=["om_1"],
+        in_day_message_ids=["om_1"],
+        messages=[message],
+    )
+
+    expanded = expand_slice_context(
+        conversation_slice,
+        [
+            ContextRequest(
+                slice_id="slice-1",
+                request_type=ContextRequestType.LINKED_FILE_TEXT.value,
+                target_message_ids=["om_1"],
+                target_link_ids=["om_1#link1"],
+                reason="补充文档正文",
+                limit=1,
+            )
+        ],
+        chat_source=chat_source,
+        content_resolver=FakeResolver(),
+        config=config,
+    )
+
+    assert len(expanded.linked_file_texts) == 1
+    assert expanded.linked_file_texts[0].link_id == "om_1#link1"

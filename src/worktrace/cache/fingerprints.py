@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 
-from ..models import AnchorUnit, AttachmentTextBlock
+from ..models import AnchorUnit, AttachmentTextBlock, LinkedFileTextBlock
 from ..utils.json_io import dump_json
 
 
@@ -10,8 +10,9 @@ def build_anchor_input_fingerprint(
     anchor_unit: AnchorUnit,
     *,
     attachment_texts: list[AttachmentTextBlock] | None = None,
-    prompt_version: str = "v1",
-    schema_version: str = "v1",
+    linked_file_texts: list[LinkedFileTextBlock] | None = None,
+    prompt_version: str = "v2",
+    schema_version: str = "v2",
 ) -> str:
     payload = {
         "anchor_unit_id": anchor_unit.anchor_unit_id,
@@ -24,6 +25,7 @@ def build_anchor_input_fingerprint(
         "messages": [item.to_dict() for item in anchor_unit.messages],
         "attachment_refs": [item.to_dict() for item in anchor_unit.attachment_refs],
         "attachment_texts": [item.to_dict() for item in (attachment_texts or [])],
+        "linked_file_texts": [item.to_dict() for item in (linked_file_texts or [])],
         "prompt_version": prompt_version,
         "schema_version": schema_version,
     }

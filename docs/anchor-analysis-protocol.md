@@ -16,7 +16,6 @@
 
 - `conversation_name`
 - `messages`
-- `omitted_message_count`
 - `attachment_refs`
 
 ### 2.1 `messages` 字段
@@ -27,7 +26,16 @@
 - `s`：发送人
 - `x`：压缩后的消息文本
 
-锚点协议当前不会在消息对象里额外发送 `id`、`type`、`reply_to`、`quote_to`、`links`、`attachments`。
+每条消息当前使用以下字段：
+
+- `id`：消息 id
+- `t`：时间
+- `s`：发送人
+- `x`：压缩后的消息文本
+- `attachments`：附件元信息，元素包含 `attachment_id`、`file_name`、`mime_type`
+- `links`：消息内链接，元素包含 `link_id`、`message_id`、`url`、`title`、`link_type`
+- `reply_to`：若当前消息是回复消息，则包含被回复消息摘要：`message_id`、`sender`、`text`、`attachments`、`links`
+- `quote_to`：若当前消息是引用消息，则包含被引用消息摘要：`message_id`、`sender`、`text`、`attachments`、`links`
 
 ### 2.2 `attachment_refs` 字段
 
@@ -96,11 +104,12 @@ LLM 必须返回单个 JSON 对象，固定包含以下顶层字段：
 
 ## 6. `context_requests`
 
-`context_requests` 继续沿用现有协议，只允许：
+`context_requests` 当前允许：
 
 - `earlier_messages`
 - `later_messages`
 - `attachment_text`
+- `linked_file_text`
 
 每个请求固定包含：
 
@@ -108,6 +117,7 @@ LLM 必须返回单个 JSON 对象，固定包含以下顶层字段：
 - `request_type`
 - `target_message_ids`
 - `target_attachment_ids`
+- `target_link_ids`
 - `reason`
 - `limit`
 
@@ -115,7 +125,9 @@ LLM 必须返回单个 JSON 对象，固定包含以下顶层字段：
 
 - `slice_id` 在锚点协议里写 `anchor_unit_id`
 - `attachment_text` 请求必须同时提供 `target_message_ids` 与 `target_attachment_ids`
+- `linked_file_text` 请求必须同时提供 `target_message_ids` 与 `target_link_ids`
 - `earlier_messages / later_messages` 请求不允许填写附件 ID
+- `earlier_messages / later_messages` 请求不允许填写链接 ID
 
 ## 7. `needs_cross_anchor_merge`
 

@@ -50,7 +50,6 @@
 - `slice_base_limit = 150`
 - `max_model_input_tokens = 100000`
 - `slice_retry_limit = 3`
-- `prompt_slice_message_limit = 40`
 - `prompt_message_char_limit = 300`
 - `prompt_attachment_char_limit = 800`
 - `analyzer_timeout_seconds = 180`
@@ -58,6 +57,8 @@
 - `llm_sleep_min_seconds = 1.0`
 - `llm_sleep_max_seconds = 2.0`
 - `llm_reasoning_effort = "none"`
+
+当前首轮 / 扩窗 prompt 不再按消息条数截断；只保留单条消息字符截断和现有模型输入上限。
 
 当前运行时还会从本地配置文件读取以下覆盖项：
 

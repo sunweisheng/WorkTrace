@@ -45,11 +45,12 @@
 
 ### 4.1 已支持的 `context_requests`
 
-当前支持以下三类补充请求：
+当前支持以下四类补充请求：
 
 - `earlier_messages`
 - `later_messages`
 - `attachment_text`
+- `linked_file_text`
 
 ### 4.2 当前不做的事
 
@@ -96,6 +97,8 @@
 
 附件正文只在模型明确请求时才补充，不会在首轮默认预读全部附件正文。
 
+飞书文档 / wiki 链接正文也只在模型明确请求时才补充，不会在首轮默认预读全部链接正文。
+
 ## 6. 运行流程
 
 当前单会话处理流程如下：
@@ -121,6 +124,7 @@
 - 锚点消息 id
 - 当日消息 id
 - 附件正文块
+- 已补读的链接正文块
 
 ### 7.2 `ContextRequest`
 
@@ -130,6 +134,7 @@
 - `request_type`
 - `target_message_ids`
 - `target_attachment_ids`
+- `target_link_ids`
 - `reason`
 - `limit`
 
@@ -170,13 +175,22 @@
 3. 调 `content_resolver` 加载正文
 4. 把新增 `AttachmentTextBlock` 合并回 slice
 
-### 8.3 扩展合并
+### 8.3 链接正文补充
+
+当请求类型为 `linked_file_text` 时，系统会：
+
+1. 在当前 slice 中定位目标消息
+2. 按 `target_link_ids` 过滤目标消息里的链接
+3. 仅对飞书 `docx` / `wiki` 链接调用 `content_resolver` 补读正文
+4. 把新增链接正文块合并回 slice
+### 8.4 扩展合并
 
 扩展后的新老信息会按以下规则合并：
 
 - 消息按 `message_id` 去重
 - 按时间顺序重排消息
 - 附件正文按 `attachment_id` 去重
+- 链接正文按 `link_id` 去重
 
 ## 9. 停止条件与 warning 策略
 
@@ -199,6 +213,7 @@
 
 - 消息 `message_id` 序列
 - 附件 `attachment_id` 序列
+- 已补读链接正文的 `link_id` 序列
 
 若签名未变化，说明本轮扩展没有引入新信息，也会停止重跑并记录 warning。
 

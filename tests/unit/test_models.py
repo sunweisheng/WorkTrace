@@ -19,6 +19,7 @@ from src.worktrace.models import (
     DayDocument,
     EventFileLink,
     LinkMeta,
+    LinkedFileTextBlock,
     MergedEventDraft,
     NormalizedMessage,
     SelfIdentity,
@@ -77,6 +78,15 @@ def test_model_roundtrip(sample_message: NormalizedMessage) -> None:
                 text="发布排期补充",
             )
         ],
+        linked_file_texts=[
+            LinkedFileTextBlock(
+                link_id="om_001#link1",
+                message_id="om_001",
+                title="发布方案",
+                url="https://example.feishu.cn/docx/abc",
+                text="方案正文",
+            )
+        ],
     )
     batch = AnalysisBatch(
         target_date="2026-06-22",
@@ -104,6 +114,7 @@ def test_model_roundtrip(sample_message: NormalizedMessage) -> None:
         request_type=ContextRequestType.ATTACHMENT_TEXT.value,
         target_message_ids=["om_001"],
         target_attachment_ids=["att_001"],
+        target_link_ids=["om_001#link1"],
         reason="需要附件正文确认发布时间",
         limit=1,
     )
@@ -189,6 +200,7 @@ def test_model_roundtrip(sample_message: NormalizedMessage) -> None:
         sample_message.attachments[0],
         sample_message,
         conversation_slice.attachment_texts[0],
+        conversation_slice.linked_file_texts[0],
         conversation_slice,
         batch,
         anchor_unit,

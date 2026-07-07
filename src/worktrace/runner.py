@@ -664,10 +664,13 @@ def run_daily_trace(target_date: str, config: RuntimeConfig) -> DailyRunResult:
     return runner.run(target_date)
 
 
-def _conversation_slice_signature(conversation_slice: ConversationSlice) -> tuple[tuple[str, ...], tuple[str, ...]]:
+def _conversation_slice_signature(
+    conversation_slice: ConversationSlice,
+) -> tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]]:
     return (
         tuple(message.message_id for message in conversation_slice.messages),
         tuple(block.attachment_id for block in conversation_slice.attachment_texts),
+        tuple(block.link_id for block in conversation_slice.linked_file_texts),
     )
 
 

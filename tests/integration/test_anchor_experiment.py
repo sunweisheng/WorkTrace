@@ -596,6 +596,275 @@ def test_run_anchor_experiment_retries_anchor_with_more_context(tmp_path: Path) 
     ]
 
 
+def test_run_anchor_experiment_retries_anchor_and_corrects_reply_object(tmp_path: Path) -> None:
+    from src.worktrace.anchor_experiment import run_anchor_experiment
+    from src.worktrace.constants import ContextRequestType
+    from src.worktrace.factories import RuntimeDependencies
+    from src.worktrace.models import ConversationRef, NormalizedMessage, SelfIdentity
+
+    class FakeSource:
+        def get_self_identity(self):
+            return SelfIdentity(open_id="ou_self", display_name="Me", source="fake")
+
+        def list_target_conversations(self, target_date, self_identity):
+            return [ConversationRef(conversation_id="oc_1", conversation_name="项目群")]
+
+        def fetch_conversation_messages(self, target_date, conversation_ids):
+            return [
+                NormalizedMessage(
+                    conversation_id="oc_1",
+                    conversation_name="项目群",
+                    message_id="om_1",
+                    sender_open_id="ou_other",
+                    sender_name="Alice",
+                    send_time="2026-06-23T10:00:00+08:00",
+                    message_type="text",
+                    text="上海大区报销单今天处理",
+                    reply_to_message_id=None,
+                    quote_message_id=None,
+                    links=[],
+                    attachments=[],
+                    is_system=False,
+                ),
+                NormalizedMessage(
+                    conversation_id="oc_1",
+                    conversation_name="项目群",
+                    message_id="om_2",
+                    sender_open_id="ou_self",
+                    sender_name="Me",
+                    send_time="2026-06-23T10:01:00+08:00",
+                    message_type="text",
+                    text="这笔我先跟进",
+                    reply_to_message_id="om_1",
+                    quote_message_id=None,
+                    links=[],
+                    attachments=[],
+                    is_system=False,
+                ),
+            ]
+
+        def fetch_related_messages(self, conversation_id, target_message_ids, direction, limit):
+            return [
+                NormalizedMessage(
+                    conversation_id="oc_1",
+                    conversation_name="项目群",
+                    message_id="om_3",
+                    sender_open_id="ou_other",
+                    sender_name="Alice",
+                    send_time="2026-06-23T10:02:00+08:00",
+                    message_type="text",
+                    text="不是上海，这是昆山的",
+                    reply_to_message_id="om_2",
+                    quote_message_id=None,
+                    links=[],
+                    attachments=[],
+                    is_system=False,
+                )
+            ]
+
+    class FakeResolver:
+        def to_text(self, message):
+            return message.text
+
+        def load_attachment_text_if_needed(self, message, attachment_ids, hint):
+            return None
+
+        def load_link_text_if_needed(self, message, link_ids, hint):
+            return None
+
+    class FakeAnalyzer:
+        def __init__(self):
+            self.calls = 0
+
+        def _invoke_codex(self, prompt):
+            self.calls += 1
+            if self.calls == 1:
+                return {
+                    "anchor_status": "needs_more_context",
+                    "candidate_events": [],
+                    "context_requests": [
+                        {
+                            "slice_id": "oc_1:om_2",
+                            "request_type": ContextRequestType.LATER_MESSAGES.value,
+                            "target_message_ids": ["om_2"],
+                            "target_attachment_ids": [],
+                            "target_link_ids": [],
+                            "reason": "需要确认最终对象",
+                            "limit": 1,
+                        }
+                    ],
+                    "needs_cross_anchor_merge": False,
+                }
+            return {
+                "anchor_status": "completed",
+                "candidate_events": [
+                    {
+                        "topic": "昆山报销单收款公司修改跟进",
+                        "content": "补充后文明确这笔不是上海而是昆山，并继续跟进收款公司修改。",
+                        "object_hint": "昆山报销单收款公司修改",
+                        "retention_reason": "follow_up_assigned",
+                        "retention_detail": "补充后文明确说明这笔不是上海而是昆山。",
+                        "source_message_ids": ["om_2", "om_3"],
+                    }
+                ],
+                "context_requests": [],
+                "needs_cross_anchor_merge": False,
+            }
+
+    fake_runtime = RuntimeDependencies(
+        chat_source=FakeSource(),
+        content_resolver=FakeResolver(),
+        analyzer=FakeAnalyzer(),
+        delivery_channel=NullDelivery(),
+        event_store=None,  # type: ignore[arg-type]
+    )
+
+    result = run_anchor_experiment(
+        target_date="2026-06-23",
+        config=RuntimeConfig(
+            data_root=tmp_path / "data",
+            cache_root=tmp_path / "cache",
+            anchor_retry_limit=3,
+        ),
+        limit=1,
+        runtime=fake_runtime,
+    )
+
+    assert result.status == DailyRunStatus.SUCCESS.value
+    assert result.candidate_event_count == 1
+    assert "multi_pass_completed" in result.completion_mode_counts
+    assert "昆山报销单收款公司修改跟进" in json.dumps(result.results, ensure_ascii=False)
+
+
+def test_run_anchor_experiment_retries_anchor_with_linked_file_text(tmp_path: Path) -> None:
+    from src.worktrace.anchor_experiment import run_anchor_experiment
+    from src.worktrace.constants import ContextRequestType
+    from src.worktrace.factories import RuntimeDependencies
+    from src.worktrace.models import (
+        ConversationRef,
+        LinkMeta,
+        LinkedFileTextBlock,
+        NormalizedMessage,
+        SelfIdentity,
+    )
+
+    class FakeSource:
+        def get_self_identity(self):
+            return SelfIdentity(open_id="ou_self", display_name="Me", source="fake")
+
+        def list_target_conversations(self, target_date, self_identity):
+            return [ConversationRef(conversation_id="oc_1", conversation_name="项目群")]
+
+        def fetch_conversation_messages(self, target_date, conversation_ids):
+            return [
+                NormalizedMessage(
+                    conversation_id="oc_1",
+                    conversation_name="项目群",
+                    message_id="om_1",
+                    sender_open_id="ou_self",
+                    sender_name="Me",
+                    send_time="2026-06-23T10:00:00+08:00",
+                    message_type="text",
+                    text="请看 https://foo.feishu.cn/docx/abc",
+                    reply_to_message_id=None,
+                    quote_message_id=None,
+                    links=[
+                        LinkMeta(
+                            url="https://foo.feishu.cn/docx/abc",
+                            title="收款公司说明",
+                            link_type="feishu_doc",
+                        )
+                    ],
+                    attachments=[],
+                    is_system=False,
+                )
+            ]
+
+        def fetch_related_messages(self, conversation_id, target_message_ids, direction, limit):
+            return []
+
+    class FakeResolver:
+        def to_text(self, message):
+            return message.text
+
+        def load_attachment_text_if_needed(self, message, attachment_ids, hint):
+            return None
+
+        def load_link_text_if_needed(self, message, link_ids, hint):
+            return [
+                LinkedFileTextBlock(
+                    link_id=link_ids[0],
+                    message_id=message.message_id,
+                    title="收款公司说明",
+                    url="https://foo.feishu.cn/docx/abc",
+                    text=f"文档正文明确写明收款公司需要修改。{hint}",
+                )
+            ]
+
+    class FakeAnalyzer:
+        def __init__(self):
+            self.calls = 0
+
+        def _invoke_codex(self, prompt):
+            self.calls += 1
+            if self.calls == 1:
+                return {
+                    "anchor_status": "needs_more_context",
+                    "candidate_events": [],
+                    "context_requests": [
+                        {
+                            "slice_id": "oc_1:om_1",
+                            "request_type": ContextRequestType.LINKED_FILE_TEXT.value,
+                            "target_message_ids": ["om_1"],
+                            "target_attachment_ids": [],
+                            "target_link_ids": ["om_1#link1"],
+                            "reason": "需要文档正文判断",
+                            "limit": 1,
+                        }
+                    ],
+                    "needs_cross_anchor_merge": False,
+                }
+            return {
+                "anchor_status": "completed",
+                "candidate_events": [
+                    {
+                        "topic": "收款公司修改确认",
+                        "content": "补读飞书文档正文后，确认收款公司需要修改。",
+                        "object_hint": "收款公司修改",
+                        "retention_reason": "decision_made",
+                        "retention_detail": "补读飞书文档正文后完成确认。",
+                        "source_message_ids": ["om_1"],
+                    }
+                ],
+                "context_requests": [],
+                "needs_cross_anchor_merge": False,
+            }
+
+    fake_runtime = RuntimeDependencies(
+        chat_source=FakeSource(),
+        content_resolver=FakeResolver(),
+        analyzer=FakeAnalyzer(),
+        delivery_channel=NullDelivery(),
+        event_store=None,  # type: ignore[arg-type]
+    )
+
+    result = run_anchor_experiment(
+        target_date="2026-06-23",
+        config=RuntimeConfig(
+            data_root=tmp_path / "data",
+            cache_root=tmp_path / "cache",
+            anchor_retry_limit=3,
+        ),
+        limit=1,
+        runtime=fake_runtime,
+    )
+
+    assert result.status == DailyRunStatus.SUCCESS.value
+    assert result.candidate_event_count == 1
+    assert "收款公司修改确认" in json.dumps(result.results, ensure_ascii=False)
+    assert "linked_file_texts" in result.results[0]
+
+
 def test_run_anchor_experiment_reuses_cached_anchor_result(tmp_path: Path) -> None:
     from src.worktrace.anchor_experiment import run_anchor_experiment
     from src.worktrace.factories import RuntimeDependencies

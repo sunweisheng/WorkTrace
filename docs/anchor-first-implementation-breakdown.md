@@ -12,6 +12,8 @@
 - 锚点首轮识别协议
 - 多轮扩窗执行
 - 按需补附件正文
+- 按需补飞书文档 / wiki 正文
+- reply / quote 关系摘要入模
 - 锚点级缓存
 - 调试产物落盘
 - `summary-only` / `summary-table` 输出

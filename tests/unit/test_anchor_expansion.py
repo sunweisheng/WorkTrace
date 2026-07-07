@@ -9,6 +9,7 @@ from src.worktrace.models import (
     AttachmentMeta,
     AttachmentTextBlock,
     ContextRequest,
+    LinkedFileTextBlock,
     NormalizedMessage,
 )
 from src.worktrace.pipeline.anchor_expansion import expand_anchor_unit_context
@@ -48,6 +49,17 @@ class FakeResolver:
                 text=f"转写内容: {hint}",
             )
         ]
+
+    def load_link_text_if_needed(self, message, link_ids, hint):
+        return [
+            LinkedFileTextBlock(
+                link_id=link_ids[0],
+                message_id=message.message_id,
+                title="飞书文档",
+                url="https://foo.feishu.cn/docx/abc",
+                text=f"文档正文: {hint}",
+            )
+        ] if link_ids else []
 
 
 def test_expand_anchor_unit_context_adds_messages_and_attachments(tmp_path: Path) -> None:
@@ -105,7 +117,14 @@ def test_expand_anchor_unit_context_adds_messages_and_attachments(tmp_path: Path
         ),
     ]
 
-    expanded, new_messages, all_attachment_texts, new_attachment_texts = expand_anchor_unit_context(
+    (
+        expanded,
+        new_messages,
+        all_attachment_texts,
+        new_attachment_texts,
+        all_linked_file_texts,
+        new_linked_file_texts,
+    ) = expand_anchor_unit_context(
         anchor_unit,
         requests,
         chat_source=FakeChatSource(),
@@ -119,6 +138,8 @@ def test_expand_anchor_unit_context_adds_messages_and_attachments(tmp_path: Path
     assert len(all_attachment_texts) == 1
     assert len(new_attachment_texts) == 1
     assert all_attachment_texts[0].attachment_id == "att_1"
+    assert all_linked_file_texts == []
+    assert new_linked_file_texts == []
 
 
 def test_expand_anchor_unit_context_ignores_invalid_message_ids(tmp_path: Path) -> None:
@@ -161,7 +182,14 @@ def test_expand_anchor_unit_context_ignores_invalid_message_ids(tmp_path: Path) 
         )
     ]
 
-    expanded, new_messages, all_attachment_texts, new_attachment_texts = expand_anchor_unit_context(
+    (
+        expanded,
+        new_messages,
+        all_attachment_texts,
+        new_attachment_texts,
+        all_linked_file_texts,
+        new_linked_file_texts,
+    ) = expand_anchor_unit_context(
         anchor_unit,
         requests,
         chat_source=FakeChatSource(),
@@ -174,3 +202,5 @@ def test_expand_anchor_unit_context_ignores_invalid_message_ids(tmp_path: Path) 
     assert [item.message_id for item in new_messages] == ["om_2"]
     assert all_attachment_texts == []
     assert new_attachment_texts == []
+    assert all_linked_file_texts == []
+    assert new_linked_file_texts == []

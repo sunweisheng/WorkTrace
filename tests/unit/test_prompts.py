@@ -18,10 +18,12 @@ from src.worktrace.models import (
     AnalysisBatch,
     AnchorAnalysisResult,
     AnchorUnit,
+    AttachmentMeta,
     AttachmentTextBlock,
     ContextRequest,
     ConversationSlice,
     LinkMeta,
+    LinkedFileTextBlock,
     NormalizedMessage,
     SourceBackedEventDraft,
 )
@@ -88,7 +90,7 @@ def test_prompt_serialization_is_compact(tmp_path: Path) -> None:
     assert payload["self"]["display_name"] == "Me"
     assert payload["slices"][0]["messages"][0]["x"] == "abcdefghijkl..."
     assert payload["slices"][0]["messages"][0]["id"] == "om_1"
-    assert payload["slices"][0]["omitted_message_count"] == 1
+    assert len(payload["slices"][0]["messages"]) == 2
     assert payload["slices"][0]["slice_id"] == "slice-1"
     assert payload["slices"][0]["conversation_id"] == "oc_1"
     assert "anchor_message_ids" not in payload["slices"][0]
@@ -176,6 +178,9 @@ def test_batch_prompt_uses_original_message_ids_and_slim_rules(tmp_path: Path) -
     assert "审核客户合同并反馈付款条款问题，可以输出 candidate_event。" in prompt
     assert "正例：本人要求他人汇报、本人审批、本人同步、本人催办、本人推进，都算与本人直接相关。" in prompt
     assert "反例：他人之间讨论自己的工作、自己的承诺、自己的处理进度，即使本人在该会话里发过言，也不算与本人直接相关。" in prompt
+    assert "如果当前消息是在纠正、澄清或替换前文对象" in prompt
+    assert "reply_to 或 quote_to 里的内容只能作为背景" in prompt
+    assert "linked_file_text" in prompt
     assert '"id": "om_1"' in prompt
     assert '"id": "om_2"' in prompt
     assert "每条事项附上最相关的消息 id。" in prompt
@@ -276,7 +281,7 @@ def test_anchor_prompt_serialization_is_compact(tmp_path: Path) -> None:
     prompt = build_anchor_analysis_prompt("2026-06-22", anchor_unit, config=config)
 
     assert payload["messages"][0]["x"] == "abcdefghijkl..."
-    assert payload["omitted_message_count"] == 1
+    assert len(payload["messages"]) == 2
     assert "anchor_unit_id" not in payload
     assert "base_message_ids" not in payload
     assert "reply_relation_ids" not in payload
@@ -292,6 +297,8 @@ def test_anchor_prompt_serialization_is_compact(tmp_path: Path) -> None:
     assert "retention_detail 表示保留依据/来源证据" in prompt
     assert "不要写 message id、open_id、conversation_id 或 om_/ou_/oc_ 等内部标识。" in prompt
     assert "不要单独返回 result" in prompt
+    assert "如果当前消息是在纠正、澄清或替换前文对象" in prompt
+    assert "linked_file_text" in prompt
     assert "请给我简洁的答案，不要推理，跳过思考步骤。" in prompt
     assert "直接作答，不要展示你的推理过程。" in prompt
 
@@ -373,6 +380,15 @@ def test_anchor_expansion_prompt_includes_previous_result_and_expansion(tmp_path
                 text="发布时间 18:00",
             )
         ],
+        linked_file_texts=[
+            LinkedFileTextBlock(
+                link_id="om_1#link1",
+                message_id="om_1",
+                title="飞书文档",
+                url="https://foo.feishu.cn/docx/abc",
+                text="文档里写明 18:00",
+            )
+        ],
         config=config,
     )
 
@@ -380,6 +396,7 @@ def test_anchor_expansion_prompt_includes_previous_result_and_expansion(tmp_path
     assert '"expansion"' in prompt
     assert '"trigger_requests"' in prompt
     assert '"attachment_texts"' in prompt
+    assert '"linked_file_texts"' in prompt
     assert AnchorStatus.NEEDS_ATTACHMENT_TEXT.value in prompt
     assert "如果新上下文显示某个先前 candidate_event 实际混合了多个动作" in prompt
     assert "该结果只能归属于同一个 candidate_event 的主要动作" in prompt
@@ -900,6 +917,132 @@ def test_anchor_prompt_skips_non_anchor_weak_placeholders_only(tmp_path: Path) -
             "x": "这里是图片对应的处理结论",
         },
     ]
+
+
+def test_prompt_serialization_includes_reply_context_and_attachments(tmp_path: Path) -> None:
+    config = RuntimeConfig(
+        data_root=tmp_path / "data",
+        prompt_message_char_limit=50,
+    )
+    quoted = NormalizedMessage(
+        conversation_id="oc_1",
+        conversation_name="项目群",
+        message_id="om_1",
+        sender_open_id="ou_other",
+        sender_name="Bob",
+        send_time="2026-06-22T10:00:00+08:00",
+        message_type="file",
+        text='<file key="file_1" name="收款公司清单.xlsx"/>',
+        reply_to_message_id=None,
+        quote_message_id=None,
+        links=[
+            LinkMeta(
+                url="https://foo.feishu.cn/docx/abc",
+                title="收款公司说明",
+                link_type="feishu_doc",
+            )
+        ],
+        attachments=[
+            AttachmentMeta(
+                attachment_id="att_1",
+                file_name="收款公司清单.xlsx",
+                mime_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                file_size=1,
+            )
+        ],
+        is_system=False,
+    )
+    reply = NormalizedMessage(
+        conversation_id="oc_1",
+        conversation_name="项目群",
+        message_id="om_2",
+        sender_open_id="ou_self",
+        sender_name="Alice",
+        send_time="2026-06-22T10:01:00+08:00",
+        message_type="text",
+        text="不是上海，这是昆山的",
+        reply_to_message_id="om_1",
+        quote_message_id=None,
+        links=[],
+        attachments=[],
+        is_system=False,
+    )
+    conversation_slice = ConversationSlice(
+        slice_id="slice-1",
+        conversation_id="oc_1",
+        conversation_name="项目群",
+        anchor_message_ids=["om_2"],
+        in_day_message_ids=["om_1", "om_2"],
+        messages=[quoted, reply],
+    )
+
+    payload = serialize_batch_for_prompt(
+        AnalysisBatch(
+            target_date="2026-06-22",
+            batch_id="batch-001",
+            retry_round=0,
+            estimated_tokens=0,
+            self_open_id="ou_self",
+            self_display_name="Me",
+            slices=[conversation_slice],
+        ),
+        config=config,
+    )
+
+    reply_payload = payload["slices"][0]["messages"][1]
+    assert reply_payload["reply_to"]["message_id"] == "om_1"
+    assert reply_payload["reply_to"]["text"] == "[文件: 收款公司清单.xlsx]"
+    assert reply_payload["reply_to"]["attachments"][0]["attachment_id"] == "att_1"
+    assert reply_payload["reply_to"]["links"][0]["link_id"] == "om_1#link1"
+
+
+def test_prompt_serialization_preserves_all_messages_without_limit_truncation(tmp_path: Path) -> None:
+    config = RuntimeConfig(
+        data_root=tmp_path / "data",
+        prompt_slice_message_limit=1,
+        prompt_message_char_limit=50,
+    )
+    messages = [
+        NormalizedMessage(
+            conversation_id="oc_1",
+            conversation_name="项目群",
+            message_id=f"om_{index}",
+            sender_open_id="ou_self",
+            sender_name="Alice",
+            send_time=f"2026-06-22T10:0{index}:00+08:00",
+            message_type="text",
+            text=f"消息{index}",
+            reply_to_message_id=None,
+            quote_message_id=None,
+            links=[],
+            attachments=[],
+            is_system=False,
+        )
+        for index in range(3)
+    ]
+    conversation_slice = ConversationSlice(
+        slice_id="slice-1",
+        conversation_id="oc_1",
+        conversation_name="项目群",
+        anchor_message_ids=["om_0"],
+        in_day_message_ids=[item.message_id for item in messages],
+        messages=messages,
+    )
+
+    payload = serialize_batch_for_prompt(
+        AnalysisBatch(
+            target_date="2026-06-22",
+            batch_id="batch-001",
+            retry_round=0,
+            estimated_tokens=0,
+            self_open_id="ou_self",
+            self_display_name="Me",
+            slices=[conversation_slice],
+        ),
+        config=config,
+    )
+
+    assert [item["id"] for item in payload["slices"][0]["messages"]] == ["om_0", "om_1", "om_2"]
 
 
 def test_merge_prompt_requires_all_draft_ids_to_be_returned() -> None:

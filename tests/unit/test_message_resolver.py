@@ -82,3 +82,71 @@ def test_message_resolver_fetches_doc_title_for_bare_feishu_url(tmp_path: Path) 
     assert links[0].title == "竞品逾期调研"
     assert links_again[0].title == "竞品逾期调研"
     assert call_count == 1
+
+
+def test_message_resolver_loads_feishu_doc_link_text(tmp_path: Path) -> None:
+    def fake_runner(args):
+        return CompletedProcess(
+            args=args,
+            returncode=0,
+            stdout=json.dumps(
+                {
+                    "data": {
+                        "document": {
+                            "content": "<title>竞品逾期调研</title><p>第一段</p><p>第二段</p>"
+                        }
+                    }
+                }
+            ),
+            stderr="",
+        )
+
+    resolver = FeishuMessageContentResolver(
+        config=RuntimeConfig(data_root=tmp_path / "data"),
+        command_runner=fake_runner,
+    )
+    message = NormalizedMessage(
+        conversation_id="oc_1",
+        conversation_name="项目群",
+        message_id="om_1",
+        sender_open_id="ou_1",
+        sender_name="Alice",
+        send_time="2026-06-22T10:00:00+08:00",
+        message_type="text",
+        text="看这里 https://foo.feishu.cn/docx/abc",
+        reply_to_message_id=None,
+        quote_message_id=None,
+        links=[LinkMeta(url="https://foo.feishu.cn/docx/abc", title="方案", link_type="feishu_doc")],
+        attachments=[],
+        is_system=False,
+    )
+
+    loaded = resolver.load_link_text_if_needed(message, ["om_1#link1"], "需要正文")
+
+    assert loaded is not None
+    assert loaded[0].link_id == "om_1#link1"
+    assert "竞品逾期调研" in loaded[0].text
+    assert "第一段第二段" in loaded[0].text
+
+
+def test_message_resolver_does_not_load_plain_url_as_link_text(tmp_path: Path) -> None:
+    resolver = FeishuMessageContentResolver(config=RuntimeConfig(data_root=tmp_path / "data"))
+    message = NormalizedMessage(
+        conversation_id="oc_1",
+        conversation_name="项目群",
+        message_id="om_1",
+        sender_open_id="ou_1",
+        sender_name="Alice",
+        send_time="2026-06-22T10:00:00+08:00",
+        message_type="text",
+        text="https://example.com/report",
+        reply_to_message_id=None,
+        quote_message_id=None,
+        links=[],
+        attachments=[],
+        is_system=False,
+    )
+
+    loaded = resolver.load_link_text_if_needed(message, ["om_1#link1"], "需要正文")
+
+    assert loaded is None

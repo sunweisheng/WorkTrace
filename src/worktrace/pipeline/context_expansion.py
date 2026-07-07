@@ -9,6 +9,7 @@ from ..models import (
     AttachmentTextBlock,
     ContextRequest,
     ConversationSlice,
+    LinkedFileTextBlock,
 )
 from ..resolvers.base import ContentResolver
 from ..sources.base import ChatSource
@@ -39,14 +40,18 @@ def expand_slice_context(
 
     request_order = {
         ContextRequestType.ATTACHMENT_TEXT.value: 0,
-        ContextRequestType.EARLIER_MESSAGES.value: 1,
-        ContextRequestType.LATER_MESSAGES.value: 2,
+        ContextRequestType.LINKED_FILE_TEXT.value: 1,
+        ContextRequestType.EARLIER_MESSAGES.value: 2,
+        ContextRequestType.LATER_MESSAGES.value: 3,
     }
     ordered = sorted(requests, key=lambda item: request_order[item.request_type])
 
     message_by_id = {message.message_id: message for message in conversation_slice.messages}
     attachment_blocks: dict[str, AttachmentTextBlock] = {
         block.attachment_id: block for block in conversation_slice.attachment_texts
+    }
+    linked_file_blocks: dict[str, LinkedFileTextBlock] = {
+        block.link_id: block for block in conversation_slice.linked_file_texts
     }
 
     for request in ordered:
@@ -62,6 +67,19 @@ def expand_slice_context(
                 )
                 for block in loaded or []:
                     attachment_blocks.setdefault(block.attachment_id, block)
+            continue
+        if request.request_type == ContextRequestType.LINKED_FILE_TEXT.value:
+            for message_id in _normalize_target_message_ids(request.target_message_ids):
+                message = message_by_id.get(message_id)
+                if not message:
+                    continue
+                loaded = content_resolver.load_link_text_if_needed(
+                    message,
+                    request.target_link_ids,
+                    request.reason,
+                )
+                for block in loaded or []:
+                    linked_file_blocks.setdefault(block.link_id, block)
             continue
 
         direction = (
@@ -91,6 +109,10 @@ def expand_slice_context(
         attachment_texts=sorted(
             attachment_blocks.values(),
             key=lambda item: (item.message_id, item.attachment_id),
+        ),
+        linked_file_texts=sorted(
+            linked_file_blocks.values(),
+            key=lambda item: (item.message_id, item.link_id),
         ),
     )
 

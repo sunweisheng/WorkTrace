@@ -8,6 +8,7 @@ from ..models import (
     AnchorUnit,
     AttachmentTextBlock,
     ContextRequest,
+    LinkedFileTextBlock,
     NormalizedMessage,
 )
 from ..resolvers.base import ContentResolver
@@ -38,11 +39,14 @@ def validate_anchor_context_request(request: ContextRequest) -> bool:
         ContextRequestType.EARLIER_MESSAGES.value,
         ContextRequestType.LATER_MESSAGES.value,
         ContextRequestType.ATTACHMENT_TEXT.value,
+        ContextRequestType.LINKED_FILE_TEXT.value,
     }:
         return False
     if request.request_type == ContextRequestType.ATTACHMENT_TEXT.value:
-        return bool(request.target_attachment_ids)
-    return not request.target_attachment_ids
+        return bool(request.target_attachment_ids) and not request.target_link_ids
+    if request.request_type == ContextRequestType.LINKED_FILE_TEXT.value:
+        return bool(request.target_link_ids) and not request.target_attachment_ids
+    return not request.target_attachment_ids and not request.target_link_ids
 
 
 def expand_anchor_unit_context(
@@ -53,15 +57,25 @@ def expand_anchor_unit_context(
     content_resolver: ContentResolver,
     config: RuntimeConfig,
     existing_attachment_texts: list[AttachmentTextBlock] | None = None,
-) -> tuple[AnchorUnit, list[NormalizedMessage], list[AttachmentTextBlock], list[AttachmentTextBlock]]:
+    existing_linked_file_texts: list[LinkedFileTextBlock] | None = None,
+) -> tuple[
+    AnchorUnit,
+    list[NormalizedMessage],
+    list[AttachmentTextBlock],
+    list[AttachmentTextBlock],
+    list[LinkedFileTextBlock],
+    list[LinkedFileTextBlock],
+]:
     if not requests:
         existing = list(existing_attachment_texts or [])
-        return anchor_unit, [], existing, []
+        existing_links = list(existing_linked_file_texts or [])
+        return anchor_unit, [], existing, [], existing_links, []
 
     request_order = {
         ContextRequestType.ATTACHMENT_TEXT.value: 0,
-        ContextRequestType.EARLIER_MESSAGES.value: 1,
-        ContextRequestType.LATER_MESSAGES.value: 2,
+        ContextRequestType.LINKED_FILE_TEXT.value: 1,
+        ContextRequestType.EARLIER_MESSAGES.value: 2,
+        ContextRequestType.LATER_MESSAGES.value: 3,
     }
     ordered = sorted(
         [item for item in requests if validate_anchor_context_request(item)],
@@ -72,8 +86,12 @@ def expand_anchor_unit_context(
     attachment_blocks: dict[str, AttachmentTextBlock] = {
         block.attachment_id: block for block in (existing_attachment_texts or [])
     }
+    linked_file_blocks: dict[str, LinkedFileTextBlock] = {
+        block.link_id: block for block in (existing_linked_file_texts or [])
+    }
     new_message_ids: list[str] = []
     new_attachment_ids: list[str] = []
+    new_link_ids: list[str] = []
 
     for request in ordered:
         valid_message_ids = _normalize_valid_message_ids(request.target_message_ids)
@@ -94,6 +112,21 @@ def expand_anchor_unit_context(
                     if block.attachment_id not in attachment_blocks:
                         new_attachment_ids.append(block.attachment_id)
                     attachment_blocks.setdefault(block.attachment_id, block)
+            continue
+        if request.request_type == ContextRequestType.LINKED_FILE_TEXT.value:
+            for message_id in valid_message_ids:
+                message = message_by_id.get(message_id)
+                if not message:
+                    continue
+                loaded = content_resolver.load_link_text_if_needed(
+                    message,
+                    request.target_link_ids,
+                    request.reason,
+                )
+                for block in loaded or []:
+                    if block.link_id not in linked_file_blocks:
+                        new_link_ids.append(block.link_id)
+                    linked_file_blocks.setdefault(block.link_id, block)
             continue
 
         direction = (
@@ -126,7 +159,21 @@ def expand_anchor_unit_context(
         attachment_blocks.values(),
         key=lambda item: (item.message_id, item.attachment_id),
     )
+    all_linked_file_texts = sorted(
+        linked_file_blocks.values(),
+        key=lambda item: (item.message_id, item.link_id),
+    )
     new_attachment_texts = [
         block for block in all_attachment_texts if block.attachment_id in set(new_attachment_ids)
     ]
-    return updated_anchor_unit, new_messages, all_attachment_texts, new_attachment_texts
+    new_linked_file_texts = [
+        block for block in all_linked_file_texts if block.link_id in set(new_link_ids)
+    ]
+    return (
+        updated_anchor_unit,
+        new_messages,
+        all_attachment_texts,
+        new_attachment_texts,
+        all_linked_file_texts,
+        new_linked_file_texts,
+    )

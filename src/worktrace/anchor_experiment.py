@@ -12,7 +12,13 @@ from .config import RuntimeConfig
 from .constants import AnchorStatus, DailyRunStatus
 from .errors import AnalyzerProtocolError, ChatSourceError
 from .factories import build_runtime_dependencies
-from .models import AnchorUnit, AnchorAnalysisResult, AnchorCacheEntry, AttachmentTextBlock
+from .models import (
+    AnchorUnit,
+    AnchorAnalysisResult,
+    AnchorCacheEntry,
+    AttachmentTextBlock,
+    LinkedFileTextBlock,
+)
 from .logging_utils import log_timing
 from .pipeline.anchor_expansion import expand_anchor_unit_context
 from .pipeline.anchors import group_anchor_units
@@ -266,6 +272,7 @@ def _analyze_anchor_unit(
     current_anchor_unit = anchor_unit
     current_result: AnchorAnalysisResult | None = None
     attachment_texts: list[AttachmentTextBlock] = []
+    linked_file_texts: list[LinkedFileTextBlock] = []
     pass_records: list[dict[str, object]] = []
     cache_hit = False
     cache_key: str | None = None
@@ -292,6 +299,7 @@ def _analyze_anchor_unit(
                     "analysis": current_result.to_dict(),
                     "expanded_message_ids": [],
                     "expanded_attachment_ids": list(cache_entry.included_attachment_ids),
+                    "expanded_link_ids": list(cache_entry.included_link_ids),
                     "cache_hit": True,
                 }
             )
@@ -301,6 +309,7 @@ def _analyze_anchor_unit(
                 "pass_count": len(pass_records),
                 "passes": pass_records,
                 "attachment_texts": [],
+                "linked_file_texts": [],
                 "cache_hit": True,
                 "cache_key": cache_key,
                 "completion_mode": "cache_hit",
@@ -316,6 +325,7 @@ def _analyze_anchor_unit(
             )
             new_messages = []
             new_attachment_texts = []
+            new_linked_file_texts = []
             trigger_requests = []
         else:
             assert current_result is not None
@@ -325,6 +335,8 @@ def _analyze_anchor_unit(
                 new_messages,
                 attachment_texts,
                 new_attachment_texts,
+                linked_file_texts,
+                new_linked_file_texts,
             ) = expand_anchor_unit_context(
                 current_anchor_unit,
                 trigger_requests,
@@ -332,6 +344,7 @@ def _analyze_anchor_unit(
                 content_resolver=runtime.content_resolver,
                 config=config,
                 existing_attachment_texts=attachment_texts,
+                existing_linked_file_texts=linked_file_texts,
             )
             prompt = build_anchor_expansion_prompt(
                 target_date,
@@ -340,6 +353,7 @@ def _analyze_anchor_unit(
                 trigger_requests=trigger_requests,
                 new_messages=new_messages,
                 attachment_texts=new_attachment_texts,
+                linked_file_texts=new_linked_file_texts,
                 pass_index=pass_index,
                 config=config,
             )
@@ -353,9 +367,11 @@ def _analyze_anchor_unit(
                 stage="before",
                 pass_index=pass_index,
                 attachment_texts=attachment_texts,
+                linked_file_texts=linked_file_texts,
                 expansion_requests=trigger_requests,
                 expansion_messages=new_messages,
                 expansion_attachment_texts=new_attachment_texts,
+                expansion_linked_file_texts=new_linked_file_texts,
             )
         payload = _invoke_anchor_analyzer(analyzer, prompt)
         parsed = parse_anchor_analysis_payload(payload)
@@ -363,6 +379,7 @@ def _analyze_anchor_unit(
         cache_key = build_anchor_input_fingerprint(
             current_anchor_unit,
             attachment_texts=attachment_texts,
+            linked_file_texts=linked_file_texts,
         )
         pass_records.append(
             {
@@ -370,6 +387,7 @@ def _analyze_anchor_unit(
                 "analysis": parsed.to_dict(),
                 "expanded_message_ids": [item.message_id for item in new_messages],
                 "expanded_attachment_ids": [item.attachment_id for item in new_attachment_texts],
+                "expanded_link_ids": [item.link_id for item in new_linked_file_texts],
                 "cache_hit": False,
             }
         )
@@ -396,13 +414,14 @@ def _analyze_anchor_unit(
                 input_fingerprint=cache_key,
                 status=current_result.anchor_status,
                 pass_index=len(pass_records),
-                prompt_version="v1",
-                schema_version="v1",
+                prompt_version="v2",
+                schema_version="v2",
                 analyzer_key="codex",
                 candidate_events=list(current_result.candidate_events),
                 context_requests=list(current_result.context_requests),
                 included_message_ids=[item.message_id for item in current_anchor_unit.messages],
                 included_attachment_ids=[item.attachment_id for item in attachment_texts],
+                included_link_ids=[item.link_id for item in linked_file_texts],
                 needs_cross_anchor_merge=current_result.needs_cross_anchor_merge,
                 created_at=now_iso(config.timezone),
             )
@@ -413,6 +432,7 @@ def _analyze_anchor_unit(
         "pass_count": len(pass_records),
         "passes": pass_records,
         "attachment_texts": [item.to_dict() for item in attachment_texts],
+        "linked_file_texts": [item.to_dict() for item in linked_file_texts],
         "cache_hit": cache_hit,
         "cache_key": cache_key,
         "completion_mode": _determine_completion_mode(
@@ -543,10 +563,12 @@ def _try_restore_anchor_from_cache(
                 "analysis": current_result.to_dict(),
                 "expanded_message_ids": [],
                 "expanded_attachment_ids": list(cache_entry.included_attachment_ids),
+                "expanded_link_ids": list(cache_entry.included_link_ids),
                 "cache_hit": True,
             }
         ],
         "attachment_texts": [],
+        "linked_file_texts": [],
         "cache_hit": True,
         "cache_key": cache_key,
         "completion_mode": "cache_hit",
@@ -607,10 +629,12 @@ def _invoke_anchor_batch_first_pass(
                     "analysis": item.analysis.to_dict(),
                     "expanded_message_ids": [],
                     "expanded_attachment_ids": [],
+                    "expanded_link_ids": [],
                     "cache_hit": False,
                 }
             ],
             "attachment_texts": [],
+            "linked_file_texts": [],
             "cache_hit": False,
             "cache_key": build_anchor_input_fingerprint(anchor_unit),
             "completion_mode": _determine_completion_mode(
@@ -647,13 +671,14 @@ def _write_anchor_cache_from_payload(
             input_fingerprint=cache_key,
             status=analysis.anchor_status,
             pass_index=int(payload.get("pass_count", 1)),
-            prompt_version="v1",
-            schema_version="v1",
+            prompt_version="v2",
+            schema_version="v2",
             analyzer_key="codex",
             candidate_events=list(analysis.candidate_events),
             context_requests=list(analysis.context_requests),
             included_message_ids=[item.message_id for item in anchor_unit.messages],
             included_attachment_ids=[],
+            included_link_ids=[],
             needs_cross_anchor_merge=analysis.needs_cross_anchor_merge,
             created_at=now_iso(config.timezone),
         )
@@ -799,9 +824,11 @@ def _dump_anchor_debug_artifacts(
     pass_index: int = 1,
     output_payload: dict[str, object] | None = None,
     attachment_texts: list[AttachmentTextBlock] | None = None,
+    linked_file_texts: list[LinkedFileTextBlock] | None = None,
     expansion_requests: list | None = None,
     expansion_messages: list | None = None,
     expansion_attachment_texts: list[AttachmentTextBlock] | None = None,
+    expansion_linked_file_texts: list[LinkedFileTextBlock] | None = None,
 ) -> None:
     anchor_dir = dump_dir / target_date / _safe_anchor_dir_name(anchor_unit.anchor_unit_id)
     pass_dir = anchor_dir / f"pass_{pass_index:02d}"
@@ -817,6 +844,11 @@ def _dump_anchor_debug_artifacts(
                 dump_json([item.to_dict() for item in attachment_texts], pretty=True) + "\n",
                 encoding="utf-8",
             )
+        if linked_file_texts:
+            (pass_dir / "linked_file_texts.json").write_text(
+                dump_json([item.to_dict() for item in linked_file_texts], pretty=True) + "\n",
+                encoding="utf-8",
+            )
         if pass_index > 1:
             expansion_payload = {
                 "trigger_requests": [
@@ -827,6 +859,9 @@ def _dump_anchor_debug_artifacts(
                 ],
                 "new_attachment_texts": [
                     item.to_dict() for item in (expansion_attachment_texts or [])
+                ],
+                "new_linked_file_texts": [
+                    item.to_dict() for item in (expansion_linked_file_texts or [])
                 ],
             }
             (pass_dir / "expansion.json").write_text(

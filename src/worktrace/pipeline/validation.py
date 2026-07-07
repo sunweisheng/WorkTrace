@@ -46,6 +46,7 @@ def validate_context_request_against_slice(
         ContextRequestType.EARLIER_MESSAGES.value,
         ContextRequestType.LATER_MESSAGES.value,
         ContextRequestType.ATTACHMENT_TEXT.value,
+        ContextRequestType.LINKED_FILE_TEXT.value,
     }:
         return False
 
@@ -64,11 +65,25 @@ def validate_context_request_against_slice(
             if message.message_id in target_message_ids
             for attachment in message.attachments
         }
-        return bool(request.target_attachment_ids) and set(request.target_attachment_ids).issubset(
-            valid_attachment_ids
+        return (
+            bool(request.target_attachment_ids)
+            and set(request.target_attachment_ids).issubset(valid_attachment_ids)
+            and not request.target_link_ids
+        )
+    if request.request_type == ContextRequestType.LINKED_FILE_TEXT.value:
+        valid_link_ids = {
+            item.link_id
+            for message in conversation_slice.messages
+            if message.message_id in target_message_ids
+            for item in build_message_link_candidates(message)
+        }
+        return (
+            bool(request.target_link_ids)
+            and set(request.target_link_ids).issubset(valid_link_ids)
+            and not request.target_attachment_ids
         )
 
-    return not request.target_attachment_ids
+    return not request.target_attachment_ids and not request.target_link_ids
 
 
 def validate_batch_analysis_result(
@@ -150,6 +165,7 @@ def validate_batch_analysis_result(
                     request_type=request.request_type,
                     target_message_ids=request.target_message_ids,
                     target_attachment_ids=request.target_attachment_ids,
+                    target_link_ids=request.target_link_ids,
                     reason=request.reason,
                     limit=max(1, request.limit),
                 )

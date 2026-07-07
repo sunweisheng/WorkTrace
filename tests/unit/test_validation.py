@@ -6,6 +6,7 @@ from src.worktrace.models import (
     CrossConversationGroupResult,
     ContextRequest,
     ConversationSlice,
+    LinkMeta,
     NormalizedMessage,
     SourceBackedEventDraft,
 )
@@ -297,6 +298,99 @@ def test_validation_backfills_minimal_context_request_from_single_slice() -> Non
     assert len(validated.context_requests) == 1
     assert validated.context_requests[0].slice_id == "slice-1"
     assert validated.context_requests[0].limit == 1
+
+
+def test_validation_accepts_linked_file_text_request_with_known_link_id() -> None:
+    message = NormalizedMessage(
+        conversation_id="oc_1",
+        conversation_name="项目群",
+        message_id="om_1",
+        sender_open_id="ou_self",
+        sender_name="Me",
+        send_time="2026-06-22T10:00:00+08:00",
+        message_type="text",
+        text="请看 https://foo.feishu.cn/docx/abc",
+        reply_to_message_id=None,
+        quote_message_id=None,
+        links=[
+            LinkMeta(
+                url="https://foo.feishu.cn/docx/abc",
+                title="方案",
+                link_type="feishu_doc",
+            )
+        ],
+        attachments=[],
+        is_system=False,
+    )
+    conversation_slice = ConversationSlice(
+        slice_id="slice-1",
+        conversation_id="oc_1",
+        conversation_name="项目群",
+        anchor_message_ids=["om_1"],
+        in_day_message_ids=["om_1"],
+        messages=[message],
+    )
+    result = BatchAnalysisResult(
+        candidate_events=[],
+        context_requests=[
+            ContextRequest(
+                slice_id="slice-1",
+                request_type="linked_file_text",
+                target_message_ids=["om_1"],
+                target_link_ids=["om_1#link1"],
+                reason="需要文档正文",
+                limit=1,
+            )
+        ],
+    )
+
+    validated = validate_batch_analysis_result(result, {"slice-1": conversation_slice})
+
+    assert len(validated.context_requests) == 1
+    assert validated.context_requests[0].target_link_ids == ["om_1#link1"]
+
+
+def test_validation_drops_linked_file_text_request_with_unknown_link_id() -> None:
+    message = NormalizedMessage(
+        conversation_id="oc_1",
+        conversation_name="项目群",
+        message_id="om_1",
+        sender_open_id="ou_self",
+        sender_name="Me",
+        send_time="2026-06-22T10:00:00+08:00",
+        message_type="text",
+        text="hello",
+        reply_to_message_id=None,
+        quote_message_id=None,
+        links=[],
+        attachments=[],
+        is_system=False,
+    )
+    conversation_slice = ConversationSlice(
+        slice_id="slice-1",
+        conversation_id="oc_1",
+        conversation_name="项目群",
+        anchor_message_ids=["om_1"],
+        in_day_message_ids=["om_1"],
+        messages=[message],
+    )
+    result = BatchAnalysisResult(
+        candidate_events=[],
+        context_requests=[
+            ContextRequest(
+                slice_id="slice-1",
+                request_type="linked_file_text",
+                target_message_ids=["om_1"],
+                target_link_ids=["om_1#link1"],
+                reason="需要文档正文",
+                limit=1,
+            )
+        ],
+    )
+
+    validated = validate_batch_analysis_result(result, {"slice-1": conversation_slice})
+
+    assert validated.context_requests == []
 
 
 def test_validation_deduplicates_cross_conversation_groups() -> None:

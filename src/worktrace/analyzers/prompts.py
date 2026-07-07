@@ -14,6 +14,7 @@ from ..models import (
     CollectedSourceEvent,
     ConversationSlice,
     ContextRequest,
+    LinkedFileTextBlock,
     NormalizedMessage,
     SourceBackedEventDraft,
 )
@@ -96,6 +97,9 @@ def build_batch_analysis_prompt(
             "如需给事项挂涉及文件，只能从对应 source_message_ids 的 links 里选择 referenced_link_ids；拿不准就返回空数组。",
             "正例：本人要求他人汇报、本人审批、本人同步、本人催办、本人推进，都算与本人直接相关。",
             "反例：他人之间讨论自己的工作、自己的承诺、自己的处理进度，即使本人在该会话里发过言，也不算与本人直接相关。",
+            "如果当前消息是在纠正、澄清或替换前文对象，topic、content、object_hint 必须以当前消息确认后的对象为准。",
+            "reply_to 或 quote_to 里的内容只能作为背景，不能覆盖当前消息里更具体、更晚确认的对象。",
+            "如果 reply_to 或 quote_to 指向附件、文件消息、飞书文档或 wiki，且事件判断依赖其内容，必须返回 context_requests 请求补读，不要猜。",
             "拿不准就用 context_requests，不要猜。",
         ],
         "required_output_schema": {
@@ -113,13 +117,14 @@ def build_batch_analysis_prompt(
             ],
             "context_requests": [
                 {
-                    "request_type": "earlier_messages | later_messages | attachment_text",
+                    "request_type": "earlier_messages | later_messages | attachment_text | linked_file_text",
                     "target_message_ids": ["message_id"],
                     "target_attachment_ids": ["attachment_id"],
+                    "target_link_ids": ["message_id#link1"],
                 }
             ],
         },
-        "input": serialize_batch_for_prompt(batch),
+        "input": serialize_batch_for_prompt(batch, config=runtime_config),
     }
     return dump_json(protocol, pretty=True)
 
@@ -299,6 +304,9 @@ def build_anchor_analysis_prompt(
             "content 里如果包含结果信息，也只能归属于自己的动作，不要串到别的动作上。",
             "例如：已同步给老板、老板未回复可视为已知悉，属于同步动作，不属于优惠券核对动作。",
             "如果上下文不够，就用 context_requests，不要猜。",
+            "如果当前消息是在纠正、澄清或替换前文对象，topic、content、object_hint 必须以当前消息确认后的对象为准。",
+            "reply_to 或 quote_to 里的内容只能作为背景，不能覆盖当前消息里更具体、更晚确认的对象。",
+            "如果 reply_to 或 quote_to 指向附件、文件消息、飞书文档或 wiki，且事件判断依赖其内容，必须返回 context_requests 请求补读，不要猜。",
             "只有事件明显跨多个锚点窗口或会话时，needs_cross_anchor_merge 才设为 true。",
             "如果有明确结果，直接融入 content，不要单独返回 result。",
         ],
@@ -321,9 +329,10 @@ def build_anchor_analysis_prompt(
                 "source_message_ids": ["message_id"],
             },
             "context_requests_item": {
-                "request_type": "earlier_messages | later_messages | attachment_text",
+                "request_type": "earlier_messages | later_messages | attachment_text | linked_file_text",
                 "target_message_ids": ["message_id"],
                 "target_attachment_ids": ["attachment_id"],
+                "target_link_ids": ["message_id#link1"],
             },
             "needs_cross_anchor_merge": "boolean",
         },
@@ -373,6 +382,9 @@ def build_anchor_batch_analysis_prompt(
             "同步/通知 与 核对/校验/执行/跟进，通常不是同一事件。",
             "content 里如果包含结果信息，也只能归属于自己的动作，不要串到别的动作上。",
             "如果上下文不够，就用 context_requests，不要猜。",
+            "如果当前消息是在纠正、澄清或替换前文对象，topic、content、object_hint 必须以当前消息确认后的对象为准。",
+            "reply_to 或 quote_to 里的内容只能作为背景，不能覆盖当前消息里更具体、更晚确认的对象。",
+            "如果 reply_to 或 quote_to 指向附件、文件消息、飞书文档或 wiki，且事件判断依赖其内容，必须返回 context_requests 请求补读，不要猜。",
             "只有事件明显跨多个锚点窗口或会话时，needs_cross_anchor_merge 才设为 true。",
             "如果有明确结果，直接融入 content，不要单独返回 result。",
         ],
@@ -399,9 +411,10 @@ def build_anchor_batch_analysis_prompt(
                             "source_message_ids": ["message_id"],
                         },
                         "context_requests_item": {
-                            "request_type": "earlier_messages | later_messages | attachment_text",
+                            "request_type": "earlier_messages | later_messages | attachment_text | linked_file_text",
                             "target_message_ids": ["message_id"],
                             "target_attachment_ids": ["attachment_id"],
+                            "target_link_ids": ["message_id#link1"],
                         },
                         "needs_cross_anchor_merge": "boolean",
                     },
@@ -428,6 +441,7 @@ def build_anchor_expansion_prompt(
     trigger_requests: list[ContextRequest],
     new_messages: list[NormalizedMessage],
     attachment_texts: list[AttachmentTextBlock],
+    linked_file_texts: list[LinkedFileTextBlock] | None = None,
     pass_index: int = 2,
     config: RuntimeConfig | None = None,
 ) -> str:
@@ -485,6 +499,9 @@ def build_anchor_expansion_prompt(
                 "不属于单独的优惠券配置核对动作。"
             ),
             "只有新增消息或附件正文仍无法解决事件判断时，才请求更多上下文。",
+            "如果当前消息是在纠正、澄清或替换前文对象，topic、content、object_hint 必须以当前消息确认后的对象为准。",
+            "reply_to 或 quote_to 里的内容只能作为背景，不能覆盖当前消息里更具体、更晚确认的对象。",
+            "如果 reply_to 或 quote_to 指向附件、文件消息、飞书文档或 wiki，且事件判断依赖其内容，必须请求补读，不要猜。",
             "只有事件可能跨其他锚点窗口或会话时，needs_cross_anchor_merge 才设为 true。",
             "如果有明确结果，直接融入 content，不要单独返回 result。",
         ],
@@ -510,9 +527,10 @@ def build_anchor_expansion_prompt(
             ],
             "context_requests": [
                 {
-                    "request_type": "earlier_messages | later_messages | attachment_text",
+                    "request_type": "earlier_messages | later_messages | attachment_text | linked_file_text",
                     "target_message_ids": ["message_id"],
                     "target_attachment_ids": ["attachment_id"],
+                    "target_link_ids": ["message_id#link1"],
                 }
             ],
             "needs_cross_anchor_merge": True,
@@ -533,6 +551,10 @@ def build_anchor_expansion_prompt(
                 "attachment_texts": [
                     serialize_attachment_for_prompt(block, runtime_config)
                     for block in attachment_texts
+                ],
+                "linked_file_texts": [
+                    serialize_linked_file_text_for_prompt(block, runtime_config)
+                    for block in (linked_file_texts or [])
                 ],
             },
         },
@@ -566,8 +588,11 @@ def serialize_slice_for_prompt(
     conversation_slice: ConversationSlice,
     config: RuntimeConfig,
 ) -> dict[str, object]:
-    limited_messages = conversation_slice.messages[: config.prompt_slice_message_limit]
-    serialized_messages = _serialize_prompt_messages(conversation_slice, limited_messages, config)
+    serialized_messages = _serialize_prompt_messages(
+        conversation_slice,
+        conversation_slice.messages,
+        config,
+    )
     serialized: dict[str, object] = {
         "slice_id": conversation_slice.slice_id,
         "conversation_id": conversation_slice.conversation_id,
@@ -575,14 +600,15 @@ def serialize_slice_for_prompt(
     }
     if conversation_slice.conversation_name:
         serialized["conversation_name"] = conversation_slice.conversation_name
-    if len(conversation_slice.messages) > len(limited_messages):
-        serialized["omitted_message_count"] = (
-            len(conversation_slice.messages) - len(limited_messages)
-        )
     if conversation_slice.attachment_texts:
         serialized["attachment_texts"] = [
             serialize_attachment_for_prompt(block, config)
             for block in conversation_slice.attachment_texts
+        ]
+    if conversation_slice.linked_file_texts:
+        serialized["linked_file_texts"] = [
+            serialize_linked_file_text_for_prompt(block, config)
+            for block in conversation_slice.linked_file_texts
         ]
     return serialized
 
@@ -591,15 +617,16 @@ def serialize_anchor_unit_for_prompt(
     anchor_unit: AnchorUnit,
     config: RuntimeConfig,
 ) -> dict[str, object]:
-    limited_messages = anchor_unit.messages[: config.prompt_slice_message_limit]
-    serialized_messages = _serialize_anchor_prompt_messages(anchor_unit, limited_messages, config)
+    serialized_messages = _serialize_anchor_prompt_messages(
+        anchor_unit,
+        anchor_unit.messages,
+        config,
+    )
     serialized: dict[str, object] = {
         "messages": serialized_messages,
     }
     if anchor_unit.conversation_name:
         serialized["conversation_name"] = anchor_unit.conversation_name
-    if len(anchor_unit.messages) > len(limited_messages):
-        serialized["omitted_message_count"] = len(anchor_unit.messages) - len(limited_messages)
     if anchor_unit.attachment_refs:
         serialized["attachment_refs"] = [
             {
@@ -665,6 +692,7 @@ def serialize_context_request_for_prompt(request: ContextRequest) -> dict[str, o
         "request_type": request.request_type,
         "target_message_ids": list(request.target_message_ids),
         "target_attachment_ids": list(request.target_attachment_ids),
+        "target_link_ids": list(request.target_link_ids),
         "reason": request.reason,
         "limit": request.limit,
     }
@@ -673,6 +701,8 @@ def serialize_context_request_for_prompt(request: ContextRequest) -> dict[str, o
 def serialize_message_for_prompt(
     message: NormalizedMessage,
     config: RuntimeConfig,
+    *,
+    message_lookup: dict[str, NormalizedMessage] | None = None,
 ) -> dict[str, object]:
     compressed_text = _trim_text(
         _compress_prompt_message_text(message),
@@ -684,6 +714,9 @@ def serialize_message_for_prompt(
         "s": message.sender_name or message.sender_open_id or "",
         "x": compressed_text,
     }
+    attachments = _serialize_message_attachments(message)
+    if attachments:
+        serialized["attachments"] = attachments
     links = [
         {
             "link_id": item.link_id,
@@ -696,6 +729,21 @@ def serialize_message_for_prompt(
     ]
     if links:
         serialized["links"] = links
+    if message_lookup is not None:
+        reply_to = _serialize_relation_summary(
+            message.reply_to_message_id,
+            message_lookup=message_lookup,
+            config=config,
+        )
+        if reply_to:
+            serialized["reply_to"] = reply_to
+        quote_to = _serialize_relation_summary(
+            message.quote_message_id,
+            message_lookup=message_lookup,
+            config=config,
+        )
+        if quote_to:
+            serialized["quote_to"] = quote_to
     return serialized
 
 
@@ -704,9 +752,14 @@ def _serialize_prompt_messages(
     messages: list[NormalizedMessage],
     config: RuntimeConfig,
 ) -> list[dict[str, object]]:
+    message_lookup = {message.message_id: message for message in conversation_slice.messages}
     serialized_messages: list[dict[str, object]] = []
     for message in messages:
-        serialized = serialize_message_for_prompt(message, config)
+        serialized = serialize_message_for_prompt(
+            message,
+            config,
+            message_lookup=message_lookup,
+        )
         if _is_prompt_message_meaningful(serialized):
             serialized_messages.append(serialized)
     return serialized_messages
@@ -718,9 +771,14 @@ def _serialize_anchor_prompt_messages(
     config: RuntimeConfig,
 ) -> list[dict[str, object]]:
     anchor_ids = set(anchor_unit.anchor_message_ids)
+    message_lookup = {message.message_id: message for message in anchor_unit.messages}
     serialized_messages: list[dict[str, object]] = []
     for message in messages:
-        serialized = serialize_message_for_prompt(message, config)
+        serialized = serialize_message_for_prompt(
+            message,
+            config,
+            message_lookup=message_lookup,
+        )
         if not _is_prompt_message_meaningful(serialized):
             continue
         if _is_non_anchor_weak_placeholder(message, serialized, anchor_ids):
@@ -732,7 +790,7 @@ def _serialize_anchor_prompt_messages(
 def _is_prompt_message_meaningful(message: dict[str, object]) -> bool:
     text = clean_text(str(message.get("x", "")))
     if not text:
-        return False
+        return bool(message.get("attachments")) or bool(message.get("links"))
     if text == "[Sticker]":
         return False
     return True
@@ -744,6 +802,8 @@ def _is_non_anchor_weak_placeholder(
     anchor_ids: set[str],
 ) -> bool:
     if message.message_id in anchor_ids:
+        return False
+    if serialized.get("attachments") or serialized.get("links"):
         return False
     text = clean_text(str(serialized.get("x", "")))
     return text in {
@@ -763,6 +823,68 @@ def serialize_attachment_for_prompt(
         "mid": block.message_id,
         "name": block.file_name,
         "text": _trim_text(block.text, config.prompt_attachment_char_limit),
+    }
+
+
+def serialize_linked_file_text_for_prompt(
+    block: LinkedFileTextBlock,
+    config: RuntimeConfig,
+) -> dict[str, object]:
+    return {
+        "link_id": block.link_id,
+        "mid": block.message_id,
+        "title": block.title,
+        "url": block.url,
+        "text": _trim_text(block.text, config.prompt_attachment_char_limit),
+    }
+
+
+def _serialize_message_attachments(message: NormalizedMessage) -> list[dict[str, str]]:
+    return [
+        {
+            "attachment_id": item.attachment_id,
+            "file_name": item.file_name,
+            "mime_type": item.mime_type,
+        }
+        for item in message.attachments
+    ]
+
+
+def _serialize_relation_summary(
+    target_message_id: str | None,
+    *,
+    message_lookup: dict[str, NormalizedMessage],
+    config: RuntimeConfig,
+) -> dict[str, object] | None:
+    if not target_message_id:
+        return None
+    target = message_lookup.get(target_message_id)
+    if target is None:
+        return {
+            "message_id": target_message_id,
+            "sender": "",
+            "text": "",
+            "attachments": [],
+            "links": [],
+        }
+    return {
+        "message_id": target.message_id,
+        "sender": target.sender_name or target.sender_open_id or "",
+        "text": _trim_text(
+            _compress_prompt_message_text(target),
+            min(config.prompt_message_char_limit, 120),
+        ),
+        "attachments": _serialize_message_attachments(target),
+        "links": [
+            {
+                "link_id": item.link_id,
+                "message_id": item.message_id,
+                "url": item.url,
+                "title": item.title,
+                "link_type": item.link_type,
+            }
+            for item in build_message_link_candidates(target)
+        ],
     }
 
 

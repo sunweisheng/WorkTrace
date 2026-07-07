@@ -234,6 +234,34 @@ class AttachmentTextBlock:
 
 
 @dataclass(frozen=True)
+class LinkedFileTextBlock:
+    link_id: str
+    message_id: str
+    title: str
+    url: str
+    text: str
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> LinkedFileTextBlock:
+        return cls(
+            link_id=str(data["link_id"]),
+            message_id=str(data["message_id"]),
+            title=str(data.get("title", "")),
+            url=str(data.get("url", "")),
+            text=str(data.get("text", "")),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "link_id": self.link_id,
+            "message_id": self.message_id,
+            "title": self.title,
+            "url": self.url,
+            "text": self.text,
+        }
+
+
+@dataclass(frozen=True)
 class ConversationSlice:
     slice_id: str
     conversation_id: str
@@ -242,6 +270,7 @@ class ConversationSlice:
     in_day_message_ids: list[str]
     messages: list[NormalizedMessage]
     attachment_texts: list[AttachmentTextBlock] = field(default_factory=list)
+    linked_file_texts: list[LinkedFileTextBlock] = field(default_factory=list)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> ConversationSlice:
@@ -259,6 +288,10 @@ class ConversationSlice:
                 AttachmentTextBlock.from_dict(item)
                 for item in _dict_list(data.get("attachment_texts"))
             ],
+            linked_file_texts=[
+                LinkedFileTextBlock.from_dict(item)
+                for item in _dict_list(data.get("linked_file_texts"))
+            ],
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -270,6 +303,7 @@ class ConversationSlice:
             "in_day_message_ids": list(self.in_day_message_ids),
             "messages": [item.to_dict() for item in self.messages],
             "attachment_texts": [item.to_dict() for item in self.attachment_texts],
+            "linked_file_texts": [item.to_dict() for item in self.linked_file_texts],
         }
 
 
@@ -364,9 +398,10 @@ class ContextRequest:
     slice_id: str
     request_type: str
     target_message_ids: list[str]
-    target_attachment_ids: list[str]
-    reason: str
-    limit: int
+    target_attachment_ids: list[str] = field(default_factory=list)
+    target_link_ids: list[str] = field(default_factory=list)
+    reason: str = ""
+    limit: int = 1
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> ContextRequest:
@@ -375,6 +410,7 @@ class ContextRequest:
             request_type=str(data["request_type"]),
             target_message_ids=_string_list(data.get("target_message_ids")),
             target_attachment_ids=_string_list(data.get("target_attachment_ids")),
+            target_link_ids=_string_list(data.get("target_link_ids")),
             reason=str(data.get("reason", "")),
             limit=int(data.get("limit", 1)),
         )
@@ -385,6 +421,7 @@ class ContextRequest:
             "request_type": self.request_type,
             "target_message_ids": list(self.target_message_ids),
             "target_attachment_ids": list(self.target_attachment_ids),
+            "target_link_ids": list(self.target_link_ids),
             "reason": self.reason,
             "limit": self.limit,
         }
@@ -795,6 +832,7 @@ class AnchorCacheEntry:
     context_requests: list[ContextRequest] = field(default_factory=list)
     included_message_ids: list[str] = field(default_factory=list)
     included_attachment_ids: list[str] = field(default_factory=list)
+    included_link_ids: list[str] = field(default_factory=list)
     needs_cross_anchor_merge: bool = False
     created_at: str = ""
 
@@ -819,6 +857,7 @@ class AnchorCacheEntry:
             ],
             included_message_ids=_string_list(data.get("included_message_ids")),
             included_attachment_ids=_string_list(data.get("included_attachment_ids")),
+            included_link_ids=_string_list(data.get("included_link_ids")),
             needs_cross_anchor_merge=bool(data.get("needs_cross_anchor_merge", False)),
             created_at=str(data.get("created_at", "")),
         )
@@ -837,6 +876,7 @@ class AnchorCacheEntry:
             "context_requests": [item.to_dict() for item in self.context_requests],
             "included_message_ids": list(self.included_message_ids),
             "included_attachment_ids": list(self.included_attachment_ids),
+            "included_link_ids": list(self.included_link_ids),
             "needs_cross_anchor_merge": self.needs_cross_anchor_merge,
             "created_at": self.created_at,
         }

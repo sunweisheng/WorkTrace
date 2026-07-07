@@ -14,6 +14,7 @@ class ContextRequestType(str, Enum):
     EARLIER_MESSAGES = "earlier_messages"
     LATER_MESSAGES = "later_messages"
     ATTACHMENT_TEXT = "attachment_text"
+    LINKED_FILE_TEXT = "linked_file_text"
 
 
 class ContextDirection(str, Enum):

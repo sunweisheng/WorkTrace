@@ -60,6 +60,7 @@ def test_batch_parser_drops_invalid_context_request_items() -> None:
                     "request_type": "later_messages",
                     "target_message_ids": ["om_1"],
                     "target_attachment_ids": [],
+                    "target_link_ids": [],
                     "reason": "need more context",
                     "limit": 1,
                 },
@@ -73,6 +74,26 @@ def test_batch_parser_drops_invalid_context_request_items() -> None:
 
     assert len(batch.context_requests) == 1
     assert batch.context_requests[0].slice_id == "slice-1"
+
+
+def test_batch_parser_accepts_linked_file_text_request() -> None:
+    batch = parse_batch_analysis_payload(
+        {
+            "candidate_events": [],
+            "context_requests": [
+                {
+                    "request_type": "linked_file_text",
+                    "target_message_ids": ["om_1"],
+                    "target_attachment_ids": [],
+                    "target_link_ids": ["om_1#link1"],
+                    "limit": 1,
+                }
+            ],
+        }
+    )
+
+    assert batch.context_requests[0].request_type == "linked_file_text"
+    assert batch.context_requests[0].target_link_ids == ["om_1#link1"]
 
 
 def test_batch_parser_accepts_minimal_payload_shape() -> None:
@@ -90,6 +111,7 @@ def test_batch_parser_accepts_minimal_payload_shape() -> None:
                     "request_type": "later_messages",
                     "target_message_ids": ["om_1"],
                     "target_attachment_ids": [],
+                    "target_link_ids": [],
                 }
             ],
         }

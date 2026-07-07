@@ -112,6 +112,7 @@ data/anchor-debug/<target_date>/<safe_anchor_unit_id>/
 - 如发生扩窗，还会有 `pass_02/`, `pass_03/` 等
 - second pass 会额外写 `expansion.json`
 - 如已补附件正文，会写 `attachment_texts.json`
+- 如已补飞书文档 / wiki 正文，会写 `linked_file_texts.json`
 
 这些调试文件可能包含：
 
@@ -119,6 +120,7 @@ data/anchor-debug/<target_date>/<safe_anchor_unit_id>/
 - 送给 analyzer 的 prompt
 - 模型返回结果
 - 按需补充的附件正文
+- 按需补充的飞书文档 / wiki 正文
 - 多轮扩窗时新增的请求与上下文
 
 它们只在显式启用 `--dump-dir` 时落盘，不属于正式日处理主流程输出。
@@ -178,6 +180,8 @@ data/anchor-debug/2026-06-23/oc_xxx__om_xxx/
 - 锚点级缓存复用
 - 调试文件落盘
 - 实验结果摘要统计
+- reply / quote 关系摘要入模
+- 飞书文档 / wiki 正文按需补读
 
 当前实验路径还没有做：
 
