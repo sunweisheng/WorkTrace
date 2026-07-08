@@ -178,9 +178,12 @@ def test_load_runtime_config_overrides_rejects_invalid_rule_file(tmp_path: Path)
     assert "event rules config" in str(exc_info.value)
 
 
-def test_repo_event_rules_exclude_performance_related_events() -> None:
+def test_repo_event_rules_exclude_personnel_sensitive_events() -> None:
     payload = json.loads(Path("config/event_rules.json").read_text(encoding="utf-8"))
 
+    assert "劳动仲裁" in payload["confidential_event_keywords"]
+    assert "劳动仲裁" in payload["excluded_event_content_signatures"]
+    assert "绩效" in payload["confidential_event_keywords"]
     assert "绩效" in payload["excluded_event_content_signatures"]
 
 

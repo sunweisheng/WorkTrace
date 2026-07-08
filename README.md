@@ -254,30 +254,126 @@ WORKTRACE_LLM_SLEEP_MIN_SECONDS=1
 WORKTRACE_LLM_SLEEP_MAX_SECONDS=2
 ```
 
-事件是否值得保留由结构化字段和 Python 门槛判断，不靠维护大型关键词表。如果需要配置提示词敏感提醒，或精确排除某些已确认无价值的事件标题/内容特征，请维护规则文件 [config/event_rules.json](/Users/sunweisheng/Documents/GitHub/WorkTrace/config/event_rules.json)：
+事件是否值得保留，主要还是靠结构化字段和 Python 门槛判断，不靠维护一大堆关键词。
+
+`event_rules.json` 的用途只有两个：
+
+- 给 LLM 提示词补充“哪些敏感话题不要提炼”
+- 用少量精确规则，直接排除你已经确认不该进入结果的事件
+
+如果要教别人用，最简单的理解就是：
+
+- `confidential_event_keywords`：只用于提示词提醒模型回避这类工作敏感话题
+- `non_work_sensitive_keywords`：只用于提示词提醒模型回避这类非工作敏感内容
+- `excluded_event_topics`：按事件标题精确排除
+- `excluded_event_content_signatures`：按事件内容“包含某段特征文本”排除
+
+对应规则文件是 [config/event_rules.json](/Users/sunweisheng/Documents/GitHub/WorkTrace/config/event_rules.json)：
 
 ```json
 {
-  "confidential_event_keywords": ["工资", "薪资"],
+  "confidential_event_keywords": ["工资", "薪资", "劳动仲裁", "绩效"],
   "non_work_sensitive_keywords": ["吵架", "辱骂"],
-  "excluded_event_topics": [],
-  "excluded_event_content_signatures": []
+  "excluded_event_topics": ["代码同步"],
+  "excluded_event_content_signatures": ["劳动仲裁", "绩效", "git pull"]
 }
 ```
 
-敏感关键词只用于生成提示词约束，不触发 Python 最终关键词过滤。`excluded_event_topics` 是标题精确匹配，`excluded_event_content_signatures` 是内容包含匹配；两者会在来源事件阶段和合并后事件阶段都检查。
+这 4 个字段的实际效果如下：
 
-如果需要彻底排除某些会话，不让它们进入会话信息提取链路，请单独维护 [config/conversation_blacklist.json](/Users/sunweisheng/Documents/GitHub/WorkTrace/config/conversation_blacklist.json)：
+- `confidential_event_keywords`
+  只进提示词，不做 Python 最终关键词过滤。
+  适合放：工资、薪资、绩效、劳动仲裁这类你希望模型默认不要提炼的工作敏感信息。
+- `non_work_sensitive_keywords`
+  只进提示词，不做 Python 最终关键词过滤。
+  适合放：吵架、辱骂、调情这类明显不该进入工作事件的非工作敏感内容。
+- `excluded_event_topics`
+  按标题精确匹配。
+  只有事件标题清楚且稳定时才适合放这里，例如固定会被提炼成 `代码同步` 的噪音事件。
+- `excluded_event_content_signatures`
+  按内容包含匹配。
+  适合放标题不稳定、但正文里总会出现固定特征词的事件，例如 `劳动仲裁`、`绩效`、`git pull`。
+
+再直白一点：
+
+- 想“提醒模型少碰某类敏感话题”，放 `confidential_event_keywords` 或 `non_work_sensitive_keywords`
+- 想“无论模型怎么写，只要命中就直接排除”，放 `excluded_event_topics` 或 `excluded_event_content_signatures`
+
+几个常见例子：
+
+- 例 1：`劳动仲裁取数跟进`
+  标题可能叫“劳动仲裁取数跟进”“仲裁数据整理”“仲裁取数协调”，但正文通常会出现 `劳动仲裁`，更适合放进 `excluded_event_content_signatures`
+- 例 2：`绩效版本最终版确认`
+  标题写法可能变化，但正文大概率会出现 `绩效`，适合放进 `excluded_event_content_signatures`
+- 例 3：`代码同步`
+  如果这类噪音标题很固定，直接放进 `excluded_event_topics` 更干脆
+
+使用原则：
+
+- 不要把 `excluded_event_topics` / `excluded_event_content_signatures` 当成“大而全的事件价值判断系统”
+- 这两个字段更适合做“少量精确拉黑”
+- 如果只是希望模型更保守，不一定要强制排除，优先放 `confidential_event_keywords` 或 `non_work_sensitive_keywords`
+
+当前代码语义是：
+
+- `confidential_event_keywords` 和 `non_work_sensitive_keywords` 只用于生成提示词约束
+- `excluded_event_topics` 是标题精确匹配
+- `excluded_event_content_signatures` 是内容包含匹配
+- `excluded_event_topics` 和 `excluded_event_content_signatures` 都会在候选事件阶段、以及合并后事件阶段各检查一次
+
+如果需要彻底排除某些会话，不让它们进入消息收集链路，请单独维护 [config/conversation_blacklist.json](/Users/sunweisheng/Documents/GitHub/WorkTrace/config/conversation_blacklist.json)。
+
+这份配置和 `event_rules.json` 的区别很简单：
+
+- `event_rules.json` 是“会话已经进来了，再决定哪些事件不要保留”
+- `conversation_blacklist.json` 是“这个群或会话一开始就不要进来”
+
+如果你要教别人用，可以直接这么说：
+
+- 某个群长期和自己工作事件无关，直接拉黑这个群 ID
+- 某个群虽然偶尔有工作信息，但出于隐私或噪音考虑，明确不希望 WorkTrace 读取，也直接拉黑这个群 ID
+- 只要进了这个黑名单，WorkTrace 连这个群当天的消息都不会收
+
+配置格式如下：
 
 ```json
 {
   "excluded_conversation_ids": [
-    "oc_be07388984c344d1b2d68c4a92b74c81"
+    "oc_be07388984c344d1b2d68c4a92b74c81",
+    "oc_0021bbab18a1c2311f76ea72f23cbe18"
   ]
 }
 ```
 
-命中黑名单的会话会在“目标会话发现”阶段被直接跳过，不会继续进入消息拉取、会话切片、LLM 提炼和跨会话合并。
+字段含义只有一个：
+
+- `excluded_conversation_ids`
+  要彻底排除的飞书会话 ID 列表。支持放多个，系统会自动去重。
+
+命中黑名单后的效果也很明确：
+
+- 会在“目标会话发现”阶段直接跳过
+- 不会继续进入消息拉取
+- 不会进入会话切片
+- 不会进入 LLM 提炼
+- 不会进入后续跨会话合并
+
+适用场景：
+
+- 明确不想收的群
+- 长期噪音群
+- 敏感群
+- 和个人日报目标无关、但自己又经常发言的群
+
+不适用场景：
+
+- 不是整个群都要排除，只是想排除其中某类事件
+  这时应该优先用 `event_rules.json`
+
+一个直观例子：
+
+- 你已经确认 `oc_0021bbab18a1c2311f76ea72f23cbe18` 这个群不该进入 WorkTrace
+  就把它加到 `excluded_conversation_ids` 里，后面这个群的消息就不会再被收集
 
 环境变量会覆盖 `.env` 中的同名项，因此也可以在 CI 或个人 shell 中单独注入。
 

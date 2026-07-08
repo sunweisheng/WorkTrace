@@ -3,6 +3,7 @@
     "工资",
     "薪资",
     "薪酬",
+    "劳动仲裁",
     "绩效",
     "绩效考核",
     "绩效评定",
@@ -27,6 +28,7 @@
   ],
   "excluded_event_topics": [],
   "excluded_event_content_signatures": [
+    "劳动仲裁",
     "绩效"
   ]
 }
