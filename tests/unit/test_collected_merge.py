@@ -118,6 +118,38 @@ def test_extract_person_name_from_date_first_filename() -> None:
     assert extract_person_name_from_filename("张三-2026-06-29-merged.md") == ""
 
 
+def test_collected_merge_accepts_upstream_merged_markdown_and_preserves_sources(
+    tmp_path: Path,
+) -> None:
+    inbox = tmp_path / "merge_inbox" / "2026" / "06" / "29"
+    _write_day_doc(
+        inbox / "2026-06-29-部门A-merged.md",
+        [
+            WorkEvent(
+                date="2026-06-29",
+                event_id="evt-merged",
+                title="项目排期",
+                content="部门A已完成项目排期确认。",
+                object_hint="项目排期",
+                retention_reason="decision_made",
+                retention_detail="张三和李四分别确认项目排期，部门A完成汇总并形成一致结论。",
+                source_people=["张三", "李四"],
+                source_event_ids=["evt-a", "evt-b"],
+            )
+        ],
+        tmp_path,
+    )
+
+    analyzer = FakeAnalyzer()
+    result = _build_runner(tmp_path, analyzer=analyzer).run("2026-06-29")
+
+    assert result.source_file_count == 1
+    assert analyzer.calls[0]["events"][0].person_name == "部门A"
+    content = Path(result.output_path or "").read_text(encoding="utf-8")
+    assert "- 来源人员: 张三、李四" in content
+    assert "- 来源事件 ID: evt-a、evt-b" in content
+
+
 def test_collected_merge_reads_sources_and_renders_source_fields(tmp_path: Path) -> None:
     inbox = tmp_path / "merge_inbox" / "2026" / "06" / "29"
     inbox.mkdir(parents=True)
@@ -180,6 +212,42 @@ def test_collected_merge_reads_sources_and_renders_source_fields(tmp_path: Path)
     assert "- 来源人员: 张三、李四" in content
     assert "- 来源事件 ID: evt-shared" in content
     assert "项目排期确认" in content
+
+
+def test_collected_merge_skips_current_output_file_but_reads_other_merged_files(
+    tmp_path: Path,
+) -> None:
+    inbox = tmp_path / "merge_inbox" / "2026" / "06" / "29"
+    _write_day_doc(
+        inbox / "2026-06-29-管理者-merged.md",
+        [
+            _event(
+                event_id="evt-self",
+                title="旧汇总",
+                content="这是当前目录已有的旧汇总输出。",
+                retention_detail="旧汇总输出不应被再次读入。",
+            )
+        ],
+        tmp_path,
+    )
+    _write_day_doc(
+        inbox / "2026-06-29-项目A-merged.md",
+        [
+            _event(
+                event_id="evt-upstream",
+                title="项目A事项",
+                content="项目A merged 文件应继续作为输入。",
+                retention_detail="项目A上游汇总文件应继续参与合并。",
+            )
+        ],
+        tmp_path,
+    )
+
+    analyzer = FakeAnalyzer()
+    result = _build_runner(tmp_path, analyzer=analyzer).run("2026-06-29")
+
+    assert result.source_file_count == 1
+    assert [event.person_name for event in analyzer.calls[0]["events"]] == ["项目A"]
 
 
 def test_collected_merge_marks_merge_owner_sources(tmp_path: Path) -> None:
@@ -594,6 +662,8 @@ def test_collected_merge_prompt_contains_sensitive_rules() -> None:
 
     assert payload["merge_owner_person"] == "张三"
     assert payload["remaining_events"][0]["is_merge_owner_source"] is True
+    assert payload["remaining_events"][0]["source_people"] == []
+    assert payload["remaining_events"][0]["source_event_ids"] == []
     assert "涉及工资、薪资、薪酬" in prompt
     assert "涉及吵架、辱骂" in prompt
     assert "不要输出对应 group" in prompt

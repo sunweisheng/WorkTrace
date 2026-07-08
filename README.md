@@ -301,7 +301,7 @@ merge_inbox/YYYY/MM/DD/
     └── YYYY-MM-DD-王五.md
 ```
 
-日期根目录会生成一个 `YYYY-MM-DD-登录人姓名-merged.md`；日期目录下每个一级子目录也会单独生成自己的团队汇总文件。每个合并范围只读取当前目录下的普通 `.md` 文件，跳过旧 `_merged.md`、新 `*-merged.md`、隐藏文件、非 Markdown 文件和更深层子目录。
+日期根目录会生成一个 `YYYY-MM-DD-登录人姓名-merged.md`；日期目录下每个一级子目录也会单独生成自己的团队汇总文件。每个合并范围会读取当前目录下的 `.md` 文件，支持把上游 `*-merged.md` 继续作为输入，但仍会跳过旧 `_merged.md`、当前目录本次输出同名 `YYYY-MM-DD-登录人姓名-merged.md`、隐藏文件、非 Markdown 文件和更深层子目录。
 
 执行命令：
 

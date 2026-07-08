@@ -671,6 +671,8 @@ def _serialize_collected_source_event_for_prompt(
         "source_file": source_event.source_file,
         "is_merge_owner_source": source_event.is_merge_owner_source,
         "event_id": source_event.event.event_id,
+        "source_people": list(source_event.event.source_people),
+        "source_event_ids": list(source_event.event.source_event_ids),
         "title": source_event.event.title,
         "content": source_event.event.content,
         "object_hint": source_event.event.object_hint,

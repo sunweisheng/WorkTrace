@@ -248,8 +248,16 @@ class MarkdownEventStore(EventStore):
                 break
             event_id_start = start + len(start_marker)
             event_id_end = body.find('" -->', event_id_start)
+            if event_id_end == -1:
+                raise StoreWriteError("Malformed event block: missing event_id terminator.")
             event_id = body[event_id_start:event_id_end]
-            block_end = body.find(end_marker, event_id_end)
+            block_end, next_cursor = self._locate_event_block_end(
+                body=body,
+                event_id=event_id,
+                search_start=event_id_end,
+                start_marker=start_marker,
+                end_marker=end_marker,
+            )
             block = body[event_id_end + 5:block_end].strip()
             title = self._extract_value(
                 block,
@@ -298,9 +306,56 @@ class MarkdownEventStore(EventStore):
                     retention_detail=retention_detail,
                 )
             )
-            cursor = block_end + len(end_marker)
+            cursor = next_cursor
 
         return events
+
+    def _locate_event_block_end(
+        self,
+        *,
+        body: str,
+        event_id: str,
+        search_start: int,
+        start_marker: str,
+        end_marker: str,
+    ) -> tuple[int, int]:
+        explicit_end = body.find(end_marker, search_start)
+        next_start = body.find(start_marker, search_start)
+        footer_start = self._find_day_footer_start(body, search_start)
+
+        if explicit_end != -1 and (next_start == -1 or explicit_end < next_start):
+            return explicit_end, explicit_end + len(end_marker)
+
+        implicit_end_candidates = [
+            position
+            for position in (next_start, footer_start)
+            if position != -1
+        ]
+        if implicit_end_candidates:
+            implicit_end = min(implicit_end_candidates)
+            return implicit_end, implicit_end
+
+        if explicit_end != -1:
+            return explicit_end, explicit_end + len(end_marker)
+
+        raise StoreWriteError(
+            f"Malformed event block: missing end marker for event_id '{event_id}'."
+        )
+
+    def _find_day_footer_start(self, body: str, search_start: int) -> int:
+        footer_markers = (
+            "\n生成时间:",
+            "\n来源:",
+            "\n隐私声明:",
+        )
+        positions = [
+            body.find(marker, search_start)
+            for marker in footer_markers
+        ]
+        valid_positions = [position for position in positions if position != -1]
+        if not valid_positions:
+            return -1
+        return min(valid_positions)
 
     def _extract_value(self, block: str, *prefixes: str) -> str:
         for line in block.splitlines():

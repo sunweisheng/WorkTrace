@@ -19,10 +19,16 @@ merge_inbox/YYYY/MM/DD/项目A/YYYY-MM-DD-姓名.md
 merge_inbox/YYYY/MM/DD/项目B/YYYY-MM-DD-姓名.md
 ```
 
+如果上游已经先按部门或小组做过一次汇总，也可以直接放入：
+
+```text
+merge_inbox/YYYY/MM/DD/YYYY-MM-DD-负责人-merged.md
+```
+
 运行：
 
 ```bash
 python -m src.worktrace.cli merge-collected --date 2026-06-29
 ```
 
-输出文件为各自合并目录下的 `_merged.md`。日期根目录和每个一级子目录会分别合并；真实人员日报和 `_merged.md` 不提交到 Git。
+输出文件为各自合并目录下的 `_merged.md`。日期根目录和每个一级子目录会分别合并；旧 `_merged.md` 和当前目录本次输出同名文件会被跳过，其他上游 `*-merged.md` 仍可继续参与更高层汇总。真实人员日报和 `_merged.md` 不提交到 Git。

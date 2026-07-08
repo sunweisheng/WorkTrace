@@ -2,7 +2,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from src.worktrace.config import RuntimeConfig
+from src.worktrace.errors import StoreWriteError
 from src.worktrace.models import DayDocument, EventFileLink, WorkEvent
 from src.worktrace.stores.markdown import MarkdownEventStore
 
@@ -331,6 +334,91 @@ def test_markdown_store_roundtrip_keeps_collected_source_fields(tmp_path: Path) 
     assert loaded.events[0].object_hint == "客户合同"
     assert loaded.events[0].retention_reason == "substantive_approval"
     assert loaded.events[0].retention_detail == "反馈客户合同付款条款问题。"
+
+
+def test_markdown_store_auto_repairs_unclosed_last_event_block() -> None:
+    store = MarkdownEventStore(config=RuntimeConfig())
+    markdown = """---
+date: 2026-07-06
+event_count: 1
+generated_at: 2026-07-06T10:00:00+08:00
+generator: worktrace
+---
+
+# 工作事件日报 · 2026-07-06
+
+## 事件列表
+
+<!-- worktrace:event:start event_id="evt-bad" -->
+<!-- worktrace:retention_reason: follow_up_assigned -->
+### 1. 未闭合事件
+
+- **日期**: 2026-07-06
+- **事件标题**: 未闭合事件
+- **内容**: 这个事件块缺少结束标记。
+- **具体对象**: 解析异常
+- **保留理由**: 形成后续跟进任务
+- **保留依据**: 用于验证解析器能快速报错。
+- **涉及文件**:
+  - 无
+
+生成时间: 2026-07-06T10:00:00+08:00
+来源: 飞书沟通记录自动整理
+"""
+
+    loaded = store.parse_day_document(markdown)
+
+    assert len(loaded.events) == 1
+    assert loaded.events[0].event_id == "evt-bad"
+    assert loaded.events[0].title == "未闭合事件"
+
+
+def test_markdown_store_auto_repairs_missing_end_before_next_event() -> None:
+    store = MarkdownEventStore(config=RuntimeConfig())
+    markdown = """---
+date: 2026-07-06
+event_count: 2
+generated_at: 2026-07-06T10:00:00+08:00
+generator: worktrace
+---
+
+# 工作事件日报 · 2026-07-06
+
+## 事件列表
+
+<!-- worktrace:event:start event_id="evt-a" -->
+<!-- worktrace:retention_reason: follow_up_assigned -->
+### 1. 第一件事
+
+- **日期**: 2026-07-06
+- **事件标题**: 第一件事
+- **内容**: 第一件事缺少结束标记。
+- **具体对象**: 解析修复
+- **保留理由**: 形成后续跟进任务
+- **保留依据**: 用于验证遇到下一事件时也能自动截断。
+- **涉及文件**:
+  - 无
+
+<!-- worktrace:event:start event_id="evt-b" -->
+<!-- worktrace:retention_reason: decision_made -->
+### 2. 第二件事
+
+- **日期**: 2026-07-06
+- **事件标题**: 第二件事
+- **内容**: 第二件事格式完整。
+- **具体对象**: 解析修复
+- **保留理由**: 形成明确决策
+- **保留依据**: 用于验证后一事件仍能正常解析。
+- **涉及文件**:
+  - 无
+<!-- worktrace:event:end -->
+"""
+
+    loaded = store.parse_day_document(markdown)
+
+    assert [event.event_id for event in loaded.events] == ["evt-a", "evt-b"]
+    assert loaded.events[0].title == "第一件事"
+    assert loaded.events[1].title == "第二件事"
 
 
 def test_markdown_store_preserves_event_order(tmp_path: Path) -> None:

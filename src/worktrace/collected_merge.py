@@ -159,6 +159,7 @@ class CollectedMergeRunner:
             self._read_source_events(
                 target_date,
                 input_dir,
+                output_path=output_path,
                 ignored_subdirectories=ignored_subdirectories,
             )
         )
@@ -264,6 +265,7 @@ class CollectedMergeRunner:
         target_date: str,
         input_dir: Path,
         *,
+        output_path: Path,
         ignored_subdirectories: set[str] | None = None,
     ) -> tuple[list[CollectedSourceEvent], int, int, list[str]]:
         warnings: list[str] = []
@@ -281,13 +283,16 @@ class CollectedMergeRunner:
                     skipped_file_count += 1
                     warnings.append(f"Skipped nested input directory: {path.name}")
                 continue
-            if should_skip_input_file(path):
+            if should_skip_input_file(path, output_filename=output_path.name):
                 continue
             if path.suffix != ".md":
                 skipped_file_count += 1
                 continue
             source_file_count += 1
-            person_name = extract_person_name_from_filename(path.name, target_date=target_date)
+            person_name = extract_source_name_from_filename(
+                path.name,
+                target_date=target_date,
+            )
             if not person_name:
                 skipped_file_count += 1
                 warnings.append(f"Skipped invalid source filename: {path.name}")
@@ -395,8 +400,24 @@ class CollectedMergeRunner:
             ]
             if not items:
                 continue
-            source_people = _dedupe([item.person_name for item in items])
-            source_event_ids = _dedupe([item.event.event_id for item in items])
+            source_people = _dedupe(
+                [
+                    person_name
+                    for item in items
+                    for person_name in (
+                        item.event.source_people or [item.person_name]
+                    )
+                ]
+            )
+            source_event_ids = _dedupe(
+                [
+                    source_event_id
+                    for item in items
+                    for source_event_id in (
+                        item.event.source_event_ids or [item.event.event_id]
+                    )
+                ]
+            )
             file_links = _merge_file_links(items)
             event_id = stable_event_id(
                 target_date,
@@ -480,7 +501,14 @@ class CollectedMergeRunner:
 
 def extract_person_name_from_filename(filename: str, *, target_date: str = "") -> str:
     parsed = parse_worktrace_markdown_filename(filename)
-    if parsed.suffix != ".md" or parsed.is_merged:
+    if parsed.is_merged:
+        return ""
+    return extract_source_name_from_filename(filename, target_date=target_date)
+
+
+def extract_source_name_from_filename(filename: str, *, target_date: str = "") -> str:
+    parsed = parse_worktrace_markdown_filename(filename)
+    if parsed.suffix != ".md":
         return ""
     if not parsed.target_date or not parsed.owner_name:
         return ""
@@ -489,11 +517,15 @@ def extract_person_name_from_filename(filename: str, *, target_date: str = "") -
     return parsed.owner_name.strip()
 
 
-def should_skip_input_file(path: Path) -> bool:
-    if path.name == "_merged.md" or path.name.startswith(".") or path.is_dir():
+def should_skip_input_file(path: Path, *, output_filename: str = "") -> bool:
+    if (
+        path.name == "_merged.md"
+        or path.name.startswith(".")
+        or path.is_dir()
+        or (output_filename and path.name == output_filename)
+    ):
         return True
-    parsed = parse_worktrace_markdown_filename(path.name)
-    return parsed.suffix == ".md" and parsed.is_merged
+    return False
 
 
 def summarize_self_delivery_status(outputs: list[CollectedMergeOutput]) -> str:

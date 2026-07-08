@@ -56,7 +56,7 @@ python -m src.worktrace.cli merge-collected --date YYYY-MM-DD
 管理人员汇总模式约定：
 
 - 输入目录固定为 `merge_inbox/YYYY/MM/DD/`。
-- 来源文件名只要能识别出日期和姓名成分即可，例如 `YYYY-MM-DD-姓名.md`、`姓名-YYYY-MM-DD.md`、`姓名_YYYY-MM-DD.md`。
+- 来源文件名只要能识别出日期和姓名成分即可，例如 `YYYY-MM-DD-姓名.md`、`姓名-YYYY-MM-DD.md`、`姓名_YYYY-MM-DD.md`；上游 `YYYY-MM-DD-姓名-merged.md` 也支持继续参与汇总。
 - 日期根目录和每个一级子目录分别作为独立合并范围；更深层目录不递归处理。
 - 每个合并范围输出本目录 `YYYY-MM-DD-登录人姓名-merged.md`。
 - 团队汇总文件会保留来源人员和来源事件 ID。

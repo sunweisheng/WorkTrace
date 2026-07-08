@@ -181,7 +181,7 @@ WorkTrace 当前采用六层结构：
 - 输入目录固定为 `merge_inbox/YYYY/MM/DD/`
 - 输入文件名只要能识别出 `YYYY-MM-DD` 和姓名成分即可，例如 `YYYY-MM-DD-姓名.md`、`姓名-YYYY-MM-DD.md`、`姓名_YYYY-MM-DD.md`
 - 日期根目录始终作为一个合并范围；日期目录下每个一级子目录也作为独立合并范围
-- 每个合并范围只读取当前层普通 `.md` 文件，跳过旧 `_merged.md`、新 `*-merged.md`、隐藏文件、非 Markdown 文件和更深层目录
+- 每个合并范围只读取当前层 `.md` 文件；支持上游 `*-merged.md` 继续参与汇总，但跳过旧 `_merged.md`、当前目录本次输出同名 `YYYY-MM-DD-登录人姓名-merged.md`、隐藏文件、非 Markdown 文件和更深层目录
 - 输出文件固定为各合并范围本目录 `YYYY-MM-DD-登录人姓名-merged.md`
 - `stdout` 返回 `CollectedMergeRunResult` 的 machine-readable JSON，其中 `outputs` 逐项记录每个合并范围
 
