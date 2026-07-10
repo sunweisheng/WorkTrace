@@ -25,6 +25,7 @@ from .pipeline.context_expansion import (
     expand_slice_context,
 )
 from .pipeline.cross_conversation_merge import materialize_grouped_merged_drafts
+from .pipeline.direct_relation_filter import filter_self_related_candidate_drafts
 from .pipeline.event_merge import build_work_events
 from .pipeline.filtering import filter_messages
 from .pipeline.retention_filter import (
@@ -191,6 +192,20 @@ class DailyTraceRunner:
                     filter_excluded_candidate_drafts(all_candidates, self.config)
                 )
                 warning_messages.extend(excluded_candidate_warnings)
+                all_candidates, self_relation_candidate_warnings = (
+                    filter_self_related_candidate_drafts(
+                        all_candidates,
+                        {
+                            item.slice_id: item
+                            for item in conversation_slices
+                        },
+                        self_open_id=self_identity.open_id,
+                        self_display_name=self_identity.display_name,
+                        self_assignment_cues=self.config.self_assignment_cues,
+                        self_assignment_actions=self.config.self_assignment_actions,
+                    )
+                )
+                warning_messages.extend(self_relation_candidate_warnings)
                 all_candidates, retention_candidate_warnings = (
                     filter_retained_candidate_drafts(all_candidates)
                 )

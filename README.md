@@ -257,15 +257,18 @@ WORKTRACE_LLM_SLEEP_MAX_SECONDS=2
 
 事件是否值得保留，主要还是靠结构化字段和 Python 门槛判断，不靠维护一大堆关键词。
 
-`event_rules.json` 的用途只有两个：
+`event_rules.json` 的用途主要有三类：
 
 - 给 LLM 提示词补充“哪些敏感话题不要提炼”
 - 用少量精确规则，直接排除你已经确认不该进入结果的事件
+- 配置“明确点名本人并指派动作”的文本兜底词表
 
 如果要教别人用，最简单的理解就是：
 
 - `confidential_event_keywords`：只用于提示词提醒模型回避这类工作敏感话题
 - `non_work_sensitive_keywords`：只用于提示词提醒模型回避这类非工作敏感内容
+- `self_assignment_cues`：点名本人时表示指派语气的词
+- `self_assignment_actions`：点名本人时表示需要本人执行的动作词
 - `excluded_event_topics`：按事件标题精确排除
 - `excluded_event_content_signatures`：按事件内容“包含某段特征文本”排除
 
@@ -275,12 +278,14 @@ WORKTRACE_LLM_SLEEP_MAX_SECONDS=2
 {
   "confidential_event_keywords": ["工资", "薪资", "劳动仲裁", "绩效"],
   "non_work_sensitive_keywords": ["吵架", "辱骂"],
+  "self_assignment_cues": ["帮", "麻烦", "请", "需要你", "你来"],
+  "self_assignment_actions": ["处理", "确认", "推进", "反馈", "删除"],
   "excluded_event_topics": ["代码同步"],
   "excluded_event_content_signatures": ["劳动仲裁", "绩效", "git pull"]
 }
 ```
 
-这 4 个字段的实际效果如下：
+这些字段的实际效果如下：
 
 - `confidential_event_keywords`
   只进提示词，不做 Python 最终关键词过滤。
@@ -288,6 +293,12 @@ WORKTRACE_LLM_SLEEP_MAX_SECONDS=2
 - `non_work_sensitive_keywords`
   只进提示词，不做 Python 最终关键词过滤。
   适合放：吵架、辱骂、调情这类明显不该进入工作事件的非工作敏感内容。
+- `self_assignment_cues`
+  只用于“文本明确点名本人”时判断是否存在指派语气。
+  适合放：帮、麻烦、请、需要你、你来这类短语。
+- `self_assignment_actions`
+  只用于“文本明确点名本人”时判断是否要求本人执行具体动作。
+  适合放：处理、确认、推进、反馈、删除、审批、看下、核对、补充、发一下这类动作。
 - `excluded_event_topics`
   按标题精确匹配。
   只有事件标题清楚且稳定时才适合放这里，例如固定会被提炼成 `代码同步` 的噪音事件。
@@ -299,6 +310,7 @@ WORKTRACE_LLM_SLEEP_MAX_SECONDS=2
 
 - 想“提醒模型少碰某类敏感话题”，放 `confidential_event_keywords` 或 `non_work_sensitive_keywords`
 - 想“无论模型怎么写，只要命中就直接排除”，放 `excluded_event_topics` 或 `excluded_event_content_signatures`
+- 想调整“别人点名我让我做事”的文本兜底口径，改 `self_assignment_cues` 和 `self_assignment_actions`
 
 几个常见例子：
 
@@ -318,6 +330,7 @@ WORKTRACE_LLM_SLEEP_MAX_SECONDS=2
 当前代码语义是：
 
 - `confidential_event_keywords` 和 `non_work_sensitive_keywords` 只用于生成提示词约束
+- `self_assignment_cues` 和 `self_assignment_actions` 只用于候选事件本人关联硬过滤里的文本兜底；结构化本人消息和 reply/quote 直连关系不依赖这两个字段
 - `excluded_event_topics` 是标题精确匹配
 - `excluded_event_content_signatures` 是内容包含匹配
 - `excluded_event_topics` 和 `excluded_event_content_signatures` 都会在候选事件阶段、以及合并后事件阶段各检查一次

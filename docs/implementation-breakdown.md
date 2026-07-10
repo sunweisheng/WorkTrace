@@ -66,6 +66,8 @@
 - `config/event_rules.json`
   - `confidential_event_keywords`
   - `non_work_sensitive_keywords`
+  - `self_assignment_cues`
+  - `self_assignment_actions`
   - `excluded_event_topics`
   - `excluded_event_content_signatures`
 - `config/conversation_blacklist.json`

@@ -135,6 +135,8 @@ def test_load_runtime_config_overrides_reads_excluded_event_rules_from_local_env
             "{\n"
             '  "confidential_event_keywords": ["工资", "薪资"],\n'
             '  "non_work_sensitive_keywords": ["吵架"],\n'
+            '  "self_assignment_cues": ["麻烦", "请"],\n'
+            '  "self_assignment_actions": ["处理", "确认"],\n'
             '  "excluded_event_topics": ["代码同步", "工作面谈安排", "故障数据同步"],\n'
             '  "excluded_event_content_signatures": ["git pull", "聆听大老板电话"]\n'
             "}\n"
@@ -155,6 +157,8 @@ def test_load_runtime_config_overrides_reads_excluded_event_rules_from_local_env
     )
     assert config.confidential_event_keywords == ("工资", "薪资")
     assert config.non_work_sensitive_keywords == ("吵架",)
+    assert config.self_assignment_cues == ("麻烦", "请")
+    assert config.self_assignment_actions == ("处理", "确认")
 
 
 def test_load_runtime_config_overrides_uses_defaults_when_rule_file_missing(
@@ -165,6 +169,8 @@ def test_load_runtime_config_overrides_uses_defaults_when_rule_file_missing(
     assert config.excluded_event_topics == RuntimeConfig().excluded_event_topics
     assert config.confidential_event_keywords == ()
     assert config.non_work_sensitive_keywords == ()
+    assert config.self_assignment_cues == ()
+    assert config.self_assignment_actions == ()
 
 
 def test_load_runtime_config_overrides_rejects_invalid_rule_file(tmp_path: Path) -> None:
@@ -185,6 +191,8 @@ def test_repo_event_rules_exclude_personnel_sensitive_events() -> None:
     assert "劳动仲裁" in payload["excluded_event_content_signatures"]
     assert "绩效" in payload["confidential_event_keywords"]
     assert "绩效" in payload["excluded_event_content_signatures"]
+    assert "麻烦" in payload["self_assignment_cues"]
+    assert "处理" in payload["self_assignment_actions"]
 
 
 def test_load_conversation_blacklist_overrides_reads_ids_and_dedupes(tmp_path: Path) -> None:

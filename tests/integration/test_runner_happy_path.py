@@ -456,6 +456,105 @@ def test_runner_filters_low_retention_events_before_merge(tmp_path: Path) -> Non
     assert "完成审核" not in content
 
 
+def test_runner_filters_non_self_related_other_people_event_before_merge(
+    tmp_path: Path,
+) -> None:
+    class OtherPeopleDiscussionSource(FakeSource):
+        def get_self_identity(self):
+            return SelfIdentity(open_id="ou_self", display_name="张玉环", source="fake")
+
+        def fetch_conversation_messages(self, target_date, conversation_ids):
+            return [
+                NormalizedMessage(
+                    conversation_id="oc_1",
+                    conversation_name="项目群",
+                    message_id="om_1",
+                    sender_open_id="ou_self",
+                    sender_name="张玉环",
+                    send_time="2026-06-22T10:00:00+08:00",
+                    message_type="text",
+                    text="我知道了",
+                    reply_to_message_id=None,
+                    quote_message_id=None,
+                    links=[],
+                    attachments=[],
+                    is_system=False,
+                ),
+                NormalizedMessage(
+                    conversation_id="oc_1",
+                    conversation_name="项目群",
+                    message_id="om_2",
+                    sender_open_id="ou_other_1",
+                    sender_name="丁金龙",
+                    send_time="2026-06-22T10:01:00+08:00",
+                    message_type="text",
+                    text="不需要，删除吧，把所有和我有关的都删除吧",
+                    reply_to_message_id=None,
+                    quote_message_id=None,
+                    links=[],
+                    attachments=[],
+                    is_system=False,
+                ),
+                NormalizedMessage(
+                    conversation_id="oc_1",
+                    conversation_name="项目群",
+                    message_id="om_3",
+                    sender_open_id="ou_other_2",
+                    sender_name="付晨",
+                    send_time="2026-06-22T10:02:00+08:00",
+                    message_type="text",
+                    text="那能找人帮您提个看板吧，我找开发把所有经销商的都删了",
+                    reply_to_message_id=None,
+                    quote_message_id=None,
+                    links=[],
+                    attachments=[],
+                    is_system=False,
+                ),
+            ]
+
+    class OtherPeopleEventAnalyzer(FakeAnalyzer):
+        def analyze_batch(self, target_date, batch_input):
+            return BatchAnalysisResult(
+                candidate_events=[
+                    _draft(
+                        draft_id="draft-1",
+                        topic="聊天记录清理跟进",
+                        content="丁金龙要求删除与本人有关的聊天记录，付晨提出提看板处理。",
+                        source_message_ids=["om_2", "om_3"],
+                        source_slice_id=batch_input.slices[0].slice_id,
+                        object_hint="聊天记录清理与看板处理",
+                        retention_reason="follow_up_assigned",
+                        retention_detail="丁金龙明确要求删除记录，付晨提出后续看板方案。",
+                    )
+                ],
+                context_requests=[],
+            )
+
+        def merge_day_candidates(self, target_date, candidates):
+            raise AssertionError("Non-self-related candidates should be filtered before merge")
+
+    config = RuntimeConfig(data_root=tmp_path / "data")
+    runner = DailyTraceRunner(
+        config=config,
+        dependencies=RuntimeDependencies(
+            chat_source=OtherPeopleDiscussionSource(),
+            content_resolver=FakeResolver(),
+            analyzer=OtherPeopleEventAnalyzer(),
+            delivery_channel=FakeDelivery(),
+            event_store=MarkdownEventStore(config=config),
+        ),
+    )
+
+    result = runner.run("2026-06-22")
+
+    assert result.status == DailyRunStatus.SUCCESS_WITH_WARNINGS.value
+    assert result.event_count == 0
+    assert "Filtered non-self-related event draft: 聊天记录清理跟进" in result.error_summary
+    assert result.output_path is not None
+    content = Path(result.output_path).read_text(encoding="utf-8")
+    assert "聊天记录清理跟进" not in content
+
+
 def test_runner_sorts_events_by_source_message_time(tmp_path: Path) -> None:
     class OutOfOrderSource(FakeSource):
         def fetch_conversation_messages(self, target_date, conversation_ids):

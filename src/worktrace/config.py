@@ -233,6 +233,18 @@ def load_runtime_config_overrides(
         fallback=config.non_work_sensitive_keywords,
         file_path=rules_path,
     )
+    self_assignment_cues = _read_string_list(
+        payload,
+        key="self_assignment_cues",
+        fallback=config.self_assignment_cues,
+        file_path=rules_path,
+    )
+    self_assignment_actions = _read_string_list(
+        payload,
+        key="self_assignment_actions",
+        fallback=config.self_assignment_actions,
+        file_path=rules_path,
+    )
 
     if (
         excluded_event_topics == config.excluded_event_topics
@@ -240,6 +252,8 @@ def load_runtime_config_overrides(
         == config.excluded_event_content_signatures
         and confidential_event_keywords == config.confidential_event_keywords
         and non_work_sensitive_keywords == config.non_work_sensitive_keywords
+        and self_assignment_cues == config.self_assignment_cues
+        and self_assignment_actions == config.self_assignment_actions
     ):
         return config
 
@@ -249,6 +263,8 @@ def load_runtime_config_overrides(
         excluded_event_content_signatures=excluded_event_content_signatures,
         confidential_event_keywords=confidential_event_keywords,
         non_work_sensitive_keywords=non_work_sensitive_keywords,
+        self_assignment_cues=self_assignment_cues,
+        self_assignment_actions=self_assignment_actions,
     )
 
 
@@ -332,6 +348,8 @@ class RuntimeConfig:
     anchor_batch_size: int = 3
     confidential_event_keywords: tuple[str, ...] = ()
     non_work_sensitive_keywords: tuple[str, ...] = ()
+    self_assignment_cues: tuple[str, ...] = ()
+    self_assignment_actions: tuple[str, ...] = ()
     excluded_event_topics: tuple[str, ...] = ()
     excluded_event_content_signatures: tuple[str, ...] = ()
     excluded_conversation_ids: tuple[str, ...] = ()
