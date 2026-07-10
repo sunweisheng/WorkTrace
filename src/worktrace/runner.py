@@ -5,6 +5,7 @@ import logging
 from pathlib import Path
 import re
 from time import perf_counter
+from urllib.parse import urlsplit
 
 from .config import RuntimeConfig
 from .constants import DailyRunStatus
@@ -66,6 +67,13 @@ _GENERIC_LINK_HINT_TOKENS = {
     "com",
     "cn",
 }
+
+
+@dataclass(frozen=True)
+class _EventFileReference:
+    message_id: str
+    file_link: EventFileLink
+    evidence_values: tuple[str, ...]
 
 
 @dataclass
@@ -707,12 +715,40 @@ def _attach_event_file_links(
     content_resolver,
 ) -> list[WorkEvent]:
     link_by_id: dict[str, EventFileLink] = {}
+    references: list[_EventFileReference] = []
     for message in messages:
         for index, link in enumerate(content_resolver.extract_links(message), start=1):
-            link_by_id[build_message_link_id(message.message_id, index)] = EventFileLink(
+            file_link = EventFileLink(
                 url=link.url,
                 title=link.title,
                 link_type=link.link_type,
+            )
+            link_by_id[build_message_link_id(message.message_id, index)] = file_link
+            references.append(
+                _EventFileReference(
+                    message_id=message.message_id,
+                    file_link=file_link,
+                    evidence_values=tuple(_link_strong_evidence_values(file_link)),
+                )
+            )
+        for attachment in getattr(message, "attachments", []):
+            file_name = attachment.file_name.strip()
+            if not file_name:
+                continue
+            references.append(
+                _EventFileReference(
+                    message_id=message.message_id,
+                    file_link=EventFileLink(
+                        url="",
+                        title=file_name,
+                        link_type="attachment",
+                    ),
+                    evidence_values=tuple(
+                        value
+                        for value in (file_name, attachment.attachment_id.strip())
+                        if value
+                    ),
+                )
             )
     attached: list[WorkEvent] = []
 
@@ -724,27 +760,50 @@ def _attach_event_file_links(
                 continue
             if not _event_supports_link(event, link):
                 continue
-            existing = deduped.get(link.url)
+            key = _file_link_key(link)
+            existing = deduped.get(key)
             if existing is None:
-                deduped[link.url] = link
+                deduped[key] = link
                 continue
             if existing.title.strip() or not link.title.strip():
                 continue
-            deduped[link.url] = link
+            deduped[key] = link
+
+        for reference in references:
+            if not _event_supports_file_reference(event, reference):
+                continue
+            key = _file_link_key(reference.file_link)
+            existing = deduped.get(key)
+            if existing is None:
+                deduped[key] = reference.file_link
+                continue
+            if existing.title.strip() or not reference.file_link.title.strip():
+                continue
+            deduped[key] = reference.file_link
+
+        file_links = list(deduped.values())
+        title = _make_file_references_readable(
+            event.title,
+            file_links,
+            prefix_if_missing=True,
+        )
 
         attached.append(
             type(event)(
                 date=event.date,
                 event_id=event.event_id,
-                title=event.title,
-                content=event.content,
+                title=title,
+                content=_make_file_references_readable(event.content, file_links),
                 source_message_ids=list(event.source_message_ids),
-                file_links=list(deduped.values()),
+                file_links=file_links,
                 source_people=list(event.source_people),
                 source_event_ids=list(event.source_event_ids),
-                object_hint=event.object_hint,
+                object_hint=_make_file_references_readable(event.object_hint, file_links),
                 retention_reason=event.retention_reason,
-                retention_detail=event.retention_detail,
+                retention_detail=_make_file_references_readable(
+                    event.retention_detail,
+                    file_links,
+                ),
                 referenced_link_ids=list(event.referenced_link_ids),
             )
         )
@@ -770,6 +829,30 @@ def _event_supports_link(event: WorkEvent, link: EventFileLink) -> bool:
     return False
 
 
+def _event_supports_file_reference(
+    event: WorkEvent,
+    reference: _EventFileReference,
+) -> bool:
+    evidence_text = _event_file_evidence_text(event)
+    if not evidence_text.strip():
+        return False
+    for value in reference.evidence_values:
+        if value and value in evidence_text:
+            return True
+    return False
+
+
+def _event_file_evidence_text(event: WorkEvent) -> str:
+    return " ".join(
+        [
+            event.title,
+            event.content,
+            event.object_hint,
+            event.retention_detail,
+        ]
+    )
+
+
 def _link_evidence_tokens(link: EventFileLink) -> list[str]:
     evidence_source = link.title.strip() or link.url
     tokens = [token.lower() for token in _LINK_TEXT_TOKEN_RE.findall(evidence_source)]
@@ -778,6 +861,120 @@ def _link_evidence_tokens(link: EventFileLink) -> list[str]:
         for token in tokens
         if token not in _GENERIC_LINK_HINT_TOKENS and len(token.strip()) >= 2
     ]
+
+
+def _link_exact_evidence_values(link: EventFileLink) -> list[str]:
+    values: list[str] = []
+    for value in (link.url.strip(), link.title.strip()):
+        if value:
+            values.append(value)
+    token = _feishu_doc_token_from_url(link.url)
+    if token:
+        values.append(token)
+    return _dedupe_text_values(values)
+
+
+def _link_strong_evidence_values(link: EventFileLink) -> list[str]:
+    values: list[str] = []
+    if link.url.strip():
+        values.append(link.url.strip())
+    token = _feishu_doc_token_from_url(link.url)
+    if token:
+        values.append(token)
+    return _dedupe_text_values(values)
+
+
+def _feishu_doc_token_from_url(url: str) -> str:
+    try:
+        path = urlsplit(url).path
+    except ValueError:
+        return ""
+    match = re.search(r"/(?:docx|wiki)/([^/?#]+)", path)
+    if not match:
+        return ""
+    return match.group(1)
+
+
+def _file_link_key(link: EventFileLink) -> str:
+    if link.url.strip():
+        return f"url:{link.url.strip()}"
+    return f"attachment:{link.title.strip()}"
+
+
+def _make_file_references_readable(
+    value: str,
+    file_links: list[EventFileLink],
+    *,
+    prefix_if_missing: bool = False,
+) -> str:
+    result = value
+    display_names = [
+        display_name
+        for display_name in (_file_display_name(link) for link in file_links)
+        if display_name
+    ]
+    if not display_names:
+        return result
+
+    for link in file_links:
+        display_name = _file_display_name(link)
+        if not display_name:
+            continue
+        replacement = _quote_file_name(display_name)
+        for evidence in sorted(_file_readable_evidence_values(link), key=len, reverse=True):
+            if not evidence:
+                continue
+            result = _replace_unquoted(result, evidence, replacement)
+
+    if prefix_if_missing and not any(
+        _contains_file_display_name(result, display_name)
+        for display_name in display_names
+    ):
+        result = f"{_quote_file_name(display_names[0])}{result}"
+    return result
+
+
+def _file_readable_evidence_values(link: EventFileLink) -> list[str]:
+    values = _link_exact_evidence_values(link)
+    display_name = _file_display_name(link)
+    if display_name:
+        values.append(display_name)
+    return _dedupe_text_values(values)
+
+
+def _file_display_name(link: EventFileLink) -> str:
+    return link.title.strip() or link.url.strip()
+
+
+def _quote_file_name(value: str) -> str:
+    stripped = value.strip()
+    if stripped.startswith("《") and stripped.endswith("》"):
+        return stripped
+    return f"《{stripped}》"
+
+
+def _replace_unquoted(value: str, needle: str, replacement: str) -> str:
+    if not needle or needle == replacement:
+        return value
+    pattern = re.compile(rf"(?<!《){re.escape(needle)}(?!》)")
+    return pattern.sub(replacement, value)
+
+
+def _contains_file_display_name(value: str, display_name: str) -> bool:
+    quoted = _quote_file_name(display_name)
+    return quoted in value or display_name in value
+
+
+def _dedupe_text_values(values: list[str]) -> list[str]:
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        stripped = value.strip()
+        if not stripped or stripped in seen:
+            continue
+        seen.add(stripped)
+        deduped.append(stripped)
+    return deduped
 
 
 def _sort_events_for_output(events: list[WorkEvent], *, messages: list) -> list[WorkEvent]:

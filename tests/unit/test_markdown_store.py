@@ -306,6 +306,43 @@ def test_markdown_store_roundtrip_keeps_file_links(tmp_path: Path) -> None:
     assert loaded.events[0].file_links[0].url == "https://foo.feishu.cn/docx/abc"
 
 
+def test_markdown_store_roundtrip_keeps_plain_file_names(tmp_path: Path) -> None:
+    store = MarkdownEventStore(config=RuntimeConfig(data_root=tmp_path / "data"))
+    store.replace_day(
+        "2026-06-22",
+        [
+            WorkEvent(
+                date="2026-06-22",
+                event_id="evt1",
+                title="同步《友好换电管理方案.docx》",
+                content="已发送《友好换电管理方案.docx》。",
+                source_message_ids=["om_1"],
+                file_links=[
+                    EventFileLink(
+                        url="",
+                        title="友好换电管理方案.docx",
+                        link_type="attachment",
+                    )
+                ],
+            )
+        ],
+    )
+
+    output_path = store.build_output_path("2026-06-22")
+    content = output_path.read_text(encoding="utf-8")
+    loaded = store.read_day("2026-06-22")
+
+    assert "  - 《友好换电管理方案.docx》" in content
+    assert loaded is not None
+    assert loaded.events[0].file_links == [
+        EventFileLink(
+            url="",
+            title="友好换电管理方案.docx",
+            link_type="attachment",
+        )
+    ]
+
+
 def test_markdown_store_roundtrip_keeps_collected_source_fields(tmp_path: Path) -> None:
     store = MarkdownEventStore(config=RuntimeConfig(data_root=tmp_path / "data"))
     store.replace_day(

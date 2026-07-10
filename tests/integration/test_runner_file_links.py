@@ -6,6 +6,7 @@ from src.worktrace.config import RuntimeConfig
 from src.worktrace.constants import DailyRunStatus
 from src.worktrace.factories import RuntimeDependencies
 from src.worktrace.models import (
+    AttachmentMeta,
     BatchAnalysisResult,
     ConversationRef,
     EventFileLink,
@@ -445,3 +446,111 @@ def test_runner_drops_selected_link_without_event_text_support(tmp_path: Path) -
     )
 
     assert attached[0].file_links == []
+
+
+def test_runner_makes_doc_token_references_readable_in_event_text(tmp_path: Path) -> None:
+    resolver = FeishuMessageContentResolver(config=RuntimeConfig(data_root=tmp_path / "data"))
+    message = NormalizedMessage(
+        conversation_id="oc_1",
+        conversation_name="项目群",
+        message_id="om_1",
+        sender_open_id="ou_other",
+        sender_name="Alice",
+        send_time="2026-06-22T10:00:00+08:00",
+        message_type="text",
+        text="请看文档 https://foo.feishu.cn/wiki/MgYnwgMIkiUDGGkjHYLcEMaEnhd",
+        reply_to_message_id=None,
+        quote_message_id=None,
+        links=[
+            LinkMeta(
+                url="https://foo.feishu.cn/wiki/MgYnwgMIkiUDGGkjHYLcEMaEnhd",
+                title="仓库摄像头录制 PRD",
+                link_type="feishu_doc",
+            )
+        ],
+        attachments=[],
+        is_system=False,
+    )
+    event = WorkEvent(
+        date="2026-06-22",
+        event_id="evt1",
+        title="文档优先级定级为P2",
+        content="针对飞书文档（MgYnwgMIkiUDGGkjHYLcEMaEnhd），本人审阅后将其优先级标记为 P2。",
+        source_message_ids=["om_1"],
+        referenced_link_ids=[],
+        file_links=[],
+        object_hint="飞书文档优先级定级",
+        retention_reason="substantive_approval",
+        retention_detail="本人回复时明确给出了“优先级P2”的处理结论。",
+    )
+
+    attached = __import__("src.worktrace.runner", fromlist=["_attach_event_file_links"])._attach_event_file_links(
+        [event],
+        messages=[message],
+        content_resolver=resolver,
+    )
+
+    assert attached[0].file_links == [
+        EventFileLink(
+            url="https://foo.feishu.cn/wiki/MgYnwgMIkiUDGGkjHYLcEMaEnhd",
+            title="仓库摄像头录制 PRD",
+            link_type="feishu_doc",
+        )
+    ]
+    assert "《仓库摄像头录制 PRD》" in attached[0].title
+    assert "《仓库摄像头录制 PRD》" in attached[0].content
+    assert "MgYnwgMIkiUDGGkjHYLcEMaEnhd" not in attached[0].content
+
+
+def test_runner_attaches_plain_attachment_file_name_when_event_mentions_it(tmp_path: Path) -> None:
+    resolver = FeishuMessageContentResolver(config=RuntimeConfig(data_root=tmp_path / "data"))
+    message = NormalizedMessage(
+        conversation_id="oc_1",
+        conversation_name="项目群",
+        message_id="om_file",
+        sender_open_id="ou_self",
+        sender_name="Me",
+        send_time="2026-06-22T10:00:00+08:00",
+        message_type="file",
+        text='<file key="file_1" name="友好换电管理方案.docx"/>',
+        reply_to_message_id=None,
+        quote_message_id=None,
+        links=[],
+        attachments=[
+            AttachmentMeta(
+                attachment_id="file_1",
+                file_name="友好换电管理方案.docx",
+                mime_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                file_size=123,
+            )
+        ],
+        is_system=False,
+    )
+    event = WorkEvent(
+        date="2026-06-22",
+        event_id="evt1",
+        title="同步友好换电管理方案并要求群转发",
+        content="孙维晟将友好换电管理方案.docx文件发送至群内，并明确要求转发。",
+        source_message_ids=["om_file"],
+        referenced_link_ids=[],
+        file_links=[],
+        object_hint="友好换电管理方案",
+        retention_reason="follow_up_assigned",
+        retention_detail="发送文件并指派转发动作。",
+    )
+
+    attached = __import__("src.worktrace.runner", fromlist=["_attach_event_file_links"])._attach_event_file_links(
+        [event],
+        messages=[message],
+        content_resolver=resolver,
+    )
+
+    assert attached[0].file_links == [
+        EventFileLink(
+            url="",
+            title="友好换电管理方案.docx",
+            link_type="attachment",
+        )
+    ]
+    assert "《友好换电管理方案.docx》" in attached[0].title
+    assert "《友好换电管理方案.docx》" in attached[0].content

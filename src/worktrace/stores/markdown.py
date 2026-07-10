@@ -188,10 +188,21 @@ class MarkdownEventStore(EventStore):
         for link in file_links:
             safe_url = self._redact_sensitive_query_params(link.url)
             label = link.title.strip() or safe_url
+            if not safe_url:
+                lines.append(f"  - {self._quote_plain_file_name(label)}")
+                continue
             if label == link.url:
                 label = safe_url
             lines.append(f"  - [{label}]({safe_url})")
         return "\n".join(lines)
+
+    def _quote_plain_file_name(self, value: str) -> str:
+        stripped = value.strip()
+        if not stripped:
+            return "无"
+        if stripped.startswith("《") and stripped.endswith("》"):
+            return stripped
+        return f"《{stripped}》"
 
     def _redact_sensitive_query_params(self, value: str) -> str:
         try:
@@ -416,6 +427,18 @@ class MarkdownEventStore(EventStore):
                         url=url,
                         title=title,
                         link_type="normal",
+                    )
+                )
+                continue
+            title = raw_value
+            if title.startswith("《") and title.endswith("》"):
+                title = title[1:-1].strip()
+            if title:
+                collected.append(
+                    EventFileLink(
+                        url="",
+                        title=title,
+                        link_type="attachment",
                     )
                 )
         return collected
