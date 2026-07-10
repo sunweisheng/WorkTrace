@@ -12,6 +12,7 @@ from .constants import DailyRunStatus
 from .delivery.feishu_cli import FeishuCliSelfDelivery
 from .errors import AnalyzerProtocolError, DeliveryError, StoreWriteError
 from .factories import AnalyzerFactory
+from .analyzers.prompts import build_collected_merge_prompt
 from .models import (
     CollectedMergeGroup,
     CollectedMergeOutput,
@@ -177,36 +178,13 @@ class CollectedMergeRunner:
 
         merged_events: list[WorkEvent] = []
         if source_events:
-            deterministic_groups, deterministic_warnings = (
-                self._build_deterministic_groups(source_events)
-            )
-            warning_messages.extend(deterministic_warnings)
             try:
-                merge_result = self.analyzer.merge_collected_events(
+                merged_events, merge_warnings = self._merge_source_events(
                     target_date,
                     source_events,
-                    deterministic_groups,
+                    merge_owner_person=self_identity.display_name,
                 )
-                merge_result, repair_warnings = repair_collected_merge_result(
-                    merge_result,
-                    source_events,
-                    deterministic_groups,
-                )
-                warning_messages.extend(repair_warnings)
-                merged_events = self._materialize_events(
-                    target_date,
-                    source_events,
-                    merge_result,
-                )
-                merged_events, sensitive_warnings = self._filter_sensitive_events(
-                    target_date,
-                    merged_events,
-                )
-                warning_messages.extend(sensitive_warnings)
-                merged_events, retention_merged_warnings = filter_retained_work_events(
-                    merged_events,
-                )
-                warning_messages.extend(retention_merged_warnings)
+                warning_messages.extend(merge_warnings)
             except (AnalyzerProtocolError, ValueError) as exc:
                 return CollectedMergeOutput(
                     input_dir=str(input_dir.resolve()),
@@ -254,6 +232,148 @@ class CollectedMergeRunner:
             self_delivery_status=self_delivery_status,
             self_delivery_target=self_delivery_target,
             self_delivery_error=self_delivery_error,
+        )
+
+    def _merge_source_events(
+        self,
+        target_date: str,
+        source_events: list[CollectedSourceEvent],
+        *,
+        merge_owner_person: str,
+    ) -> tuple[list[WorkEvent], list[str]]:
+        deterministic_groups, deterministic_warnings = self._build_deterministic_groups(
+            source_events,
+        )
+        prompt_chars = self._count_collected_merge_prompt_chars(
+            target_date,
+            source_events,
+            deterministic_groups,
+        )
+        source_groups = self._group_source_events_for_rolling(
+            target_date,
+            source_events,
+        )
+        threshold = self.config.collected_merge_prompt_char_threshold
+        if prompt_chars <= threshold or len(source_groups) < 3:
+            merged_events, merge_warnings = self._merge_collected_event_batch(
+                target_date,
+                source_events,
+                deterministic_groups=deterministic_groups,
+            )
+            return merged_events, [*deterministic_warnings, *merge_warnings]
+
+        merged_events, rolling_warnings, call_count = self._merge_source_events_rolling(
+            target_date,
+            source_groups,
+            merge_owner_person=merge_owner_person,
+        )
+        rolling_notice = (
+            "Using rolling collected merge: "
+            f"prompt_chars={prompt_chars} threshold={threshold} calls={call_count}"
+        )
+        return merged_events, [*deterministic_warnings, rolling_notice, *rolling_warnings]
+
+    def _merge_source_events_rolling(
+        self,
+        target_date: str,
+        source_groups: list[list[CollectedSourceEvent]],
+        *,
+        merge_owner_person: str,
+    ) -> tuple[list[WorkEvent], list[str], int]:
+        current_events = source_groups[0]
+        warnings: list[str] = []
+        call_count = 0
+
+        for step_index, next_events in enumerate(source_groups[1:], start=1):
+            batch_events = [*current_events, *next_events]
+            deterministic_groups, deterministic_warnings = (
+                self._build_deterministic_groups(batch_events)
+            )
+            warnings.extend(deterministic_warnings)
+            merged_events, merge_warnings = self._merge_collected_event_batch(
+                target_date,
+                batch_events,
+                deterministic_groups=deterministic_groups,
+            )
+            call_count += 1
+            warnings.extend(merge_warnings)
+            current_events = build_synthetic_collected_source_events(
+                target_date,
+                merged_events,
+                step_index=step_index,
+                merge_owner_person=merge_owner_person,
+            )
+
+        return [item.event for item in current_events], warnings, call_count
+
+    def _merge_collected_event_batch(
+        self,
+        target_date: str,
+        source_events: list[CollectedSourceEvent],
+        *,
+        deterministic_groups: list[list[str]] | None = None,
+    ) -> tuple[list[WorkEvent], list[str]]:
+        deterministic_groups = (
+            deterministic_groups
+            if deterministic_groups is not None
+            else self._build_deterministic_groups(source_events)[0]
+        )
+        merge_result = self.analyzer.merge_collected_events(
+            target_date,
+            source_events,
+            deterministic_groups,
+        )
+        merge_result, repair_warnings = repair_collected_merge_result(
+            merge_result,
+            source_events,
+            deterministic_groups,
+        )
+        merged_events = self._materialize_events(
+            target_date,
+            source_events,
+            merge_result,
+        )
+        merged_events, sensitive_warnings = self._filter_sensitive_events(
+            target_date,
+            merged_events,
+        )
+        merged_events, retention_warnings = filter_retained_work_events(merged_events)
+        return merged_events, [*repair_warnings, *sensitive_warnings, *retention_warnings]
+
+    def _count_collected_merge_prompt_chars(
+        self,
+        target_date: str,
+        source_events: list[CollectedSourceEvent],
+        deterministic_groups: list[list[str]],
+    ) -> int:
+        return len(
+            build_collected_merge_prompt(
+                target_date,
+                source_events,
+                deterministic_groups,
+                config=self.config,
+            )
+        )
+
+    def _group_source_events_for_rolling(
+        self,
+        target_date: str,
+        source_events: list[CollectedSourceEvent],
+    ) -> list[list[CollectedSourceEvent]]:
+        grouped: dict[str, list[CollectedSourceEvent]] = defaultdict(list)
+        for source_event in source_events:
+            grouped[source_event.source_file].append(source_event)
+
+        return sorted(
+            grouped.values(),
+            key=lambda items: (
+                self._count_collected_merge_prompt_chars(
+                    target_date,
+                    items,
+                    self._build_deterministic_groups(items)[0],
+                ),
+                items[0].source_file if items else "",
+            ),
         )
 
     def build_input_dir(self, target_date: str) -> Path:
@@ -542,6 +662,30 @@ def summarize_self_delivery_status(outputs: list[CollectedMergeOutput]) -> str:
 def build_collected_draft_id(filename: str, index: int, event_id: str) -> str:
     safe_event_id = event_id.strip() or f"event-{index}"
     return f"{filename}#{index}:{safe_event_id}"
+
+
+def build_synthetic_collected_source_events(
+    target_date: str,
+    events: list[WorkEvent],
+    *,
+    step_index: int,
+    merge_owner_person: str = "",
+) -> list[CollectedSourceEvent]:
+    source_file = f"__rolling_collected_merge_step_{step_index}.md"
+    owner_name = merge_owner_person.strip()
+    return [
+        CollectedSourceEvent(
+            draft_id=build_collected_draft_id(source_file, index, event.event_id),
+            person_name="rolling-collected-merge",
+            source_file=source_file,
+            event=replace(event, date=target_date),
+            is_merge_owner_source=bool(
+                owner_name
+                and owner_name in {name.strip() for name in event.source_people}
+            ),
+        )
+        for index, event in enumerate(events, start=1)
+    ]
 
 
 def collected_events_are_similar(source_events: list[CollectedSourceEvent]) -> bool:

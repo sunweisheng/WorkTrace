@@ -49,6 +49,7 @@
 - `analyzer_backend = "online"`
 - `slice_base_limit = 150`
 - `max_model_input_tokens = 100000`
+- `collected_merge_prompt_char_threshold = 80000`
 - `slice_retry_limit = 3`
 - `prompt_message_char_limit = 300`
 - `prompt_attachment_char_limit = 800`

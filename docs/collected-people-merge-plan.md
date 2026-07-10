@@ -45,6 +45,7 @@
   - LLM 必须返回 `groups`，每个 group 包含 `group_id`、`draft_ids`、`title`、`content`、`object_hint`、`retention_reason`、`retention_detail`。
   - Prompt 明确要求：确定性组不能拆分；剩余事件拿不准就分开；每个输入 `draft_id` 必须且只能出现一次；不要编造未出现的信息。
   - 若某个 group 含有“合并人来源”，最终 `title`、`content`、`object_hint`、`retention_reason`、`retention_detail` 都以该来源为主，其它来源只能补充不冲突的信息，不能改写该来源中已明确的版本、结论、进展、结果或待办指向。
+  - 当完整合并 prompt 超过 `collected_merge_prompt_char_threshold`，Python 侧按来源文件 prompt 字符数从小到大滚动合并；中间结果只保存在内存中，并继续保留来源人员、来源事件 ID、文件链接和合并人来源信号。
   - 如果 LLM 返回漏项、重复项、未知项或破坏确定性组，Python 侧修复为安全结果：有效组保留，漏项回退为单独事件，并记录 warning。
   - 普通约时间、互通信息、泛泛完成审核/审批但无具体对象和结论的事件不应输出；如果输出，Python 写入前会再次过滤。
 
@@ -72,6 +73,7 @@
 
 - 单元测试覆盖人员名提取、标准 Markdown 解析、坏文件跳过、旧 `_merged.md` 和当前目录本次输出同名文件不参与输入、上游 `*-merged.md` 可继续参与输入、相同 `event_id` 且内容完全一致或包含时确定性合并、相同 `event_id` 但不满足确定性规则时交给 LLM 并产生 warning、输出包含来源信息、多人合并结果会自发送。
 - 单元测试覆盖“合并人来源”识别、未匹配到合并人来源时的 warning，以及相同事项中合并人版本优先信号会被送入 LLM prompt。
+- 单元测试覆盖大 prompt 触发滚动合并、低于阈值保持单次合并、滚动中间结果保留来源追溯和合并人来源信号。
 - 单元测试覆盖最终敏感兜底过滤、结构化保留门槛，以及多人合并 prompt 包含敏感事项和保留元数据要求。
 - 集成测试覆盖 `merge-collected --date` 输出结构化 JSON、多个输入生成 `YYYY-MM-DD-登录人姓名-merged.md`、坏文件不阻断有效合并、多人合并自发送结果、旧 CLI 命令行为不变。
 - 空目录、无有效事件、全坏文件均返回成功带 warning，并生成空汇总或空结果。

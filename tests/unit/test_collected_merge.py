@@ -17,6 +17,7 @@ from src.worktrace.models import (
     CollectedMergeRunResult,
     CollectedSourceEvent,
     DayDocument,
+    EventFileLink,
     SelfIdentity,
 )
 from src.worktrace.models import WorkEvent
@@ -97,12 +98,13 @@ def _unexpected_command(args, *, cwd=None):
 def _build_runner(
     tmp_path: Path,
     *,
+    config: RuntimeConfig | None = None,
     analyzer=None,
     delivery_channel=None,
     command_runner=None,
 ) -> CollectedMergeRunner:
     return CollectedMergeRunner(
-        config=RuntimeConfig(data_root=tmp_path / "data"),
+        config=config or RuntimeConfig(data_root=tmp_path / "data"),
         analyzer=analyzer or FakeAnalyzer(),
         cwd=tmp_path,
         command_runner=command_runner or _unexpected_command,
@@ -291,6 +293,193 @@ def test_collected_merge_marks_merge_owner_sources(tmp_path: Path) -> None:
         "falling back to standard collected merge" in warning
         for warning in result.warning_messages
     )
+
+
+def test_collected_merge_under_threshold_uses_single_analyzer_call(
+    tmp_path: Path,
+) -> None:
+    inbox = tmp_path / "merge_inbox" / "2026" / "06" / "29"
+    for person in ["张三", "李四", "王五"]:
+        _write_day_doc(
+            inbox / f"2026-06-29-{person}.md",
+            [
+                _event(
+                    event_id=f"evt-{person}",
+                    title=f"{person}排期",
+                    content=f"{person}确认项目排期。",
+                    object_hint=f"{person}项目排期",
+                    retention_detail=f"{person}形成项目排期确认结果。",
+                )
+            ],
+            tmp_path,
+        )
+
+    analyzer = FakeAnalyzer()
+    result = _build_runner(
+        tmp_path,
+        analyzer=analyzer,
+        config=RuntimeConfig(
+            data_root=tmp_path / "data",
+            collected_merge_prompt_char_threshold=1_000_000,
+        ),
+    ).run("2026-06-29")
+
+    assert len(analyzer.calls) == 1
+    assert result.merged_event_count == 1
+    assert not any(
+        warning.startswith("Using rolling collected merge")
+        for warning in result.warning_messages
+    )
+
+
+def test_collected_merge_over_threshold_rolls_sources_and_keeps_provenance(
+    tmp_path: Path,
+) -> None:
+    class ProvenanceAnalyzer(FakeAnalyzer):
+        def merge_collected_events(self, target_date, events, deterministic_groups):
+            self.calls.append(
+                {
+                    "target_date": target_date,
+                    "events": events,
+                    "deterministic_groups": deterministic_groups,
+                }
+            )
+            return CollectedMergeResult(
+                groups=[
+                    CollectedMergeGroup(
+                        group_id=f"g{len(self.calls)}",
+                        draft_ids=[event.draft_id for event in events],
+                        title="滚动汇总事项",
+                        content="；".join(event.event.content for event in events),
+                        object_hint="滚动汇总事项",
+                        retention_reason="decision_made",
+                        retention_detail="滚动合并保留多个来源形成的具体事项。",
+                    )
+                ]
+            )
+
+    inbox = tmp_path / "merge_inbox" / "2026" / "06" / "29"
+    for person in ["张三", "李四", "王五"]:
+        link = EventFileLink(
+            url=f"https://example.com/{person}",
+            title=f"{person}文档",
+            link_type="url",
+        )
+        _write_day_doc(
+            inbox / f"2026-06-29-{person}.md",
+            [
+                WorkEvent(
+                    date="2026-06-29",
+                    event_id=f"evt-{person}",
+                    title=f"{person}排期",
+                    content=f"{person}确认项目排期。",
+                    file_links=[link],
+                    object_hint=f"{person}项目排期",
+                    retention_reason="decision_made",
+                    retention_detail=f"{person}形成项目排期确认结果。",
+                )
+            ],
+            tmp_path,
+        )
+
+    analyzer = ProvenanceAnalyzer()
+    result = _build_runner(
+        tmp_path,
+        analyzer=analyzer,
+        config=RuntimeConfig(
+            data_root=tmp_path / "data",
+            collected_merge_prompt_char_threshold=1,
+        ),
+    ).run("2026-06-29")
+
+    assert len(analyzer.calls) == 2
+    assert (
+        analyzer.calls[1]["events"][0].source_file
+        == "__rolling_collected_merge_step_1.md"
+    )
+    content = Path(result.output_path or "").read_text(encoding="utf-8")
+    assert "- 来源人员: 张三、李四、王五" in content
+    assert "- 来源事件 ID: evt-张三、evt-李四、evt-王五" in content
+    assert "张三文档" in content
+    assert "李四文档" in content
+    assert "王五文档" in content
+    assert any(
+        warning.startswith("Using rolling collected merge:")
+        and "threshold=1" in warning
+        and "calls=2" in warning
+        for warning in result.warning_messages
+    )
+
+
+def test_collected_merge_rolling_preserves_owner_signal_between_steps(
+    tmp_path: Path,
+) -> None:
+    class OwnerCapturingAnalyzer(FakeAnalyzer):
+        def merge_collected_events(self, target_date, events, deterministic_groups):
+            self.calls.append(
+                {
+                    "target_date": target_date,
+                    "events": events,
+                    "deterministic_groups": deterministic_groups,
+                }
+            )
+            owner = next(
+                (event for event in events if event.is_merge_owner_source),
+                events[0],
+            )
+            return CollectedMergeResult(
+                groups=[
+                    CollectedMergeGroup(
+                        group_id=f"g{len(self.calls)}",
+                        draft_ids=[event.draft_id for event in events],
+                        title=owner.event.title,
+                        content=owner.event.content,
+                        object_hint=owner.event.object_hint,
+                        retention_reason=owner.event.retention_reason,
+                        retention_detail=owner.event.retention_detail,
+                    )
+                ]
+            )
+
+    inbox = tmp_path / "merge_inbox" / "2026" / "06" / "29"
+    for person, content in [
+        ("管理者", "管理者确认升级到 1.0.5。"),
+        ("张三", "张三反馈升级到 1.0.4。" * 20),
+        ("李四", "李四反馈升级到 1.0.4。" * 30),
+    ]:
+        _write_day_doc(
+            inbox / f"2026-06-29-{person}.md",
+            [
+                _event(
+                    event_id=f"evt-{person}",
+                    title="WorkTrace技能安装",
+                    content=content,
+                    object_hint="WorkTrace技能安装",
+                    retention_reason="follow_up_assigned",
+                    retention_detail=f"{person}确认 WorkTrace 技能安装版本信息。",
+                )
+            ],
+            tmp_path,
+        )
+
+    analyzer = OwnerCapturingAnalyzer()
+    result = _build_runner(
+        tmp_path,
+        analyzer=analyzer,
+        config=RuntimeConfig(
+            data_root=tmp_path / "data",
+            collected_merge_prompt_char_threshold=1,
+        ),
+    ).run("2026-06-29")
+
+    assert len(analyzer.calls) == 2
+    second_call_owner_events = [
+        event for event in analyzer.calls[1]["events"] if event.is_merge_owner_source
+    ]
+    assert [event.source_file for event in second_call_owner_events] == [
+        "__rolling_collected_merge_step_1.md"
+    ]
+    assert "1.0.5" in Path(result.output_path or "").read_text(encoding="utf-8")
 
 
 def test_collected_merge_runs_root_and_first_level_subdirectories(

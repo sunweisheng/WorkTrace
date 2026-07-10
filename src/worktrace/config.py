@@ -321,6 +321,7 @@ class RuntimeConfig:
     anchor_retry_limit: int = 3
     slice_base_limit: int = 150
     max_model_input_tokens: int = 100000
+    collected_merge_prompt_char_threshold: int = 80000
     slice_retry_limit: int = 3
     prompt_slice_message_limit: int = 40
     prompt_message_char_limit: int = 300
