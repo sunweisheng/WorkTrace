@@ -223,6 +223,10 @@ def build_collected_merge_prompt(
                 "retention_reason 只能是 deliverable_updated、decision_made、issue_or_risk_found、"
                 "follow_up_assigned、external_business_progress、substantive_approval。"
             ),
+            (
+                "retention_detail 不能为空，必须说明为什么这个事件值得保留；"
+                "不能只照抄 title、content 或 object_hint，也不能只写已确认、已同步、已处理。"
+            ),
             "如果来源事件只是普通约时间、互通信息、泛泛完成审核/审批且无具体对象和结论，不要输出对应 group。",
             _build_confidential_rule(runtime_config),
             _build_non_work_sensitive_rule(runtime_config),

@@ -193,6 +193,10 @@ def test_collected_merge_reads_sources_and_renders_source_fields(tmp_path: Path)
         encoding="utf-8",
     )
     (inbox / "_merged.md").write_text("old", encoding="utf-8")
+    (inbox / "2026-06-29-管理者-merge-omitted-events.md").write_text(
+        "diagnostic report",
+        encoding="utf-8",
+    )
     (inbox / "bad.md").write_text("bad", encoding="utf-8")
 
     analyzer = FakeAnalyzer()
@@ -975,7 +979,9 @@ def test_collected_merge_filters_low_retention_source_events_before_prompt(
     assert "下午会议安排" not in content
 
 
-def test_collected_merge_filters_group_missing_retention_reason(tmp_path: Path) -> None:
+def test_collected_merge_fills_group_missing_retention_metadata_from_sources(
+    tmp_path: Path,
+) -> None:
     class MissingRetentionAnalyzer(FakeAnalyzer):
         def merge_collected_events(self, target_date, events, deterministic_groups):
             self.calls.append(
@@ -1021,9 +1027,145 @@ def test_collected_merge_filters_group_missing_retention_reason(tmp_path: Path) 
 
     result = _build_runner(tmp_path, analyzer=MissingRetentionAnalyzer()).run("2026-06-29")
 
-    assert result.merged_event_count == 0
+    assert result.merged_event_count == 1
+    assert any(
+        "Filled collected merge metadata from source events: 需求评审"
+        in warning
+        for warning in result.warning_messages
+    )
     content = (inbox / "2026-06-29-管理者-merged.md").read_text(encoding="utf-8")
-    assert "_当天没有提炼出需要保留的工作事件。_" in content
+    assert "评审形成需求变更范围和上线排期结论。" in content
+
+
+def test_collected_merge_retries_structural_missing_retention_detail(
+    tmp_path: Path,
+) -> None:
+    class RetryAnalyzer(FakeAnalyzer):
+        def merge_collected_events(self, target_date, events, deterministic_groups):
+            self.calls.append(
+                {
+                    "target_date": target_date,
+                    "events": events,
+                    "deterministic_groups": deterministic_groups,
+                }
+            )
+            if len(self.calls) == 1:
+                return CollectedMergeResult(
+                    groups=[
+                        CollectedMergeGroup(
+                            group_id="g1",
+                            draft_ids=[events[0].draft_id],
+                            title="需求评审",
+                            content="确认需求变更范围和上线排期。",
+                            object_hint="需求变更范围和上线排期",
+                            retention_reason="decision_made",
+                            retention_detail="",
+                        ),
+                        CollectedMergeGroup(
+                            group_id="g2",
+                            draft_ids=[events[1].draft_id],
+                            title="发布排期",
+                            content="确认发布排期。",
+                            object_hint="发布排期",
+                            retention_reason="follow_up_assigned",
+                            retention_detail="",
+                        ),
+                    ]
+                )
+            return CollectedMergeResult(
+                groups=[
+                    CollectedMergeGroup(
+                        group_id="g1",
+                        draft_ids=[event.draft_id for event in events],
+                        title="需求评审与发布排期",
+                        content="确认需求变更范围、上线排期和发布排期。",
+                        object_hint="需求评审与发布排期",
+                        retention_reason="decision_made",
+                        retention_detail="评审形成需求变更范围、上线排期和发布排期结论。",
+                    )
+                ]
+            )
+
+    inbox = tmp_path / "merge_inbox" / "2026" / "06" / "29"
+    _write_day_doc(
+        inbox / "2026-06-29-张三.md",
+        [
+            _event(
+                event_id="evt-1",
+                title="需求评审",
+                content="确认需求变更范围和上线排期。",
+                object_hint="需求变更范围和上线排期",
+                retention_detail="评审形成需求变更范围和上线排期结论。",
+            ),
+            _event(
+                event_id="evt-2",
+                title="发布排期",
+                content="确认发布排期。",
+                object_hint="发布排期",
+                retention_reason="follow_up_assigned",
+                retention_detail="确认发布排期并形成后续跟进计划。",
+            ),
+        ],
+        tmp_path,
+    )
+
+    analyzer = RetryAnalyzer()
+    result = _build_runner(
+        tmp_path,
+        analyzer=analyzer,
+        config=RuntimeConfig(
+            data_root=tmp_path / "data",
+            collected_merge_missing_field_retry_ratio=0.2,
+            collected_merge_missing_field_retry_limit=1,
+        ),
+    ).run("2026-06-29")
+
+    assert len(analyzer.calls) == 2
+    assert result.merged_event_count == 1
+    assert any(
+        warning.startswith("Retrying collected merge because required fields were missing")
+        for warning in result.warning_messages
+    )
+    content = (inbox / "2026-06-29-管理者-merged.md").read_text(encoding="utf-8")
+    assert "评审形成需求变更范围、上线排期和发布排期结论。" in content
+
+
+def test_collected_merge_trace_writes_step_summary(tmp_path: Path) -> None:
+    inbox = tmp_path / "merge_inbox" / "2026" / "06" / "29"
+    _write_day_doc(
+        inbox / "2026-06-29-张三.md",
+        [
+            _event(
+                event_id="evt-1",
+                title="需求评审",
+                content="确认需求变更范围和上线排期。",
+                object_hint="需求变更范围和上线排期",
+                retention_detail="评审形成需求变更范围和上线排期结论。",
+            )
+        ],
+        tmp_path,
+    )
+
+    trace_root = tmp_path / "trace"
+    result = _build_runner(
+        tmp_path,
+        config=RuntimeConfig(
+            data_root=tmp_path / "data",
+            collected_merge_trace_enabled=True,
+            collected_merge_trace_root=trace_root,
+        ),
+    ).run("2026-06-29")
+
+    assert result.merged_event_count == 1
+    summary_path = trace_root / "2026-06-29" / "summary.json"
+    step_path = trace_root / "2026-06-29" / "step-001.json"
+    assert summary_path.exists()
+    assert step_path.exists()
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    assert summary["merged_event_count"] == 1
+    step = json.loads(step_path.read_text(encoding="utf-8"))
+    assert step["raw_group_count"] == 1
+    assert step["retained_metrics"]["event_count"] == 1
 
 
 def test_collected_merge_run_result_round_trips_outputs(tmp_path: Path) -> None:

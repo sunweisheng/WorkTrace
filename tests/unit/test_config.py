@@ -173,6 +173,25 @@ def test_load_runtime_config_overrides_uses_defaults_when_rule_file_missing(
     assert config.self_assignment_actions == ()
 
 
+def test_load_runtime_config_overrides_reads_collected_merge_env_overrides(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / ".env").write_text(
+        "WORKTRACE_COLLECTED_MERGE_TRACE=true\n"
+        "WORKTRACE_COLLECTED_MERGE_TRACE_ROOT=custom-trace\n"
+        "WORKTRACE_COLLECTED_MERGE_MISSING_FIELD_RETRY_RATIO=0.35\n"
+        "WORKTRACE_COLLECTED_MERGE_MISSING_FIELD_RETRY_LIMIT=2\n",
+        encoding="utf-8",
+    )
+
+    config = load_runtime_config_overrides(RuntimeConfig(), cwd=tmp_path)
+
+    assert config.collected_merge_trace_enabled is True
+    assert config.collected_merge_trace_root == Path("custom-trace")
+    assert config.collected_merge_missing_field_retry_ratio == 0.35
+    assert config.collected_merge_missing_field_retry_limit == 2
+
+
 def test_load_runtime_config_overrides_rejects_invalid_rule_file(tmp_path: Path) -> None:
     rules_dir = tmp_path / "config"
     rules_dir.mkdir()

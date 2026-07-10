@@ -16,6 +16,14 @@ DEFAULT_LLM_TLS_VERIFY_ENV_VAR = "WORKTRACE_LLM_TLS_VERIFY"
 DEFAULT_LLM_SLEEP_MIN_ENV_VAR = "WORKTRACE_LLM_SLEEP_MIN_SECONDS"
 DEFAULT_LLM_SLEEP_MAX_ENV_VAR = "WORKTRACE_LLM_SLEEP_MAX_SECONDS"
 DEFAULT_LLM_REASONING_EFFORT_ENV_VAR = "WORKTRACE_LLM_REASONING_EFFORT"
+DEFAULT_COLLECTED_MERGE_TRACE_ENV_VAR = "WORKTRACE_COLLECTED_MERGE_TRACE"
+DEFAULT_COLLECTED_MERGE_TRACE_ROOT_ENV_VAR = "WORKTRACE_COLLECTED_MERGE_TRACE_ROOT"
+DEFAULT_COLLECTED_MERGE_RETRY_RATIO_ENV_VAR = (
+    "WORKTRACE_COLLECTED_MERGE_MISSING_FIELD_RETRY_RATIO"
+)
+DEFAULT_COLLECTED_MERGE_RETRY_LIMIT_ENV_VAR = (
+    "WORKTRACE_COLLECTED_MERGE_MISSING_FIELD_RETRY_LIMIT"
+)
 DEFAULT_LLM_ENV_FILE_NAME = ".env"
 DEFAULT_EVENT_RULES_FILE_NAME = "config/event_rules.json"
 DEFAULT_CONVERSATION_BLACKLIST_FILE_NAME = "config/conversation_blacklist.json"
@@ -107,6 +115,16 @@ def _parse_positive_float(raw_value: str, *, env_var: str) -> float:
     return value
 
 
+def _parse_non_negative_int(raw_value: str, *, env_var: str) -> int:
+    try:
+        value = int(raw_value)
+    except ValueError as exc:
+        raise ValueError(f"Invalid integer config: {env_var} must be an integer.") from exc
+    if value < 0:
+        raise ValueError(f"Invalid integer config: {env_var} must be non-negative.")
+    return value
+
+
 def load_online_llm_settings(
     config: RuntimeConfig,
     *,
@@ -194,7 +212,9 @@ def load_runtime_config_overrides(
     *,
     cwd: Path | None = None,
 ) -> RuntimeConfig:
-    rules_path = (cwd or Path.cwd()) / config.event_rules_file_name
+    base_dir = cwd or Path.cwd()
+    config = _apply_runtime_env_overrides(config, cwd=base_dir)
+    rules_path = base_dir / config.event_rules_file_name
     try:
         payload = json.loads(rules_path.read_text(encoding="utf-8"))
     except FileNotFoundError:
@@ -268,6 +288,50 @@ def load_runtime_config_overrides(
     )
 
 
+def _apply_runtime_env_overrides(
+    config: RuntimeConfig,
+    *,
+    cwd: Path | None = None,
+) -> RuntimeConfig:
+    values = _read_local_env_values(config, cwd=cwd)
+    updates: dict[str, object] = {}
+
+    trace_raw = values.get(config.collected_merge_trace_env_var, "").strip()
+    if trace_raw:
+        updates["collected_merge_trace_enabled"] = _parse_bool_value(
+            trace_raw,
+            env_var=config.collected_merge_trace_env_var,
+        )
+
+    trace_root_raw = values.get(config.collected_merge_trace_root_env_var, "").strip()
+    if trace_root_raw:
+        updates["collected_merge_trace_root"] = Path(trace_root_raw)
+
+    retry_ratio_raw = values.get(config.collected_merge_retry_ratio_env_var, "").strip()
+    if retry_ratio_raw:
+        retry_ratio = _parse_positive_float(
+            retry_ratio_raw,
+            env_var=config.collected_merge_retry_ratio_env_var,
+        )
+        if retry_ratio > 1:
+            raise ValueError(
+                "Invalid collected merge retry ratio: "
+                f"{config.collected_merge_retry_ratio_env_var} must be between 0 and 1."
+            )
+        updates["collected_merge_missing_field_retry_ratio"] = retry_ratio
+
+    retry_limit_raw = values.get(config.collected_merge_retry_limit_env_var, "").strip()
+    if retry_limit_raw:
+        updates["collected_merge_missing_field_retry_limit"] = _parse_non_negative_int(
+            retry_limit_raw,
+            env_var=config.collected_merge_retry_limit_env_var,
+        )
+
+    if not updates:
+        return config
+    return replace(config, **updates)
+
+
 def load_conversation_blacklist_overrides(
     config: RuntimeConfig,
     *,
@@ -338,6 +402,12 @@ class RuntimeConfig:
     slice_base_limit: int = 150
     max_model_input_tokens: int = 100000
     collected_merge_prompt_char_threshold: int = 80000
+    collected_merge_missing_field_retry_ratio: float = 0.2
+    collected_merge_missing_field_retry_limit: int = 1
+    collected_merge_trace_enabled: bool = False
+    collected_merge_trace_root: Path = field(
+        default_factory=lambda: Path("data") / "debug" / "collected_merge"
+    )
     slice_retry_limit: int = 3
     prompt_slice_message_limit: int = 40
     prompt_message_char_limit: int = 300
@@ -366,6 +436,10 @@ class RuntimeConfig:
     llm_sleep_min_env_var: str = DEFAULT_LLM_SLEEP_MIN_ENV_VAR
     llm_sleep_max_env_var: str = DEFAULT_LLM_SLEEP_MAX_ENV_VAR
     llm_reasoning_effort_env_var: str = DEFAULT_LLM_REASONING_EFFORT_ENV_VAR
+    collected_merge_trace_env_var: str = DEFAULT_COLLECTED_MERGE_TRACE_ENV_VAR
+    collected_merge_trace_root_env_var: str = DEFAULT_COLLECTED_MERGE_TRACE_ROOT_ENV_VAR
+    collected_merge_retry_ratio_env_var: str = DEFAULT_COLLECTED_MERGE_RETRY_RATIO_ENV_VAR
+    collected_merge_retry_limit_env_var: str = DEFAULT_COLLECTED_MERGE_RETRY_LIMIT_ENV_VAR
     llm_env_file_name: str = DEFAULT_LLM_ENV_FILE_NAME
     event_rules_file_name: str = DEFAULT_EVENT_RULES_FILE_NAME
     conversation_blacklist_file_name: str = DEFAULT_CONVERSATION_BLACKLIST_FILE_NAME
