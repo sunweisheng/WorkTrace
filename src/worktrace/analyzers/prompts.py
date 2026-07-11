@@ -80,8 +80,7 @@ def build_batch_analysis_prompt(
             "咨询类事件、流程审核类事件、团建活动组织类事件、技能培训类事件，默认不要提炼；这类事项对后续公司级长期事件沉淀价值较低。",
             *LOW_RETENTION_EVENT_RULES,
             RETENTION_COMPLETENESS_RULE,
-            _build_confidential_rule(runtime_config),
-            _build_non_work_sensitive_rule(runtime_config),
+            _build_sensitive_rule(runtime_config),
             "一件事写一条；如果有多件事就拆开。",
             "topic 写短标题，content 写完整事项；如果有明确结果，直接融入 content，不要单独返回 result。",
             "action_label 只写主要动作标签，例如：回复、审批、催办、撰写、核对、跟进、同步、确认。",
@@ -228,8 +227,7 @@ def build_collected_merge_prompt(
                 "不能只照抄 title、content 或 object_hint，也不能只写已确认、已同步、已处理。"
             ),
             "如果来源事件只是普通约时间、互通信息、泛泛完成审核/审批且无具体对象和结论，不要输出对应 group。",
-            _build_confidential_rule(runtime_config),
-            _build_non_work_sensitive_rule(runtime_config),
+            _build_sensitive_rule(runtime_config),
             "涉及上述敏感事项时，不要输出对应 group。",
         ],
         "required_output_schema": {
@@ -1026,18 +1024,11 @@ def _format_prompt_time(value: str, config: RuntimeConfig) -> str:
         return value
 
 
-def _build_confidential_rule(config: RuntimeConfig) -> str:
-    if not config.confidential_event_keywords:
+def _build_sensitive_rule(config: RuntimeConfig) -> str:
+    if not config.sensitive_event_keywords:
         return ""
-    joined = "、".join(config.confidential_event_keywords)
-    return f"涉及{joined}等工作保密信息，不要提炼为事项。"
-
-
-def _build_non_work_sensitive_rule(config: RuntimeConfig) -> str:
-    if not config.non_work_sensitive_keywords:
-        return ""
-    joined = "、".join(config.non_work_sensitive_keywords)
-    return f"涉及{joined}等非工作敏感内容，不要提炼为事项。"
+    joined = "、".join(config.sensitive_event_keywords)
+    return f"涉及{joined}等敏感信息，不要提炼为事项。"
 
 
 def _build_feishu_doc_label(message: NormalizedMessage) -> str:

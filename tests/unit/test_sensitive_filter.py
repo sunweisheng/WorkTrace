@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 from src.worktrace.config import RuntimeConfig
-from src.worktrace.models import MergedEventDraft, SourceBackedEventDraft, WorkEvent
+from src.worktrace.models import EventFileLink, MergedEventDraft, SourceBackedEventDraft, WorkEvent
 from src.worktrace.pipeline.sensitive_filter import (
-    filter_excluded_candidate_drafts,
-    filter_sensitive_merged_drafts,
+    filter_candidate_drafts,
+    filter_merged_drafts,
+    filter_work_events,
 )
 from src.worktrace.pipeline.retention_filter import (
     filter_retained_candidate_drafts,
@@ -12,7 +13,7 @@ from src.worktrace.pipeline.retention_filter import (
 )
 
 
-def test_merged_filter_does_not_remove_configured_sensitive_keywords() -> None:
+def test_merged_filter_removes_configured_sensitive_keywords() -> None:
     drafts = [
         MergedEventDraft(
             date="2026-06-23",
@@ -30,20 +31,24 @@ def test_merged_filter_does_not_remove_configured_sensitive_keywords() -> None:
         ),
     ]
 
-    kept, warnings = filter_sensitive_merged_drafts(drafts, RuntimeConfig())
+    kept, warnings = filter_merged_drafts(
+        drafts,
+        RuntimeConfig(sensitive_event_keywords=("工资",)),
+    )
 
-    assert [draft.topic for draft in kept] == ["工资调整沟通", "项目发布推进"]
-    assert warnings == []
+    assert [draft.topic for draft in kept] == ["项目发布推进"]
+    assert warnings == ["Filtered sensitive event."]
 
 
-def test_merged_filter_does_not_remove_non_work_sensitive_keywords() -> None:
+def test_merged_filter_removes_sensitive_keyword_from_retention_detail() -> None:
     drafts = [
         MergedEventDraft(
             date="2026-06-23",
-            topic="团队吵架记录",
-            content="双方在群里互骂并出现侮辱性表达",
+            topic="团队事项",
+            content="确认处理安排",
             source_message_ids=["m1"],
             source_conversation_ids=["c1"],
+            retention_detail="讨论薪资调整方案。",
         ),
         MergedEventDraft(
             date="2026-06-23",
@@ -54,31 +59,39 @@ def test_merged_filter_does_not_remove_non_work_sensitive_keywords() -> None:
         ),
     ]
 
-    kept, warnings = filter_sensitive_merged_drafts(drafts, RuntimeConfig())
+    kept, warnings = filter_merged_drafts(
+        drafts,
+        RuntimeConfig(sensitive_event_keywords=("薪资",)),
+    )
 
-    assert [draft.topic for draft in kept] == ["团队吵架记录", "需求评审推进"]
-    assert warnings == []
+    assert [draft.topic for draft in kept] == ["需求评审推进"]
+    assert warnings == ["Filtered sensitive event."]
 
 
-def test_merged_filter_ignores_sensitive_runtime_config_keywords() -> None:
-    drafts = [
-        MergedEventDraft(
+def test_work_event_filter_removes_sensitive_file_link_without_leaking_title() -> None:
+    events = [
+        WorkEvent(
             date="2026-06-23",
-            topic="股权方案沟通",
-            content="讨论股权分配",
-            source_message_ids=["m1"],
-            source_conversation_ids=["c1"],
+            event_id="evt-1",
+            title="项目发布推进",
+            content="确认上线节奏",
+            file_links=[
+                EventFileLink(
+                    url="https://example.com/docs/1",
+                    title="薪资调整说明",
+                    link_type="doc",
+                )
+            ],
         )
     ]
 
-    config = RuntimeConfig(
-        confidential_event_keywords=("股权",),
-        non_work_sensitive_keywords=(),
+    kept, warnings = filter_work_events(
+        events,
+        RuntimeConfig(sensitive_event_keywords=("薪资",)),
     )
-    kept, warnings = filter_sensitive_merged_drafts(drafts, config)
 
-    assert [draft.topic for draft in kept] == ["股权方案沟通"]
-    assert warnings == []
+    assert kept == []
+    assert warnings == ["Filtered sensitive event."]
 
 
 def test_merged_filter_removes_excluded_operational_noise_drafts() -> None:
@@ -113,27 +126,27 @@ def test_merged_filter_removes_excluded_operational_noise_drafts() -> None:
         ),
     ]
     config = RuntimeConfig(
-        excluded_event_topics=("代码同步", "工作面谈安排", "故障数据同步"),
-        excluded_event_content_signatures=("git pull", "聆听大老板电话"),
+        excluded_event_keywords=("代码同步", "聆听大老板电话", "故障数据同步"),
     )
 
-    kept, warnings = filter_sensitive_merged_drafts(drafts, config)
+    kept, warnings = filter_merged_drafts(drafts, config)
 
     assert [draft.topic for draft in kept] == ["需求评审推进"]
     assert len(warnings) == 3
 
 
-def test_excluded_candidate_filter_removes_only_exact_topics() -> None:
+def test_excluded_candidate_filter_removes_keyword_from_object_hint() -> None:
     drafts = [
         SourceBackedEventDraft(
             draft_id="d1",
             date="2026-06-23",
-            topic="代码同步",
-            content="执行 git pull 操作，可能涉及代码更新同步。",
+            topic="常规同步",
+            content="确认进展。",
             source_message_ids=["m1"],
             source_conversation_id="c1",
             source_slice_id="s1",
             confidence=0.9,
+            object_hint="代码同步",
         ),
         SourceBackedEventDraft(
             draft_id="d2",
@@ -147,14 +160,14 @@ def test_excluded_candidate_filter_removes_only_exact_topics() -> None:
         ),
     ]
 
-    config = RuntimeConfig(excluded_event_topics=("代码同步",))
-    kept, warnings = filter_excluded_candidate_drafts(drafts, config)
+    config = RuntimeConfig(excluded_event_keywords=("代码同步",))
+    kept, warnings = filter_candidate_drafts(drafts, config)
 
     assert [draft.topic for draft in kept] == ["索取故障数据"]
     assert len(warnings) == 1
 
 
-def test_excluded_candidate_filter_removes_signature_even_when_topic_changes() -> None:
+def test_excluded_candidate_filter_removes_keyword_from_content() -> None:
     drafts = [
         SourceBackedEventDraft(
             draft_id="d1",
@@ -168,8 +181,8 @@ def test_excluded_candidate_filter_removes_signature_even_when_topic_changes() -
         )
     ]
 
-    config = RuntimeConfig(excluded_event_content_signatures=("git pull",))
-    kept, warnings = filter_excluded_candidate_drafts(drafts, config)
+    config = RuntimeConfig(excluded_event_keywords=("git pull",))
+    kept, warnings = filter_candidate_drafts(drafts, config)
 
     assert kept == []
     assert len(warnings) == 1
@@ -192,9 +205,9 @@ def test_merged_filter_removes_signature_even_when_topic_changes() -> None:
             source_conversation_ids=["c2"],
         ),
     ]
-    config = RuntimeConfig(excluded_event_content_signatures=("git pull",))
+    config = RuntimeConfig(excluded_event_keywords=("git pull",))
 
-    kept, warnings = filter_sensitive_merged_drafts(drafts, config)
+    kept, warnings = filter_merged_drafts(drafts, config)
 
     assert [draft.topic for draft in kept] == ["需求评审推进"]
     assert len(warnings) == 1
@@ -211,7 +224,7 @@ def test_merged_filter_keeps_non_excluded_topic_with_different_content() -> None
         )
     ]
 
-    kept, warnings = filter_sensitive_merged_drafts(drafts, RuntimeConfig())
+    kept, warnings = filter_merged_drafts(drafts, RuntimeConfig())
 
     assert [draft.topic for draft in kept] == ["索取故障数据"]
     assert warnings == []

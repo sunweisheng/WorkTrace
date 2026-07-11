@@ -200,8 +200,7 @@ def test_batch_prompt_uses_original_message_ids_and_slim_rules(tmp_path: Path) -
 def test_batch_prompt_uses_configured_sensitive_keywords(tmp_path: Path) -> None:
     config = RuntimeConfig(
         data_root=tmp_path / "data",
-        confidential_event_keywords=("工资", "薪资"),
-        non_work_sensitive_keywords=("吵架",),
+        sensitive_event_keywords=("工资", "薪资", "吵架"),
     )
     message = NormalizedMessage(
         conversation_id="oc_1",
@@ -239,8 +238,7 @@ def test_batch_prompt_uses_configured_sensitive_keywords(tmp_path: Path) -> None
 
     prompt = build_batch_analysis_prompt(batch, config=config)
 
-    assert "涉及工资、薪资等工作保密信息，不要提炼为事项。" in prompt
-    assert "涉及吵架等非工作敏感内容，不要提炼为事项。" in prompt
+    assert "涉及工资、薪资、吵架等敏感信息，不要提炼为事项。" in prompt
 
 
 def test_anchor_prompt_serialization_is_compact(tmp_path: Path) -> None:

@@ -6,8 +6,12 @@ from src.worktrace.pipeline.direct_relation_filter import (
 )
 
 
-SELF_ASSIGNMENT_CUES = ("帮", "麻烦", "请", "需要你", "你来")
-SELF_ASSIGNMENT_ACTIONS = (
+SELF_ASSIGNMENT_KEYWORDS = (
+    "帮",
+    "麻烦",
+    "请",
+    "需要你",
+    "你来",
     "处理",
     "确认",
     "推进",
@@ -93,8 +97,7 @@ def test_self_message_source_is_self_related() -> None:
         conversation_slice,
         self_open_id="ou_self",
         self_display_name="张玉环",
-        self_assignment_cues=SELF_ASSIGNMENT_CUES,
-        self_assignment_actions=SELF_ASSIGNMENT_ACTIONS,
+        self_assignment_keywords=SELF_ASSIGNMENT_KEYWORDS,
     )
 
 
@@ -116,8 +119,7 @@ def test_direct_reply_to_self_anchor_is_self_related() -> None:
         conversation_slice,
         self_open_id="ou_self",
         self_display_name="张玉环",
-        self_assignment_cues=SELF_ASSIGNMENT_CUES,
-        self_assignment_actions=SELF_ASSIGNMENT_ACTIONS,
+        self_assignment_keywords=SELF_ASSIGNMENT_KEYWORDS,
     )
 
 
@@ -128,7 +130,7 @@ def test_explicit_assignment_to_self_name_is_self_related() -> None:
             _message(
                 "om_2",
                 sender_open_id="ou_other",
-                text="@张玉环 麻烦你提个看板，让开发删除经销商聊天记录",
+                text="@张玉环 麻烦看一下",
             ),
         ]
     )
@@ -138,19 +140,18 @@ def test_explicit_assignment_to_self_name_is_self_related() -> None:
         conversation_slice,
         self_open_id="ou_self",
         self_display_name="张玉环",
-        self_assignment_cues=SELF_ASSIGNMENT_CUES,
-        self_assignment_actions=SELF_ASSIGNMENT_ACTIONS,
+        self_assignment_keywords=SELF_ASSIGNMENT_KEYWORDS,
     )
 
 
-def test_explicit_assignment_requires_configured_actions() -> None:
+def test_explicit_assignment_requires_configured_keywords() -> None:
     conversation_slice = _slice(
         [
             _message("om_1", sender_open_id="ou_self", text="我在"),
             _message(
                 "om_2",
                 sender_open_id="ou_other",
-                text="@张玉环 麻烦你提个看板，让开发删除经销商聊天记录",
+                text="@张玉环 麻烦看一下",
             ),
         ]
     )
@@ -160,8 +161,7 @@ def test_explicit_assignment_requires_configured_actions() -> None:
         conversation_slice,
         self_open_id="ou_self",
         self_display_name="张玉环",
-        self_assignment_cues=(),
-        self_assignment_actions=(),
+        self_assignment_keywords=(),
     )
 
 
@@ -187,8 +187,7 @@ def test_other_people_discussion_is_not_self_related() -> None:
         conversation_slice,
         self_open_id="ou_self",
         self_display_name="张玉环",
-        self_assignment_cues=SELF_ASSIGNMENT_CUES,
-        self_assignment_actions=SELF_ASSIGNMENT_ACTIONS,
+        self_assignment_keywords=SELF_ASSIGNMENT_KEYWORDS,
     )
 
 
@@ -199,7 +198,7 @@ def test_plain_name_mention_without_assignment_is_not_self_related() -> None:
             _message(
                 "om_2",
                 sender_open_id="ou_other",
-                text="张玉环之前也处理过类似问题，丁金龙这次让付晨处理",
+                text="张玉环之前参与过类似问题，丁金龙本次让付晨负责",
             ),
         ]
     )
@@ -209,6 +208,5 @@ def test_plain_name_mention_without_assignment_is_not_self_related() -> None:
         conversation_slice,
         self_open_id="ou_self",
         self_display_name="张玉环",
-        self_assignment_cues=SELF_ASSIGNMENT_CUES,
-        self_assignment_actions=SELF_ASSIGNMENT_ACTIONS,
+        self_assignment_keywords=SELF_ASSIGNMENT_KEYWORDS,
     )

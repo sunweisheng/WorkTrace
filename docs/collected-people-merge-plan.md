@@ -50,8 +50,8 @@
   - 普通约时间、互通信息、泛泛完成审核/审批但无具体对象和结论的事件不应输出；如果输出，Python 写入前会再次过滤。
 
 - 敏感内容与失败策略
-  - Prompt 继续按 `config/event_rules.json` 中的敏感关键词要求 LLM 不输出薪资、绩效、争吵、辱骂等敏感事项。
-  - Python 侧不再按敏感关键词过滤最终事件；精确排除规则会在来源事件阶段和合并后事件阶段都检查。
+  - Prompt 按 `config/event_rules.json` 的 `sensitive_event_keywords` 要求 LLM 不输出敏感事项。
+  - Python 在读取来源事件和物化合并结果后都强制过滤敏感词；命中来源不会进入合并模型，命中最终事件不会写入 Markdown。
   - Python 侧在读取来源事件后和写入团队汇总文件前都执行结构化保留门槛；被过滤的事件写 warning。
   - 空目录、无有效事件、全坏文件都生成空团队汇总文件，返回 `success_with_warnings`。
   - LLM 协议错误导致本地无法形成安全结果时返回 `failed`；上传失败不影响本地结果，只写 warning。

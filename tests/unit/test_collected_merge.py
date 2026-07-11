@@ -846,8 +846,7 @@ def test_collected_merge_prompt_contains_sensitive_rules() -> None:
         ],
         [],
         config=RuntimeConfig(
-            confidential_event_keywords=("工资", "薪资", "薪酬"),
-            non_work_sensitive_keywords=("吵架", "辱骂"),
+            sensitive_event_keywords=("工资", "薪资", "薪酬", "吵架", "辱骂"),
         ),
     )
 
@@ -857,8 +856,7 @@ def test_collected_merge_prompt_contains_sensitive_rules() -> None:
     assert payload["remaining_events"][0]["is_merge_owner_source"] is True
     assert payload["remaining_events"][0]["source_people"] == []
     assert payload["remaining_events"][0]["source_event_ids"] == []
-    assert "涉及工资、薪资、薪酬" in prompt
-    assert "涉及吵架、辱骂" in prompt
+    assert "涉及工资、薪资、薪酬、吵架、辱骂" in prompt
     assert "不要输出对应 group" in prompt
     assert "retention_reason" in prompt
     assert "以该来源事件为主" in prompt
@@ -977,6 +975,48 @@ def test_collected_merge_filters_low_retention_source_events_before_prompt(
     assert [event.event.title for event in analyzer.calls[0]["events"]] == ["需求评审"]
     content = (inbox / "2026-06-29-管理者-merged.md").read_text(encoding="utf-8")
     assert "下午会议安排" not in content
+
+
+def test_collected_merge_filters_sensitive_source_events_before_prompt(
+    tmp_path: Path,
+) -> None:
+    inbox = tmp_path / "merge_inbox" / "2026" / "06" / "29"
+    _write_day_doc(
+        inbox / "2026-06-29-张三.md",
+        [
+            _event(
+                event_id="evt-sensitive",
+                title="薪资调整审批",
+                content="确认员工薪资调整方案。",
+                object_hint="薪资调整",
+                retention_detail="审批通过薪资调整。",
+            ),
+            _event(
+                event_id="evt-keep",
+                title="需求评审",
+                content="确认需求变更范围和上线排期。",
+                object_hint="需求变更范围和上线排期",
+                retention_detail="评审形成需求变更范围和上线排期结论。",
+            ),
+        ],
+        tmp_path,
+    )
+
+    analyzer = FakeAnalyzer()
+    result = _build_runner(
+        tmp_path,
+        analyzer=analyzer,
+        config=RuntimeConfig(
+            data_root=tmp_path / "data",
+            sensitive_event_keywords=("薪资",),
+        ),
+    ).run("2026-06-29")
+
+    assert result.source_event_count == 1
+    assert [event.event.title for event in analyzer.calls[0]["events"]] == ["需求评审"]
+    assert "Filtered sensitive event." in result.warning_messages
+    content = (inbox / "2026-06-29-管理者-merged.md").read_text(encoding="utf-8")
+    assert "薪资" not in content
 
 
 def test_collected_merge_fills_group_missing_retention_metadata_from_sources(

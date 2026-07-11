@@ -121,8 +121,7 @@ class FakeDelivery:
 def test_runner_happy_path(tmp_path: Path) -> None:
     config = RuntimeConfig(
         data_root=tmp_path / "data",
-        excluded_event_topics=("代码同步",),
-        excluded_event_content_signatures=("git pull",),
+        excluded_event_keywords=("代码同步", "git pull"),
     )
     runner = DailyTraceRunner(
         config=config,
@@ -315,8 +314,7 @@ def test_runner_keeps_distinct_events_with_same_source_message_ids_separate(
 
     config = RuntimeConfig(
         data_root=tmp_path / "data",
-        excluded_event_topics=("代码同步",),
-        excluded_event_content_signatures=("git pull",),
+        excluded_event_keywords=("代码同步", "git pull"),
     )
     runner = DailyTraceRunner(
         config=config,
@@ -376,8 +374,7 @@ def test_runner_excludes_configured_topics_before_merge(tmp_path: Path) -> None:
 
     config = RuntimeConfig(
         data_root=tmp_path / "data",
-        excluded_event_topics=("代码同步",),
-        excluded_event_content_signatures=("git pull",),
+        excluded_event_keywords=("代码同步", "git pull"),
     )
     runner = DailyTraceRunner(
         config=config,

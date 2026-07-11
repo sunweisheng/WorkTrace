@@ -15,9 +15,9 @@
 5. `conversation_first_pass.py` 按会话生成 `ConversationSlice`
 6. 每个会话切片单独调用一次 analyzer，必要时按 `context_requests` 扩窗重跑
 7. 汇总全日 `candidate_events`
-8. Python 先按精确排除规则和结构化保留门槛过滤候选事件
+8. Python 先按敏感与普通事件排除规则和结构化保留门槛过滤候选事件
 9. `merge_day_candidates(...)` 做跨会话分组
-10. Python 物化 `MergedEventDraft`，再次执行精确排除和结构化保留门槛
+10. Python 物化 `MergedEventDraft`，再次执行敏感与普通事件排除和结构化保留门槛
 11. Python 构建最终 `WorkEvent`，聚合涉及文件并排序
 12. `stores/markdown.py` 覆盖写入 `data/YYYY/MM/YYYY-MM-DD-姓名.md`
 13. 通过飞书 CLI 机器人身份把当天 Markdown 文件发送给当前登录用户自己
@@ -64,12 +64,9 @@
 当前运行时还会从本地配置文件读取以下覆盖项：
 
 - `config/event_rules.json`
-  - `confidential_event_keywords`
-  - `non_work_sensitive_keywords`
-  - `self_assignment_cues`
-  - `self_assignment_actions`
-  - `excluded_event_topics`
-  - `excluded_event_content_signatures`
+  - `sensitive_event_keywords`
+  - `excluded_event_keywords`
+  - `self_assignment_keywords`
 - `config/conversation_blacklist.json`
   - `excluded_conversation_ids`
 

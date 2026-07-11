@@ -25,7 +25,7 @@ def test_readme_mentions_event_rules_file() -> None:
     content = Path("README.md").read_text(encoding="utf-8")
 
     assert "config/event_rules.json" in content
-    assert "精确排除" in content
+    assert "普通事件排除" in content
 
 
 def test_readme_mentions_quick_usage_examples() -> None:

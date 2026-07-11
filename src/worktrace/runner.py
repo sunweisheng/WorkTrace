@@ -35,8 +35,9 @@ from .pipeline.retention_filter import (
     filter_retained_work_events,
 )
 from .pipeline.sensitive_filter import (
-    filter_excluded_candidate_drafts,
-    filter_sensitive_merged_drafts,
+    filter_candidate_drafts,
+    filter_merged_drafts,
+    filter_work_events,
 )
 from .pipeline.validation import (
     normalize_cross_conversation_groups_with_fallback,
@@ -196,10 +197,10 @@ class DailyTraceRunner:
         merged_drafts: list[MergedEventDraft] = []
         if all_candidates:
             try:
-                all_candidates, excluded_candidate_warnings = (
-                    filter_excluded_candidate_drafts(all_candidates, self.config)
+                all_candidates, candidate_filter_warnings = (
+                    filter_candidate_drafts(all_candidates, self.config)
                 )
-                warning_messages.extend(excluded_candidate_warnings)
+                warning_messages.extend(candidate_filter_warnings)
                 all_candidates, self_relation_candidate_warnings = (
                     filter_self_related_candidate_drafts(
                         all_candidates,
@@ -209,8 +210,7 @@ class DailyTraceRunner:
                         },
                         self_open_id=self_identity.open_id,
                         self_display_name=self_identity.display_name,
-                        self_assignment_cues=self.config.self_assignment_cues,
-                        self_assignment_actions=self.config.self_assignment_actions,
+                        self_assignment_keywords=self.config.self_assignment_keywords,
                     )
                 )
                 warning_messages.extend(self_relation_candidate_warnings)
@@ -307,11 +307,11 @@ class DailyTraceRunner:
             )
 
         try:
-            merged_drafts, sensitive_warnings = filter_sensitive_merged_drafts(
+            merged_drafts, merged_filter_warnings = filter_merged_drafts(
                 merged_drafts,
                 self.config,
             )
-            warning_messages.extend(sensitive_warnings)
+            warning_messages.extend(merged_filter_warnings)
             merged_drafts, retention_merged_warnings = filter_retained_merged_drafts(
                 merged_drafts,
             )
@@ -323,6 +323,8 @@ class DailyTraceRunner:
                 messages=filtered_messages,
                 content_resolver=self.dependencies.content_resolver,
             )
+            events, final_event_filter_warnings = filter_work_events(events, self.config)
+            warning_messages.extend(final_event_filter_warnings)
             events, retention_event_warnings = filter_retained_work_events(events)
             warning_messages.extend(retention_event_warnings)
             events = _sort_events_for_output(events, messages=filtered_messages)

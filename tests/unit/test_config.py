@@ -125,7 +125,7 @@ def test_load_online_llm_settings_reads_stream_tls_and_sleep_overrides(tmp_path:
     assert settings.sleep_max_seconds == 2.5
 
 
-def test_load_runtime_config_overrides_reads_excluded_event_rules_from_local_env(
+def test_load_runtime_config_overrides_reads_three_rule_lists(
     tmp_path: Path,
 ) -> None:
     rules_dir = tmp_path / "config"
@@ -133,12 +133,9 @@ def test_load_runtime_config_overrides_reads_excluded_event_rules_from_local_env
     (rules_dir / "event_rules.json").write_text(
         (
             "{\n"
-            '  "confidential_event_keywords": ["工资", "薪资"],\n'
-            '  "non_work_sensitive_keywords": ["吵架"],\n'
-            '  "self_assignment_cues": ["麻烦", "请"],\n'
-            '  "self_assignment_actions": ["处理", "确认"],\n'
-            '  "excluded_event_topics": ["代码同步", "工作面谈安排", "故障数据同步"],\n'
-            '  "excluded_event_content_signatures": ["git pull", "聆听大老板电话"]\n'
+            '  "sensitive_event_keywords": ["工资", "薪资", "吵架"],\n'
+            '  "excluded_event_keywords": ["代码同步", "git pull"],\n'
+            '  "self_assignment_keywords": ["麻烦", "请", "处理", "确认"]\n'
             "}\n"
         ),
         encoding="utf-8",
@@ -146,19 +143,12 @@ def test_load_runtime_config_overrides_reads_excluded_event_rules_from_local_env
 
     config = load_runtime_config_overrides(RuntimeConfig(), cwd=tmp_path)
 
-    assert config.excluded_event_topics == (
+    assert config.sensitive_event_keywords == ("工资", "薪资", "吵架")
+    assert config.excluded_event_keywords == (
         "代码同步",
-        "工作面谈安排",
-        "故障数据同步",
-    )
-    assert config.excluded_event_content_signatures == (
         "git pull",
-        "聆听大老板电话",
     )
-    assert config.confidential_event_keywords == ("工资", "薪资")
-    assert config.non_work_sensitive_keywords == ("吵架",)
-    assert config.self_assignment_cues == ("麻烦", "请")
-    assert config.self_assignment_actions == ("处理", "确认")
+    assert config.self_assignment_keywords == ("麻烦", "请", "处理", "确认")
 
 
 def test_load_runtime_config_overrides_uses_defaults_when_rule_file_missing(
@@ -166,11 +156,9 @@ def test_load_runtime_config_overrides_uses_defaults_when_rule_file_missing(
 ) -> None:
     config = load_runtime_config_overrides(RuntimeConfig(), cwd=tmp_path)
 
-    assert config.excluded_event_topics == RuntimeConfig().excluded_event_topics
-    assert config.confidential_event_keywords == ()
-    assert config.non_work_sensitive_keywords == ()
-    assert config.self_assignment_cues == ()
-    assert config.self_assignment_actions == ()
+    assert config.sensitive_event_keywords == ()
+    assert config.excluded_event_keywords == ()
+    assert config.self_assignment_keywords == ()
 
 
 def test_load_runtime_config_overrides_reads_collected_merge_env_overrides(
@@ -195,7 +183,7 @@ def test_load_runtime_config_overrides_reads_collected_merge_env_overrides(
 def test_load_runtime_config_overrides_rejects_invalid_rule_file(tmp_path: Path) -> None:
     rules_dir = tmp_path / "config"
     rules_dir.mkdir()
-    (rules_dir / "event_rules.json").write_text('{"excluded_event_topics":"bad"}', encoding="utf-8")
+    (rules_dir / "event_rules.json").write_text('{"sensitive_event_keywords":"bad"}', encoding="utf-8")
 
     with pytest.raises(ValueError) as exc_info:
         load_runtime_config_overrides(RuntimeConfig(), cwd=tmp_path)
@@ -203,15 +191,28 @@ def test_load_runtime_config_overrides_rejects_invalid_rule_file(tmp_path: Path)
     assert "event rules config" in str(exc_info.value)
 
 
-def test_repo_event_rules_exclude_personnel_sensitive_events() -> None:
+def test_repo_event_rules_use_three_rule_lists() -> None:
     payload = json.loads(Path("config/event_rules.json").read_text(encoding="utf-8"))
 
-    assert "劳动仲裁" in payload["confidential_event_keywords"]
-    assert "劳动仲裁" in payload["excluded_event_content_signatures"]
-    assert "绩效" in payload["confidential_event_keywords"]
-    assert "绩效" in payload["excluded_event_content_signatures"]
-    assert "麻烦" in payload["self_assignment_cues"]
-    assert "处理" in payload["self_assignment_actions"]
+    assert "劳动仲裁" in payload["sensitive_event_keywords"]
+    assert "绩效" in payload["sensitive_event_keywords"]
+    assert "git pull" in payload["excluded_event_keywords"]
+    assert "麻烦" in payload["self_assignment_keywords"]
+    assert "处理" in payload["self_assignment_keywords"]
+
+
+def test_load_runtime_config_overrides_rejects_legacy_rule_keys(tmp_path: Path) -> None:
+    rules_dir = tmp_path / "config"
+    rules_dir.mkdir()
+    (rules_dir / "event_rules.json").write_text(
+        '{"confidential_event_keywords":["薪资"]}',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError) as exc_info:
+        load_runtime_config_overrides(RuntimeConfig(), cwd=tmp_path)
+
+    assert "legacy keys" in str(exc_info.value)
 
 
 def test_load_conversation_blacklist_overrides_reads_ids_and_dedupes(tmp_path: Path) -> None:

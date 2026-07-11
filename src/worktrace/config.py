@@ -229,62 +229,65 @@ def load_runtime_config_overrides(
             f"Invalid event rules config: {rules_path} must contain a JSON object."
         )
 
-    excluded_event_topics = _read_string_list(
+    legacy_rule_keys = {
+        "confidential_event_keywords",
+        "non_work_sensitive_keywords",
+        "excluded_event_topics",
+        "excluded_event_content_signatures",
+        "self_assignment_cues",
+        "self_assignment_actions",
+    }
+    legacy_keys_found = sorted(legacy_rule_keys.intersection(payload))
+    if legacy_keys_found:
+        raise ValueError(
+            "Invalid event rules config: legacy keys are no longer supported "
+            f"({', '.join(legacy_keys_found)}). Use sensitive_event_keywords, "
+            "excluded_event_keywords, and self_assignment_keywords."
+        )
+
+    supported_rule_keys = {
+        "sensitive_event_keywords",
+        "excluded_event_keywords",
+        "self_assignment_keywords",
+    }
+    unexpected_rule_keys = sorted(set(payload).difference(supported_rule_keys))
+    if unexpected_rule_keys:
+        raise ValueError(
+            "Invalid event rules config: unsupported keys "
+            f"({', '.join(unexpected_rule_keys)})."
+        )
+
+    sensitive_event_keywords = _read_string_list(
         payload,
-        key="excluded_event_topics",
-        fallback=config.excluded_event_topics,
+        key="sensitive_event_keywords",
+        fallback=config.sensitive_event_keywords,
         file_path=rules_path,
     )
-    excluded_event_content_signatures = _read_string_list(
+    excluded_event_keywords = _read_string_list(
         payload,
-        key="excluded_event_content_signatures",
-        fallback=config.excluded_event_content_signatures,
+        key="excluded_event_keywords",
+        fallback=config.excluded_event_keywords,
         file_path=rules_path,
     )
-    confidential_event_keywords = _read_string_list(
+    self_assignment_keywords = _read_string_list(
         payload,
-        key="confidential_event_keywords",
-        fallback=config.confidential_event_keywords,
-        file_path=rules_path,
-    )
-    non_work_sensitive_keywords = _read_string_list(
-        payload,
-        key="non_work_sensitive_keywords",
-        fallback=config.non_work_sensitive_keywords,
-        file_path=rules_path,
-    )
-    self_assignment_cues = _read_string_list(
-        payload,
-        key="self_assignment_cues",
-        fallback=config.self_assignment_cues,
-        file_path=rules_path,
-    )
-    self_assignment_actions = _read_string_list(
-        payload,
-        key="self_assignment_actions",
-        fallback=config.self_assignment_actions,
+        key="self_assignment_keywords",
+        fallback=config.self_assignment_keywords,
         file_path=rules_path,
     )
 
     if (
-        excluded_event_topics == config.excluded_event_topics
-        and excluded_event_content_signatures
-        == config.excluded_event_content_signatures
-        and confidential_event_keywords == config.confidential_event_keywords
-        and non_work_sensitive_keywords == config.non_work_sensitive_keywords
-        and self_assignment_cues == config.self_assignment_cues
-        and self_assignment_actions == config.self_assignment_actions
+        sensitive_event_keywords == config.sensitive_event_keywords
+        and excluded_event_keywords == config.excluded_event_keywords
+        and self_assignment_keywords == config.self_assignment_keywords
     ):
         return config
 
     return replace(
         config,
-        excluded_event_topics=excluded_event_topics,
-        excluded_event_content_signatures=excluded_event_content_signatures,
-        confidential_event_keywords=confidential_event_keywords,
-        non_work_sensitive_keywords=non_work_sensitive_keywords,
-        self_assignment_cues=self_assignment_cues,
-        self_assignment_actions=self_assignment_actions,
+        sensitive_event_keywords=sensitive_event_keywords,
+        excluded_event_keywords=excluded_event_keywords,
+        self_assignment_keywords=self_assignment_keywords,
     )
 
 
@@ -416,12 +419,9 @@ class RuntimeConfig:
     analyzer_timeout_seconds: int = 180
     codex_stdin_mode: bool = False
     anchor_batch_size: int = 3
-    confidential_event_keywords: tuple[str, ...] = ()
-    non_work_sensitive_keywords: tuple[str, ...] = ()
-    self_assignment_cues: tuple[str, ...] = ()
-    self_assignment_actions: tuple[str, ...] = ()
-    excluded_event_topics: tuple[str, ...] = ()
-    excluded_event_content_signatures: tuple[str, ...] = ()
+    sensitive_event_keywords: tuple[str, ...] = ()
+    excluded_event_keywords: tuple[str, ...] = ()
+    self_assignment_keywords: tuple[str, ...] = ()
     excluded_conversation_ids: tuple[str, ...] = ()
     data_root: Path = field(default_factory=lambda: Path("data"))
     cache_root: Path | None = None

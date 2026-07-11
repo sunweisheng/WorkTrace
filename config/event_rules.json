@@ -1,5 +1,5 @@
 {
-  "confidential_event_keywords": [
+  "sensitive_event_keywords": [
     "工资",
     "薪资",
     "薪酬",
@@ -13,9 +13,7 @@
     "涨薪",
     "降薪",
     "薪级",
-    "年终奖"
-  ],
-  "non_work_sensitive_keywords": [
+    "年终奖",
     "吵架",
     "辱骂",
     "侮辱",
@@ -26,16 +24,17 @@
     "骂人",
     "对骂"
   ],
-  "self_assignment_cues": [
+  "excluded_event_keywords": [
+    "git pull"
+  ],
+  "self_assignment_keywords": [
     "帮",
     "麻烦",
     "请",
     "需要你",
     "你来",
     "辛苦",
-    "劳烦"
-  ],
-  "self_assignment_actions": [
+    "劳烦",
     "处理",
     "确认",
     "推进",
@@ -52,10 +51,5 @@
     "提一下",
     "发一下",
     "发下"
-  ],
-  "excluded_event_topics": [],
-  "excluded_event_content_signatures": [
-    "劳动仲裁",
-    "绩效"
   ]
 }

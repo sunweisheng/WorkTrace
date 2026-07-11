@@ -21,11 +21,10 @@ from .models import (
     CollectedSourceEvent,
     DayDocument,
     EventFileLink,
-    MergedEventDraft,
     SelfIdentity,
     WorkEvent,
 )
-from .pipeline.sensitive_filter import filter_sensitive_merged_drafts
+from .pipeline.sensitive_filter import filter_work_events
 from .pipeline.retention_filter import (
     RETENTION_REASONS,
     filter_retained_work_events,
@@ -175,6 +174,8 @@ class CollectedMergeRunner:
             )
         )
         warning_messages.extend(read_warnings)
+        source_events, source_filter_warnings = self._filter_source_events(source_events)
+        warning_messages.extend(source_filter_warnings)
         source_events, retention_source_warnings = self._filter_retained_source_events(
             source_events,
         )
@@ -357,9 +358,8 @@ class CollectedMergeRunner:
             source_events,
             merge_result,
         )
-        merged_events_after_sensitive, sensitive_warnings = self._filter_sensitive_events(
-            target_date,
-            merged_events_before_filters,
+        merged_events_after_sensitive, sensitive_warnings = self._filter_events(
+            merged_events_before_filters
         )
         retained_events, retention_warnings = filter_retained_work_events(
             merged_events_after_sensitive,
@@ -646,6 +646,21 @@ class CollectedMergeRunner:
             if id(source_event.event) in kept_ids
         ], warnings
 
+    def _filter_source_events(
+        self,
+        source_events: list[CollectedSourceEvent],
+    ) -> tuple[list[CollectedSourceEvent], list[str]]:
+        kept_events, warnings = filter_work_events(
+            [source_event.event for source_event in source_events],
+            self.config,
+        )
+        kept_ids = {id(event) for event in kept_events}
+        return [
+            source_event
+            for source_event in source_events
+            if id(source_event.event) in kept_ids
+        ], warnings
+
     def _mark_merge_owner_sources(
         self,
         source_events: list[CollectedSourceEvent],
@@ -734,30 +749,11 @@ class CollectedMergeRunner:
             )
         return events
 
-    def _filter_sensitive_events(
+    def _filter_events(
         self,
-        target_date: str,
         events: list[WorkEvent],
     ) -> tuple[list[WorkEvent], list[str]]:
-        drafts = [
-            MergedEventDraft(
-                date=target_date,
-                topic=event.title,
-                content=event.content,
-                object_hint=event.object_hint,
-                retention_reason=event.retention_reason,
-                retention_detail=event.retention_detail,
-                referenced_link_ids=[],
-                source_message_ids=[event.event_id],
-                source_conversation_ids=[],
-            )
-            for event in events
-        ]
-        kept_drafts, warnings = filter_sensitive_merged_drafts(drafts, self.config)
-        kept_keys = {(draft.topic, draft.content) for draft in kept_drafts}
-        return [
-            event for event in events if (event.title, event.content) in kept_keys
-        ], warnings
+        return filter_work_events(events, self.config)
 
     def _start_collected_merge_trace(self, target_date: str, input_dir: Path) -> None:
         if not self.config.collected_merge_trace_enabled:

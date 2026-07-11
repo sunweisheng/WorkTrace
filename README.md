@@ -257,83 +257,25 @@ WORKTRACE_LLM_SLEEP_MAX_SECONDS=2
 
 事件是否值得保留，主要还是靠结构化字段和 Python 门槛判断，不靠维护一大堆关键词。
 
-`event_rules.json` 的用途主要有三类：
-
-- 给 LLM 提示词补充“哪些敏感话题不要提炼”
-- 用少量精确规则，直接排除你已经确认不该进入结果的事件
-- 配置“明确点名本人并指派动作”的文本兜底词表
-
-如果要教别人用，最简单的理解就是：
-
-- `confidential_event_keywords`：只用于提示词提醒模型回避这类工作敏感话题
-- `non_work_sensitive_keywords`：只用于提示词提醒模型回避这类非工作敏感内容
-- `self_assignment_cues`：点名本人时表示指派语气的词
-- `self_assignment_actions`：点名本人时表示需要本人执行的动作词
-- `excluded_event_topics`：按事件标题精确排除
-- `excluded_event_content_signatures`：按事件内容“包含某段特征文本”排除
+`event_rules.json` 只维护敏感信息、普通事件排除和本人指派判断三类词表。
 
 对应规则文件是 [config/event_rules.json](/Users/sunweisheng/Documents/GitHub/WorkTrace/config/event_rules.json)：
 
 ```json
 {
-  "confidential_event_keywords": ["工资", "薪资", "劳动仲裁", "绩效"],
-  "non_work_sensitive_keywords": ["吵架", "辱骂"],
-  "self_assignment_cues": ["帮", "麻烦", "请", "需要你", "你来"],
-  "self_assignment_actions": ["处理", "确认", "推进", "反馈", "删除"],
-  "excluded_event_topics": ["代码同步"],
-  "excluded_event_content_signatures": ["劳动仲裁", "绩效", "git pull"]
+  "sensitive_event_keywords": ["工资", "薪资", "劳动仲裁", "绩效", "吵架", "辱骂"],
+  "excluded_event_keywords": ["代码同步", "git pull"],
+  "self_assignment_keywords": ["帮", "麻烦", "请", "处理", "确认", "推进"]
 }
 ```
 
 这些字段的实际效果如下：
 
-- `confidential_event_keywords`
-  只进提示词，不做 Python 最终关键词过滤。
-  适合放：工资、薪资、绩效、劳动仲裁这类你希望模型默认不要提炼的工作敏感信息。
-- `non_work_sensitive_keywords`
-  只进提示词，不做 Python 最终关键词过滤。
-  适合放：吵架、辱骂、调情这类明显不该进入工作事件的非工作敏感内容。
-- `self_assignment_cues`
-  只用于“文本明确点名本人”时判断是否存在指派语气。
-  适合放：帮、麻烦、请、需要你、你来这类短语。
-- `self_assignment_actions`
-  只用于“文本明确点名本人”时判断是否要求本人执行具体动作。
-  适合放：处理、确认、推进、反馈、删除、审批、看下、核对、补充、发一下这类动作。
-- `excluded_event_topics`
-  按标题精确匹配。
-  只有事件标题清楚且稳定时才适合放这里，例如固定会被提炼成 `代码同步` 的噪音事件。
-- `excluded_event_content_signatures`
-  按内容包含匹配。
-  适合放标题不稳定、但正文里总会出现固定特征词的事件，例如 `劳动仲裁`、`绩效`、`git pull`。
+- `sensitive_event_keywords` 同时进入提示词和 Python 硬过滤。个人候选、个人最终事件、部门来源与部门最终事件任一命中时都会删除整条事件；标题、内容、具体对象、保留依据和文件链接文本均受检查。
+- `excluded_event_keywords` 用于非敏感但无需保留的固定噪音。Python 在事件标题、内容、具体对象和保留依据中执行包含匹配。
+- `self_assignment_keywords` 用于本人关联的文本兜底。消息在同一语句中明确点名本人且命中任一词时，视为本人被指派；本人发言与直接回复/引用关系不依赖该列表。
 
-再直白一点：
-
-- 想“提醒模型少碰某类敏感话题”，放 `confidential_event_keywords` 或 `non_work_sensitive_keywords`
-- 想“无论模型怎么写，只要命中就直接排除”，放 `excluded_event_topics` 或 `excluded_event_content_signatures`
-- 想调整“别人点名我让我做事”的文本兜底口径，改 `self_assignment_cues` 和 `self_assignment_actions`
-
-几个常见例子：
-
-- 例 1：`劳动仲裁取数跟进`
-  标题可能叫“劳动仲裁取数跟进”“仲裁数据整理”“仲裁取数协调”，但正文通常会出现 `劳动仲裁`，更适合放进 `excluded_event_content_signatures`
-- 例 2：`绩效版本最终版确认`
-  标题写法可能变化，但正文大概率会出现 `绩效`，适合放进 `excluded_event_content_signatures`
-- 例 3：`代码同步`
-  如果这类噪音标题很固定，直接放进 `excluded_event_topics` 更干脆
-
-使用原则：
-
-- 不要把 `excluded_event_topics` / `excluded_event_content_signatures` 当成“大而全的事件价值判断系统”
-- 这两个字段更适合做“少量精确拉黑”
-- 如果只是希望模型更保守，不一定要强制排除，优先放 `confidential_event_keywords` 或 `non_work_sensitive_keywords`
-
-当前代码语义是：
-
-- `confidential_event_keywords` 和 `non_work_sensitive_keywords` 只用于生成提示词约束
-- `self_assignment_cues` 和 `self_assignment_actions` 只用于候选事件本人关联硬过滤里的文本兜底；结构化本人消息和 reply/quote 直连关系不依赖这两个字段
-- `excluded_event_topics` 是标题精确匹配
-- `excluded_event_content_signatures` 是内容包含匹配
-- `excluded_event_topics` 和 `excluded_event_content_signatures` 都会在候选事件阶段、以及合并后事件阶段各检查一次
+旧的六个顶层规则键已不再支持；加载到旧格式会直接报错，避免规则静默失效。
 
 如果需要彻底排除某些会话，不让它们进入消息收集链路，请单独维护 [config/conversation_blacklist.json](/Users/sunweisheng/Documents/GitHub/WorkTrace/config/conversation_blacklist.json)。
 
