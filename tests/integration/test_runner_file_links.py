@@ -502,7 +502,7 @@ def test_runner_makes_doc_token_references_readable_in_event_text(tmp_path: Path
     assert "MgYnwgMIkiUDGGkjHYLcEMaEnhd" not in attached[0].content
 
 
-def test_runner_attaches_plain_attachment_file_name_when_event_mentions_it(tmp_path: Path) -> None:
+def test_runner_attaches_plain_attachment_only_when_explicitly_referenced(tmp_path: Path) -> None:
     resolver = FeishuMessageContentResolver(config=RuntimeConfig(data_root=tmp_path / "data"))
     message = NormalizedMessage(
         conversation_id="oc_1",
@@ -533,6 +533,7 @@ def test_runner_attaches_plain_attachment_file_name_when_event_mentions_it(tmp_p
         content="孙维晟将友好换电管理方案.docx文件发送至群内，并明确要求转发。",
         source_message_ids=["om_file"],
         referenced_link_ids=[],
+        referenced_attachment_ids=["file_1"],
         file_links=[],
         object_hint="友好换电管理方案",
         retention_reason="follow_up_assigned",
@@ -554,3 +555,21 @@ def test_runner_attaches_plain_attachment_file_name_when_event_mentions_it(tmp_p
     ]
     assert "《友好换电管理方案.docx》" in attached[0].title
     assert "《友好换电管理方案.docx》" in attached[0].content
+
+    without_reference = WorkEvent(
+        date=event.date,
+        event_id="evt2",
+        title=event.title,
+        content=event.content,
+        source_message_ids=event.source_message_ids,
+        object_hint=event.object_hint,
+        retention_reason=event.retention_reason,
+        retention_detail=event.retention_detail,
+    )
+    unattached = __import__("src.worktrace.runner", fromlist=["_attach_event_file_links"])._attach_event_file_links(
+        [without_reference],
+        messages=[message],
+        content_resolver=resolver,
+    )
+
+    assert unattached[0].file_links == []

@@ -1,0 +1,12 @@
+{
+  "enabled": true,
+  "max_files_per_run": 8,
+  "max_file_bytes": 1048576,
+  "allowed_extensions": [
+    ".md",
+    ".txt",
+    ".csv",
+    ".json",
+    ".log"
+  ]
+}

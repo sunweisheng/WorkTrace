@@ -751,6 +751,9 @@ class SourceBackedEventDraft:
     retention_reason: str = ""
     retention_detail: str = ""
     referenced_link_ids: list[str] = field(default_factory=list)
+    referenced_attachment_ids: list[str] = field(default_factory=list)
+    self_evidence_message_ids: list[str] = field(default_factory=list)
+    workstream_key: str = ""
     response_outcome: str = "unknown"
     response_signal_ids: list[str] = field(default_factory=list)
     response_evidence_message_ids: list[str] = field(default_factory=list)
@@ -767,6 +770,9 @@ class SourceBackedEventDraft:
             retention_reason=str(data.get("retention_reason", "")),
             retention_detail=str(data.get("retention_detail", "")),
             referenced_link_ids=_string_list(data.get("referenced_link_ids")),
+            referenced_attachment_ids=_string_list(data.get("referenced_attachment_ids")),
+            self_evidence_message_ids=_string_list(data.get("self_evidence_message_ids")),
+            workstream_key=str(data.get("workstream_key", "")),
             source_message_ids=_string_list(data.get("source_message_ids")),
             source_conversation_id=str(data.get("source_conversation_id", "")),
             source_slice_id=str(data.get("source_slice_id", "")),
@@ -787,6 +793,9 @@ class SourceBackedEventDraft:
             "retention_reason": self.retention_reason,
             "retention_detail": self.retention_detail,
             "referenced_link_ids": list(self.referenced_link_ids),
+            "referenced_attachment_ids": list(self.referenced_attachment_ids),
+            "self_evidence_message_ids": list(self.self_evidence_message_ids),
+            "workstream_key": self.workstream_key,
             "source_message_ids": list(self.source_message_ids),
             "source_conversation_id": self.source_conversation_id,
             "source_slice_id": self.source_slice_id,
@@ -991,6 +1000,7 @@ class MergedEventDraft:
     retention_reason: str = ""
     retention_detail: str = ""
     referenced_link_ids: list[str] = field(default_factory=list)
+    referenced_attachment_ids: list[str] = field(default_factory=list)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> MergedEventDraft:
@@ -1004,6 +1014,7 @@ class MergedEventDraft:
             retention_reason=str(data.get("retention_reason", "")),
             retention_detail=str(data.get("retention_detail", "")),
             referenced_link_ids=_string_list(data.get("referenced_link_ids")),
+            referenced_attachment_ids=_string_list(data.get("referenced_attachment_ids")),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -1017,6 +1028,7 @@ class MergedEventDraft:
             "retention_reason": self.retention_reason,
             "retention_detail": self.retention_detail,
             "referenced_link_ids": list(self.referenced_link_ids),
+            "referenced_attachment_ids": list(self.referenced_attachment_ids),
         }
 
 
@@ -1024,18 +1036,21 @@ class MergedEventDraft:
 class CrossConversationGroup:
     group_id: str
     draft_ids: list[str]
+    primary_draft_id: str = ""
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> CrossConversationGroup:
         return cls(
             group_id=str(data["group_id"]),
             draft_ids=_string_list(data.get("draft_ids")),
+            primary_draft_id=str(data.get("primary_draft_id", "")),
         )
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "group_id": self.group_id,
             "draft_ids": list(self.draft_ids),
+            "primary_draft_id": self.primary_draft_id,
         }
 
 
@@ -1059,6 +1074,48 @@ class CrossConversationGroupResult:
 
 
 @dataclass(frozen=True)
+class WorkstreamAssignment:
+    draft_id: str
+    parent_draft_id: str
+    root_workstream_name: str = ""
+    evidence_message_ids: list[str] = field(default_factory=list)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "WorkstreamAssignment":
+        return cls(
+            draft_id=str(data.get("draft_id", "")),
+            parent_draft_id=str(data.get("parent_draft_id", "")),
+            root_workstream_name=str(data.get("root_workstream_name", "")),
+            evidence_message_ids=_string_list(data.get("evidence_message_ids")),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "draft_id": self.draft_id,
+            "parent_draft_id": self.parent_draft_id,
+            "root_workstream_name": self.root_workstream_name,
+            "evidence_message_ids": list(self.evidence_message_ids),
+        }
+
+
+@dataclass(frozen=True)
+class WorkstreamAssignmentResult:
+    assignments: list[WorkstreamAssignment] = field(default_factory=list)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "WorkstreamAssignmentResult":
+        return cls(
+            assignments=[
+                WorkstreamAssignment.from_dict(item)
+                for item in _dict_list(data.get("assignments"))
+            ]
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"assignments": [item.to_dict() for item in self.assignments]}
+
+
+@dataclass(frozen=True)
 class WorkEvent:
     date: str
     event_id: str
@@ -1072,6 +1129,7 @@ class WorkEvent:
     retention_reason: str = ""
     retention_detail: str = ""
     referenced_link_ids: list[str] = field(default_factory=list)
+    referenced_attachment_ids: list[str] = field(default_factory=list)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> WorkEvent:
@@ -1091,6 +1149,7 @@ class WorkEvent:
             retention_reason=str(data.get("retention_reason", "")),
             retention_detail=str(data.get("retention_detail", "")),
             referenced_link_ids=_string_list(data.get("referenced_link_ids")),
+            referenced_attachment_ids=_string_list(data.get("referenced_attachment_ids")),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -1108,6 +1167,7 @@ class WorkEvent:
             "retention_reason": self.retention_reason,
             "retention_detail": self.retention_detail,
             "referenced_link_ids": list(self.referenced_link_ids),
+            "referenced_attachment_ids": list(self.referenced_attachment_ids),
         }
 
     @property

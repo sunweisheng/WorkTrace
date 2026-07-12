@@ -1,0 +1,6 @@
+{
+  "enabled": true,
+  "prompt": "请用中文简要描述图片中与工作事项相关的文字、对象、范围、状态和结论。无法确认时明确说明，不要猜测。",
+  "max_images_per_run": 12,
+  "max_image_bytes": 8388608
+}

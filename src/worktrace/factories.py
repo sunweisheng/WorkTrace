@@ -41,9 +41,15 @@ class ReactionCatalogProviderFactory:
 class ContentResolverFactory:
     @staticmethod
     def create_default(config: RuntimeConfig) -> ContentResolver:
+        from .attachments import TextAttachmentExtractor
         from .resolvers.feishu_message import FeishuMessageContentResolver
+        from .vision import OnlineImageSummarizer
 
-        return FeishuMessageContentResolver(config=config)
+        return FeishuMessageContentResolver(
+            config=config,
+            image_summarizer=OnlineImageSummarizer(config=config),
+            text_attachment_extractor=TextAttachmentExtractor(config=config),
+        )
 
 
 class AnalyzerFactory:

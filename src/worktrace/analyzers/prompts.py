@@ -99,6 +99,9 @@ def build_batch_analysis_prompt(
             "每条事项附上最相关的消息 id。",
             "只能使用输入里出现过的真实 message id，不要自造占位符 id。",
             "如需给事项挂涉及文件，只能从对应 source_message_ids 的 links 里选择 referenced_link_ids；拿不准就返回空数组。",
+            "self_evidence_message_ids 必须列出证明本人发起、负责、审批或跟进该事项的本人消息；它可以与 source_message_ids 不同。",
+            "只有在已读取对应附件正文且正文确实支撑事项时，才能填写 referenced_attachment_ids；文件名、扩展名和发送文件本身不是业务事实。",
+            "workstream_key 只在消息明确命名项目、产品或政策时填写其稳定规范名称；不能使用城市、地点、部门、工具类别、环境或泛化主题，无法确定时返回空字符串。",
             "正例：本人要求他人汇报、本人审批、本人同步、本人催办、本人推进，都算与本人直接相关。",
             "反例：他人之间讨论自己的工作、自己的承诺、自己的处理进度，即使本人在该会话里发过言，也不算与本人直接相关。",
             "如果当前消息是在纠正、澄清或替换前文对象，topic、content、object_hint 必须以当前消息确认后的对象为准。",
@@ -116,6 +119,9 @@ def build_batch_analysis_prompt(
                     "retention_reason": "deliverable_updated | decision_made | issue_or_risk_found | follow_up_assigned | external_business_progress | substantive_approval",
                     "retention_detail": "string",
                     "referenced_link_ids": ["message_id#link1"],
+                    "referenced_attachment_ids": ["attachment_id"],
+                    "self_evidence_message_ids": ["message_id"],
+                    "workstream_key": "string or empty string",
                     "source_message_ids": ["message_id"],
                 }
             ],
@@ -179,6 +185,7 @@ def build_conversation_segmentation_prompt(
             "segment_start_message_ids 必须以 message_refs_in_order 的第一项开始，后续仅能选择其中按原顺序出现的消息。",
             "连续围绕同一对象的发言、回复和确认默认合并为同一轮次；不要因每次单独发送就切成单消息轮次。",
             "仅在明确换题、hard_boundary_before 或旧话题被 reply/quote 续谈时开始新轮次。",
+            "相邻的本人消息只要明确切换到不同项目、产品、政策、客户或业务对象，就必须开始新轮次；同一发送人、相近时间或没有回复链都不能作为合并理由。",
             "标记 hard_boundary_before 的消息必须出现在 segment_start_message_ids 中。",
             "本人文本和本人表情都是参与信号，不等于同意、完成或结束；必须结合后续沟通判断是否仍为同一话题。",
             "旧事项被 reply 或 quote 续谈时，回复消息在它实际发生的时间位置开始新轮次，不能移回旧事项旁边。",
@@ -287,7 +294,11 @@ def build_segment_batch_analysis_prompt(
             "每个 segment 独立判断，禁止从其它 segment 借用事实、对象、结论或来源。",
             "每个输入 segment_id 必须且只能返回一个 result。",
             "candidate_events 的 source_message_ids 只能使用该 segment 的 primary_message_ids，不能使用 context_message_ids。",
+            "每条 candidate 必须在 self_evidence_message_ids 中列出本人发起、负责、审批或跟进的消息；事实来源可由他人的执行、反馈或文件消息组成。",
             "每条 candidate 至少引用一条本人参与证据，或引用该 segment 的本人回应 signal。",
+            "一个 candidate 只能描述一条工作线；若同一 segment 同时出现两个命名项目、产品、政策或不相干业务对象，必须拆成多个 candidate_events。",
+            "referenced_attachment_ids 只能引用已提供正文的附件；文件名、扩展名和单纯发送附件不构成事项事实。",
+            "workstream_key 只在消息明确命名项目、产品或政策时填写其稳定规范名称；不能使用城市、地点、部门、工具类别、环境或泛化主题，无法确定时返回空字符串。",
             "本人提出的问题、风险和待确认事项本身可以提炼，不要求已有处理结果。",
             "表情是本人回复证据，但不能单凭表情描述事项已完成、已同意或已拒绝。",
             "普通约时间、确认开会、互通信息、泛泛审核/审批且无具体对象和结论，不要输出 candidate_event。",
@@ -321,6 +332,9 @@ def build_segment_batch_analysis_prompt(
                                 "retention_reason": "deliverable_updated | decision_made | issue_or_risk_found | follow_up_assigned | external_business_progress | substantive_approval",
                                 "retention_detail": "string",
                                 "referenced_link_ids": ["message_id#link1"],
+                                "referenced_attachment_ids": ["attachment_id"],
+                                "self_evidence_message_ids": ["message_id"],
+                                "workstream_key": "string or empty string",
                                 "source_message_ids": ["primary_message_id"],
                             }
                         ],
@@ -342,11 +356,14 @@ def build_merge_prompt(target_date: str, candidates: list[SourceBackedEventDraft
             "直接作答，不要展示你的推理过程。"
         ),
         "rules": [
-            "只把明显属于同一真实事件的事项分到一起。",
+            "只把明显属于同一真实事件或同一项目生命周期的事项分到一起。",
             "如果拿不准，宁可分开。",
             "背景相同不等于同一事件。",
-            "动作类型不同通常不是同一事件。",
-            "同步/通知 和 核对/执行/跟进，通常不是同一事件。",
+            "不同的非空 workstream_key 必须分开，即使消息相邻、同一发送人或共享地点、设备也不能合并。",
+            "若多个候选具有相同的非空 workstream_key，必须合并为同一项目或政策生命周期；项目根候选作为 primary_draft_id。",
+            "workstream_key 为空的候选只能在某个非空工作流候选明确分配了同一具体对象或动作时并入该组；否则必须单独成组。",
+            "同一政策的适用范围/通知指令与其直接执行反馈应合并为一条闭环事件；范围和执行对象不一致时必须分开。",
+            "不能以城市、地点、部门、通用工具或相近时间作为合并理由。",
             "每个 draft_id 必须且只能出现在一个 group 里。",
             "禁止漏掉任何 draft_id。输出前必须逐个核对 candidates 里的全部 draft_id 都已被返回一次且仅一次。",
             "错误示例：candidates 有 [d1, d2, d3]，但只返回 [['d1', 'd2']]，漏掉 d3，这是错误的。",
@@ -357,6 +374,7 @@ def build_merge_prompt(target_date: str, candidates: list[SourceBackedEventDraft
                 {
                     "group_id": "string",
                     "draft_ids": ["draft_id"],
+                    "primary_draft_id": "draft_id",
                 }
             ]
         },
@@ -366,11 +384,107 @@ def build_merge_prompt(target_date: str, candidates: list[SourceBackedEventDraft
                 "draft_id": candidate.draft_id,
                 "action_label": candidate.action_label,
                 "object_hint": candidate.object_hint,
+                "workstream_key": candidate.workstream_key,
                 "source_conversation_id": candidate.source_conversation_id,
                 "topic": candidate.topic,
                 "content": candidate.content,
             }
             for candidate in candidates
+        ],
+    }
+    return dump_json(protocol, pretty=True)
+
+
+def build_workstream_assignment_prompt(
+    target_date: str,
+    candidates: list[SourceBackedEventDraft],
+) -> str:
+    protocol = {
+        "instruction": (
+            "判断当天候选事项是否属于某个明确命名的项目、产品或政策工作流。"
+            "只返回 JSON assignments，不展示推理过程。"
+        ),
+        "rules": [
+            "每个 draft_id 必须且只能返回一次。",
+            "parent_draft_id 填该事项的直接项目父候选 draft_id；独立事项返回空字符串。",
+            "一个明确命名的项目、产品或政策根候选的 parent_draft_id 填自己的 draft_id，并在 root_workstream_name 填输入中明确出现的名称；其余事项的 root_workstream_name 返回空字符串。",
+            "只有候选内容明确表明项目启动时分配了该任务、该任务是该项目的实施/验收/监控/成效统计，或该政策的范围指令与直接执行反馈构成同一闭环时，才能归入同一项目根候选。",
+            "不同命名项目、产品或政策不得归并；共享城市、地点、部门、设备、通用工具、相近时间或相似措辞都不是依据。",
+            "不确定时返回独立事项，绝不猜测。",
+            "每个非独立、非根归属必须在 evidence_message_ids 中引用至少一条子事项或直接父候选的 source_message_ids；直接父候选本身及其 source_message_ids 共同构成另一侧证据，不能使用输入外的消息 ID。",
+            "同一政策的适用范围指令与其直接执行/通知反馈，即使描述的是不同对象子集，只要输入没有明确命名不同政策，应归入同一政策工作流。",
+            "不同写法是否为同一命名项目由消息语义判断，不能仅凭字符串相似度判断。",
+        ],
+        "required_output_schema": {
+            "assignments": [
+                {
+                    "draft_id": "draft_id",
+                    "parent_draft_id": "draft_id or empty string",
+                    "root_workstream_name": "string or empty string",
+                    "evidence_message_ids": ["message_id"],
+                }
+            ]
+        },
+        "target_date": target_date,
+        "candidates": [
+            {
+                "draft_id": candidate.draft_id,
+                "topic": candidate.topic,
+                "content": candidate.content,
+                "object_hint": candidate.object_hint,
+                "workstream_key": candidate.workstream_key,
+                "source_message_ids": candidate.source_message_ids,
+                "self_evidence_message_ids": candidate.self_evidence_message_ids,
+                "retention_detail": candidate.retention_detail,
+            }
+            for candidate in candidates
+        ],
+    }
+    return dump_json(protocol, pretty=True)
+
+
+def build_unassigned_workstream_assignment_prompt(
+    target_date: str,
+    *,
+    known_workstreams: list[dict[str, object]],
+    unassigned_candidates: list[SourceBackedEventDraft],
+) -> str:
+    protocol = {
+        "instruction": (
+            "复核尚未归属的候选事项是否属于已确认的项目、产品或政策工作流。"
+            "只返回 JSON assignments，不展示推理过程。"
+        ),
+        "rules": [
+            "只处理 unassigned_candidates 中的 draft_id；每个必须且只能返回一次。",
+            "parent_draft_id 只能填 known_workstreams.members 中的 draft_id；无法明确归属时返回空字符串。",
+            "不能新建项目根，也不能合并不同 known_workstreams。root_workstream_name 必须返回空字符串。",
+            "只有候选内容明确表明是该项目的启动分配、实施、验收、监控、成效统计，或是该政策的范围指令与直接执行/通知反馈时，才能归入。",
+            "同一政策的适用范围指令与其直接执行/通知反馈，即使描述不同对象子集，只要输入没有明确命名不同政策，应归入同一政策工作流。",
+            "城市、地点、部门、设备、工具、时间相近或文字相似都不是归属依据；不确定时必须独立。",
+            "每个非独立归属必须在 evidence_message_ids 中引用至少一条子事项或直接父候选的 source_message_ids，不能使用输入外的消息 ID。",
+        ],
+        "required_output_schema": {
+            "assignments": [
+                {
+                    "draft_id": "unassigned draft_id",
+                    "parent_draft_id": "known member draft_id or empty string",
+                    "root_workstream_name": "empty string",
+                    "evidence_message_ids": ["message_id"],
+                }
+            ]
+        },
+        "target_date": target_date,
+        "known_workstreams": known_workstreams,
+        "unassigned_candidates": [
+            {
+                "draft_id": candidate.draft_id,
+                "topic": candidate.topic,
+                "content": candidate.content,
+                "object_hint": candidate.object_hint,
+                "source_message_ids": candidate.source_message_ids,
+                "retention_detail": candidate.retention_detail,
+            }
+            for candidate in unassigned_candidates
         ],
     }
     return dump_json(protocol, pretty=True)
@@ -505,6 +619,9 @@ def build_anchor_analysis_prompt(
             RETENTION_DETAIL_EVIDENCE_RULE,
             "普通约时间、确认开会、互通信息、泛泛完成审核/审批但没有具体对象和结论的内容，不要输出 candidate_event。",
             "如需给事项挂涉及文件，只能从对应 source_message_ids 的 links 里选择 referenced_link_ids；拿不准就返回空数组。",
+            "self_evidence_message_ids 列出证明本人直接相关的本人消息；事实来源可以是他人的反馈。",
+            "只有已读取正文且正文支撑事项的附件才能填写 referenced_attachment_ids；文件名不是业务事实。",
+            "workstream_key 只填写消息明确命名的项目、产品或政策；无法确定时返回空字符串。",
             "如果窗口里有多个动作，就拆开。",
             "动作类型比共享名词更重要。",
             "同步/通知 与 核对/校验/执行/跟进，通常不是同一事件。",
@@ -533,6 +650,9 @@ def build_anchor_analysis_prompt(
                 "retention_reason": "deliverable_updated | decision_made | issue_or_risk_found | follow_up_assigned | external_business_progress | substantive_approval",
                 "retention_detail": "string",
                 "referenced_link_ids": ["message_id#link1"],
+                "referenced_attachment_ids": ["attachment_id"],
+                "self_evidence_message_ids": ["message_id"],
+                "workstream_key": "string or empty string",
                 "source_message_ids": ["message_id"],
             },
             "context_requests_item": {
@@ -584,6 +704,9 @@ def build_anchor_batch_analysis_prompt(
             RETENTION_DETAIL_EVIDENCE_RULE,
             "普通约时间、确认开会、互通信息、泛泛完成审核/审批但没有具体对象和结论的内容，不要输出 candidate_event。",
             "如需给事项挂涉及文件，只能从对应 source_message_ids 的 links 里选择 referenced_link_ids；拿不准就返回空数组。",
+            "self_evidence_message_ids 列出证明本人直接相关的本人消息；事实来源可以是他人的反馈。",
+            "只有已读取正文且正文支撑事项的附件才能填写 referenced_attachment_ids；文件名不是业务事实。",
+            "workstream_key 只填写消息明确命名的项目、产品或政策；无法确定时返回空字符串。",
             "如果同一窗口有多个动作，就拆开。",
             "动作类型比共享名词更重要。",
             "同步/通知 与 核对/校验/执行/跟进，通常不是同一事件。",
@@ -615,6 +738,9 @@ def build_anchor_batch_analysis_prompt(
                             "retention_reason": "deliverable_updated | decision_made | issue_or_risk_found | follow_up_assigned | external_business_progress | substantive_approval",
                             "retention_detail": "string",
                             "referenced_link_ids": ["message_id#link1"],
+                            "referenced_attachment_ids": ["attachment_id"],
+                            "self_evidence_message_ids": ["message_id"],
+                            "workstream_key": "string or empty string",
                             "source_message_ids": ["message_id"],
                         },
                         "context_requests_item": {
@@ -729,6 +855,9 @@ def build_anchor_expansion_prompt(
                     "retention_reason": "deliverable_updated | decision_made | issue_or_risk_found | follow_up_assigned | external_business_progress | substantive_approval",
                     "retention_detail": "string",
                     "referenced_link_ids": ["message_id#link1"],
+                    "referenced_attachment_ids": ["attachment_id"],
+                    "self_evidence_message_ids": ["message_id"],
+                    "workstream_key": "string or empty string",
                     "source_message_ids": ["message_id"],
                 }
             ],
@@ -874,7 +1003,6 @@ def serialize_anchor_unit_for_prompt(
         serialized["attachment_refs"] = [
             {
                 "id": item.attachment_id,
-                "name": item.file_name,
                 "mime": item.mime_type,
             }
             for item in anchor_unit.attachment_refs
@@ -1084,7 +1212,8 @@ def _is_non_anchor_weak_placeholder(
         "[链接]",
         "[飞书文档]",
         "[表单链接]",
-    } or text.startswith("[文件: ")
+        "[文件附件]",
+    }
 
 
 def serialize_attachment_for_prompt(
@@ -1094,7 +1223,6 @@ def serialize_attachment_for_prompt(
     return {
         "id": block.attachment_id,
         "mid": block.message_id,
-        "name": block.file_name,
         "text": _trim_text(block.text, config.prompt_attachment_char_limit),
     }
 
@@ -1116,7 +1244,6 @@ def _serialize_message_attachments(message: NormalizedMessage) -> list[dict[str,
     return [
         {
             "attachment_id": item.attachment_id,
-            "file_name": item.file_name,
             "mime_type": item.mime_type,
         }
         for item in message.attachments
@@ -1178,8 +1305,8 @@ def _compress_prompt_message_text(message: NormalizedMessage) -> str:
         return ""
 
     file_name = _extract_inline_media_name(text)
-    if message.message_type == "file" and file_name:
-        return f"[文件: {file_name}]"
+    if message.message_type == "file":
+        return "[文件附件]"
 
     audio_match = _AUDIO_TAG_RE.fullmatch(text)
     if audio_match:
@@ -1302,9 +1429,7 @@ def _build_sensitive_rule(config: RuntimeConfig) -> str:
 
 def _build_feishu_doc_label(message: NormalizedMessage) -> str:
     if message.message_type == "file":
-        file_name = _extract_inline_media_name(message.text)
-        if file_name:
-            return f"[文件: {file_name}]"
+        return "[文件附件]"
 
     text = clean_text(message.text)
     pure_feishu_doc_message = False

@@ -2,31 +2,44 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import json
+import logging
 import re
 import subprocess
+import tempfile
 from html import unescape
+from pathlib import Path
 from xml.etree import ElementTree
 from typing import Any, Sequence
 from urllib.parse import urlparse
 
+from ..attachments import TextAttachmentExtractor
 from ..config import RuntimeConfig
 from ..constants import LinkType
 from ..models import AttachmentTextBlock, LinkMeta, LinkedFileTextBlock, NormalizedMessage
 from ..utils.link_refs import build_message_link_candidates, classify_link_type, collect_message_links
 from ..utils.text import clean_text, extract_urls
+from ..vision import OnlineImageSummarizer
 from .base import ContentResolver
+
+logger = logging.getLogger("worktrace")
 
 
 @dataclass
 class FeishuMessageContentResolver(ContentResolver):
     config: RuntimeConfig
     command_runner: Any | None = None
+    image_summarizer: OnlineImageSummarizer | None = None
+    image_downloader: Any | None = None
+    text_attachment_extractor: TextAttachmentExtractor | None = None
+    attachment_downloader: Any | None = None
     _doc_title_cache: dict[str, str] = field(default_factory=dict)
     _doc_content_cache: dict[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if self.command_runner is None:
             self.command_runner = self._run_command
+        if self.text_attachment_extractor is None:
+            self.text_attachment_extractor = TextAttachmentExtractor(config=self.config)
 
     def to_text(self, message: NormalizedMessage) -> str:
         parts = [clean_text(message.text)]
@@ -146,22 +159,116 @@ class FeishuMessageContentResolver(ContentResolver):
         attachment_ids: list[str],
         hint: str,
     ) -> list[AttachmentTextBlock] | None:
+        if self.text_attachment_extractor is None:
+            return None
         selected_ids = set(attachment_ids)
         blocks: list[AttachmentTextBlock] = []
 
         for attachment in message.attachments:
             if attachment.attachment_id not in selected_ids:
                 continue
-            blocks.append(
-                AttachmentTextBlock(
-                    attachment_id=attachment.attachment_id,
-                    message_id=message.message_id,
-                    file_name=attachment.file_name,
-                    text=f"[Attachment placeholder] {attachment.file_name}\nHint: {hint}".strip(),
+            if not self.text_attachment_extractor.is_supported(attachment.file_name):
+                continue
+            try:
+                text = self._load_text_attachment(message, attachment)
+            except Exception as exc:
+                logger.warning(
+                    "Skipped attachment text for message %s: %s",
+                    message.message_id,
+                    exc,
                 )
-            )
+                continue
+            if text:
+                blocks.append(
+                    AttachmentTextBlock(
+                        attachment_id=attachment.attachment_id,
+                        message_id=message.message_id,
+                        file_name=attachment.file_name,
+                        text=f"附件正文：{text}",
+                    )
+                )
 
         return blocks or None
+
+    def _load_text_attachment(self, message: NormalizedMessage, attachment: Any) -> str:
+        if self.text_attachment_extractor is None:
+            return ""
+        if self.attachment_downloader is not None:
+            path = self.attachment_downloader(message, attachment.attachment_id)
+            return self.text_attachment_extractor.extract(path, file_name=attachment.file_name)
+        with tempfile.TemporaryDirectory(prefix="worktrace-attachment-") as temp_dir:
+            result = subprocess.run(
+                [
+                    "lark-cli", "im", "+messages-resources-download", "--as", "user",
+                    "--message-id", message.message_id, "--file-key", attachment.attachment_id,
+                    "--type", "file", "--output", "attachment",
+                ],
+                cwd=temp_dir,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if result.returncode != 0:
+                raise RuntimeError(result.stderr.strip() or "attachment download failed")
+            paths = [item for item in Path(temp_dir).iterdir() if item.is_file()]
+            if not paths:
+                raise RuntimeError("attachment download did not produce a file")
+            return self.text_attachment_extractor.extract(paths[0], file_name=attachment.file_name)
+
+    def summarize_images(self, messages: list[NormalizedMessage]) -> list[AttachmentTextBlock]:
+        if self.image_summarizer is None:
+            return []
+
+        summaries: list[AttachmentTextBlock] = []
+        seen: set[tuple[str, str]] = set()
+        for message in messages:
+            for attachment in message.attachments:
+                key = (message.message_id, attachment.attachment_id)
+                if key in seen or not self._is_image_attachment(message, attachment):
+                    continue
+                seen.add(key)
+                try:
+                    summary = self._summarize_image_attachment(message, attachment.attachment_id)
+                except Exception as exc:
+                    logger.warning("Skipped image summary for message %s: %s", message.message_id, exc)
+                    continue
+                if summary:
+                    summaries.append(
+                        AttachmentTextBlock(
+                            attachment_id=attachment.attachment_id,
+                            message_id=message.message_id,
+                            file_name=attachment.file_name,
+                            text=f"图片内容摘要：{clean_text(summary)}",
+                        )
+                    )
+        return summaries
+
+    def _is_image_attachment(self, message: NormalizedMessage, attachment: Any) -> bool:
+        return message.message_type in {"image", "post"} or attachment.mime_type.startswith("image/")
+
+    def _summarize_image_attachment(self, message: NormalizedMessage, attachment_id: str) -> str:
+        if self.image_downloader is not None:
+            return self.image_summarizer.summarize(
+                self.image_downloader(message, attachment_id)
+            )
+        with tempfile.TemporaryDirectory(prefix="worktrace-image-") as temp_dir:
+            result = subprocess.run(
+                [
+                    "lark-cli", "im", "+messages-resources-download", "--as", "user",
+                    "--message-id", message.message_id, "--file-key", attachment_id,
+                    "--type", "image", "--output", "image",
+                ],
+                cwd=temp_dir,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if result.returncode != 0:
+                raise RuntimeError(result.stderr.strip() or "image download failed")
+            paths = [item for item in Path(temp_dir).iterdir() if item.is_file()]
+            if not paths:
+                raise RuntimeError("image download did not produce a file")
+            return self.image_summarizer.summarize(paths[0])
 
     def load_link_text_if_needed(
         self,

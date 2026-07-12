@@ -36,3 +36,7 @@ class ContentResolver(ABC):
         hint: str,
     ) -> list[LinkedFileTextBlock] | None:
         raise NotImplementedError
+
+    def summarize_images(self, messages: list[NormalizedMessage]) -> list[AttachmentTextBlock]:
+        """Return transient LLM summaries for image attachments when supported."""
+        return []

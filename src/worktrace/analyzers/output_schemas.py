@@ -30,6 +30,15 @@ def batch_output_schema() -> dict[str, object]:
                             "type": "array",
                             "items": {"type": "string"},
                         },
+                        "referenced_attachment_ids": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                        },
+                        "self_evidence_message_ids": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                        },
+                        "workstream_key": {"type": "string"},
                         "source_message_ids": {
                             "type": "array",
                             "items": {"type": "string"},
@@ -43,6 +52,9 @@ def batch_output_schema() -> dict[str, object]:
                         "retention_reason",
                         "retention_detail",
                         "referenced_link_ids",
+                        "referenced_attachment_ids",
+                        "self_evidence_message_ids",
+                        "workstream_key",
                         "source_message_ids",
                     ],
                     "additionalProperties": False,
@@ -149,6 +161,15 @@ def _segment_candidate_schema() -> dict[str, object]:
                 "type": "array",
                 "items": {"type": "string"},
             },
+            "referenced_attachment_ids": {
+                "type": "array",
+                "items": {"type": "string"},
+            },
+            "self_evidence_message_ids": {
+                "type": "array",
+                "items": {"type": "string"},
+            },
+            "workstream_key": {"type": "string"},
             "source_message_ids": {
                 "type": "array",
                 "items": {"type": "string"},
@@ -162,6 +183,9 @@ def _segment_candidate_schema() -> dict[str, object]:
             "retention_reason",
             "retention_detail",
             "referenced_link_ids",
+            "referenced_attachment_ids",
+            "self_evidence_message_ids",
+            "workstream_key",
             "source_message_ids",
         ],
         "additionalProperties": False,
@@ -238,6 +262,15 @@ def anchor_batch_output_schema() -> dict[str, object]:
                                                 "type": "array",
                                                 "items": {"type": "string"},
                                             },
+                                            "referenced_attachment_ids": {
+                                                "type": "array",
+                                                "items": {"type": "string"},
+                                            },
+                                            "self_evidence_message_ids": {
+                                                "type": "array",
+                                                "items": {"type": "string"},
+                                            },
+                                            "workstream_key": {"type": "string"},
                                             "source_message_ids": {
                                                 "type": "array",
                                                 "items": {"type": "string"},
@@ -251,6 +284,9 @@ def anchor_batch_output_schema() -> dict[str, object]:
                                             "retention_reason",
                                             "retention_detail",
                                             "referenced_link_ids",
+                                            "referenced_attachment_ids",
+                                            "self_evidence_message_ids",
+                                            "workstream_key",
                                             "source_message_ids",
                                         ],
                                         "additionalProperties": False,
@@ -304,10 +340,57 @@ def merge_output_schema() -> dict[str, object]:
     return {
         "type": "object",
         "properties": {
-            "groups": {"type": "array"},
+            "groups": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "group_id": {"type": "string"},
+                        "draft_ids": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                        },
+                        "primary_draft_id": {"type": "string"},
+                    },
+                    "required": ["group_id", "draft_ids", "primary_draft_id"],
+                    "additionalProperties": False,
+                },
+            },
         },
         "required": ["groups"],
-        "additionalProperties": True,
+        "additionalProperties": False,
+    }
+
+
+def workstream_assignment_output_schema() -> dict[str, object]:
+    return {
+        "type": "object",
+        "properties": {
+            "assignments": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "draft_id": {"type": "string"},
+                        "parent_draft_id": {"type": "string"},
+                        "root_workstream_name": {"type": "string"},
+                        "evidence_message_ids": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                        },
+                    },
+                    "required": [
+                        "draft_id",
+                        "parent_draft_id",
+                        "root_workstream_name",
+                        "evidence_message_ids",
+                    ],
+                    "additionalProperties": False,
+                },
+            },
+        },
+        "required": ["assignments"],
+        "additionalProperties": False,
     }
 
 

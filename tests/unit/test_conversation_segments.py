@@ -58,6 +58,8 @@ def _candidate(
     response_outcome: str = "unknown",
     response_signal_ids: list[str] | None = None,
     response_evidence_message_ids: list[str] | None = None,
+    self_evidence_message_ids: list[str] | None = None,
+    referenced_attachment_ids: list[str] | None = None,
 ) -> SourceBackedEventDraft:
     return SourceBackedEventDraft(
         draft_id="draft",
@@ -75,6 +77,8 @@ def _candidate(
         response_outcome=response_outcome,
         response_signal_ids=response_signal_ids or [],
         response_evidence_message_ids=response_evidence_message_ids or [],
+        self_evidence_message_ids=self_evidence_message_ids or [],
+        referenced_attachment_ids=referenced_attachment_ids or [],
     )
 
 
@@ -217,6 +221,25 @@ def test_segmentation_prompt_uses_short_references_and_restores_them() -> None:
 
     assert restored.segment_start_message_ids == ["opaque-message-id-1"]
     assert restored.segments == []
+
+
+def test_segmentation_prompt_requires_boundary_for_adjacent_named_workstreams() -> None:
+    prompt = build_conversation_segmentation_prompt(
+        target_date="2026-07-10",
+        conversation_id="oc_1",
+        conversation_name="项目群",
+        messages=[
+            _message("om_1", sender_open_id="ou_self", minute=0, text="项目甲启动"),
+            _message("om_2", sender_open_id="ou_self", minute=1, text="项目乙获批"),
+        ],
+        self_open_id="ou_self",
+        self_display_name="张宝华",
+        response_signals=[],
+        hard_boundary_before_ids=set(),
+    )
+
+    assert "不同项目、产品、政策、客户或业务对象" in prompt
+    assert "同一发送人、相近时间或没有回复链都不能作为合并理由" in prompt
 
 
 def test_segmentation_start_ids_preserve_the_immutable_message_timeline() -> None:
@@ -445,3 +468,78 @@ def test_segment_batch_does_not_require_a_response_assessment() -> None:
     assert missing == []
     assert len(valid["turn-1"].candidate_events) == 1
     assert warnings == []
+
+
+def test_segment_batch_keeps_external_feedback_with_explicit_self_evidence() -> None:
+    command = _message("om_command", sender_open_id="ou_self", minute=0, text="请同步处罚事项")
+    feedback = _message("om_feedback", sender_open_id="ou_other", minute=1, text="已同步处罚文件")
+    unit = _unit(
+        "turn-1",
+        [command, feedback],
+        primary_message_ids=["om_command", "om_feedback"],
+        self_evidence_message_ids=["om_command"],
+    )
+    batch = SegmentAnalysisBatch(
+        target_date="2026-07-10",
+        conversation_id="oc_1",
+        conversation_name="项目群",
+        self_open_id="ou_self",
+        self_display_name="张宝华",
+        segments=[unit],
+    )
+    result = BatchSegmentAnalysisResult(
+        results=[
+            BatchSegmentAnalysisItem(
+                "turn-1",
+                BatchAnalysisResult(
+                    candidate_events=[
+                        _candidate(
+                            ["om_feedback"],
+                            self_evidence_message_ids=["om_command"],
+                        )
+                    ]
+                ),
+            )
+        ]
+    )
+
+    valid, missing, warnings = validate_segment_batch_result(result, batch)
+
+    assert missing == []
+    assert warnings == []
+    assert valid["turn-1"].candidate_events[0].self_evidence_message_ids == ["om_command"]
+
+
+def test_segment_batch_rejects_attachment_not_backed_by_loaded_text() -> None:
+    message = _message("om_1", sender_open_id="ou_self", minute=0, text="请看附件")
+    unit = _unit(
+        "turn-1",
+        [message],
+        primary_message_ids=["om_1"],
+        self_evidence_message_ids=["om_1"],
+    )
+    batch = SegmentAnalysisBatch(
+        target_date="2026-07-10",
+        conversation_id="oc_1",
+        conversation_name="项目群",
+        self_open_id="ou_self",
+        self_display_name="张宝华",
+        segments=[unit],
+    )
+    result = BatchSegmentAnalysisResult(
+        results=[
+            BatchSegmentAnalysisItem(
+                "turn-1",
+                BatchAnalysisResult(
+                    candidate_events=[
+                        _candidate(["om_1"], referenced_attachment_ids=["file_missing"])
+                    ]
+                ),
+            )
+        ]
+    )
+
+    valid, _, warnings = validate_segment_batch_result(result, batch)
+
+    assert valid["turn-1"].candidate_events == []
+    assert warnings == ["Filtered candidate with unavailable attachment evidence."]

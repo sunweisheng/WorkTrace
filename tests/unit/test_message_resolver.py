@@ -10,7 +10,25 @@ from src.worktrace.resolvers.feishu_message import FeishuMessageContentResolver
 
 
 def test_message_resolver_extracts_text_and_links(tmp_path: Path) -> None:
-    resolver = FeishuMessageContentResolver(config=RuntimeConfig(data_root=tmp_path / "data"))
+    class FakeExtractor:
+        def is_supported(self, file_name: str) -> bool:
+            return file_name == "a.txt"
+
+        def extract(self, path: Path, *, file_name: str) -> str:
+            return path.read_text(encoding="utf-8")
+
+    def fake_download(message, attachment_id):
+        assert message.message_id == "om_1"
+        assert attachment_id == "att_1"
+        path = tmp_path / "a.txt"
+        path.write_text("附件里的业务结论", encoding="utf-8")
+        return path
+
+    resolver = FeishuMessageContentResolver(
+        config=RuntimeConfig(data_root=tmp_path / "data"),
+        text_attachment_extractor=FakeExtractor(),
+        attachment_downloader=fake_download,
+    )
     message = NormalizedMessage(
         conversation_id="oc_1",
         conversation_name="项目群",
@@ -33,6 +51,80 @@ def test_message_resolver_extracts_text_and_links(tmp_path: Path) -> None:
     assert "方案: https://foo.feishu.cn/docx/abc" in text
     assert loaded is not None
     assert loaded[0].attachment_id == "att_1"
+    assert loaded[0].text == "附件正文：附件里的业务结论"
+
+
+def test_message_resolver_skips_unsupported_attachment_without_download(tmp_path: Path) -> None:
+    class FakeExtractor:
+        def is_supported(self, file_name: str) -> bool:
+            return False
+
+    resolver = FeishuMessageContentResolver(
+        config=RuntimeConfig(data_root=tmp_path / "data"),
+        text_attachment_extractor=FakeExtractor(),
+        attachment_downloader=lambda *_: (_ for _ in ()).throw(AssertionError("must not download")),
+    )
+    message = NormalizedMessage(
+        conversation_id="oc_1",
+        conversation_name="项目群",
+        message_id="om_file",
+        sender_open_id="ou_1",
+        sender_name="Alice",
+        send_time="2026-06-22T10:00:00+08:00",
+        message_type="file",
+        text='<file key="file_1" name="方案.pdf"/>',
+        reply_to_message_id=None,
+        quote_message_id=None,
+        attachments=[AttachmentMeta("file_1", "方案.pdf", "application/pdf", 1)],
+    )
+
+    assert resolver.load_attachment_text_if_needed(message, ["file_1"], "需要正文") is None
+
+
+def test_message_resolver_summarizes_image_with_transient_download(tmp_path: Path) -> None:
+    class FakeImageSummarizer:
+        def summarize(self, image_path: Path) -> str:
+            assert image_path.read_bytes() == b"image-bytes"
+            return "图片中标注了两家代理商。"
+
+    def fake_download(message, attachment_id):
+        assert message.message_id == "om_image"
+        assert attachment_id == "img_1"
+        path = tmp_path / "image.png"
+        path.write_bytes(b"image-bytes")
+        return path
+
+    resolver = FeishuMessageContentResolver(
+        config=RuntimeConfig(data_root=tmp_path / "data"),
+        image_summarizer=FakeImageSummarizer(),
+        image_downloader=fake_download,
+    )
+    message = NormalizedMessage(
+        conversation_id="oc_1",
+        conversation_name="项目群",
+        message_id="om_image",
+        sender_open_id="ou_1",
+        sender_name="Alice",
+        send_time="2026-06-22T10:00:00+08:00",
+        message_type="image",
+        text="[Image: img_1]",
+        reply_to_message_id=None,
+        quote_message_id=None,
+        attachments=[
+            AttachmentMeta(
+                attachment_id="img_1",
+                file_name="image.png",
+                mime_type="image/png",
+                file_size=11,
+            )
+        ],
+    )
+
+    summaries = resolver.summarize_images([message])
+
+    assert len(summaries) == 1
+    assert summaries[0].message_id == "om_image"
+    assert summaries[0].text == "图片内容摘要：图片中标注了两家代理商。"
 
 
 def test_message_resolver_fetches_doc_title_for_bare_feishu_url(tmp_path: Path) -> None:

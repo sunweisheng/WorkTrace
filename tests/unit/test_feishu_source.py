@@ -27,6 +27,36 @@ def test_parse_content_extracts_media_attachments() -> None:
     assert "video_1" in attachment_ids
 
 
+def test_parse_content_extracts_inline_image_keys() -> None:
+    source = FeishuCliChatSource(config=RuntimeConfig())
+
+    parsed = source._parse_content(  # noqa: SLF001 - unit test on parser contract
+        "[Image: img_v3_first] ![Image](img_v3_second)"
+    )
+
+    assert {item["attachment_id"] for item in parsed["attachments"]} == {
+        "img_v3_first",
+        "img_v3_second",
+    }
+
+
+def test_normalize_message_extracts_image_key_from_raw_text() -> None:
+    source = FeishuCliChatSource(config=RuntimeConfig())
+
+    message = source._normalize_message(  # noqa: SLF001 - parser contract
+        {
+            "chat_id": "oc_1",
+            "message_id": "om_1",
+            "sender_open_id": "ou_self",
+            "send_time": "2026-07-10T09:00:00+08:00",
+            "msg_type": "image",
+            "text": "[Image: img_v3_raw]",
+        }
+    )
+
+    assert [item.attachment_id for item in message.attachments] == ["img_v3_raw"]
+
+
 def test_normalize_message_extracts_mention_and_nested_reaction_details() -> None:
     source = FeishuCliChatSource(config=RuntimeConfig())
 

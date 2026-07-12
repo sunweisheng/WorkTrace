@@ -20,6 +20,7 @@ from .models import (
     BatchSegmentAnalysisResult,
     ContextRequest,
     ConversationSegmentUnit,
+    CrossConversationGroup,
     DailyRunResult,
     EventFileLink,
     WorkEvent,
@@ -29,6 +30,13 @@ from .models import (
     SourceBackedEventDraft,
     ConversationSlice,
     SelfIdentity,
+    WorkstreamAssignment,
+    WorkstreamAssignmentResult,
+)
+from .analyzers.output_schemas import workstream_assignment_output_schema
+from .analyzers.prompts import (
+    build_unassigned_workstream_assignment_prompt,
+    build_workstream_assignment_prompt,
 )
 from .reaction_catalog import ReactionCatalog, ReactionCatalogStore, enrich_message_reactions
 from .pipeline.conversation_first_pass import build_conversation_level_slices
@@ -46,7 +54,11 @@ from .pipeline.context_expansion import (
     build_single_slice_retry_batch,
     expand_slice_context,
 )
-from .pipeline.cross_conversation_merge import materialize_grouped_merged_drafts
+from .pipeline.cross_conversation_merge import (
+    consolidate_workstream_groups,
+    materialize_grouped_merged_drafts,
+)
+from .pipeline.workstream_resolution import groups_from_workstream_assignments
 from .pipeline.direct_relation_filter import filter_self_related_candidate_drafts
 from .pipeline.event_merge import build_work_events
 from .pipeline.filtering import filter_messages
@@ -277,8 +289,15 @@ class DailyTraceRunner:
                 if len(all_candidates) == 1:
                     merged_drafts = materialize_grouped_merged_drafts(
                         all_candidates,
-                        [[all_candidates[0].draft_id]],
+                        [
+                            CrossConversationGroup(
+                                group_id="single",
+                                draft_ids=[all_candidates[0].draft_id],
+                                primary_draft_id=all_candidates[0].draft_id,
+                            )
+                        ],
                         target_date=target_date,
+                        message_order=all_message_order,
                     )
                 else:
                     merge_started_at = perf_counter()
@@ -308,10 +327,23 @@ class DailyTraceRunner:
                             )
                         )
                         warning_messages.extend(merge_repair_warnings)
+                    corrected_groups, workstream_warnings = self._resolve_workstream_groups(
+                        target_date=target_date,
+                        model_groups=group_result.groups,
+                        candidates=all_candidates,
+                    )
+                    warning_messages.extend(workstream_warnings)
+                    group_result = replace(group_result, groups=corrected_groups)
+                    self._dump_resolved_merge_groups(
+                        target_date=target_date,
+                        groups=group_result.groups,
+                        warnings=workstream_warnings,
+                    )
                     merged_drafts = materialize_grouped_merged_drafts(
                         all_candidates,
-                        [group.draft_ids for group in group_result.groups],
+                        group_result.groups,
                         target_date=target_date,
+                        message_order=all_message_order,
                     )
                     merged_drafts = validate_merged_event_drafts(
                         merged_drafts,
@@ -534,6 +566,24 @@ class DailyTraceRunner:
         skipped_segment_count = 0
         model_call_count = 0
 
+        image_summary_func = getattr(self.dependencies.content_resolver, "summarize_images", None)
+        try:
+            image_summary_messages = sorted(
+                messages,
+                key=lambda item: item.sender_open_id != self_identity.open_id,
+            )
+            image_summaries = (
+                image_summary_func(image_summary_messages)
+                if callable(image_summary_func)
+                else []
+            )
+        except Exception as exc:
+            image_summaries = []
+            warnings.append(f"Skipped image summaries: {exc}")
+        image_summaries_by_message: dict[str, list] = {}
+        for block in image_summaries:
+            image_summaries_by_message.setdefault(block.message_id, []).append(block)
+
         anchor_units = group_anchor_units(
             messages,
             self_identity.open_id,
@@ -553,7 +603,14 @@ class DailyTraceRunner:
             if not conversation_anchors:
                 continue
             conversation_anchors = [
-                self._hydrate_anchor_link_titles(item) for item in conversation_anchors
+                replace(
+                    self._hydrate_anchor_link_titles(item),
+                    attachment_texts=_image_summaries_for_messages(
+                        image_summaries_by_message,
+                        item.messages,
+                    ),
+                )
+                for item in conversation_anchors
             ]
             conversation_name = conversation_anchors[0].conversation_name
             conversation_units: list[ConversationSegmentUnit] = []
@@ -598,6 +655,20 @@ class DailyTraceRunner:
                 else:
                     for retry_round in range(self.config.anchor_retry_limit + 1):
                         segmentation_started_at = perf_counter()
+                        segmentation_prompt = (
+                            self.dependencies.analyzer.build_segmentation_prompt(
+                                target_date=target_date,
+                                conversation_id=conversation_id,
+                                conversation_name=conversation_name,
+                                messages=segmentation_messages,
+                                self_open_id=self_identity.open_id,
+                                self_display_name=self_identity.display_name,
+                                response_signals=response_signals,
+                                hard_boundary_before_ids=hard_boundary_before_ids,
+                            )
+                            if hasattr(self.dependencies.analyzer, "build_segmentation_prompt")
+                            else None
+                        )
                         try:
                             segmentation_result = self.dependencies.analyzer.segment_conversation(
                                 target_date=target_date,
@@ -623,6 +694,25 @@ class DailyTraceRunner:
                             self_display_name=self_identity.display_name,
                             self_assignment_keywords=self.config.self_assignment_keywords,
                             response_signals=response_signals,
+                        )
+                        units = [
+                            replace(
+                                unit,
+                                attachment_texts=_image_summaries_for_messages(
+                                    image_summaries_by_message,
+                                    unit.messages,
+                                ),
+                            )
+                            for unit in units
+                        ]
+                        self._dump_segment_segmentation_debug_artifacts(
+                            target_date=target_date,
+                            anchor_unit=anchor_unit,
+                            retry_round=retry_round,
+                            prompt=segmentation_prompt,
+                            output_payload=segmentation_result.to_dict(),
+                            units=units,
+                            warnings=segmentation_warnings,
                         )
                         if units:
                             break
@@ -990,6 +1080,11 @@ class DailyTraceRunner:
         for attempt in range(2):
             try:
                 batch_started_at = perf_counter()
+                prompt = (
+                    self.dependencies.analyzer.build_segment_batch_prompt(batch)
+                    if hasattr(self.dependencies.analyzer, "build_segment_batch_prompt")
+                    else None
+                )
                 result = self.dependencies.analyzer.analyze_segment_batch(batch)
                 call_count += 1
                 candidates, result_warnings, skipped_count, nested_call_count = (
@@ -1002,6 +1097,15 @@ class DailyTraceRunner:
                 )
                 call_count += nested_call_count
                 warnings.extend(result_warnings)
+                self._dump_segment_batch_debug_artifacts(
+                    batch=batch,
+                    retry_round=attempt,
+                    prompt=prompt,
+                    output_payload=result.to_dict(),
+                    candidates=candidates,
+                    warnings=result_warnings,
+                    skipped_count=skipped_count,
+                )
                 log_timing(
                     logger,
                     "runner.stage.completed",
@@ -1142,6 +1246,12 @@ class DailyTraceRunner:
     ) -> tuple[list[SourceBackedEventDraft], list[str], int, int]:
         warnings: list[str] = []
         base_slice = segment_unit_to_slice(unit)
+        self._dump_segment_context_debug_artifacts(
+            target_date=target_date,
+            unit=unit,
+            requests=requests,
+            before=base_slice,
+        )
         expanded_slice = expand_slice_context(
             base_slice,
             requests,
@@ -1149,6 +1259,13 @@ class DailyTraceRunner:
             content_resolver=self.dependencies.content_resolver,
             config=self.config,
             reaction_catalog=self.reaction_catalog,
+        )
+        self._dump_segment_context_debug_artifacts(
+            target_date=target_date,
+            unit=unit,
+            requests=requests,
+            before=base_slice,
+            after=expanded_slice,
         )
         if _conversation_slice_signature(expanded_slice) == _conversation_slice_signature(
             base_slice
@@ -1435,6 +1552,285 @@ class DailyTraceRunner:
             encoding="utf-8",
         )
 
+    def _dump_segment_segmentation_debug_artifacts(
+        self,
+        *,
+        target_date: str,
+        anchor_unit: AnchorUnit,
+        retry_round: int,
+        prompt: str | None,
+        output_payload: dict[str, object],
+        units: list[ConversationSegmentUnit],
+        warnings: list[str],
+    ) -> None:
+        debug_root = self.config.conversation_debug_root
+        if debug_root is None:
+            return
+        directory = (
+            debug_root
+            / target_date
+            / "_segment_batches"
+            / _safe_conversation_dir_name(anchor_unit.conversation_id)
+            / _safe_conversation_dir_name(anchor_unit.anchor_unit_id)
+            / f"segmentation-{retry_round + 1:02d}"
+        )
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / "segmentation_input.json").write_text(
+            dump_json(anchor_unit.to_dict(), pretty=True) + "\n",
+            encoding="utf-8",
+        )
+        if prompt is not None:
+            (directory / "segmentation_prompt.txt").write_text(prompt, encoding="utf-8")
+        (directory / "segmentation_output.json").write_text(
+            dump_json(output_payload, pretty=True) + "\n",
+            encoding="utf-8",
+        )
+        (directory / "segmentation_validation.json").write_text(
+            dump_json(
+                {
+                    "units": [item.to_dict() for item in units],
+                    "warnings": list(warnings),
+                },
+                pretty=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+    def _dump_segment_batch_debug_artifacts(
+        self,
+        *,
+        batch: SegmentAnalysisBatch,
+        retry_round: int,
+        prompt: str | None,
+        output_payload: dict[str, object],
+        candidates: list[SourceBackedEventDraft],
+        warnings: list[str],
+        skipped_count: int,
+    ) -> None:
+        debug_root = self.config.conversation_debug_root
+        if debug_root is None:
+            return
+        segment_key = "-".join(item.segment_id for item in batch.segments)
+        directory = (
+            debug_root
+            / batch.target_date
+            / "_segment_batches"
+            / _safe_conversation_dir_name(batch.conversation_id)
+            / _safe_conversation_dir_name(segment_key)
+            / f"analysis-{retry_round + 1:02d}"
+        )
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / "input.json").write_text(
+            dump_json(batch.to_dict(), pretty=True) + "\n",
+            encoding="utf-8",
+        )
+        if prompt is not None:
+            (directory / "prompt.txt").write_text(prompt, encoding="utf-8")
+        (directory / "output.json").write_text(
+            dump_json(output_payload, pretty=True) + "\n",
+            encoding="utf-8",
+        )
+        (directory / "candidate_validation.json").write_text(
+            dump_json(
+                {
+                    "retained_candidates": [item.to_dict() for item in candidates],
+                    "skipped_count": skipped_count,
+                    "warnings": list(warnings),
+                },
+                pretty=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+    def _dump_segment_context_debug_artifacts(
+        self,
+        *,
+        target_date: str,
+        unit: ConversationSegmentUnit,
+        requests: list[ContextRequest],
+        before: ConversationSlice,
+        after: ConversationSlice | None = None,
+    ) -> None:
+        debug_root = self.config.conversation_debug_root
+        if debug_root is None:
+            return
+        directory = (
+            debug_root
+            / target_date
+            / "_segment_batches"
+            / _safe_conversation_dir_name(unit.conversation_id)
+            / _safe_conversation_dir_name(unit.segment_id)
+            / "context_expansion"
+        )
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / "requests.json").write_text(
+            dump_json([item.to_dict() for item in requests], pretty=True) + "\n",
+            encoding="utf-8",
+        )
+        (directory / "before.json").write_text(
+            dump_json(before.to_dict(), pretty=True) + "\n",
+            encoding="utf-8",
+        )
+        if after is not None:
+            (directory / "after.json").write_text(
+                dump_json(after.to_dict(), pretty=True) + "\n",
+                encoding="utf-8",
+            )
+
+    def _resolve_workstream_groups(
+        self,
+        *,
+        target_date: str,
+        model_groups: list[CrossConversationGroup],
+        candidates: list[SourceBackedEventDraft],
+    ) -> tuple[list[CrossConversationGroup], list[str]]:
+        request_json = getattr(self.dependencies.analyzer, "request_json", None)
+        if not callable(request_json):
+            return consolidate_workstream_groups(model_groups, candidates)
+
+        prompt = build_workstream_assignment_prompt(target_date, candidates)
+        try:
+            payload = request_json(
+                prompt,
+                output_schema=workstream_assignment_output_schema(),
+            )
+            if not isinstance(payload, dict):
+                raise TypeError("Workstream assignment response must be an object.")
+            assignment_result = WorkstreamAssignmentResult.from_dict(payload)
+            groups, warnings = groups_from_workstream_assignments(
+                assignment_result,
+                candidates,
+            )
+            assignment_result, followup_warnings = self._resolve_unassigned_workstreams(
+                target_date=target_date,
+                request_json=request_json,
+                initial_result=assignment_result,
+                initial_groups=groups,
+                candidates=candidates,
+            )
+            groups, assignment_warnings = groups_from_workstream_assignments(
+                assignment_result,
+                candidates,
+            )
+            warnings.extend([*followup_warnings, *assignment_warnings])
+        except (AnalyzerProtocolError, TypeError, ValueError) as exc:
+            fallback_groups, fallback_warnings = consolidate_workstream_groups(
+                model_groups,
+                candidates,
+            )
+            warnings = [
+                f"Skipped LLM workstream resolution: {exc}",
+                *fallback_warnings,
+            ]
+            self._dump_workstream_resolution_debug_artifacts(
+                target_date=target_date,
+                prompt=prompt,
+                candidates=candidates,
+                output_payload=None,
+                groups=fallback_groups,
+                warnings=warnings,
+            )
+            return fallback_groups, warnings
+
+        self._dump_workstream_resolution_debug_artifacts(
+            target_date=target_date,
+            prompt=prompt,
+            candidates=candidates,
+            output_payload=assignment_result.to_dict(),
+            groups=groups,
+            warnings=warnings,
+        )
+        return groups, warnings
+
+    def _resolve_unassigned_workstreams(
+        self,
+        *,
+        target_date: str,
+        request_json,
+        initial_result: WorkstreamAssignmentResult,
+        initial_groups: list[CrossConversationGroup],
+        candidates: list[SourceBackedEventDraft],
+    ) -> tuple[WorkstreamAssignmentResult, list[str]]:
+        assignments_by_id = {
+            assignment.draft_id: assignment
+            for assignment in initial_result.assignments
+        }
+        unassigned_candidates = [
+            candidate
+            for candidate in candidates
+            if not assignments_by_id.get(candidate.draft_id, WorkstreamAssignment("", "")).parent_draft_id
+        ]
+        known_workstreams = _build_known_workstream_context(
+            initial_result,
+            initial_groups,
+            candidates,
+        )
+        if not unassigned_candidates or not known_workstreams:
+            return initial_result, []
+
+        prompt = build_unassigned_workstream_assignment_prompt(
+            target_date,
+            known_workstreams=known_workstreams,
+            unassigned_candidates=unassigned_candidates,
+        )
+        try:
+            payload = request_json(
+                prompt,
+                output_schema=workstream_assignment_output_schema(),
+            )
+            if not isinstance(payload, dict):
+                raise TypeError("Unassigned workstream response must be an object.")
+            followup_result = WorkstreamAssignmentResult.from_dict(payload)
+        except (AnalyzerProtocolError, TypeError, ValueError) as exc:
+            self._dump_workstream_followup_debug_artifacts(
+                target_date=target_date,
+                known_workstreams=known_workstreams,
+                unassigned_candidates=unassigned_candidates,
+                prompt=prompt,
+                output_payload=None,
+                warnings=[f"Skipped LLM unassigned workstream review: {exc}"],
+            )
+            return initial_result, [f"Skipped LLM unassigned workstream review: {exc}"]
+
+        unassigned_ids = {candidate.draft_id for candidate in unassigned_candidates}
+        followup_by_id: dict[str, WorkstreamAssignment] = {}
+        warnings: list[str] = []
+        for assignment in followup_result.assignments:
+            if assignment.draft_id not in unassigned_ids:
+                warnings.append(
+                    f"Ignored follow-up assignment outside unresolved candidates: {assignment.draft_id}."
+                )
+                continue
+            if assignment.draft_id in followup_by_id:
+                warnings.append(
+                    f"Ignored duplicate follow-up assignment: {assignment.draft_id}."
+                )
+                continue
+            if assignment.root_workstream_name.strip():
+                warnings.append(
+                    f"Ignored follow-up attempt to create a workstream root: {assignment.draft_id}."
+                )
+                continue
+            followup_by_id[assignment.draft_id] = assignment
+
+        merged_result = WorkstreamAssignmentResult(
+            assignments=[
+                followup_by_id.get(candidate.draft_id, assignments_by_id.get(candidate.draft_id, WorkstreamAssignment(candidate.draft_id, "")))
+                for candidate in candidates
+            ]
+        )
+        self._dump_workstream_followup_debug_artifacts(
+            target_date=target_date,
+            known_workstreams=known_workstreams,
+            unassigned_candidates=unassigned_candidates,
+            prompt=prompt,
+            output_payload=followup_result.to_dict(),
+            warnings=warnings,
+        )
+        return merged_result, warnings
+
     def _dump_merge_debug_artifacts(
         self,
         *,
@@ -1456,13 +1852,126 @@ class DailyTraceRunner:
             dump_json(input_payload, pretty=True) + "\n",
             encoding="utf-8",
         )
-        prompt = self.dependencies.analyzer.build_merge_prompt(target_date, candidates)
-        (merge_dir / "prompt.txt").write_text(prompt, encoding="utf-8")
+        if hasattr(self.dependencies.analyzer, "build_merge_prompt"):
+            prompt = self.dependencies.analyzer.build_merge_prompt(target_date, candidates)
+            (merge_dir / "prompt.txt").write_text(prompt, encoding="utf-8")
         if output_payload is not None:
             (merge_dir / "output.json").write_text(
                 dump_json(output_payload, pretty=True) + "\n",
                 encoding="utf-8",
             )
+
+    def _dump_workstream_followup_debug_artifacts(
+        self,
+        *,
+        target_date: str,
+        known_workstreams: list[dict[str, object]],
+        unassigned_candidates: list[SourceBackedEventDraft],
+        prompt: str,
+        output_payload: dict[str, object] | None,
+        warnings: list[str],
+    ) -> None:
+        debug_root = self.config.conversation_debug_root
+        if debug_root is None:
+            return
+        merge_dir = debug_root / target_date / "_merge_day_candidates"
+        merge_dir.mkdir(parents=True, exist_ok=True)
+        (merge_dir / "workstream_resolution_followup_input.json").write_text(
+            dump_json(
+                {
+                    "known_workstreams": known_workstreams,
+                    "unassigned_candidates": [
+                        candidate.to_dict() for candidate in unassigned_candidates
+                    ],
+                },
+                pretty=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        (merge_dir / "workstream_resolution_followup_prompt.txt").write_text(
+            prompt,
+            encoding="utf-8",
+        )
+        if output_payload is not None:
+            (merge_dir / "workstream_resolution_followup_output.json").write_text(
+                dump_json(output_payload, pretty=True) + "\n",
+                encoding="utf-8",
+            )
+        (merge_dir / "workstream_resolution_followup_validation.json").write_text(
+            dump_json({"warnings": list(warnings)}, pretty=True) + "\n",
+            encoding="utf-8",
+        )
+
+    def _dump_workstream_resolution_debug_artifacts(
+        self,
+        *,
+        target_date: str,
+        prompt: str,
+        candidates: list[SourceBackedEventDraft],
+        output_payload: dict[str, object] | None,
+        groups: list[CrossConversationGroup],
+        warnings: list[str],
+    ) -> None:
+        debug_root = self.config.conversation_debug_root
+        if debug_root is None:
+            return
+        merge_dir = debug_root / target_date / "_merge_day_candidates"
+        merge_dir.mkdir(parents=True, exist_ok=True)
+        (merge_dir / "workstream_resolution_input.json").write_text(
+            dump_json(
+                {
+                    "candidates": [candidate.to_dict() for candidate in candidates],
+                },
+                pretty=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        (merge_dir / "workstream_resolution_prompt.txt").write_text(
+            prompt,
+            encoding="utf-8",
+        )
+        if output_payload is not None:
+            (merge_dir / "workstream_resolution_output.json").write_text(
+                dump_json(output_payload, pretty=True) + "\n",
+                encoding="utf-8",
+            )
+        (merge_dir / "workstream_resolution_validated.json").write_text(
+            dump_json(
+                {
+                    "groups": [group.to_dict() for group in groups],
+                    "warnings": list(warnings),
+                },
+                pretty=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+    def _dump_resolved_merge_groups(
+        self,
+        *,
+        target_date: str,
+        groups: list[CrossConversationGroup],
+        warnings: list[str],
+    ) -> None:
+        debug_root = self.config.conversation_debug_root
+        if debug_root is None:
+            return
+        merge_dir = debug_root / target_date / "_merge_day_candidates"
+        merge_dir.mkdir(parents=True, exist_ok=True)
+        (merge_dir / "resolved_groups.json").write_text(
+            dump_json(
+                {
+                    "groups": [group.to_dict() for group in groups],
+                    "warnings": list(warnings),
+                },
+                pretty=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
 
 
 def _supports_segment_batches(analyzer: object) -> bool:
@@ -1470,6 +1979,62 @@ def _supports_segment_batches(analyzer: object) -> bool:
         callable(getattr(analyzer, method_name, None))
         for method_name in ("segment_conversation", "analyze_segment_batch")
     )
+
+
+def _build_known_workstream_context(
+    result: WorkstreamAssignmentResult,
+    groups: list[CrossConversationGroup],
+    candidates: list[SourceBackedEventDraft],
+) -> list[dict[str, object]]:
+    candidate_by_id = {candidate.draft_id: candidate for candidate in candidates}
+    root_names = {
+        assignment.draft_id: assignment.root_workstream_name
+        for assignment in result.assignments
+        if (
+            assignment.draft_id == assignment.parent_draft_id
+            and assignment.root_workstream_name.strip()
+        )
+    }
+    context: list[dict[str, object]] = []
+    for group in groups:
+        root_name = root_names.get(group.primary_draft_id, "")
+        if not root_name:
+            continue
+        members = [
+            candidate_by_id[draft_id]
+            for draft_id in group.draft_ids
+            if draft_id in candidate_by_id
+        ]
+        context.append(
+            {
+                "root_draft_id": group.primary_draft_id,
+                "root_workstream_name": root_name,
+                "members": [
+                    {
+                        "draft_id": member.draft_id,
+                        "topic": member.topic,
+                        "content": member.content,
+                        "object_hint": member.object_hint,
+                        "source_message_ids": member.source_message_ids,
+                    }
+                    for member in members
+                ],
+            }
+        )
+    return context
+
+
+def _image_summaries_for_messages(
+    summaries_by_message: dict[str, list],
+    messages: list[NormalizedMessage],
+) -> list:
+    message_ids = {item.message_id for item in messages}
+    return [
+        summary
+        for message_id, summaries in summaries_by_message.items()
+        if message_id in message_ids
+        for summary in summaries
+    ]
 
 
 def _anchor_unit_to_slice(anchor_unit: AnchorUnit) -> ConversationSlice:
@@ -1594,6 +2159,7 @@ def _attach_event_file_links(
     content_resolver,
 ) -> list[WorkEvent]:
     link_by_id: dict[str, EventFileLink] = {}
+    attachment_by_id: dict[str, EventFileLink] = {}
     references: list[_EventFileReference] = []
     for message in messages:
         for index, link in enumerate(content_resolver.extract_links(message), start=1):
@@ -1612,22 +2178,12 @@ def _attach_event_file_links(
             )
         for attachment in getattr(message, "attachments", []):
             file_name = attachment.file_name.strip()
-            if not file_name:
+            if not file_name or attachment.mime_type.startswith("image/"):
                 continue
-            references.append(
-                _EventFileReference(
-                    message_id=message.message_id,
-                    file_link=EventFileLink(
-                        url="",
-                        title=file_name,
-                        link_type="attachment",
-                    ),
-                    evidence_values=tuple(
-                        value
-                        for value in (file_name, attachment.attachment_id.strip())
-                        if value
-                    ),
-                )
+            attachment_by_id[attachment.attachment_id] = EventFileLink(
+                url="",
+                title=file_name,
+                link_type="attachment",
             )
     attached: list[WorkEvent] = []
 
@@ -1660,6 +2216,12 @@ def _attach_event_file_links(
                 continue
             deduped[key] = reference.file_link
 
+        for attachment_id in event.referenced_attachment_ids:
+            attachment = attachment_by_id.get(attachment_id)
+            if attachment is None:
+                continue
+            deduped.setdefault(_file_link_key(attachment), attachment)
+
         file_links = list(deduped.values())
         title = _make_file_references_readable(
             event.title,
@@ -1684,6 +2246,7 @@ def _attach_event_file_links(
                     file_links,
                 ),
                 referenced_link_ids=list(event.referenced_link_ids),
+                referenced_attachment_ids=list(event.referenced_attachment_ids),
             )
         )
 

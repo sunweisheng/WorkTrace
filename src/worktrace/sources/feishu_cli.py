@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -18,6 +19,8 @@ from ..utils.text import clean_text
 from .base import ChatSource
 
 logger = logging.getLogger("worktrace")
+_INLINE_IMAGE_KEY_RE = re.compile(r"\[Image:\s*(img_[^\]\s]+)\]", re.IGNORECASE)
+_MARKDOWN_IMAGE_KEY_RE = re.compile(r"!\[[^\]]*\]\((img_[^)\s]+)\)", re.IGNORECASE)
 
 
 @dataclass
@@ -424,6 +427,7 @@ class FeishuCliChatSource(ChatSource):
         )
         links = parsed_content.get("links", [])
         attachments = parsed_content.get("attachments", [])
+        attachments.extend(self._extract_inline_image_attachments(text))
         mentioned_open_ids = self._dedupe_strings(
             [
                 *parsed_content.get("mentioned_open_ids", []),
@@ -448,6 +452,7 @@ class FeishuCliChatSource(ChatSource):
                     if isinstance(item, dict)
                 ]
             )
+        attachments = self._dedupe_attachment_dicts(attachments)
 
         is_system = bool(
             raw.get("is_system")
@@ -488,7 +493,7 @@ class FeishuCliChatSource(ChatSource):
                 return {
                     "text": content,
                     "links": [],
-                    "attachments": [],
+                    "attachments": self._extract_inline_image_attachments(content),
                     "mentioned_open_ids": [],
                 }
             return self._parse_content(loaded)
@@ -753,6 +758,21 @@ class FeishuCliChatSource(ChatSource):
                 }
             )
         return attachments
+
+    def _extract_inline_image_attachments(self, content: str) -> list[dict[str, Any]]:
+        keys = [
+            *(_INLINE_IMAGE_KEY_RE.findall(content)),
+            *(_MARKDOWN_IMAGE_KEY_RE.findall(content)),
+        ]
+        return [
+            {
+                "attachment_id": key,
+                "file_name": "[Image]",
+                "mime_type": "image/*",
+                "file_size": None,
+            }
+            for key in self._dedupe_strings(keys)
+        ]
 
     def _dedupe_attachment_dicts(
         self,

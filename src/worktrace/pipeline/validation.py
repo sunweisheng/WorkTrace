@@ -118,6 +118,16 @@ def validate_batch_analysis_result(
             conversation_slice=conversation_slice,
             source_message_ids=normalized_ids,
         )
+        referenced_attachment_ids = _filter_valid_referenced_attachment_ids(
+            candidate.referenced_attachment_ids,
+            conversation_slice=conversation_slice,
+            source_message_ids=normalized_ids,
+        )
+        self_evidence_message_ids = _filter_valid_self_evidence_message_ids(
+            candidate.self_evidence_message_ids,
+            conversation_slice=conversation_slice,
+            self_open_id=self_open_id,
+        )
 
         draft_id = candidate.draft_id.strip()
         date = candidate.date.strip()
@@ -145,6 +155,9 @@ def validate_batch_analysis_result(
                 retention_reason=(candidate.retention_reason or "").strip(),
                 retention_detail=(candidate.retention_detail or "").strip(),
                 referenced_link_ids=referenced_link_ids,
+                referenced_attachment_ids=referenced_attachment_ids,
+                self_evidence_message_ids=self_evidence_message_ids,
+                workstream_key=(candidate.workstream_key or "").strip(),
                 source_message_ids=normalized_ids,
                 source_conversation_id=source_conversation_id,
                 source_slice_id=source_slice_id,
@@ -211,6 +224,9 @@ def validate_merged_event_drafts(
                     ],
                     message_order=ordered_ids,
                 ),
+                referenced_attachment_ids=list(
+                    dict.fromkeys(draft.referenced_attachment_ids)
+                ),
                 source_message_ids=ordered_ids,
                 source_conversation_ids=sorted(set(draft.source_conversation_ids)),
             )
@@ -242,10 +258,14 @@ def validate_cross_conversation_groups(
             normalized_ids.append(draft_id)
 
         if normalized_ids:
+            primary_draft_id = group.primary_draft_id
+            if primary_draft_id not in normalized_ids:
+                primary_draft_id = normalized_ids[0]
             normalized_groups.append(
                 CrossConversationGroup(
                     group_id=group.group_id,
                     draft_ids=normalized_ids,
+                    primary_draft_id=primary_draft_id,
                 )
             )
 
@@ -287,6 +307,45 @@ def _filter_valid_referenced_link_ids(
     ]
 
 
+def _filter_valid_referenced_attachment_ids(
+    attachment_ids: list[str],
+    *,
+    conversation_slice: ConversationSlice,
+    source_message_ids: list[str],
+) -> list[str]:
+    source_id_set = set(source_message_ids)
+    available_ids = {
+        block.attachment_id
+        for block in conversation_slice.attachment_texts
+        if block.message_id in source_id_set
+    }
+    return [
+        attachment_id
+        for attachment_id in dict.fromkeys(attachment_ids)
+        if attachment_id in available_ids
+    ]
+
+
+def _filter_valid_self_evidence_message_ids(
+    message_ids: list[str],
+    *,
+    conversation_slice: ConversationSlice,
+    self_open_id: str,
+) -> list[str]:
+    message_by_id = {
+        message.message_id: message for message in conversation_slice.messages
+    }
+    return [
+        message_id
+        for message_id in dict.fromkeys(message_ids)
+        if message_id in message_by_id
+        and (
+            not self_open_id
+            or message_by_id[message_id].sender_open_id == self_open_id
+        )
+    ]
+
+
 def _link_id_belongs_to_messages(link_id: str, message_ids: list[str]) -> bool:
     for candidate_message_id in message_ids:
         if link_id.startswith(f"{candidate_message_id}#link"):
@@ -318,10 +377,14 @@ def normalize_cross_conversation_groups_with_fallback(
             normalized_ids.append(draft_id)
 
         if normalized_ids:
+            primary_draft_id = group.primary_draft_id
+            if primary_draft_id not in normalized_ids:
+                primary_draft_id = normalized_ids[0]
             normalized_groups.append(
                 CrossConversationGroup(
                     group_id=group.group_id,
                     draft_ids=normalized_ids,
+                    primary_draft_id=primary_draft_id,
                 )
             )
 
@@ -331,6 +394,7 @@ def normalize_cross_conversation_groups_with_fallback(
             CrossConversationGroup(
                 group_id=f"fallback-{index}",
                 draft_ids=[draft_id],
+                primary_draft_id=draft_id,
             )
         )
 

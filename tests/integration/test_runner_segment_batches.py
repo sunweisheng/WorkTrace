@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import replace
 from pathlib import Path
 
@@ -222,6 +223,71 @@ def test_runner_batches_multiple_self_turns_and_excludes_other_recipient_turn(
         "anchor-002:turn-risk",
     ]]
     assert result.batch_count == 2
+
+
+def test_runner_debug_output_captures_segment_batch_input_output_and_filtering(
+    tmp_path: Path,
+) -> None:
+    class DebugResolver(SegmentResolver):
+        def summarize_images(self, messages):
+            return [
+                AttachmentTextBlock(
+                    attachment_id="img_1",
+                    message_id="om_1",
+                    file_name="image.png",
+                    text="图片内容摘要：截图显示发布范围。",
+                )
+            ]
+
+    debug_root = tmp_path / "debug"
+    config = RuntimeConfig(data_root=tmp_path / "data", conversation_debug_root=debug_root)
+    runner = DailyTraceRunner(
+        config=config,
+        dependencies=RuntimeDependencies(
+            chat_source=SegmentSource(),
+            content_resolver=DebugResolver(),
+            analyzer=SegmentBatchAnalyzer(),
+            delivery_channel=SegmentDelivery(),
+            event_store=MarkdownEventStore(config=config),
+        ),
+    )
+
+    result = runner.run("2026-07-10")
+
+    assert result.status == DailyRunStatus.SUCCESS.value
+    batch_dirs = list((debug_root / "2026-07-10" / "_segment_batches").glob("**/analysis-01"))
+    assert batch_dirs
+    input_payload = json.loads((batch_dirs[0] / "input.json").read_text(encoding="utf-8"))
+    assert "图片内容摘要：截图显示发布范围。" in json.dumps(input_payload, ensure_ascii=False)
+    assert (batch_dirs[0] / "output.json").is_file()
+    assert (batch_dirs[0] / "candidate_validation.json").is_file()
+
+
+def test_runner_prioritizes_self_authored_images_for_summaries(tmp_path: Path) -> None:
+    class OrderingResolver(SegmentResolver):
+        def __init__(self) -> None:
+            self.message_ids: list[str] = []
+
+        def summarize_images(self, messages):
+            self.message_ids = [item.message_id for item in messages]
+            return []
+
+    resolver = OrderingResolver()
+    runner = DailyTraceRunner(
+        config=RuntimeConfig(data_root=tmp_path / "data"),
+        dependencies=RuntimeDependencies(
+            chat_source=SegmentSource(),
+            content_resolver=resolver,
+            analyzer=SegmentBatchAnalyzer(),
+            delivery_channel=SegmentDelivery(),
+            event_store=MarkdownEventStore(config=RuntimeConfig(data_root=tmp_path / "data")),
+        ),
+    )
+
+    result = runner.run("2026-07-10")
+
+    assert result.status == DailyRunStatus.SUCCESS.value
+    assert resolver.message_ids[:2] == ["om_1", "om_3"]
 
 
 def test_runner_retries_only_the_invalid_anchor_segmentation(tmp_path: Path) -> None:

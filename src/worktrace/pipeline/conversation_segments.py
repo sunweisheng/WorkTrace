@@ -305,19 +305,37 @@ def validate_segment_batch_result(
         source_ids = set(unit.primary_message_ids)
         evidence_ids = set(unit.self_evidence_message_ids)
         signal_ids = {signal.signal_id for signal in unit.response_signals}
+        available_attachment_ids = {
+            block.attachment_id for block in unit.attachment_texts
+        }
         for candidate in item.analysis.candidate_events:
             candidate_sources = set(candidate.source_message_ids)
             if not candidate_sources or not candidate_sources.issubset(source_ids):
                 warnings.append("Filtered candidate with cross-segment source.")
                 continue
             candidate_signals = set(candidate.response_signal_ids)
-            if not (candidate_sources & evidence_ids) and not (candidate_signals & signal_ids):
-                warnings.append("Filtered candidate without self evidence.")
+            candidate_evidence = set(candidate.self_evidence_message_ids)
+            if candidate_evidence and not candidate_evidence.issubset(evidence_ids):
+                warnings.append("Filtered candidate with invalid self evidence.")
                 continue
             if candidate_signals and not candidate_signals.issubset(signal_ids):
                 warnings.append("Filtered candidate with invalid response signal.")
                 continue
-            filtered_candidates.append(candidate)
+            if not candidate_evidence:
+                candidate_evidence = candidate_sources & evidence_ids
+            if not candidate_evidence and not (candidate_signals & signal_ids):
+                warnings.append("Filtered candidate without self evidence.")
+                continue
+            attachment_ids = set(candidate.referenced_attachment_ids)
+            if attachment_ids and not attachment_ids.issubset(available_attachment_ids):
+                warnings.append("Filtered candidate with unavailable attachment evidence.")
+                continue
+            filtered_candidates.append(
+                replace(
+                    candidate,
+                    self_evidence_message_ids=sorted(candidate_evidence),
+                )
+            )
         valid[item.segment_id] = replace(
             item.analysis,
             candidate_events=filtered_candidates,

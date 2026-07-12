@@ -666,7 +666,7 @@ def test_post_image_only_message_is_compressed_for_prompt(tmp_path: Path) -> Non
     assert payload["x"] == "[图片]"
 
 
-def test_file_message_uses_file_name_placeholder(tmp_path: Path) -> None:
+def test_file_message_hides_file_name_from_prompt(tmp_path: Path) -> None:
     config = RuntimeConfig(
         data_root=tmp_path / "data",
         prompt_message_char_limit=200,
@@ -689,7 +689,8 @@ def test_file_message_uses_file_name_placeholder(tmp_path: Path) -> None:
 
     payload = serialize_message_for_prompt(message, config)
 
-    assert payload["x"] == "[文件: 方案.md]"
+    assert payload["x"] == "[文件附件]"
+    assert "方案.md" not in str(payload)
 
 
 def test_feishu_doc_link_uses_title_placeholder(tmp_path: Path) -> None:
@@ -989,7 +990,9 @@ def test_prompt_serialization_includes_reply_context_and_attachments(tmp_path: P
 
     reply_payload = payload["slices"][0]["messages"][1]
     assert reply_payload["reply_to"]["message_id"] == "om_1"
-    assert reply_payload["reply_to"]["text"] == "[文件: 收款公司清单.xlsx]"
+    assert reply_payload["reply_to"]["text"] == "[文件附件]"
+    assert "file_name" not in reply_payload["reply_to"]["attachments"][0]
+    assert "收款公司清单.xlsx" not in str(reply_payload)
     assert reply_payload["reply_to"]["attachments"][0]["attachment_id"] == "att_1"
     assert reply_payload["reply_to"]["links"][0]["link_id"] == "om_1#link1"
 

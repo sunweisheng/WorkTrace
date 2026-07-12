@@ -87,16 +87,33 @@ def test_expand_slice_context_adds_messages_and_attachments(tmp_path: Path) -> N
         ),
     ]
 
+    class FakeExtractor:
+        def is_supported(self, file_name: str) -> bool:
+            return file_name == "a.txt"
+
+        def extract(self, path: Path, *, file_name: str) -> str:
+            return path.read_text(encoding="utf-8")
+
+    def fake_download(_message, _attachment_id):
+        path = tmp_path / "a.txt"
+        path.write_text("附件正文", encoding="utf-8")
+        return path
+
     expanded = expand_slice_context(
         conversation_slice,
         requests,
         chat_source=chat_source,
-        content_resolver=FeishuMessageContentResolver(config=config),
+        content_resolver=FeishuMessageContentResolver(
+            config=config,
+            text_attachment_extractor=FakeExtractor(),
+            attachment_downloader=fake_download,
+        ),
         config=config,
     )
 
     assert len(expanded.messages) == 2
     assert len(expanded.attachment_texts) == 1
+    assert expanded.attachment_texts[0].text == "附件正文：附件正文"
     assert chat_source.calls == [("oc_1", ["om_1"], ContextDirection.EARLIER, 1)]
 
 

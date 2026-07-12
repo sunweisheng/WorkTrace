@@ -47,6 +47,13 @@ def merge_duplicate_drafts(
                 source_conversation_ids=sorted(
                     {cid for item in items for cid in item.source_conversation_ids}
                 ),
+                referenced_attachment_ids=list(
+                    dict.fromkeys(
+                        attachment_id
+                        for item in items
+                        for attachment_id in item.referenced_attachment_ids
+                    )
+                ),
             )
         )
 
@@ -77,6 +84,7 @@ def build_work_events(
                 object_hint=draft.object_hint,
                 retention_reason=draft.retention_reason,
                 retention_detail=draft.retention_detail,
+                referenced_attachment_ids=list(draft.referenced_attachment_ids),
             )
         )
 
