@@ -4,6 +4,7 @@ import argparse
 import sys
 from dataclasses import replace
 from pathlib import Path
+from typing import Callable
 
 from .config import (
     DEFAULT_CONFIG,
@@ -12,9 +13,11 @@ from .config import (
     load_runtime_config_overrides,
 )
 from .constants import DailyRunStatus
-from .errors import InvalidInputError
+from .errors import AnalyzerProtocolError, InvalidInputError
 from .logging_utils import configure_logging
 from .models import CollectedMergeRunResult, DailyRunResult, PreflightResult
+from .reaction_catalogs.base import ReactionCatalogSyncResult
+from .reaction_catalog import ReactionCatalogError
 from .preflight import run_preflight_checks
 from .runner import run_daily_trace
 from .utils.json_io import dump_json
@@ -25,6 +28,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     subparsers = parser.add_subparsers(dest="command")
     merge_parser = subparsers.add_parser("merge-collected")
     merge_parser.add_argument("--date", dest="target_date", required=True)
+    sync_parser = subparsers.add_parser("sync-reaction-catalog")
+    sync_parser.add_argument("--source", default="feishu")
     parser.add_argument("--date", dest="target_date", required=False)
     parser.add_argument("--preflight", dest="preflight_only", action="store_true")
     parser.add_argument("--debug-output", dest="debug_output", action="store_true")
@@ -103,6 +108,17 @@ def run_collected_merge(
     return CollectedMergeRunner(config=config).run(target_date)
 
 
+def run_sync_reaction_catalog(
+    *,
+    source_id: str,
+    config: RuntimeConfig,
+    cwd: Path,
+) -> ReactionCatalogSyncResult:
+    from .factories import ReactionCatalogProviderFactory
+
+    return ReactionCatalogProviderFactory.create(source_id, config, cwd=cwd).synchronize()
+
+
 def apply_cli_overrides(config: RuntimeConfig, args: argparse.Namespace) -> RuntimeConfig:
     if not args.debug_output or config.conversation_debug_root is not None:
         return config
@@ -119,13 +135,34 @@ def execute(
     preflight_func=run_preflight_checks,
     run_func=run_target_day,
     collected_run_func=run_collected_merge,
-) -> tuple[DailyRunResult | PreflightResult | CollectedMergeRunResult, int]:
+    sync_reaction_catalog_func: Callable[..., ReactionCatalogSyncResult] = run_sync_reaction_catalog,
+) -> tuple[DailyRunResult | PreflightResult | CollectedMergeRunResult | ReactionCatalogSyncResult, int]:
     logger = configure_logging()
 
     args = parse_args(argv)
     file_config = load_runtime_config_overrides(config, cwd=Path.cwd())
     blacklist_config = load_conversation_blacklist_overrides(file_config, cwd=Path.cwd())
     effective_config = apply_cli_overrides(blacklist_config, args)
+    if args.command == "sync-reaction-catalog":
+        try:
+            result = sync_reaction_catalog_func(
+                source_id=args.source,
+                config=replace(effective_config),
+                cwd=Path.cwd(),
+            )
+        except (AnalyzerProtocolError, ReactionCatalogError, OSError, ValueError) as exc:
+            return (
+                ReactionCatalogSyncResult(
+                    source_id=args.source,
+                    entry_count=0,
+                    catalog_path=Path(effective_config.reaction_catalogs_root) / f"{args.source}.json",
+                    asset_dir=Path("config") / "assets" / "reactions" / args.source,
+                    status="failed",
+                    error_summary=str(exc),
+                ),
+                1,
+            )
+        return result, 0
     if args.command == "merge-collected":
         try:
             target_date = validate_target_date(args.target_date)
@@ -182,6 +219,7 @@ def main(
     preflight_func=run_preflight_checks,
     run_func=run_target_day,
     collected_run_func=run_collected_merge,
+    sync_reaction_catalog_func: Callable[..., ReactionCatalogSyncResult] = run_sync_reaction_catalog,
 ) -> int:
     result, exit_code = execute(
         argv,
@@ -189,6 +227,7 @@ def main(
         preflight_func=preflight_func,
         run_func=run_func,
         collected_run_func=collected_run_func,
+        sync_reaction_catalog_func=sync_reaction_catalog_func,
     )
     sys.stdout.write(dump_json(result.to_dict(), pretty=True))
     sys.stdout.write("\n")

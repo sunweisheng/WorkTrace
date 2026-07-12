@@ -12,6 +12,7 @@ from ..models import (
     LinkedFileTextBlock,
 )
 from ..resolvers.base import ContentResolver
+from ..reaction_catalog import ReactionCatalog, enrich_message_reactions
 from ..sources.base import ChatSource
 
 
@@ -34,6 +35,7 @@ def expand_slice_context(
     chat_source: ChatSource,
     content_resolver: ContentResolver,
     config: RuntimeConfig,
+    reaction_catalog: ReactionCatalog | None = None,
 ) -> ConversationSlice:
     if not requests:
         return conversation_slice
@@ -96,6 +98,8 @@ def expand_slice_context(
             direction,
             min(request.limit, config.max_model_input_tokens),
         )
+        if reaction_catalog is not None:
+            related = enrich_message_reactions(related, reaction_catalog)
         for message in related:
             message_by_id.setdefault(message.message_id, message)
 

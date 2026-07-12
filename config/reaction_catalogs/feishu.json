@@ -1,0 +1,1285 @@
+{
+  "entry_count": 182,
+  "entries": [
+    {
+      "description": "表示同意、确认或收到信息",
+      "emoji_type": "OK",
+      "image_path": "config/assets/reactions/feishu/OK.png",
+      "name": "好的",
+      "semantic": "acknowledgement"
+    },
+    {
+      "description": "表示认可、支持或做得好",
+      "emoji_type": "THUMBSUP",
+      "image_path": "config/assets/reactions/feishu/THUMBSUP.png",
+      "name": "点赞",
+      "semantic": "approval"
+    },
+    {
+      "description": "表达谢意或感激之情",
+      "emoji_type": "THANKS",
+      "image_path": "config/assets/reactions/feishu/THANKS.png",
+      "name": "感谢",
+      "semantic": "gratitude"
+    },
+    {
+      "description": "表示鼓励、努力或力量",
+      "emoji_type": "MUSCLE",
+      "image_path": "config/assets/reactions/feishu/MUSCLE.png",
+      "name": "加油",
+      "semantic": "encouragement"
+    },
+    {
+      "description": "表达喜爱、友好或亲切",
+      "emoji_type": "FINGERHEART",
+      "image_path": "config/assets/reactions/feishu/FINGERHEART.png",
+      "name": "比心",
+      "semantic": "affection"
+    },
+    {
+      "description": "表示祝贺、赞赏或欢迎",
+      "emoji_type": "APPLAUSE",
+      "image_path": "config/assets/reactions/feishu/APPLAUSE.png",
+      "name": "鼓掌",
+      "semantic": "appreciation"
+    },
+    {
+      "description": "表示默契、合作或达成共识",
+      "emoji_type": "FISTBUMP",
+      "image_path": "config/assets/reactions/feishu/FISTBUMP.png",
+      "name": "碰拳",
+      "semantic": "camaraderie"
+    },
+    {
+      "description": "表示附和、支持或同意的观点",
+      "emoji_type": "JIAYI",
+      "image_path": "config/assets/reactions/feishu/JIAYI.png",
+      "name": "加一",
+      "semantic": "agreement"
+    },
+    {
+      "description": "表示任务已结束或事项已办结",
+      "emoji_type": "DONE",
+      "image_path": "config/assets/reactions/feishu/DONE.png",
+      "name": "完成",
+      "semantic": "completion"
+    },
+    {
+      "description": "表示友好、礼貌或轻松氛围",
+      "emoji_type": "SMILE",
+      "image_path": "config/assets/reactions/feishu/SMILE.png",
+      "name": "微笑",
+      "semantic": "friendliness"
+    },
+    {
+      "description": "表示羞涩、不好意思或受到夸奖时的腼腆反应。",
+      "emoji_type": "BLUSH",
+      "image_path": "config/assets/reactions/feishu/BLUSH.png",
+      "name": "害羞",
+      "semantic": "shy or embarrassed"
+    },
+    {
+      "description": "表示开心、愉悦或被逗乐时的爽朗笑声。",
+      "emoji_type": "LAUGH",
+      "image_path": "config/assets/reactions/feishu/LAUGH.png",
+      "name": "大笑",
+      "semantic": "happy laughter"
+    },
+    {
+      "description": "表示得意、狡黠或心照不宣的微妙表情。",
+      "emoji_type": "SMIRK",
+      "image_path": "config/assets/reactions/feishu/SMIRK.png",
+      "name": "坏笑",
+      "semantic": "smug or mischievous"
+    },
+    {
+      "description": "表示哭笑不得、无奈或极度搞笑的反应。",
+      "emoji_type": "LOL",
+      "image_path": "config/assets/reactions/feishu/LOL.png",
+      "name": "捂脸笑",
+      "semantic": "laughing out loud"
+    },
+    {
+      "description": "表示无语、无奈、尴尬或对错误感到头疼。",
+      "emoji_type": "FACEPALM",
+      "image_path": "config/assets/reactions/feishu/FACEPALM.png",
+      "name": "扶额",
+      "semantic": "facepalm frustration"
+    },
+    {
+      "description": "表示喜爱、感谢、支持或友好的情感。",
+      "emoji_type": "LOVE",
+      "image_path": "config/assets/reactions/feishu/LOVE.png",
+      "name": "爱心",
+      "semantic": "love and appreciation"
+    },
+    {
+      "description": "表示俏皮、暗示、开玩笑或心领神会。",
+      "emoji_type": "WINK",
+      "image_path": "config/assets/reactions/feishu/WINK.png",
+      "name": "眨眼",
+      "semantic": "winking playful"
+    },
+    {
+      "description": "表示自豪、骄傲或对成果感到满意。",
+      "emoji_type": "PROUD",
+      "image_path": "config/assets/reactions/feishu/PROUD.png",
+      "name": "得意",
+      "semantic": "proud and confident"
+    },
+    {
+      "description": "表示幽默、风趣或对妙语表示赞赏。",
+      "emoji_type": "WITTY",
+      "image_path": "config/assets/reactions/feishu/WITTY.png",
+      "name": "机智",
+      "semantic": "witty and humorous"
+    },
+    {
+      "description": "表示认可对方的智慧、洞察力或好主意。",
+      "emoji_type": "SMART",
+      "image_path": "config/assets/reactions/feishu/SMART.png",
+      "name": "聪明",
+      "semantic": "smart and insightful"
+    },
+    {
+      "description": "表示愤怒、不满或严肃警告的态度。",
+      "emoji_type": "SCOWL",
+      "image_path": "config/assets/reactions/feishu/SCOWL.png",
+      "name": "怒视",
+      "semantic": "anger or disapproval"
+    },
+    {
+      "description": "表示正在斟酌、考虑或提出疑问。",
+      "emoji_type": "THINKING",
+      "image_path": "config/assets/reactions/feishu/THINKING.png",
+      "name": "思考",
+      "semantic": "contemplation or curiosity"
+    },
+    {
+      "description": "表示极度悲伤、委屈或崩溃的情绪。",
+      "emoji_type": "SOB",
+      "image_path": "config/assets/reactions/feishu/SOB.png",
+      "name": "大哭",
+      "semantic": "intense sadness or grief"
+    },
+    {
+      "description": "表示难过、感动或轻微的委屈。",
+      "emoji_type": "CRY",
+      "image_path": "config/assets/reactions/feishu/CRY.png",
+      "name": "流泪",
+      "semantic": "sadness or being moved"
+    },
+    {
+      "description": "表示遇到错误、故障或不可行的情况。",
+      "emoji_type": "ERROR",
+      "image_path": "config/assets/reactions/feishu/ERROR.png",
+      "name": "报错",
+      "semantic": "error or failure"
+    },
+    {
+      "description": "表示不屑、无语或漫不经心的态度。",
+      "emoji_type": "NOSEPICK",
+      "image_path": "config/assets/reactions/feishu/NOSEPICK.png",
+      "name": "抠鼻",
+      "semantic": "disdain or indifference"
+    },
+    {
+      "description": "表示得意、轻蔑或居高临下的姿态。",
+      "emoji_type": "HAUGHTY",
+      "image_path": "config/assets/reactions/feishu/HAUGHTY.png",
+      "name": "傲慢",
+      "semantic": "arrogance or smugness"
+    },
+    {
+      "description": "表示强烈反对、震惊或戏剧性打击。",
+      "emoji_type": "SLAP",
+      "image_path": "config/assets/reactions/feishu/SLAP.png",
+      "name": "掌掴",
+      "semantic": "shock or strong rejection"
+    },
+    {
+      "description": "表示极度无奈、受挫或身心俱疲。",
+      "emoji_type": "SPITBLOOD",
+      "image_path": "config/assets/reactions/feishu/SPITBLOOD.png",
+      "name": "吐血",
+      "semantic": "extreme frustration or exhaustion"
+    },
+    {
+      "description": "表示被工作压垮、过热或彻底疲惫。",
+      "emoji_type": "TOASTED",
+      "image_path": "config/assets/reactions/feishu/TOASTED.png",
+      "name": "烤焦",
+      "semantic": "burnout or being overwhelmed"
+    },
+    {
+      "description": "快速浏览，表示已阅或轻微关注。",
+      "emoji_type": "GLANCE",
+      "image_path": "config/assets/reactions/feishu/GLANCE.png",
+      "name": "瞥一眼",
+      "semantic": "brief acknowledgment"
+    },
+    {
+      "description": "表示无奈、无话可说或轻微失望。",
+      "emoji_type": "DULL",
+      "image_path": "config/assets/reactions/feishu/DULL.png",
+      "name": "无语",
+      "semantic": "speechless resignation"
+    },
+    {
+      "description": "假装无辜或礼貌性微笑，缓和气氛。",
+      "emoji_type": "INNOCENTSMILE",
+      "image_path": "config/assets/reactions/feishu/INNOCENTSMILE.png",
+      "name": "无辜笑",
+      "semantic": "polite deflection"
+    },
+    {
+      "description": "表达喜悦、满意或积极正面的情绪。",
+      "emoji_type": "JOYFUL",
+      "image_path": "config/assets/reactions/feishu/JOYFUL.png",
+      "name": "开心",
+      "semantic": "happy approval"
+    },
+    {
+      "description": "表示惊讶、赞叹或对信息的强烈兴趣。",
+      "emoji_type": "WOW",
+      "image_path": "config/assets/reactions/feishu/WOW.png",
+      "name": "哇哦",
+      "semantic": "surprised admiration"
+    },
+    {
+      "description": "表示俏皮、开玩笑或灵机一动。",
+      "emoji_type": "TRICK",
+      "image_path": "config/assets/reactions/feishu/TRICK.png",
+      "name": "机智",
+      "semantic": "playful wit"
+    },
+    {
+      "description": "表示同意、庆祝或完成任务的兴奋。",
+      "emoji_type": "YEAH",
+      "image_path": "config/assets/reactions/feishu/YEAH.png",
+      "name": "耶",
+      "semantic": "enthusiastic agreement"
+    },
+    {
+      "description": "表示拒绝、停止或已达极限。",
+      "emoji_type": "ENOUGH",
+      "image_path": "config/assets/reactions/feishu/ENOUGH.png",
+      "name": "够了",
+      "semantic": "firm rejection"
+    },
+    {
+      "description": "表示感动、委屈或极度悲伤。",
+      "emoji_type": "TEARS",
+      "image_path": "config/assets/reactions/feishu/TEARS.png",
+      "name": "流泪",
+      "semantic": "emotional sadness"
+    },
+    {
+      "description": "表示不好意思、社死或轻微窘迫。",
+      "emoji_type": "EMBARRASSED",
+      "image_path": "config/assets/reactions/feishu/EMBARRASSED.png",
+      "name": "尴尬",
+      "semantic": "awkward embarrassment"
+    },
+    {
+      "description": "发送飞吻，表达喜爱或感谢之情",
+      "emoji_type": "KISS",
+      "image_path": "config/assets/reactions/feishu/KISS.png",
+      "name": "飞吻",
+      "semantic": "affectionate gratitude"
+    },
+    {
+      "description": "亲密亲吻，表示友好、喜爱或安慰",
+      "emoji_type": "SMOOCH",
+      "image_path": "config/assets/reactions/feishu/SMOOCH.png",
+      "name": "亲吻",
+      "semantic": "friendly affection"
+    },
+    {
+      "description": "垂涎欲滴，表达对事物极度渴望或羡慕",
+      "emoji_type": "DROOL",
+      "image_path": "config/assets/reactions/feishu/DROOL.png",
+      "name": "流口水",
+      "semantic": "eager desire"
+    },
+    {
+      "description": "极度喜欢，表达对内容或观点的痴迷",
+      "emoji_type": "OBSESSED",
+      "image_path": "config/assets/reactions/feishu/OBSESSED.png",
+      "name": "着迷",
+      "semantic": "intense fascination"
+    },
+    {
+      "description": "金钱符号，寓意祝好运、发财或奖励",
+      "emoji_type": "MONEY",
+      "image_path": "config/assets/reactions/feishu/MONEY.png",
+      "name": "发财",
+      "semantic": "wealth wish"
+    },
+    {
+      "description": "俏皮挑眉，用于轻松幽默地开玩笑",
+      "emoji_type": "TEASE",
+      "image_path": "config/assets/reactions/feishu/TEASE.png",
+      "name": "调侃",
+      "semantic": "playful teasing"
+    },
+    {
+      "description": "得意展示，幽默地表达自豪或晒成果",
+      "emoji_type": "SHOWOFF",
+      "image_path": "config/assets/reactions/feishu/SHOWOFF.png",
+      "name": "炫耀",
+      "semantic": "proud showing off"
+    },
+    {
+      "description": "拍拍肩膀，表达慰问、支持或鼓励",
+      "emoji_type": "COMFORT",
+      "image_path": "config/assets/reactions/feishu/COMFORT.png",
+      "name": "安慰",
+      "semantic": "supportive comfort"
+    },
+    {
+      "description": "热烈鼓掌，表示欢迎、认可或祝贺",
+      "emoji_type": "CLAP",
+      "image_path": "config/assets/reactions/feishu/CLAP.png",
+      "name": "鼓掌",
+      "semantic": "applause approval"
+    },
+    {
+      "description": "竖起大拇指，表示称赞、同意或做得好",
+      "emoji_type": "PRAISE",
+      "image_path": "config/assets/reactions/feishu/PRAISE.png",
+      "name": "点赞",
+      "semantic": "positive praise"
+    },
+    {
+      "description": "表达鼓励、支持或共同努力的决心",
+      "emoji_type": "STRIVE",
+      "image_path": "config/assets/reactions/feishu/STRIVE.png",
+      "name": "加油",
+      "semantic": "encouragement and motivation"
+    },
+    {
+      "description": "表示害羞、尴尬或不好意思的情绪",
+      "emoji_type": "XBLUSH",
+      "image_path": "config/assets/reactions/feishu/XBLUSH.png",
+      "name": "脸红",
+      "semantic": "shyness or embarrassment"
+    },
+    {
+      "description": "表达无奈、无话可说或轻微的不满",
+      "emoji_type": "SILENT",
+      "image_path": "config/assets/reactions/feishu/SILENT.png",
+      "name": "无语",
+      "semantic": "speechless or resignation"
+    },
+    {
+      "description": "用于打招呼、告别或引起注意",
+      "emoji_type": "WAVE",
+      "image_path": "config/assets/reactions/feishu/WAVE.png",
+      "name": "挥手",
+      "semantic": "greeting or farewell"
+    },
+    {
+      "description": "表达惊讶、不解或询问怎么回事",
+      "emoji_type": "WHAT",
+      "image_path": "config/assets/reactions/feishu/WHAT.png",
+      "name": "疑惑",
+      "semantic": "confusion or surprise"
+    },
+    {
+      "description": "表示担忧、不满或遇到难题",
+      "emoji_type": "FROWN",
+      "image_path": "config/assets/reactions/feishu/FROWN.png",
+      "name": "皱眉",
+      "semantic": "concern or dissatisfaction"
+    },
+    {
+      "description": "表现拘谨、含蓄或轻微的社交焦虑",
+      "emoji_type": "SHY",
+      "image_path": "config/assets/reactions/feishu/SHY.png",
+      "name": "怯怯",
+      "semantic": "timidity or modesty"
+    },
+    {
+      "description": "表示困惑、疲惫或被信息量冲击",
+      "emoji_type": "DIZZY",
+      "image_path": "config/assets/reactions/feishu/DIZZY.png",
+      "name": "晕了",
+      "semantic": "overwhelmed or confused"
+    },
+    {
+      "description": "表示沉思、失落或回避目光接触",
+      "emoji_type": "LOOKDOWN",
+      "image_path": "config/assets/reactions/feishu/LOOKDOWN.png",
+      "name": "低头",
+      "semantic": "contemplation or dejection"
+    },
+    {
+      "description": "表达轻快、调侃或心领神会的笑意",
+      "emoji_type": "CHUCKLE",
+      "image_path": "config/assets/reactions/feishu/CHUCKLE.png",
+      "name": "偷笑",
+      "semantic": "amusement or lightheartedness"
+    },
+    {
+      "description": "表达极度悲伤或崩溃的情绪",
+      "emoji_type": "WAIL",
+      "image_path": "config/assets/reactions/feishu/WAIL.png",
+      "name": "大哭",
+      "semantic": "extreme sadness"
+    },
+    {
+      "description": "表达烦躁、无奈或情绪失控",
+      "emoji_type": "CRAZY",
+      "image_path": "config/assets/reactions/feishu/CRAZY.png",
+      "name": "抓狂",
+      "semantic": "frustration and chaos"
+    },
+    {
+      "description": "表达可怜巴巴或寻求安慰",
+      "emoji_type": "WHIMPER",
+      "image_path": "config/assets/reactions/feishu/WHIMPER.png",
+      "name": "委屈",
+      "semantic": "seeking comfort"
+    },
+    {
+      "description": "表达友好、安慰或感谢支持",
+      "emoji_type": "HUG",
+      "image_path": "config/assets/reactions/feishu/HUG.png",
+      "name": "拥抱",
+      "semantic": "support and warmth"
+    },
+    {
+      "description": "表达感动、伤心或激动落泪",
+      "emoji_type": "BLUBBER",
+      "image_path": "config/assets/reactions/feishu/BLUBBER.png",
+      "name": "流泪",
+      "semantic": "tears of emotion"
+    },
+    {
+      "description": "表达被误解或受委屈的不满",
+      "emoji_type": "WRONGED",
+      "image_path": "config/assets/reactions/feishu/WRONGED.png",
+      "name": "冤枉",
+      "semantic": "feeling misunderstood"
+    },
+    {
+      "description": "表达调侃、反讽或幽默意味",
+      "emoji_type": "HUSKY",
+      "image_path": "config/assets/reactions/feishu/HUSKY.png",
+      "name": "狗头",
+      "semantic": "sarcastic humor"
+    },
+    {
+      "description": "提示保持安静或保守秘密",
+      "emoji_type": "SHHH",
+      "image_path": "config/assets/reactions/feishu/SHHH.png",
+      "name": "嘘声",
+      "semantic": "request for silence"
+    },
+    {
+      "description": "表达自信、骄傲或小确幸",
+      "emoji_type": "SMUG",
+      "image_path": "config/assets/reactions/feishu/SMUG.png",
+      "name": "得意",
+      "semantic": "self-satisfaction"
+    },
+    {
+      "description": "表达生气、不满或强烈反对",
+      "emoji_type": "ANGRY",
+      "image_path": "config/assets/reactions/feishu/ANGRY.png",
+      "name": "愤怒",
+      "semantic": "anger and disapproval"
+    },
+    {
+      "description": "表示督促、提醒或强调重点",
+      "emoji_type": "HAMMER",
+      "image_path": "config/assets/reactions/feishu/HAMMER.png",
+      "name": "敲打",
+      "semantic": "urge or emphasize"
+    },
+    {
+      "description": "对突发消息感到意外或惊讶",
+      "emoji_type": "SHOCKED",
+      "image_path": "config/assets/reactions/feishu/SHOCKED.png",
+      "name": "震惊",
+      "semantic": "surprise or shock"
+    },
+    {
+      "description": "表达害怕、担忧或极度紧张",
+      "emoji_type": "TERROR",
+      "image_path": "config/assets/reactions/feishu/TERROR.png",
+      "name": "恐惧",
+      "semantic": "fear or anxiety"
+    },
+    {
+      "description": "因尴尬或无语而僵住的状态",
+      "emoji_type": "PETRIFIED",
+      "image_path": "config/assets/reactions/feishu/PETRIFIED.png",
+      "name": "石化",
+      "semantic": "awkward silence"
+    },
+    {
+      "description": "表示累垮、完蛋或无奈自嘲",
+      "emoji_type": "SKULL",
+      "image_path": "config/assets/reactions/feishu/SKULL.png",
+      "name": "骷髅",
+      "semantic": "exhausted or done"
+    },
+    {
+      "description": "表示尴尬、无奈或压力大",
+      "emoji_type": "SWEAT",
+      "image_path": "config/assets/reactions/feishu/SWEAT.png",
+      "name": "流汗",
+      "semantic": "embarrassment or stress"
+    },
+    {
+      "description": "对某事感到无法反驳或无奈",
+      "emoji_type": "SPEECHLESS",
+      "image_path": "config/assets/reactions/feishu/SPEECHLESS.png",
+      "name": "无语",
+      "semantic": "speechless or resigned"
+    },
+    {
+      "description": "表示休息、离线或已入睡",
+      "emoji_type": "SLEEP",
+      "image_path": "config/assets/reactions/feishu/SLEEP.png",
+      "name": "睡觉",
+      "semantic": "sleeping or offline"
+    },
+    {
+      "description": "表示疲惫、打瞌睡或没精神",
+      "emoji_type": "DROWSY",
+      "image_path": "config/assets/reactions/feishu/DROWSY.png",
+      "name": "困倦",
+      "semantic": "drowsy or tired"
+    },
+    {
+      "description": "表示无聊、疲倦或不感兴趣",
+      "emoji_type": "YAWN",
+      "image_path": "config/assets/reactions/feishu/YAWN.png",
+      "name": "哈欠",
+      "semantic": "bored or yawning"
+    },
+    {
+      "description": "身体不适或状态不佳，请求休息或关怀。",
+      "emoji_type": "SICK",
+      "image_path": "config/assets/reactions/feishu/SICK.png",
+      "name": "生病",
+      "semantic": "feeling unwell"
+    },
+    {
+      "description": "表示极度反感、恶心或无法接受某事。",
+      "emoji_type": "PUKE",
+      "image_path": "config/assets/reactions/feishu/PUKE.png",
+      "name": "呕吐",
+      "semantic": "strong disgust"
+    },
+    {
+      "description": "感到被辜负、失望或受到情感伤害。",
+      "emoji_type": "BETRAYED",
+      "image_path": "config/assets/reactions/feishu/BETRAYED.png",
+      "name": "心碎",
+      "semantic": "feeling betrayed"
+    },
+    {
+      "description": "正在专注工作、会议中或勿扰模式。",
+      "emoji_type": "HEADSET",
+      "image_path": "config/assets/reactions/feishu/HEADSET.png",
+      "name": "耳机",
+      "semantic": "focused or in meeting"
+    },
+    {
+      "description": "正在用餐或讨论吃饭话题，轻松休闲。",
+      "emoji_type": "EatingFood",
+      "image_path": "config/assets/reactions/feishu/EatingFood.png",
+      "name": "干饭",
+      "semantic": "having a meal"
+    },
+    {
+      "description": "积极举手发言，表示参与意愿或抢答。",
+      "emoji_type": "MeMeMe",
+      "image_path": "config/assets/reactions/feishu/MeMeMe.png",
+      "name": "我我我",
+      "semantic": "eager to participate"
+    },
+    {
+      "description": "表达无奈、疲惫或对现状的轻微抱怨。",
+      "emoji_type": "Sigh",
+      "image_path": "config/assets/reactions/feishu/Sigh.png",
+      "name": "叹气",
+      "semantic": "resignation or fatigue"
+    },
+    {
+      "description": "正在编辑消息，请稍等片刻。",
+      "emoji_type": "Typing",
+      "image_path": "config/assets/reactions/feishu/Typing.png",
+      "name": "输入中",
+      "semantic": "currently typing"
+    },
+    {
+      "description": "表达羡慕、嫉妒或自嘲“酸了”的心情。",
+      "emoji_type": "Lemon",
+      "image_path": "config/assets/reactions/feishu/Lemon.png",
+      "name": "柠檬",
+      "semantic": "envy or jealousy"
+    },
+    {
+      "description": "确认已知晓信息，表示理解或接受。",
+      "emoji_type": "Get",
+      "image_path": "config/assets/reactions/feishu/Get.png",
+      "name": "收到",
+      "semantic": "acknowledged and understood"
+    },
+    {
+      "description": "表示认可、同意或确认无误",
+      "emoji_type": "LGTM",
+      "image_path": "config/assets/reactions/feishu/LGTM.png",
+      "name": "没问题",
+      "semantic": "approval confirmed"
+    },
+    {
+      "description": "表示正在处理或立即执行任务",
+      "emoji_type": "OnIt",
+      "image_path": "config/assets/reactions/feishu/OnIt.png",
+      "name": "马上办",
+      "semantic": "task in progress"
+    },
+    {
+      "description": "表示需要短暂等待或稍后回复",
+      "emoji_type": "OneSecond",
+      "image_path": "config/assets/reactions/feishu/OneSecond.png",
+      "name": "稍等",
+      "semantic": "wait a moment"
+    },
+    {
+      "description": "表示专注体验或深入查看内容",
+      "emoji_type": "VRHeadset",
+      "image_path": "config/assets/reactions/feishu/VRHeadset.png",
+      "name": "沉浸式",
+      "semantic": "deep focus"
+    },
+    {
+      "description": "高度赞扬对方表现优秀或出色",
+      "emoji_type": "YouAreTheBest",
+      "image_path": "config/assets/reactions/feishu/YouAreTheBest.png",
+      "name": "太棒了",
+      "semantic": "high praise"
+    },
+    {
+      "description": "表达尊重、感谢或钦佩之情",
+      "emoji_type": "SALUTE",
+      "image_path": "config/assets/reactions/feishu/SALUTE.png",
+      "name": "致敬",
+      "semantic": "respect and gratitude"
+    },
+    {
+      "description": "表示合作达成、友好或共识",
+      "emoji_type": "SHAKE",
+      "image_path": "config/assets/reactions/feishu/SHAKE.png",
+      "name": "握手",
+      "semantic": "agreement reached"
+    },
+    {
+      "description": "庆祝成功、鼓励或团队默契",
+      "emoji_type": "HIGHFIVE",
+      "image_path": "config/assets/reactions/feishu/HIGHFIVE.png",
+      "name": "击掌",
+      "semantic": "celebration success"
+    },
+    {
+      "description": "表示已阅知或确认接收信息",
+      "emoji_type": "UPPERLEFT",
+      "image_path": "config/assets/reactions/feishu/UPPERLEFT.png",
+      "name": "收到",
+      "semantic": "message received"
+    },
+    {
+      "description": "表示反对、拒绝或不认可提议",
+      "emoji_type": "ThumbsDown",
+      "image_path": "config/assets/reactions/feishu/ThumbsDown.png",
+      "name": "不行",
+      "semantic": "disapproval rejected"
+    },
+    {
+      "description": "表示友好、礼貌或轻微赞同的温和表情。",
+      "emoji_type": "SLIGHT",
+      "image_path": "config/assets/reactions/feishu/SLIGHT.png",
+      "name": "微笑",
+      "semantic": "polite agreement"
+    },
+    {
+      "description": "表示调皮、开玩笑或轻松幽默的氛围。",
+      "emoji_type": "TONGUE",
+      "image_path": "config/assets/reactions/feishu/TONGUE.png",
+      "name": "吐舌",
+      "semantic": "playful joke"
+    },
+    {
+      "description": "表示无奈、无语或尴尬时的沉默反应。",
+      "emoji_type": "EYESCLOSED",
+      "image_path": "config/assets/reactions/feishu/EYESCLOSED.png",
+      "name": "闭眼",
+      "semantic": "speechless awkwardness"
+    },
+    {
+      "description": "表示激动地支持、加油或强烈的情感共鸣。",
+      "emoji_type": "RoarForYou",
+      "image_path": "config/assets/reactions/feishu/RoarForYou.png",
+      "name": "为你咆哮",
+      "semantic": "enthusiastic support"
+    },
+    {
+      "description": "象征勤奋、踏实工作或初生牛犊不怕虎。",
+      "emoji_type": "CALF",
+      "image_path": "config/assets/reactions/feishu/CALF.png",
+      "name": "小牛",
+      "semantic": "diligent work"
+    },
+    {
+      "description": "表示憨厚、可靠或给予温暖的拥抱安慰。",
+      "emoji_type": "BEAR",
+      "image_path": "config/assets/reactions/feishu/BEAR.png",
+      "name": "熊",
+      "semantic": "reliable comfort"
+    },
+    {
+      "description": "表示厉害、强大或对某事的高度认可。",
+      "emoji_type": "BULL",
+      "image_path": "config/assets/reactions/feishu/BULL.png",
+      "name": "牛",
+      "semantic": "strong approval"
+    },
+    {
+      "description": "表示极度喜爱、萌翻了或夸张的赞美。",
+      "emoji_type": "RAINBOWPUKE",
+      "image_path": "config/assets/reactions/feishu/RAINBOWPUKE.png",
+      "name": "彩虹呕吐",
+      "semantic": "overwhelming adoration"
+    },
+    {
+      "description": "表示感谢、欣赏或友好的致意与问候。",
+      "emoji_type": "ROSE",
+      "image_path": "config/assets/reactions/feishu/ROSE.png",
+      "name": "玫瑰",
+      "semantic": "gratitude and respect"
+    },
+    {
+      "description": "表示喜爱、关心或发自内心的感谢与支持。",
+      "emoji_type": "HEART",
+      "image_path": "config/assets/reactions/feishu/HEART.png",
+      "name": "爱心",
+      "semantic": "love and care"
+    },
+    {
+      "description": "表达喜悦、祝贺或庆祝活动的兴奋心情。",
+      "emoji_type": "PARTY",
+      "image_path": "config/assets/reactions/feishu/PARTY.png",
+      "name": "庆祝",
+      "semantic": "celebration and joy"
+    },
+    {
+      "description": "表示友好、喜爱或感谢的亲吻动作。",
+      "emoji_type": "LIPS",
+      "image_path": "config/assets/reactions/feishu/LIPS.png",
+      "name": "飞吻",
+      "semantic": "affection and gratitude"
+    },
+    {
+      "description": "用于庆贺、放松或邀请同事小聚畅饮。",
+      "emoji_type": "BEER",
+      "image_path": "config/assets/reactions/feishu/BEER.png",
+      "name": "干杯",
+      "semantic": "cheers and relaxation"
+    },
+    {
+      "description": "象征生日祝福、分享甜蜜或庆祝里程碑。",
+      "emoji_type": "CAKE",
+      "image_path": "config/assets/reactions/feishu/CAKE.png",
+      "name": "蛋糕",
+      "semantic": "birthday and sweet treats"
+    },
+    {
+      "description": "表达惊喜、馈赠心意或收到奖励的喜悦。",
+      "emoji_type": "GIFT",
+      "image_path": "config/assets/reactions/feishu/GIFT.png",
+      "name": "礼物",
+      "semantic": "surprise and giving"
+    },
+    {
+      "description": "常指代清淡饮食、健康打卡或幽默调侃。",
+      "emoji_type": "CUCUMBER",
+      "image_path": "config/assets/reactions/feishu/CUCUMBER.png",
+      "name": "黄瓜",
+      "semantic": "healthy eating and humor"
+    },
+    {
+      "description": "表示加餐、犒劳自己或羡慕他人的美食。",
+      "emoji_type": "Drumstick",
+      "image_path": "config/assets/reactions/feishu/Drumstick.png",
+      "name": "鸡腿",
+      "semantic": "food treat and reward"
+    },
+    {
+      "description": "形容性格火辣、工作热情或事情棘手。",
+      "emoji_type": "Pepper",
+      "image_path": "config/assets/reactions/feishu/Pepper.png",
+      "name": "辣椒",
+      "semantic": "spicy and intensity"
+    },
+    {
+      "description": "代表传统零食、酸甜滋味或怀旧情怀。",
+      "emoji_type": "CANDIEDHAWS",
+      "image_path": "config/assets/reactions/feishu/CANDIEDHAWS.png",
+      "name": "糖葫芦",
+      "semantic": "traditional snack and nostalgia"
+    },
+    {
+      "description": "职场社交硬通货，表示放松或下午茶邀约。",
+      "emoji_type": "BubbleTea",
+      "image_path": "config/assets/reactions/feishu/BubbleTea.png",
+      "name": "奶茶",
+      "semantic": "afternoon tea and socializing"
+    },
+    {
+      "description": "休息一下，喝杯咖啡提神",
+      "emoji_type": "Coffee",
+      "image_path": "config/assets/reactions/feishu/Coffee.png",
+      "name": "咖啡",
+      "semantic": "taking a break"
+    },
+    {
+      "description": "表示赞同、认可或确认",
+      "emoji_type": "Yes",
+      "image_path": "config/assets/reactions/feishu/Yes.png",
+      "name": "同意",
+      "semantic": "agreement or approval"
+    },
+    {
+      "description": "表示反对、否定或不认可",
+      "emoji_type": "No",
+      "image_path": "config/assets/reactions/feishu/No.png",
+      "name": "拒绝",
+      "semantic": "disagreement or rejection"
+    },
+    {
+      "description": "关联目标与关键结果进度",
+      "emoji_type": "OKR",
+      "image_path": "config/assets/reactions/feishu/OKR.png",
+      "name": "目标",
+      "semantic": "objective tracking"
+    },
+    {
+      "description": "表示任务已完成或事项已核对",
+      "emoji_type": "CheckMark",
+      "image_path": "config/assets/reactions/feishu/CheckMark.png",
+      "name": "完成",
+      "semantic": "task completed"
+    },
+    {
+      "description": "表示有误、取消或未通过",
+      "emoji_type": "CrossMark",
+      "image_path": "config/assets/reactions/feishu/CrossMark.png",
+      "name": "错误",
+      "semantic": "error or cancellation"
+    },
+    {
+      "description": "表示反对意见或投反对票",
+      "emoji_type": "MinusOne",
+      "image_path": "config/assets/reactions/feishu/MinusOne.png",
+      "name": "-1",
+      "semantic": "voting against"
+    },
+    {
+      "description": "表示完美、极度认可或厉害",
+      "emoji_type": "Hundred",
+      "image_path": "config/assets/reactions/feishu/Hundred.png",
+      "name": "满分",
+      "semantic": "perfect score or praise"
+    },
+    {
+      "description": "表达赞赏、惊叹或鼓励",
+      "emoji_type": "AWESOMEN",
+      "image_path": "config/assets/reactions/feishu/AWESOMEN.png",
+      "name": "太棒了",
+      "semantic": "strong appreciation"
+    },
+    {
+      "description": "标记重要消息以便后续查看",
+      "emoji_type": "Pin",
+      "image_path": "config/assets/reactions/feishu/Pin.png",
+      "name": "置顶",
+      "semantic": "marking as important"
+    },
+    {
+      "description": "提醒重要事项或截止时间",
+      "emoji_type": "Alarm",
+      "image_path": "config/assets/reactions/feishu/Alarm.png",
+      "name": "闹钟",
+      "semantic": "reminder urgency"
+    },
+    {
+      "description": "用于发布通知或重要公告",
+      "emoji_type": "Loudspeaker",
+      "image_path": "config/assets/reactions/feishu/Loudspeaker.png",
+      "name": "扩音器",
+      "semantic": "announcement broadcast"
+    },
+    {
+      "description": "祝贺取得优异成绩或胜利",
+      "emoji_type": "Trophy",
+      "image_path": "config/assets/reactions/feishu/Trophy.png",
+      "name": "奖杯",
+      "semantic": "achievement celebration"
+    },
+    {
+      "description": "表示项目火爆或表现杰出",
+      "emoji_type": "Fire",
+      "image_path": "config/assets/reactions/feishu/Fire.png",
+      "name": "火焰",
+      "semantic": "hot trending excellent"
+    },
+    {
+      "description": "形容消息重磅或极具冲击力",
+      "emoji_type": "BOMB",
+      "image_path": "config/assets/reactions/feishu/BOMB.png",
+      "name": "炸弹",
+      "semantic": "shocking impactful news"
+    },
+    {
+      "description": "分享歌曲或表达轻松心情",
+      "emoji_type": "Music",
+      "image_path": "config/assets/reactions/feishu/Music.png",
+      "name": "音乐",
+      "semantic": "music sharing relaxed"
+    },
+    {
+      "description": "庆祝圣诞节或节日氛围",
+      "emoji_type": "XmasTree",
+      "image_path": "config/assets/reactions/feishu/XmasTree.png",
+      "name": "圣诞树",
+      "semantic": "christmas festival celebration"
+    },
+    {
+      "description": "表达冬日问候或寒冷天气",
+      "emoji_type": "Snowman",
+      "image_path": "config/assets/reactions/feishu/Snowman.png",
+      "name": "雪人",
+      "semantic": "winter cold greeting"
+    },
+    {
+      "description": "节日装扮或圣诞祝福",
+      "emoji_type": "XmasHat",
+      "image_path": "config/assets/reactions/feishu/XmasHat.png",
+      "name": "圣诞帽",
+      "semantic": "christmas hat festive"
+    },
+    {
+      "description": "庆祝成功或表达喜悦之情",
+      "emoji_type": "FIREWORKS",
+      "image_path": "config/assets/reactions/feishu/FIREWORKS.png",
+      "name": "烟花",
+      "semantic": "celebration joy success"
+    },
+    {
+      "description": "代表2022年份，用于新年或年度回顾。",
+      "emoji_type": "2022",
+      "image_path": "config/assets/reactions/feishu/2022.png",
+      "name": "二零二二",
+      "semantic": "year reference"
+    },
+    {
+      "description": "象征红包，用于表达感谢、祝贺或发福利。",
+      "emoji_type": "REDPACKET",
+      "image_path": "config/assets/reactions/feishu/REDPACKET.png",
+      "name": "红包",
+      "semantic": "gratitude or reward"
+    },
+    {
+      "description": "寓意财运亨通，常用于商务祝贺或玩笑。",
+      "emoji_type": "FORTUNE",
+      "image_path": "config/assets/reactions/feishu/FORTUNE.png",
+      "name": "发财",
+      "semantic": "wishing prosperity"
+    },
+    {
+      "description": "象征幸运，用于鼓励或祝愿顺利。",
+      "emoji_type": "LUCK",
+      "image_path": "config/assets/reactions/feishu/LUCK.png",
+      "name": "好运",
+      "semantic": "good wishes"
+    },
+    {
+      "description": "象征庆祝和热闹，用于喜庆场合。",
+      "emoji_type": "FIRECRACKER",
+      "image_path": "config/assets/reactions/feishu/FIRECRACKER.png",
+      "name": "鞭炮",
+      "semantic": "celebration"
+    },
+    {
+      "description": "象征团圆和美满，常用于节日问候。",
+      "emoji_type": "StickyRiceBalls",
+      "image_path": "config/assets/reactions/feishu/StickyRiceBalls.png",
+      "name": "汤圆",
+      "semantic": "reunion and harmony"
+    },
+    {
+      "description": "表达伤心、失望或遗憾的情绪。",
+      "emoji_type": "HEARTBROKEN",
+      "image_path": "config/assets/reactions/feishu/HEARTBROKEN.png",
+      "name": "心碎",
+      "semantic": "sadness or disappointment"
+    },
+    {
+      "description": "幽默表达糟糕情况或自嘲，语气轻松。",
+      "emoji_type": "POOP",
+      "image_path": "config/assets/reactions/feishu/POOP.png",
+      "name": "便便",
+      "semantic": "humorous negativity"
+    },
+    {
+      "description": "表示突然想到好主意或解决方案。",
+      "emoji_type": "StatusFlashOfInspiration",
+      "image_path": "config/assets/reactions/feishu/StatusFlashOfInspiration.png",
+      "name": "灵感迸发",
+      "semantic": "idea or insight"
+    },
+    {
+      "description": "标记内容仅限成人，提示敏感或不适宜公开。",
+      "emoji_type": "18X",
+      "image_path": "config/assets/reactions/feishu/18X.png",
+      "name": "十八禁",
+      "semantic": "restricted content warning"
+    },
+    {
+      "description": "表示愤怒、威胁或开玩笑式的“砍人”情绪。",
+      "emoji_type": "CLEAVER",
+      "image_path": "config/assets/reactions/feishu/CLEAVER.png",
+      "name": "菜刀",
+      "semantic": "anger or playful threat"
+    },
+    {
+      "description": "指代足球运动、比赛或相关话题讨论。",
+      "emoji_type": "Soccer",
+      "image_path": "config/assets/reactions/feishu/Soccer.png",
+      "name": "足球",
+      "semantic": "soccer sports topic"
+    },
+    {
+      "description": "指代篮球运动、比赛或相关话题讨论。",
+      "emoji_type": "Basketball",
+      "image_path": "config/assets/reactions/feishu/Basketball.png",
+      "name": "篮球",
+      "semantic": "basketball sports topic"
+    },
+    {
+      "description": "表示当前忙碌，不希望被打扰或接收通知。",
+      "emoji_type": "GeneralDoNotDisturb",
+      "image_path": "config/assets/reactions/feishu/GeneralDoNotDisturb.png",
+      "name": "勿扰",
+      "semantic": "do not disturb status"
+    },
+    {
+      "description": "表示希望进行一对一私下沟通或密谈。",
+      "emoji_type": "Status_PrivateMessage",
+      "image_path": "config/assets/reactions/feishu/Status_PrivateMessage.png",
+      "name": "私聊",
+      "semantic": "private message request"
+    },
+    {
+      "description": "表示正在参加会议，暂时无法即时回复。",
+      "emoji_type": "GeneralInMeetingBusy",
+      "image_path": "config/assets/reactions/feishu/GeneralInMeetingBusy.png",
+      "name": "会议中",
+      "semantic": "in meeting busy status"
+    },
+    {
+      "description": "表示正在专注阅读文档或消息，稍后回复。",
+      "emoji_type": "StatusReading",
+      "image_path": "config/assets/reactions/feishu/StatusReading.png",
+      "name": "阅读中",
+      "semantic": "reading status"
+    },
+    {
+      "description": "表示正在乘坐飞机，处于离线或不便联系状态。",
+      "emoji_type": "StatusInFlight",
+      "image_path": "config/assets/reactions/feishu/StatusInFlight.png",
+      "name": "飞行中",
+      "semantic": "in flight status"
+    },
+    {
+      "description": "表示因公外出出差，响应可能延迟。",
+      "emoji_type": "GeneralBusinessTrip",
+      "image_path": "config/assets/reactions/feishu/GeneralBusinessTrip.png",
+      "name": "出差",
+      "semantic": "business trip status"
+    },
+    {
+      "description": "表示正在家中远程办公，在线但位置不同。",
+      "emoji_type": "GeneralWorkFromHome",
+      "image_path": "config/assets/reactions/feishu/GeneralWorkFromHome.png",
+      "name": "居家办公",
+      "semantic": "work from home status"
+    },
+    {
+      "description": "表达惬意放松、享受当下美好时光的心情。",
+      "emoji_type": "StatusEnjoyLife",
+      "image_path": "config/assets/reactions/feishu/StatusEnjoyLife.png",
+      "name": "享受生活",
+      "semantic": "relaxing and enjoying life"
+    },
+    {
+      "description": "表示正在驾车旅行或准备出发去某地。",
+      "emoji_type": "GeneralTravellingCar",
+      "image_path": "config/assets/reactions/feishu/GeneralTravellingCar.png",
+      "name": "自驾出行",
+      "semantic": "traveling by car"
+    },
+    {
+      "description": "表示正在通勤或乘坐公共交通工具。",
+      "emoji_type": "StatusBus",
+      "image_path": "config/assets/reactions/feishu/StatusBus.png",
+      "name": "乘坐公交",
+      "semantic": "commuting by bus"
+    },
+    {
+      "description": "象征阳光明媚，常用于表达好心情或天气好。",
+      "emoji_type": "GeneralSun",
+      "image_path": "config/assets/reactions/feishu/GeneralSun.png",
+      "name": "晴天",
+      "semantic": "sunny weather"
+    },
+    {
+      "description": "表示夜晚降临，准备休息或晚安。",
+      "emoji_type": "GeneralMoonRest",
+      "image_path": "config/assets/reactions/feishu/GeneralMoonRest.png",
+      "name": "月亮休息",
+      "semantic": "night time rest"
+    },
+    {
+      "description": "中秋节相关元素，象征可爱与节日氛围。",
+      "emoji_type": "MoonRabbit",
+      "image_path": "config/assets/reactions/feishu/MoonRabbit.png",
+      "name": "玉兔",
+      "semantic": "mid-autumn festival rabbit"
+    },
+    {
+      "description": "中秋节传统美食，用于节日祝福或分享。",
+      "emoji_type": "Mooncake",
+      "image_path": "config/assets/reactions/feishu/Mooncake.png",
+      "name": "月饼",
+      "semantic": "mid-autumn mooncake"
+    },
+    {
+      "description": "表达喜悦、兴奋或庆祝的情绪。",
+      "emoji_type": "JubilantRabbit",
+      "image_path": "config/assets/reactions/feishu/JubilantRabbit.png",
+      "name": "欢兔",
+      "semantic": "joyful celebration"
+    },
+    {
+      "description": "表示观看电视节目或休闲娱乐时间。",
+      "emoji_type": "TV",
+      "image_path": "config/assets/reactions/feishu/TV.png",
+      "name": "电视",
+      "semantic": "watching tv"
+    },
+    {
+      "description": "表示看电影或讨论影视相关内容。",
+      "emoji_type": "Movie",
+      "image_path": "config/assets/reactions/feishu/Movie.png",
+      "name": "电影",
+      "semantic": "watching movie"
+    },
+    {
+      "description": "万圣节元素，用于节日问候或搞怪互动。",
+      "emoji_type": "Pumpkin",
+      "image_path": "config/assets/reactions/feishu/Pumpkin.png",
+      "name": "南瓜",
+      "semantic": "halloween fun"
+    },
+    {
+      "description": "开怀大笑，表达极度开心或赞同。",
+      "emoji_type": "BeamingFace",
+      "image_path": "config/assets/reactions/feishu/BeamingFace.png",
+      "name": "大笑",
+      "semantic": "joyful agreement"
+    },
+    {
+      "description": "面带微笑，表示满意、友好或轻松。",
+      "emoji_type": "Delighted",
+      "image_path": "config/assets/reactions/feishu/Delighted.png",
+      "name": "愉快",
+      "semantic": "pleasant satisfaction"
+    },
+    {
+      "description": "尴尬或紧张，表示无奈、无语或压力。",
+      "emoji_type": "ColdSweat",
+      "image_path": "config/assets/reactions/feishu/ColdSweat.png",
+      "name": "冷汗",
+      "semantic": "awkward nervousness"
+    },
+    {
+      "description": "圆润表情，常用于卖萌或表示无辜。",
+      "emoji_type": "FullMoonFace",
+      "image_path": "config/assets/reactions/feishu/FullMoonFace.png",
+      "name": "满月脸",
+      "semantic": "cute innocence"
+    },
+    {
+      "description": "派对欢呼，用于祝贺成功或好消息。",
+      "emoji_type": "Partying",
+      "image_path": "config/assets/reactions/feishu/Partying.png",
+      "name": "庆祝",
+      "semantic": "celebratory cheer"
+    },
+    {
+      "description": "冲刺姿态，表示鼓励、支持或行动。",
+      "emoji_type": "GoGoGo",
+      "image_path": "config/assets/reactions/feishu/GoGoGo.png",
+      "name": "加油",
+      "semantic": "motivational support"
+    },
+    {
+      "description": "双手合十或致谢表情，表达感激之情。",
+      "emoji_type": "ThanksFace",
+      "image_path": "config/assets/reactions/feishu/ThanksFace.png",
+      "name": "感谢",
+      "semantic": "grateful appreciation"
+    },
+    {
+      "description": "标准敬礼，表示收到、服从或致敬。",
+      "emoji_type": "SaluteFace",
+      "image_path": "config/assets/reactions/feishu/SaluteFace.png",
+      "name": "敬礼",
+      "semantic": "respectful acknowledgement"
+    },
+    {
+      "description": "双手摊开，表示不知道、无所谓或无奈。",
+      "emoji_type": "Shrug",
+      "image_path": "config/assets/reactions/feishu/Shrug.png",
+      "name": "耸肩",
+      "semantic": "uncertain indifference"
+    },
+    {
+      "description": "自嘲或调侃局面荒诞可笑",
+      "emoji_type": "ClownFace",
+      "image_path": "config/assets/reactions/feishu/ClownFace.png",
+      "name": "小丑",
+      "semantic": "self-deprecating humor"
+    },
+    {
+      "description": "表达喜悦、庆祝或吉祥好运",
+      "emoji_type": "HappyDragon",
+      "image_path": "config/assets/reactions/feishu/HappyDragon.png",
+      "name": "开心龙",
+      "semantic": "joyful celebration"
+    }
+  ],
+  "fallback": {
+    "description_template": "飞书返回了尚未收录的表情类型：{emoji_type}。",
+    "name": "未收录表情",
+    "semantic": "other"
+  },
+  "source_id": "feishu"
+}

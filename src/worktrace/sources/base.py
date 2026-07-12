@@ -7,6 +7,8 @@ from ..models import ConversationRef, NormalizedMessage, SelfIdentity
 
 
 class ChatSource(ABC):
+    source_id: str
+
     @abstractmethod
     def get_self_identity(self) -> SelfIdentity:
         raise NotImplementedError

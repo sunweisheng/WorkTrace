@@ -7,14 +7,61 @@ from ..models import (
     AnchorUnit,
     BatchAnalysisResult,
     BatchAnchorAnalysisResult,
+    BatchSegmentAnalysisResult,
     CollectedMergeResult,
     CollectedSourceEvent,
+    ConversationSegmentationResult,
+    ConversationSegmentUnit,
     CrossConversationGroupResult,
     SourceBackedEventDraft,
+    SegmentAnalysisBatch,
+    NormalizedMessage,
+    ResponseSignal,
 )
 
 
 class Analyzer(ABC):
+    @abstractmethod
+    def build_segmentation_prompt(
+        self,
+        *,
+        target_date: str,
+        conversation_id: str,
+        conversation_name: str,
+        messages: list[NormalizedMessage],
+        self_open_id: str,
+        self_display_name: str,
+        response_signals: list[ResponseSignal],
+        hard_boundary_before_ids: set[str],
+    ) -> str:
+        raise NotImplementedError
+
+    @abstractmethod
+    def segment_conversation(
+        self,
+        *,
+        target_date: str,
+        conversation_id: str,
+        conversation_name: str,
+        messages: list[NormalizedMessage],
+        self_open_id: str,
+        self_display_name: str,
+        response_signals: list[ResponseSignal],
+        hard_boundary_before_ids: set[str],
+    ) -> ConversationSegmentationResult:
+        raise NotImplementedError
+
+    @abstractmethod
+    def build_segment_batch_prompt(self, batch: SegmentAnalysisBatch) -> str:
+        raise NotImplementedError
+
+    @abstractmethod
+    def analyze_segment_batch(
+        self,
+        batch: SegmentAnalysisBatch,
+    ) -> BatchSegmentAnalysisResult:
+        raise NotImplementedError
+
     @abstractmethod
     def build_batch_prompt(self, batch_input: AnalysisBatch) -> str:
         raise NotImplementedError

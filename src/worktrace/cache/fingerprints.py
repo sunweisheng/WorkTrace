@@ -24,8 +24,13 @@ def build_anchor_input_fingerprint(
         "quote_relation_ids": anchor_unit.quote_relation_ids,
         "messages": [item.to_dict() for item in anchor_unit.messages],
         "attachment_refs": [item.to_dict() for item in anchor_unit.attachment_refs],
-        "attachment_texts": [item.to_dict() for item in (attachment_texts or [])],
-        "linked_file_texts": [item.to_dict() for item in (linked_file_texts or [])],
+        "anchor_signals": [item.to_dict() for item in anchor_unit.anchor_signals],
+        "attachment_texts": [
+            item.to_dict() for item in (attachment_texts or anchor_unit.attachment_texts)
+        ],
+        "linked_file_texts": [
+            item.to_dict() for item in (linked_file_texts or anchor_unit.linked_file_texts)
+        ],
         "prompt_version": prompt_version,
         "schema_version": schema_version,
     }

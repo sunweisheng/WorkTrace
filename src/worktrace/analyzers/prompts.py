@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime
 import re
 
@@ -12,10 +13,14 @@ from ..models import (
     AnchorUnit,
     AttachmentTextBlock,
     CollectedSourceEvent,
+    ConversationSegmentUnit,
+    ConversationSegmentationResult,
     ConversationSlice,
     ContextRequest,
     LinkedFileTextBlock,
     NormalizedMessage,
+    ResponseSignal,
+    SegmentAnalysisBatch,
     SourceBackedEventDraft,
 )
 from ..utils.link_refs import build_message_link_candidates
@@ -124,6 +129,206 @@ def build_batch_analysis_prompt(
             ],
         },
         "input": serialize_batch_for_prompt(batch, config=runtime_config),
+    }
+    return dump_json(protocol, pretty=True)
+
+
+def build_conversation_segmentation_prompt(
+    *,
+    target_date: str,
+    conversation_id: str,
+    conversation_name: str,
+    messages: list[NormalizedMessage],
+    self_open_id: str,
+    self_display_name: str,
+    response_signals: list[ResponseSignal],
+    hard_boundary_before_ids: set[str],
+    config: RuntimeConfig | None = None,
+) -> str:
+    runtime_config = config or RuntimeConfig()
+    message_lookup = {message.message_id: message for message in messages}
+    message_refs = _build_segmentation_message_refs(messages)
+    signal_refs = _build_segmentation_signal_refs(response_signals)
+    serialized_messages: list[dict[str, object]] = []
+    for message in messages:
+        serialized = serialize_message_for_prompt(
+            message,
+            runtime_config,
+            message_lookup=message_lookup,
+        )
+        serialized = _replace_segmentation_message_refs(serialized, message_refs)
+        serialized["sent_by_self"] = message.sender_open_id == self_open_id
+        serialized["mentions_self"] = self_open_id in message.mentioned_open_ids
+        serialized["mentions_other"] = bool(
+            set(message.mentioned_open_ids) - {self_open_id}
+        )
+        if message.message_id in hard_boundary_before_ids:
+            serialized["hard_boundary_before"] = True
+        serialized_messages.append(serialized)
+
+    protocol = {
+        "instruction": (
+            "按时间线判断一个会话中每个独立会话轮次的起点。"
+            "只返回 JSON 的 segment_start_message_ids，不要提炼或筛选工作事件。"
+            "请直接作答，不要推理、展示思考过程或添加解释。"
+        ),
+        "rules": [
+            "这是分段而非事项筛选：无论消息是否构成工作事件，都必须返回至少一个轮次起点。",
+            "输入消息的时间顺序固定，绝不能移动、重排、归组或重复任何消息。",
+            "只返回每个轮次的第一条 message_ref；Python 会按 message_refs_in_order 自动包含起点之间的所有消息。",
+            "segment_start_message_ids 必须以 message_refs_in_order 的第一项开始，后续仅能选择其中按原顺序出现的消息。",
+            "连续围绕同一对象的发言、回复和确认默认合并为同一轮次；不要因每次单独发送就切成单消息轮次。",
+            "仅在明确换题、hard_boundary_before 或旧话题被 reply/quote 续谈时开始新轮次。",
+            "标记 hard_boundary_before 的消息必须出现在 segment_start_message_ids 中。",
+            "本人文本和本人表情都是参与信号，不等于同意、完成或结束；必须结合后续沟通判断是否仍为同一话题。",
+            "旧事项被 reply 或 quote 续谈时，回复消息在它实际发生的时间位置开始新轮次，不能移回旧事项旁边。",
+        ],
+        "input": {
+            "target_date": target_date,
+            "conversation_id": conversation_id,
+            "conversation_name": conversation_name,
+            "self": {"open_id": self_open_id, "display_name": self_display_name},
+            "message_refs_in_order": list(message_refs.values()),
+            "messages": serialized_messages,
+            "response_signals": [
+                {
+                    **item.to_dict(),
+                    "signal_id": signal_refs[item.signal_id],
+                    "message_id": message_refs.get(item.message_id, item.message_id),
+                }
+                for item in response_signals
+            ],
+        },
+        "required_output_schema": {
+            "segment_start_message_ids": ["message_ref"]
+        },
+    }
+    return dump_json(protocol, pretty=True)
+
+
+def restore_conversation_segmentation_references(
+    result: ConversationSegmentationResult,
+    *,
+    messages: list[NormalizedMessage],
+    response_signals: list[ResponseSignal],
+) -> ConversationSegmentationResult:
+    """Restore internal prompt references before strict message ownership checks."""
+    message_ref_to_id = {
+        ref: message_id
+        for message_id, ref in _build_segmentation_message_refs(messages).items()
+    }
+    return ConversationSegmentationResult(
+        segment_start_message_ids=[
+            message_ref_to_id.get(item, item)
+            for item in result.segment_start_message_ids
+        ],
+        segments=[
+            replace(
+                segment,
+                primary_message_ids=[
+                    message_ref_to_id.get(item, item)
+                    for item in segment.primary_message_ids
+                ],
+            )
+            for segment in result.segments
+        ]
+    )
+
+
+def _build_segmentation_message_refs(
+    messages: list[NormalizedMessage],
+) -> dict[str, str]:
+    return {
+        message.message_id: f"m{index:03d}"
+        for index, message in enumerate(messages, start=1)
+    }
+
+
+def _build_segmentation_signal_refs(
+    response_signals: list[ResponseSignal],
+) -> dict[str, str]:
+    return {
+        signal.signal_id: f"r{index:03d}"
+        for index, signal in enumerate(response_signals, start=1)
+    }
+
+
+def _replace_segmentation_message_refs(
+    value: object,
+    message_refs: dict[str, str],
+) -> object:
+    if isinstance(value, str):
+        return message_refs.get(value, value)
+    if isinstance(value, list):
+        return [
+            _replace_segmentation_message_refs(item, message_refs) for item in value
+        ]
+    if isinstance(value, dict):
+        return {
+            key: _replace_segmentation_message_refs(item, message_refs)
+            for key, item in value.items()
+        }
+    return value
+
+
+def build_segment_batch_analysis_prompt(
+    batch: SegmentAnalysisBatch,
+    *,
+    config: RuntimeConfig | None = None,
+) -> str:
+    runtime_config = config or RuntimeConfig()
+    protocol = {
+        "instruction": (
+            "一次提炼多个彼此隔离的本人会话轮次。"
+            "每个 result 只能使用同一 segment_id 的消息与上下文。"
+            "只返回 JSON results，不要推理、展示思考过程或添加解释。"
+        ),
+        "rules": [
+            "每个 segment 独立判断，禁止从其它 segment 借用事实、对象、结论或来源。",
+            "每个输入 segment_id 必须且只能返回一个 result。",
+            "candidate_events 的 source_message_ids 只能使用该 segment 的 primary_message_ids，不能使用 context_message_ids。",
+            "每条 candidate 至少引用一条本人参与证据，或引用该 segment 的本人回应 signal。",
+            "本人提出的问题、风险和待确认事项本身可以提炼，不要求已有处理结果。",
+            "表情是本人回复证据，但不能单凭表情描述事项已完成、已同意或已拒绝。",
+            "普通约时间、确认开会、互通信息、泛泛审核/审批且无具体对象和结论，不要输出 candidate_event。",
+            RETENTION_COMPLETENESS_RULE,
+            "上下文消息只用于理解当前主消息，不得作为当前事件来源。",
+        ],
+        "input": {
+            "target_date": batch.target_date,
+            "conversation_id": batch.conversation_id,
+            "conversation_name": batch.conversation_name,
+            "self": {
+                "open_id": batch.self_open_id,
+                "display_name": batch.self_display_name,
+            },
+            "segments": [
+                _serialize_segment_unit_for_prompt(item, runtime_config)
+                for item in batch.segments
+            ],
+        },
+        "required_output_schema": {
+            "results": [
+                {
+                    "segment_id": "segment_id",
+                    "analysis": {
+                        "candidate_events": [
+                            {
+                                "topic": "string",
+                                "content": "string",
+                                "action_label": "string",
+                                "object_hint": "string",
+                                "retention_reason": "deliverable_updated | decision_made | issue_or_risk_found | follow_up_assigned | external_business_progress | substantive_approval",
+                                "retention_detail": "string",
+                                "referenced_link_ids": ["message_id#link1"],
+                                "source_message_ids": ["primary_message_id"],
+                            }
+                        ],
+                        "context_requests": [],
+                    },
+                }
+            ]
+        },
     }
     return dump_json(protocol, pretty=True)
 
@@ -615,6 +820,42 @@ def serialize_slice_for_prompt(
     return serialized
 
 
+def _serialize_segment_unit_for_prompt(
+    unit: ConversationSegmentUnit,
+    config: RuntimeConfig,
+) -> dict[str, object]:
+    message_lookup = {message.message_id: message for message in unit.messages}
+    primary_ids = set(unit.primary_message_ids)
+    context_ids = set(unit.context_message_ids)
+    messages = [
+        serialize_message_for_prompt(message, config, message_lookup=message_lookup)
+        | {
+            "role": "primary" if message.message_id in primary_ids else "context",
+        }
+        for message in unit.messages
+        if message.message_id in primary_ids | context_ids
+    ]
+    serialized = {
+        "segment_id": unit.segment_id,
+        "primary_message_ids": list(unit.primary_message_ids),
+        "context_message_ids": list(unit.context_message_ids),
+        "self_evidence_message_ids": list(unit.self_evidence_message_ids),
+        "response_signals": [item.to_dict() for item in unit.response_signals],
+        "messages": messages,
+    }
+    if unit.attachment_texts:
+        serialized["attachment_texts"] = [
+            serialize_attachment_for_prompt(item, config)
+            for item in unit.attachment_texts
+        ]
+    if unit.linked_file_texts:
+        serialized["linked_file_texts"] = [
+            serialize_linked_file_text_for_prompt(item, config)
+            for item in unit.linked_file_texts
+        ]
+    return serialized
+
+
 def serialize_anchor_unit_for_prompt(
     anchor_unit: AnchorUnit,
     config: RuntimeConfig,
@@ -637,6 +878,18 @@ def serialize_anchor_unit_for_prompt(
                 "mime": item.mime_type,
             }
             for item in anchor_unit.attachment_refs
+        ]
+    if anchor_unit.anchor_signals:
+        serialized["anchor_signals"] = [item.to_dict() for item in anchor_unit.anchor_signals]
+    if anchor_unit.attachment_texts:
+        serialized["attachment_texts"] = [
+            serialize_attachment_for_prompt(item, config)
+            for item in anchor_unit.attachment_texts
+        ]
+    if anchor_unit.linked_file_texts:
+        serialized["linked_file_texts"] = [
+            serialize_linked_file_text_for_prompt(item, config)
+            for item in anchor_unit.linked_file_texts
         ]
     return serialized
 
@@ -721,6 +974,9 @@ def serialize_message_for_prompt(
     attachments = _serialize_message_attachments(message)
     if attachments:
         serialized["attachments"] = attachments
+    reactions = _serialize_message_reactions(message)
+    if reactions:
+        serialized["reactions"] = reactions
     links = [
         {
             "link_id": item.link_id,
@@ -749,6 +1005,19 @@ def serialize_message_for_prompt(
         if quote_to:
             serialized["quote_to"] = quote_to
     return serialized
+
+
+def _serialize_message_reactions(message: NormalizedMessage) -> list[dict[str, str]]:
+    return [
+        {
+            "emoji_type": reaction.emoji_type,
+            "name": reaction.emoji_name,
+            "description": reaction.emoji_description,
+            "semantic": reaction.semantic,
+        }
+        for reaction in message.reactions
+        if reaction.emoji_type
+    ]
 
 
 def _serialize_prompt_messages(

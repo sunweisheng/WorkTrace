@@ -5,7 +5,9 @@ from ..models import (
     AnchorAnalysisResult,
     BatchAnalysisResult,
     BatchAnchorAnalysisResult,
+    BatchSegmentAnalysisResult,
     CollectedMergeResult,
+    ConversationSegmentationResult,
     CrossConversationGroupResult,
 )
 from ..pipeline.validation import expect_json_object
@@ -33,6 +35,22 @@ def parse_anchor_batch_analysis_payload(payload: object) -> BatchAnchorAnalysisR
         return BatchAnchorAnalysisResult.from_dict(data)
     except (KeyError, TypeError, ValueError) as exc:
         raise AnalyzerProtocolError("Invalid batch anchor analysis payload.") from exc
+
+
+def parse_conversation_segmentation_payload(payload: object) -> ConversationSegmentationResult:
+    data = expect_json_object(payload, "Conversation segmentation result")
+    try:
+        return ConversationSegmentationResult.from_dict(data)
+    except (KeyError, TypeError, ValueError) as exc:
+        raise AnalyzerProtocolError("Invalid conversation segmentation payload.") from exc
+
+
+def parse_segment_batch_analysis_payload(payload: object) -> BatchSegmentAnalysisResult:
+    data = expect_json_object(payload, "Segment batch analysis result")
+    try:
+        return BatchSegmentAnalysisResult.from_dict(data)
+    except (KeyError, TypeError, ValueError) as exc:
+        raise AnalyzerProtocolError("Invalid segment batch analysis payload.") from exc
 
 
 def parse_merge_payload(payload: object) -> CrossConversationGroupResult:

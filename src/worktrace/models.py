@@ -147,6 +147,54 @@ class AttachmentMeta:
 
 
 @dataclass(frozen=True)
+class MessageReaction:
+    reaction_id: str
+    operator_open_id: str
+    emoji_type: str
+    action_time: str
+    emoji_name: str = ""
+    emoji_description: str = ""
+    semantic: str = "unknown"
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> MessageReaction:
+        operator = data.get("operator") if isinstance(data.get("operator"), dict) else {}
+        return cls(
+            reaction_id=str(data.get("reaction_id", "")),
+            operator_open_id=str(
+                data.get("operator_open_id")
+                or data.get("operator_id")
+                or operator.get("operator_id")
+                or operator.get("open_id")
+                or ""
+            ),
+            emoji_type=str(
+                data.get("emoji_type")
+                or (
+                    data.get("reaction_type", {}).get("emoji_type")
+                    if isinstance(data.get("reaction_type"), dict)
+                    else ""
+                )
+            ),
+            action_time=str(data.get("action_time", "")),
+            emoji_name=str(data.get("emoji_name", "")),
+            emoji_description=str(data.get("emoji_description", "")),
+            semantic=str(data.get("semantic", "unknown")),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "reaction_id": self.reaction_id,
+            "operator_open_id": self.operator_open_id,
+            "emoji_type": self.emoji_type,
+            "action_time": self.action_time,
+            "emoji_name": self.emoji_name,
+            "emoji_description": self.emoji_description,
+            "semantic": self.semantic,
+        }
+
+
+@dataclass(frozen=True)
 class NormalizedMessage:
     conversation_id: str
     conversation_name: str
@@ -161,6 +209,8 @@ class NormalizedMessage:
     links: list[LinkMeta] = field(default_factory=list)
     attachments: list[AttachmentMeta] = field(default_factory=list)
     is_system: bool = False
+    mentioned_open_ids: list[str] = field(default_factory=list)
+    reactions: list[MessageReaction] = field(default_factory=list)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> NormalizedMessage:
@@ -188,6 +238,11 @@ class NormalizedMessage:
                 for item in _dict_list(data.get("attachments"))
             ],
             is_system=bool(data.get("is_system", False)),
+            mentioned_open_ids=_string_list(data.get("mentioned_open_ids")),
+            reactions=[
+                MessageReaction.from_dict(item)
+                for item in _dict_list(data.get("reactions"))
+            ],
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -205,6 +260,8 @@ class NormalizedMessage:
             "links": [item.to_dict() for item in self.links],
             "attachments": [item.to_dict() for item in self.attachments],
             "is_system": self.is_system,
+            "mentioned_open_ids": list(self.mentioned_open_ids),
+            "reactions": [item.to_dict() for item in self.reactions],
         }
 
 
@@ -271,6 +328,10 @@ class ConversationSlice:
     messages: list[NormalizedMessage]
     attachment_texts: list[AttachmentTextBlock] = field(default_factory=list)
     linked_file_texts: list[LinkedFileTextBlock] = field(default_factory=list)
+    primary_message_ids: list[str] = field(default_factory=list)
+    context_message_ids: list[str] = field(default_factory=list)
+    self_evidence_message_ids: list[str] = field(default_factory=list)
+    response_signal_ids: list[str] = field(default_factory=list)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> ConversationSlice:
@@ -292,6 +353,10 @@ class ConversationSlice:
                 LinkedFileTextBlock.from_dict(item)
                 for item in _dict_list(data.get("linked_file_texts"))
             ],
+            primary_message_ids=_string_list(data.get("primary_message_ids")),
+            context_message_ids=_string_list(data.get("context_message_ids")),
+            self_evidence_message_ids=_string_list(data.get("self_evidence_message_ids")),
+            response_signal_ids=_string_list(data.get("response_signal_ids")),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -304,6 +369,10 @@ class ConversationSlice:
             "messages": [item.to_dict() for item in self.messages],
             "attachment_texts": [item.to_dict() for item in self.attachment_texts],
             "linked_file_texts": [item.to_dict() for item in self.linked_file_texts],
+            "primary_message_ids": list(self.primary_message_ids),
+            "context_message_ids": list(self.context_message_ids),
+            "self_evidence_message_ids": list(self.self_evidence_message_ids),
+            "response_signal_ids": list(self.response_signal_ids),
         }
 
 
@@ -319,6 +388,9 @@ class AnchorUnit:
     reply_relation_ids: list[str] = field(default_factory=list)
     quote_relation_ids: list[str] = field(default_factory=list)
     attachment_refs: list[AttachmentMeta] = field(default_factory=list)
+    anchor_signals: list["AnchorSignal"] = field(default_factory=list)
+    attachment_texts: list[AttachmentTextBlock] = field(default_factory=list)
+    linked_file_texts: list[LinkedFileTextBlock] = field(default_factory=list)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> AnchorUnit:
@@ -339,6 +411,18 @@ class AnchorUnit:
                 AttachmentMeta.from_dict(item)
                 for item in _dict_list(data.get("attachment_refs"))
             ],
+            anchor_signals=[
+                AnchorSignal.from_dict(item)
+                for item in _dict_list(data.get("anchor_signals"))
+            ],
+            attachment_texts=[
+                AttachmentTextBlock.from_dict(item)
+                for item in _dict_list(data.get("attachment_texts"))
+            ],
+            linked_file_texts=[
+                LinkedFileTextBlock.from_dict(item)
+                for item in _dict_list(data.get("linked_file_texts"))
+            ],
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -353,6 +437,9 @@ class AnchorUnit:
             "reply_relation_ids": list(self.reply_relation_ids),
             "quote_relation_ids": list(self.quote_relation_ids),
             "attachment_refs": [item.to_dict() for item in self.attachment_refs],
+            "anchor_signals": [item.to_dict() for item in self.anchor_signals],
+            "attachment_texts": [item.to_dict() for item in self.attachment_texts],
+            "linked_file_texts": [item.to_dict() for item in self.linked_file_texts],
         }
 
 
@@ -443,6 +530,213 @@ def _parse_context_requests(value: Any) -> list[ContextRequest]:
 
 
 @dataclass(frozen=True)
+class ResponseSignal:
+    signal_id: str
+    kind: str
+    message_id: str
+    action_time: str
+    emoji_type: str = ""
+    emoji_name: str = ""
+    emoji_description: str = ""
+    semantic: str = "unknown"
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> ResponseSignal:
+        return cls(
+            signal_id=str(data.get("signal_id", "")),
+            kind=str(data.get("kind", "")),
+            message_id=str(data.get("message_id", "")),
+            action_time=str(data.get("action_time", "")),
+            emoji_type=str(data.get("emoji_type", "")),
+            emoji_name=str(data.get("emoji_name", "")),
+            emoji_description=str(data.get("emoji_description", "")),
+            semantic=str(data.get("semantic", "unknown")),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "signal_id": self.signal_id,
+            "kind": self.kind,
+            "message_id": self.message_id,
+            "action_time": self.action_time,
+            "emoji_type": self.emoji_type,
+            "emoji_name": self.emoji_name,
+            "emoji_description": self.emoji_description,
+            "semantic": self.semantic,
+        }
+
+
+@dataclass(frozen=True)
+class AnchorSignal:
+    signal_id: str
+    kind: str
+    message_id: str
+    action_time: str
+    emoji_type: str = ""
+    emoji_name: str = ""
+    emoji_description: str = ""
+    semantic: str = "unknown"
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> AnchorSignal:
+        return cls(
+            signal_id=str(data.get("signal_id", "")),
+            kind=str(data.get("kind", "")),
+            message_id=str(data.get("message_id", "")),
+            action_time=str(data.get("action_time", "")),
+            emoji_type=str(data.get("emoji_type", "")),
+            emoji_name=str(data.get("emoji_name", "")),
+            emoji_description=str(data.get("emoji_description", "")),
+            semantic=str(data.get("semantic", "unknown")),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "signal_id": self.signal_id,
+            "kind": self.kind,
+            "message_id": self.message_id,
+            "action_time": self.action_time,
+            "emoji_type": self.emoji_type,
+            "emoji_name": self.emoji_name,
+            "emoji_description": self.emoji_description,
+            "semantic": self.semantic,
+        }
+
+
+@dataclass(frozen=True)
+class ResponseAssessment:
+    signal_id: str
+    disposition: str
+    continuation: str
+    evidence_message_ids: list[str] = field(default_factory=list)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> ResponseAssessment:
+        return cls(
+            signal_id=str(data.get("signal_id", "")),
+            disposition=str(data.get("disposition", "unknown")),
+            continuation=str(data.get("continuation", "unknown")),
+            evidence_message_ids=_string_list(data.get("evidence_message_ids")),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "signal_id": self.signal_id,
+            "disposition": self.disposition,
+            "continuation": self.continuation,
+            "evidence_message_ids": list(self.evidence_message_ids),
+        }
+
+
+@dataclass(frozen=True)
+class ConversationSegment:
+    segment_id: str
+    primary_message_ids: list[str]
+    context_message_ids: list[str] = field(default_factory=list)
+    self_evidence_message_ids: list[str] = field(default_factory=list)
+    response_assessments: list[ResponseAssessment] = field(default_factory=list)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> ConversationSegment:
+        return cls(
+            segment_id=str(data.get("segment_id", "")),
+            primary_message_ids=_string_list(data.get("primary_message_ids")),
+            context_message_ids=_string_list(data.get("context_message_ids")),
+            self_evidence_message_ids=_string_list(data.get("self_evidence_message_ids")),
+            response_assessments=[
+                ResponseAssessment.from_dict(item)
+                for item in _dict_list(data.get("response_assessments"))
+            ],
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "segment_id": self.segment_id,
+            "primary_message_ids": list(self.primary_message_ids),
+            "context_message_ids": list(self.context_message_ids),
+            "self_evidence_message_ids": list(self.self_evidence_message_ids),
+            "response_assessments": [item.to_dict() for item in self.response_assessments],
+        }
+
+
+@dataclass(frozen=True)
+class ConversationSegmentationResult:
+    # Online analyzers return only the messages that begin a turn.  Python expands
+    # those positions against the immutable input timeline into contiguous segments.
+    segment_start_message_ids: list[str] = field(default_factory=list)
+    segments: list[ConversationSegment] = field(default_factory=list)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> ConversationSegmentationResult:
+        return cls(
+            segment_start_message_ids=_string_list(
+                data.get("segment_start_message_ids")
+            ),
+            segments=[
+                ConversationSegment.from_dict(item)
+                for item in _dict_list(data.get("segments"))
+            ]
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        if self.segment_start_message_ids:
+            return {
+                "segment_start_message_ids": list(self.segment_start_message_ids),
+            }
+        return {"segments": [item.to_dict() for item in self.segments]}
+
+
+@dataclass(frozen=True)
+class ConversationSegmentUnit:
+    segment_id: str
+    conversation_id: str
+    conversation_name: str
+    primary_message_ids: list[str]
+    context_message_ids: list[str]
+    self_evidence_message_ids: list[str]
+    response_signals: list[ResponseSignal]
+    response_assessments: list[ResponseAssessment]
+    messages: list[NormalizedMessage]
+    attachment_texts: list[AttachmentTextBlock] = field(default_factory=list)
+    linked_file_texts: list[LinkedFileTextBlock] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "segment_id": self.segment_id,
+            "conversation_id": self.conversation_id,
+            "conversation_name": self.conversation_name,
+            "primary_message_ids": list(self.primary_message_ids),
+            "context_message_ids": list(self.context_message_ids),
+            "self_evidence_message_ids": list(self.self_evidence_message_ids),
+            "response_signals": [item.to_dict() for item in self.response_signals],
+            "response_assessments": [item.to_dict() for item in self.response_assessments],
+            "messages": [item.to_dict() for item in self.messages],
+            "attachment_texts": [item.to_dict() for item in self.attachment_texts],
+            "linked_file_texts": [item.to_dict() for item in self.linked_file_texts],
+        }
+
+
+@dataclass(frozen=True)
+class SegmentAnalysisBatch:
+    target_date: str
+    conversation_id: str
+    conversation_name: str
+    self_open_id: str
+    self_display_name: str
+    segments: list[ConversationSegmentUnit]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "target_date": self.target_date,
+            "conversation_id": self.conversation_id,
+            "conversation_name": self.conversation_name,
+            "self_open_id": self.self_open_id,
+            "self_display_name": self.self_display_name,
+            "segments": [item.to_dict() for item in self.segments],
+        }
+
+
+@dataclass(frozen=True)
 class SourceBackedEventDraft:
     draft_id: str
     date: str
@@ -457,6 +751,9 @@ class SourceBackedEventDraft:
     retention_reason: str = ""
     retention_detail: str = ""
     referenced_link_ids: list[str] = field(default_factory=list)
+    response_outcome: str = "unknown"
+    response_signal_ids: list[str] = field(default_factory=list)
+    response_evidence_message_ids: list[str] = field(default_factory=list)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> SourceBackedEventDraft:
@@ -474,6 +771,9 @@ class SourceBackedEventDraft:
             source_conversation_id=str(data.get("source_conversation_id", "")),
             source_slice_id=str(data.get("source_slice_id", "")),
             confidence=float(data.get("confidence", 0.0)),
+            response_outcome=str(data.get("response_outcome", "unknown")),
+            response_signal_ids=_string_list(data.get("response_signal_ids")),
+            response_evidence_message_ids=_string_list(data.get("response_evidence_message_ids")),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -491,6 +791,9 @@ class SourceBackedEventDraft:
             "source_conversation_id": self.source_conversation_id,
             "source_slice_id": self.source_slice_id,
             "confidence": self.confidence,
+            "response_outcome": self.response_outcome,
+            "response_signal_ids": list(self.response_signal_ids),
+            "response_evidence_message_ids": list(self.response_evidence_message_ids),
         }
 
 
@@ -514,6 +817,44 @@ class BatchAnalysisResult:
             "candidate_events": [item.to_dict() for item in self.candidate_events],
             "context_requests": [item.to_dict() for item in self.context_requests],
         }
+
+
+@dataclass(frozen=True)
+class BatchSegmentAnalysisItem:
+    segment_id: str
+    analysis: BatchAnalysisResult
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> BatchSegmentAnalysisItem:
+        return cls(
+            segment_id=str(data.get("segment_id", "")),
+            analysis=BatchAnalysisResult.from_dict(
+                data.get("analysis") if isinstance(data.get("analysis"), dict) else {}
+            ),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "segment_id": self.segment_id,
+            "analysis": self.analysis.to_dict(),
+        }
+
+
+@dataclass(frozen=True)
+class BatchSegmentAnalysisResult:
+    results: list[BatchSegmentAnalysisItem] = field(default_factory=list)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> BatchSegmentAnalysisResult:
+        return cls(
+            results=[
+                BatchSegmentAnalysisItem.from_dict(item)
+                for item in _dict_list(data.get("results"))
+            ]
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"results": [item.to_dict() for item in self.results]}
 
 
 @dataclass(frozen=True)

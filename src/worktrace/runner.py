@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import logging
 from pathlib import Path
 import re
@@ -14,13 +14,34 @@ from .factories import RuntimeDependencies, build_runtime_dependencies
 from .logging_utils import log_timing
 from .models import (
     AnalysisBatch,
+    AnchorAnalysisResult,
+    AnchorUnit,
+    BatchAnalysisResult,
+    BatchSegmentAnalysisResult,
+    ContextRequest,
+    ConversationSegmentUnit,
     DailyRunResult,
     EventFileLink,
     WorkEvent,
     MergedEventDraft,
+    NormalizedMessage,
+    SegmentAnalysisBatch,
     SourceBackedEventDraft,
+    ConversationSlice,
+    SelfIdentity,
 )
+from .reaction_catalog import ReactionCatalog, ReactionCatalogStore, enrich_message_reactions
 from .pipeline.conversation_first_pass import build_conversation_level_slices
+from .pipeline.conversation_segments import (
+    build_hard_boundary_message_ids,
+    build_response_signals,
+    pack_segment_units,
+    segment_unit_to_slice,
+    validate_conversation_segmentation,
+    validate_segment_batch_result,
+)
+from .pipeline.anchors import group_anchor_units
+from .pipeline.anchor_expansion import expand_anchor_unit_context
 from .pipeline.context_expansion import (
     build_single_slice_retry_batch,
     expand_slice_context,
@@ -46,7 +67,6 @@ from .pipeline.validation import (
     validate_merged_event_drafts,
 )
 from .utils.link_refs import build_message_link_id
-from .models import AnalysisBatch, BatchAnalysisResult, ConversationSlice, SelfIdentity
 from .utils.json_io import dump_json
 
 logger = logging.getLogger("worktrace")
@@ -81,6 +101,12 @@ class _EventFileReference:
 class DailyTraceRunner:
     config: RuntimeConfig
     dependencies: RuntimeDependencies
+    reaction_catalog: ReactionCatalog | None = None
+
+    def __post_init__(self) -> None:
+        if self.reaction_catalog is None:
+            source_id = getattr(self.dependencies.chat_source, "source_id", "feishu")
+            self.reaction_catalog = ReactionCatalogStore.from_config(self.config).load(source_id)
 
     def run(self, target_date: str) -> DailyRunResult:
         run_started_at = perf_counter()
@@ -114,6 +140,7 @@ class DailyTraceRunner:
                 target_date,
                 [item.conversation_id for item in conversations],
             )
+            messages = enrich_message_reactions(messages, self.reaction_catalog)
             log_timing(
                 logger,
                 "runner.stage.completed",
@@ -151,43 +178,55 @@ class DailyTraceRunner:
             input_message_count=len(messages),
             output_message_count=len(filtered_messages),
         )
-        stage_started_at = perf_counter()
-        conversation_slices = build_conversation_level_slices(
-            filtered_messages,
-            self_identity.open_id,
-            self.config,
-        )
-        log_timing(
-            logger,
-            "runner.stage.completed",
-            stage_started_at,
-            stage="build_conversation_level_slices",
-            slice_count=len(conversation_slices),
-        )
         all_candidates: list[SourceBackedEventDraft] = []
         analyzed_batch_count = 0
         all_message_order = [message.message_id for message in filtered_messages]
+        conversation_slices: list[ConversationSlice] = []
 
         try:
-            for conversation_slice in conversation_slices:
+            if _supports_segment_batches(self.dependencies.analyzer):
                 (
-                    validated_result,
-                    slice_warnings,
-                    unresolved,
-                    run_count,
-                ) = self._analyze_conversation_slice_with_retry(
+                    all_candidates,
+                    conversation_slices,
+                    segment_warnings,
+                    skipped_slice_count,
+                    analyzed_batch_count,
+                ) = self._analyze_segmented_conversations(
                     target_date=target_date,
-                    conversation_slice=conversation_slice,
+                    messages=filtered_messages,
                     self_identity=self_identity,
                 )
-                analyzed_batch_count += run_count
-
-                for candidate in validated_result.candidate_events:
-                    all_candidates.append(candidate)
-
-                if unresolved:
-                    skipped_slice_count += 1
-                warning_messages.extend(slice_warnings)
+                warning_messages.extend(segment_warnings)
+            else:
+                stage_started_at = perf_counter()
+                conversation_slices = build_conversation_level_slices(
+                    filtered_messages,
+                    self_identity.open_id,
+                    self.config,
+                )
+                log_timing(
+                    logger,
+                    "runner.stage.completed",
+                    stage_started_at,
+                    stage="build_conversation_level_slices",
+                    slice_count=len(conversation_slices),
+                )
+                for conversation_slice in conversation_slices:
+                    (
+                        validated_result,
+                        slice_warnings,
+                        unresolved,
+                        run_count,
+                    ) = self._analyze_conversation_slice_with_retry(
+                        target_date=target_date,
+                        conversation_slice=conversation_slice,
+                        self_identity=self_identity,
+                    )
+                    analyzed_batch_count += run_count
+                    all_candidates.extend(validated_result.candidate_events)
+                    if unresolved:
+                        skipped_slice_count += 1
+                    warning_messages.extend(slice_warnings)
         except AnalyzerProtocolError as exc:
             return self._finish_run(
                 run_started_at,
@@ -201,19 +240,20 @@ class DailyTraceRunner:
                     filter_candidate_drafts(all_candidates, self.config)
                 )
                 warning_messages.extend(candidate_filter_warnings)
-                all_candidates, self_relation_candidate_warnings = (
-                    filter_self_related_candidate_drafts(
-                        all_candidates,
-                        {
-                            item.slice_id: item
-                            for item in conversation_slices
-                        },
-                        self_open_id=self_identity.open_id,
-                        self_display_name=self_identity.display_name,
-                        self_assignment_keywords=self.config.self_assignment_keywords,
+                if not _supports_segment_batches(self.dependencies.analyzer):
+                    all_candidates, self_relation_candidate_warnings = (
+                        filter_self_related_candidate_drafts(
+                            all_candidates,
+                            {
+                                item.slice_id: item
+                                for item in conversation_slices
+                            },
+                            self_open_id=self_identity.open_id,
+                            self_display_name=self_identity.display_name,
+                            self_assignment_keywords=self.config.self_assignment_keywords,
+                        )
                     )
-                )
-                warning_messages.extend(self_relation_candidate_warnings)
+                    warning_messages.extend(self_relation_candidate_warnings)
                 all_candidates, retention_candidate_warnings = (
                     filter_retained_candidate_drafts(all_candidates)
                 )
@@ -475,6 +515,748 @@ class DailyTraceRunner:
         )
         return result
 
+    def _analyze_segmented_conversations(
+        self,
+        *,
+        target_date: str,
+        messages: list[NormalizedMessage],
+        self_identity: SelfIdentity,
+    ) -> tuple[
+        list[SourceBackedEventDraft],
+        list[ConversationSlice],
+        list[str],
+        int,
+        int,
+    ]:
+        candidates: list[SourceBackedEventDraft] = []
+        conversation_slices: list[ConversationSlice] = []
+        warnings: list[str] = []
+        skipped_segment_count = 0
+        model_call_count = 0
+
+        anchor_units = group_anchor_units(
+            messages,
+            self_identity.open_id,
+            before_limit=30,
+            after_limit=30,
+            reaction_catalog=self.reaction_catalog,
+        )
+        anchors_by_conversation: dict[str, list] = {}
+        for anchor_unit in anchor_units:
+            anchors_by_conversation.setdefault(anchor_unit.conversation_id, []).append(
+                anchor_unit
+            )
+
+        for conversation_id, conversation_anchors in sorted(
+            anchors_by_conversation.items()
+        ):
+            if not conversation_anchors:
+                continue
+            conversation_anchors = [
+                self._hydrate_anchor_link_titles(item) for item in conversation_anchors
+            ]
+            conversation_name = conversation_anchors[0].conversation_name
+            conversation_units: list[ConversationSegmentUnit] = []
+            fallback_required = False
+            segmentation_cache: dict[
+                tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]],
+                tuple[list[ConversationSegmentUnit], list[str], str, int, str],
+            ] = {}
+            segmentation_failure_counts: dict[str, int] = {}
+            segmentation_circuit_open = False
+            skipped_anchor_count = 0
+            for anchor_index, anchor_unit in enumerate(conversation_anchors, start=1):
+                if segmentation_circuit_open:
+                    skipped_anchor_count += 1
+                    continue
+                segmentation_messages = anchor_unit.messages
+                response_signals = build_response_signals(
+                    segmentation_messages,
+                    self_open_id=self_identity.open_id,
+                    reaction_catalog=self.reaction_catalog,
+                )
+                hard_boundary_before_ids = build_hard_boundary_message_ids(
+                    segmentation_messages,
+                    self_open_id=self_identity.open_id,
+                )
+                units: list[ConversationSegmentUnit] = []
+                segmentation_warnings: list[str] = []
+                segmentation_error = ""
+                retry_round = 0
+                failure_category = ""
+                segmentation_started_at = perf_counter()
+                window_signature = _anchor_unit_context_signature(anchor_unit)
+                cached = segmentation_cache.get(window_signature)
+                if cached is not None:
+                    (
+                        units,
+                        segmentation_warnings,
+                        segmentation_error,
+                        retry_round,
+                        failure_category,
+                    ) = cached
+                else:
+                    for retry_round in range(self.config.anchor_retry_limit + 1):
+                        segmentation_started_at = perf_counter()
+                        try:
+                            segmentation_result = self.dependencies.analyzer.segment_conversation(
+                                target_date=target_date,
+                                conversation_id=conversation_id,
+                                conversation_name=conversation_name,
+                                messages=segmentation_messages,
+                                self_open_id=self_identity.open_id,
+                                self_display_name=self_identity.display_name,
+                                response_signals=response_signals,
+                                hard_boundary_before_ids=hard_boundary_before_ids,
+                            )
+                        except AnalyzerProtocolError as exc:
+                            model_call_count += 1
+                            segmentation_error = str(exc)
+                            continue
+
+                        model_call_count += 1
+                        segmentation_error = ""
+                        units, segmentation_warnings = validate_conversation_segmentation(
+                            segmentation_result,
+                            segmentation_messages,
+                            self_open_id=self_identity.open_id,
+                            self_display_name=self_identity.display_name,
+                            self_assignment_keywords=self.config.self_assignment_keywords,
+                            response_signals=response_signals,
+                        )
+                        if units:
+                            break
+                    if not units:
+                        failure_category = (
+                            "analyzer_protocol_failure"
+                            if segmentation_error
+                            else "segmentation_validation_failure"
+                        )
+                    segmentation_cache[window_signature] = (
+                        units,
+                        segmentation_warnings,
+                        segmentation_error,
+                        retry_round,
+                        failure_category,
+                    )
+
+                if not units:
+                    fallback_required = True
+                    if cached is None:
+                        warnings.extend(segmentation_warnings)
+                        if segmentation_error:
+                            warnings.append(
+                                "Skipped anchor after segmentation retries failed: "
+                                f"{segmentation_error}"
+                            )
+                        else:
+                            warnings.append("Skipped anchor after invalid segmentation retries.")
+                        segmentation_failure_counts[failure_category] = (
+                            segmentation_failure_counts.get(failure_category, 0) + 1
+                        )
+                        if (
+                            segmentation_failure_counts[failure_category]
+                            >= self.config.conversation_segmentation_failure_threshold
+                        ):
+                            segmentation_circuit_open = True
+                            warnings.append(
+                                "Stopped remaining anchor segmentation after repeated "
+                                f"{failure_category}."
+                            )
+                    continue
+
+                conversation_units.extend(
+                    replace(
+                        unit,
+                        segment_id=f"anchor-{anchor_index:03d}:{unit.segment_id}",
+                    )
+                    for unit in units
+                    if set(unit.primary_message_ids)
+                    & set(anchor_unit.anchor_message_ids)
+                )
+                warnings.extend(segmentation_warnings)
+                log_timing(
+                    logger,
+                    "runner.stage.completed",
+                    segmentation_started_at,
+                    stage="segment_conversation",
+                    conversation_id=conversation_id,
+                    segment_count=len(units),
+                    anchor_index=anchor_index,
+                    anchor_count=len(conversation_anchors),
+                    anchor_message_count=len(anchor_unit.anchor_message_ids),
+                    input_message_count=len(segmentation_messages),
+                    retry_round=retry_round,
+                )
+            if skipped_anchor_count:
+                warnings.append(
+                    "Skipped remaining anchor segmentation windows after circuit open: "
+                    f"{skipped_anchor_count}."
+                )
+            conversation_units = _dedupe_segment_primary_ownership(conversation_units)
+            if conversation_units:
+                conversation_slices.extend(
+                    segment_unit_to_slice(unit) for unit in conversation_units
+                )
+                for batch in pack_segment_units(
+                    target_date=target_date,
+                    self_open_id=self_identity.open_id,
+                    self_display_name=self_identity.display_name,
+                    units=conversation_units,
+                    config=self.config,
+                ):
+                    (
+                        batch_candidates,
+                        batch_warnings,
+                        batch_skipped_count,
+                        batch_call_count,
+                    ) = self._analyze_segment_batch_with_retry(
+                        batch=batch,
+                        self_identity=self_identity,
+                    )
+                    candidates.extend(batch_candidates)
+                    warnings.extend(batch_warnings)
+                    skipped_segment_count += batch_skipped_count
+                    model_call_count += batch_call_count
+
+            if fallback_required:
+                warnings.append(
+                    "Anchor segmentation retries were exhausted; running full-conversation anchor fallback."
+                )
+                (
+                    fallback_candidates,
+                    fallback_warnings,
+                    fallback_skipped_count,
+                    fallback_call_count,
+                ) = self._analyze_anchor_fallback(
+                    target_date=target_date,
+                    anchor_units=conversation_anchors,
+                    self_identity=self_identity,
+                )
+                candidates.extend(fallback_candidates)
+                warnings.extend(fallback_warnings)
+                skipped_segment_count += fallback_skipped_count
+                model_call_count += fallback_call_count
+
+        return (
+            candidates,
+            conversation_slices,
+            warnings,
+            skipped_segment_count,
+            model_call_count,
+        )
+
+    def _hydrate_anchor_link_titles(self, anchor_unit: AnchorUnit) -> AnchorUnit:
+        messages = [
+            replace(message, links=list(self.dependencies.content_resolver.extract_links(message)))
+            for message in anchor_unit.messages
+        ]
+        return replace(anchor_unit, messages=messages)
+
+    def _analyze_anchor_fallback(
+        self,
+        *,
+        target_date: str,
+        anchor_units: list[AnchorUnit],
+        self_identity: SelfIdentity,
+    ) -> tuple[list[SourceBackedEventDraft], list[str], int, int]:
+        if not hasattr(self.dependencies.analyzer, "analyze_anchor_batch"):
+            return [], ["Anchor fallback is unavailable for this analyzer."], len(anchor_units), 0
+
+        candidates: list[SourceBackedEventDraft] = []
+        warnings: list[str] = []
+        initial_results, initial_warnings, skipped_count, call_count = (
+            self._analyze_anchor_units_resilient(
+                target_date=target_date,
+                anchor_units=anchor_units,
+            )
+        )
+        warnings.extend(initial_warnings)
+        pending = [
+            (unit, initial_results[unit.anchor_unit_id], 0)
+            for unit in anchor_units
+            if unit.anchor_unit_id in initial_results
+        ]
+
+        while pending:
+            expanded_groups: dict[
+                tuple[str, ...], list[tuple[AnchorUnit, int]]
+            ] = {}
+            for unit, analysis, expansion_round in pending:
+                slice_input = _anchor_unit_to_slice(unit)
+                validated = validate_batch_analysis_result(
+                    BatchAnalysisResult(
+                        candidate_events=[
+                            replace(
+                                item,
+                                source_conversation_id=slice_input.conversation_id,
+                                source_slice_id=slice_input.slice_id,
+                            )
+                            for item in analysis.candidate_events
+                        ],
+                        context_requests=analysis.context_requests,
+                    ),
+                    {slice_input.slice_id: slice_input},
+                    self_open_id=self_identity.open_id,
+                )
+                if not validated.context_requests:
+                    candidates.extend(validated.candidate_events)
+                    continue
+                if expansion_round >= self.config.anchor_retry_limit:
+                    skipped_count += 1
+                    warnings.append(
+                        f"Anchor fallback still needs context after retries: {unit.anchor_unit_id}."
+                    )
+                    continue
+
+                previous_signature = _anchor_unit_context_signature(unit)
+                (
+                    expanded_unit,
+                    _,
+                    attachment_texts,
+                    _,
+                    linked_file_texts,
+                    _,
+                ) = expand_anchor_unit_context(
+                    unit,
+                    validated.context_requests,
+                    chat_source=self.dependencies.chat_source,
+                    content_resolver=self.dependencies.content_resolver,
+                    config=self.config,
+                    reaction_catalog=self.reaction_catalog,
+                    existing_attachment_texts=unit.attachment_texts,
+                    existing_linked_file_texts=unit.linked_file_texts,
+                )
+                expanded_unit = replace(
+                    expanded_unit,
+                    attachment_texts=attachment_texts,
+                    linked_file_texts=linked_file_texts,
+                )
+                if _anchor_unit_context_signature(expanded_unit) == previous_signature:
+                    skipped_count += 1
+                    warnings.append(
+                        f"Anchor fallback expansion produced no new context: {unit.anchor_unit_id}."
+                    )
+                    continue
+                request_signature = tuple(
+                    sorted({item.request_type for item in validated.context_requests})
+                )
+                expanded_groups.setdefault(request_signature, []).append(
+                    (expanded_unit, expansion_round + 1)
+                )
+
+            pending = []
+            for expanded_items in expanded_groups.values():
+                expanded_units = [item[0] for item in expanded_items]
+                expansion_round_by_id = {
+                    unit.anchor_unit_id: round_number
+                    for unit, round_number in expanded_items
+                }
+                results, result_warnings, result_skipped, result_calls = (
+                    self._analyze_anchor_units_resilient(
+                        target_date=target_date,
+                        anchor_units=expanded_units,
+                    )
+                )
+                warnings.extend(result_warnings)
+                skipped_count += result_skipped
+                call_count += result_calls
+                pending.extend(
+                    (
+                        unit,
+                        results[unit.anchor_unit_id],
+                        expansion_round_by_id[unit.anchor_unit_id],
+                    )
+                    for unit in expanded_units
+                    if unit.anchor_unit_id in results
+                )
+        return candidates, warnings, skipped_count, call_count
+
+    def _analyze_anchor_units_resilient(
+        self,
+        *,
+        target_date: str,
+        anchor_units: list[AnchorUnit],
+    ) -> tuple[dict[str, AnchorAnalysisResult], list[str], int, int]:
+        results: dict[str, AnchorAnalysisResult] = {}
+        warnings: list[str] = []
+        skipped_count = 0
+        call_count = 0
+        batch_size = max(self.config.anchor_batch_size, 1)
+        for start in range(0, len(anchor_units), batch_size):
+            (
+                batch_results,
+                batch_warnings,
+                batch_skipped_count,
+                batch_call_count,
+            ) = self._resolve_anchor_batch(
+                target_date=target_date,
+                anchor_units=anchor_units[start : start + batch_size],
+            )
+            results.update(batch_results)
+            warnings.extend(batch_warnings)
+            skipped_count += batch_skipped_count
+            call_count += batch_call_count
+        return results, warnings, skipped_count, call_count
+
+    def _resolve_anchor_batch(
+        self,
+        *,
+        target_date: str,
+        anchor_units: list[AnchorUnit],
+    ) -> tuple[dict[str, AnchorAnalysisResult], list[str], int, int]:
+        if not anchor_units:
+            return {}, [], 0, 0
+
+        warnings: list[str] = []
+        call_count = 0
+        final_valid: dict[str, AnchorAnalysisResult] = {}
+        final_missing: list[AnchorUnit] = list(anchor_units)
+        saw_response = False
+        for attempt in range(self.config.anchor_batch_retry_limit + 1):
+            try:
+                result = self.dependencies.analyzer.analyze_anchor_batch(
+                    target_date,
+                    anchor_units,
+                )
+                call_count += 1
+            except AnalyzerProtocolError:
+                call_count += 1
+                continue
+
+            saw_response = True
+            final_valid, final_missing, invalid_count = _validate_anchor_batch_result(
+                result.results,
+                anchor_units,
+            )
+            if invalid_count:
+                warnings.append(
+                    "Filtered invalid anchor fallback batch result."
+                )
+            if not final_missing:
+                return final_valid, warnings, 0, call_count
+            if attempt < self.config.anchor_batch_retry_limit:
+                warnings.append("Anchor fallback batch was incomplete; retrying the same batch.")
+
+        if saw_response and final_valid:
+            (
+                missing_results,
+                missing_warnings,
+                missing_skipped_count,
+                missing_call_count,
+            ) = self._resolve_anchor_batch(
+                target_date=target_date,
+                anchor_units=final_missing,
+            )
+            final_valid.update(missing_results)
+            warnings.extend(missing_warnings)
+            return (
+                final_valid,
+                warnings,
+                missing_skipped_count,
+                call_count + missing_call_count,
+            )
+
+        if len(anchor_units) > 1:
+            midpoint = len(anchor_units) // 2
+            left = self._resolve_anchor_batch(
+                target_date=target_date,
+                anchor_units=anchor_units[:midpoint],
+            )
+            right = self._resolve_anchor_batch(
+                target_date=target_date,
+                anchor_units=anchor_units[midpoint:],
+            )
+            return (
+                left[0] | right[0],
+                [*warnings, *left[1], *right[1]],
+                left[2] + right[2],
+                call_count + left[3] + right[3],
+            )
+
+        warnings.append("Skipped anchor fallback after repeated batch failures.")
+        return {}, warnings, 1, call_count
+
+    def _analyze_segment_batch_with_retry(
+        self,
+        *,
+        batch: SegmentAnalysisBatch,
+        self_identity: SelfIdentity,
+        allow_context_expansion: bool = True,
+    ) -> tuple[list[SourceBackedEventDraft], list[str], int, int]:
+        warnings: list[str] = []
+        call_count = 0
+
+        for attempt in range(2):
+            try:
+                batch_started_at = perf_counter()
+                result = self.dependencies.analyzer.analyze_segment_batch(batch)
+                call_count += 1
+                candidates, result_warnings, skipped_count, nested_call_count = (
+                    self._collect_segment_batch_result(
+                        result=result,
+                        batch=batch,
+                        self_identity=self_identity,
+                        allow_context_expansion=allow_context_expansion,
+                    )
+                )
+                call_count += nested_call_count
+                warnings.extend(result_warnings)
+                log_timing(
+                    logger,
+                    "runner.stage.completed",
+                    batch_started_at,
+                    stage="analyze_segment_batch",
+                    conversation_id=batch.conversation_id,
+                    segment_count=len(batch.segments),
+                    retry_round=attempt,
+                    candidate_event_count=len(candidates),
+                )
+                return candidates, warnings, skipped_count, call_count
+            except AnalyzerProtocolError as exc:
+                call_count += 1
+                if attempt == 0:
+                    warnings.append("Segment batch failed; retrying the same batch once.")
+                    continue
+                warnings.append("Segment batch failed twice; retrying its segments separately.")
+                batch_error = exc
+                break
+        else:
+            return [], warnings, 0, call_count
+
+        candidates: list[SourceBackedEventDraft] = []
+        skipped_count = 0
+        for unit in batch.segments:
+            single_batch = SegmentAnalysisBatch(
+                target_date=batch.target_date,
+                conversation_id=batch.conversation_id,
+                conversation_name=batch.conversation_name,
+                self_open_id=batch.self_open_id,
+                self_display_name=batch.self_display_name,
+                segments=[unit],
+            )
+            try:
+                result = self.dependencies.analyzer.analyze_segment_batch(single_batch)
+                call_count += 1
+            except AnalyzerProtocolError:
+                warnings.append(
+                    f"Skipped segment after batch and single-segment analysis failures: {unit.segment_id}."
+                )
+                skipped_count += 1
+                continue
+            (
+                unit_candidates,
+                unit_warnings,
+                unit_skipped_count,
+                nested_call_count,
+            ) = (
+                self._collect_segment_batch_result(
+                    result=result,
+                    batch=single_batch,
+                    self_identity=self_identity,
+                    allow_context_expansion=allow_context_expansion,
+                )
+            )
+            call_count += nested_call_count
+            candidates.extend(unit_candidates)
+            warnings.extend(unit_warnings)
+            skipped_count += unit_skipped_count
+
+        logger.warning(
+            "Segment batch fallback completed after analyzer failure: %s",
+            batch_error,
+        )
+        return candidates, warnings, skipped_count, call_count
+
+    def _collect_segment_batch_result(
+        self,
+        *,
+        result: BatchSegmentAnalysisResult,
+        batch: SegmentAnalysisBatch,
+        self_identity: SelfIdentity,
+        allow_context_expansion: bool,
+    ) -> tuple[list[SourceBackedEventDraft], list[str], int, int]:
+        analyses_by_segment, missing_units, warnings = validate_segment_batch_result(
+            result,
+            batch,
+        )
+        candidates: list[SourceBackedEventDraft] = []
+        skipped_count = len(missing_units)
+        nested_call_count = 0
+
+        for unit in batch.segments:
+            analysis = analyses_by_segment.get(unit.segment_id)
+            if analysis is None:
+                continue
+            conversation_slice = segment_unit_to_slice(unit)
+            analysis = replace(
+                analysis,
+                candidate_events=[
+                    replace(
+                        candidate,
+                        source_conversation_id=conversation_slice.conversation_id,
+                        source_slice_id=conversation_slice.slice_id,
+                    )
+                    for candidate in analysis.candidate_events
+                ],
+            )
+            validated = validate_batch_analysis_result(
+                analysis,
+                {conversation_slice.slice_id: conversation_slice},
+                self_open_id=self_identity.open_id,
+            )
+            if validated.context_requests:
+                if not allow_context_expansion:
+                    warnings.append(
+                        f"Skipped segment that still needs additional context: {unit.segment_id}."
+                    )
+                    skipped_count += 1
+                    continue
+                (
+                    retry_candidates,
+                    retry_warnings,
+                    retry_skipped_count,
+                    retry_call_count,
+                ) = self._retry_segment_context(
+                    target_date=batch.target_date,
+                    unit=unit,
+                    requests=validated.context_requests,
+                    self_identity=self_identity,
+                )
+                candidates.extend(retry_candidates)
+                warnings.extend(retry_warnings)
+                skipped_count += retry_skipped_count
+                nested_call_count += retry_call_count
+                continue
+            candidates.extend(validated.candidate_events)
+
+        return candidates, warnings, skipped_count, nested_call_count
+
+    def _retry_segment_context(
+        self,
+        *,
+        target_date: str,
+        unit: ConversationSegmentUnit,
+        requests: list[ContextRequest],
+        self_identity: SelfIdentity,
+    ) -> tuple[list[SourceBackedEventDraft], list[str], int, int]:
+        warnings: list[str] = []
+        base_slice = segment_unit_to_slice(unit)
+        expanded_slice = expand_slice_context(
+            base_slice,
+            requests,
+            chat_source=self.dependencies.chat_source,
+            content_resolver=self.dependencies.content_resolver,
+            config=self.config,
+            reaction_catalog=self.reaction_catalog,
+        )
+        if _conversation_slice_signature(expanded_slice) == _conversation_slice_signature(
+            base_slice
+        ):
+            return (
+                [],
+                [f"Segment expansion produced no new context: {unit.segment_id}."],
+                1,
+                0,
+            )
+
+        expanded_by_id = {message.message_id: message for message in unit.messages}
+        expanded_by_id.update(
+            {message.message_id: message for message in expanded_slice.messages}
+        )
+        expanded_conversation_messages = sorted(
+            expanded_by_id.values(),
+            key=lambda item: (item.send_time, item.message_id),
+        )
+        response_signals = build_response_signals(
+            expanded_conversation_messages,
+            self_open_id=self_identity.open_id,
+            reaction_catalog=self.reaction_catalog,
+        )
+        try:
+            segmentation_result = self.dependencies.analyzer.segment_conversation(
+                target_date=target_date,
+                conversation_id=unit.conversation_id,
+                conversation_name=unit.conversation_name,
+                messages=expanded_conversation_messages,
+                self_open_id=self_identity.open_id,
+                self_display_name=self_identity.display_name,
+                response_signals=response_signals,
+                hard_boundary_before_ids=build_hard_boundary_message_ids(
+                    expanded_conversation_messages,
+                    self_open_id=self_identity.open_id,
+                ),
+            )
+        except AnalyzerProtocolError:
+            return (
+                [],
+                [f"Skipped segment because expanded-context segmentation failed: {unit.segment_id}."],
+                1,
+                1,
+            )
+        retry_units, segmentation_warnings = validate_conversation_segmentation(
+            segmentation_result,
+            expanded_conversation_messages,
+            self_open_id=self_identity.open_id,
+            self_display_name=self_identity.display_name,
+            self_assignment_keywords=self.config.self_assignment_keywords,
+            response_signals=response_signals,
+        )
+        warnings.extend(segmentation_warnings)
+        original_primary_ids = set(unit.primary_message_ids)
+        retry_units = [
+            item
+            for item in retry_units
+            if original_primary_ids & set(item.primary_message_ids)
+        ]
+        if not retry_units:
+            warnings.append(
+                f"Skipped segment after expanded context changed its verified turn: {unit.segment_id}."
+            )
+            return [], warnings, 1, 1
+
+        retry_units = [
+            replace(
+                item,
+                attachment_texts=[
+                    block
+                    for block in expanded_slice.attachment_texts
+                    if block.message_id in {message.message_id for message in item.messages}
+                ],
+                linked_file_texts=[
+                    block
+                    for block in expanded_slice.linked_file_texts
+                    if block.message_id in {message.message_id for message in item.messages}
+                ],
+            )
+            for item in retry_units
+        ]
+        candidates: list[SourceBackedEventDraft] = []
+        skipped_count = 0
+        call_count = 1
+        for retry_batch in pack_segment_units(
+            target_date=target_date,
+            self_open_id=self_identity.open_id,
+            self_display_name=self_identity.display_name,
+            units=retry_units,
+            config=self.config,
+        ):
+            (
+                retry_candidates,
+                retry_warnings,
+                retry_skipped_count,
+                retry_call_count,
+            ) = self._analyze_segment_batch_with_retry(
+                batch=retry_batch,
+                self_identity=self_identity,
+                allow_context_expansion=False,
+            )
+            candidates.extend(retry_candidates)
+            warnings.extend(retry_warnings)
+            skipped_count += retry_skipped_count
+            call_count += retry_call_count
+        return candidates, warnings, skipped_count, call_count
+
     def _analyze_conversation_slice_with_retry(
         self,
         *,
@@ -574,6 +1356,7 @@ class DailyTraceRunner:
                 chat_source=self.dependencies.chat_source,
                 content_resolver=self.dependencies.content_resolver,
                 config=self.config,
+                reaction_catalog=self.reaction_catalog,
             )
             if _conversation_slice_signature(expanded_slice) == _conversation_slice_signature(
                 current_slice
@@ -680,6 +1463,100 @@ class DailyTraceRunner:
                 dump_json(output_payload, pretty=True) + "\n",
                 encoding="utf-8",
             )
+
+
+def _supports_segment_batches(analyzer: object) -> bool:
+    return all(
+        callable(getattr(analyzer, method_name, None))
+        for method_name in ("segment_conversation", "analyze_segment_batch")
+    )
+
+
+def _anchor_unit_to_slice(anchor_unit: AnchorUnit) -> ConversationSlice:
+    return ConversationSlice(
+        slice_id=f"{anchor_unit.conversation_id}:anchor:{anchor_unit.anchor_unit_id}",
+        conversation_id=anchor_unit.conversation_id,
+        conversation_name=anchor_unit.conversation_name,
+        anchor_message_ids=list(anchor_unit.anchor_message_ids),
+        in_day_message_ids=[item.message_id for item in anchor_unit.messages],
+        messages=list(anchor_unit.messages),
+        attachment_texts=list(anchor_unit.attachment_texts),
+        linked_file_texts=list(anchor_unit.linked_file_texts),
+    )
+
+
+def _anchor_unit_context_signature(
+    anchor_unit: AnchorUnit,
+) -> tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]]:
+    return (
+        tuple(message.message_id for message in anchor_unit.messages),
+        tuple(block.attachment_id for block in anchor_unit.attachment_texts),
+        tuple(block.link_id for block in anchor_unit.linked_file_texts),
+    )
+
+
+def _validate_anchor_batch_result(
+    items: list[object],
+    anchor_units: list[AnchorUnit],
+) -> tuple[dict[str, AnchorAnalysisResult], list[AnchorUnit], int]:
+    expected_ids = {item.anchor_unit_id for item in anchor_units}
+    returned_ids = [
+        item.anchor_unit_id
+        for item in items
+        if isinstance(getattr(item, "anchor_unit_id", None), str)
+    ]
+    duplicate_ids = {
+        item for item in returned_ids if returned_ids.count(item) > 1
+    }
+    valid: dict[str, AnchorAnalysisResult] = {}
+    invalid_count = 0
+    for item in items:
+        anchor_unit_id = getattr(item, "anchor_unit_id", "")
+        analysis = getattr(item, "analysis", None)
+        if (
+            not isinstance(anchor_unit_id, str)
+            or anchor_unit_id not in expected_ids
+            or anchor_unit_id in duplicate_ids
+            or not isinstance(analysis, AnchorAnalysisResult)
+        ):
+            invalid_count += 1
+            continue
+        valid[anchor_unit_id] = analysis
+    missing = [item for item in anchor_units if item.anchor_unit_id not in valid]
+    return valid, missing, invalid_count
+
+
+def _dedupe_segment_primary_ownership(
+    units: list[ConversationSegmentUnit],
+) -> list[ConversationSegmentUnit]:
+    owned_ids: set[str] = set()
+    deduped: list[ConversationSegmentUnit] = []
+    for unit in units:
+        primary_ids = [item for item in unit.primary_message_ids if item not in owned_ids]
+        if not primary_ids:
+            continue
+        owned_ids.update(primary_ids)
+        context_ids = list(dict.fromkeys([*unit.context_message_ids, *(
+            item for item in unit.primary_message_ids if item not in primary_ids
+        )]))
+        included_ids = set(primary_ids) | set(context_ids)
+        deduped.append(
+            replace(
+                unit,
+                primary_message_ids=primary_ids,
+                context_message_ids=context_ids,
+                self_evidence_message_ids=[
+                    item for item in unit.self_evidence_message_ids if item in included_ids
+                ],
+                response_signals=[
+                    item for item in unit.response_signals if item.message_id in included_ids
+                ],
+                messages=[
+                    item for item in unit.messages if item.message_id in included_ids
+                ],
+            )
+        )
+    return deduped
 
 
 def _safe_conversation_dir_name(slice_id: str) -> str:

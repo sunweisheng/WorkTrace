@@ -26,6 +26,7 @@ DEFAULT_COLLECTED_MERGE_RETRY_LIMIT_ENV_VAR = (
 )
 DEFAULT_LLM_ENV_FILE_NAME = ".env"
 DEFAULT_EVENT_RULES_FILE_NAME = "config/event_rules.json"
+DEFAULT_REACTION_CATALOGS_ROOT = Path("config") / "reaction_catalogs"
 DEFAULT_CONVERSATION_BLACKLIST_FILE_NAME = "config/conversation_blacklist.json"
 
 
@@ -275,7 +276,6 @@ def load_runtime_config_overrides(
         fallback=config.self_assignment_keywords,
         file_path=rules_path,
     )
-
     if (
         sensitive_event_keywords == config.sensitive_event_keywords
         and excluded_event_keywords == config.excluded_event_keywords
@@ -402,6 +402,9 @@ class RuntimeConfig:
     timezone: str = "Asia/Shanghai"
     analyzer_backend: str = "online"
     anchor_retry_limit: int = 3
+    anchor_batch_retry_limit: int = 1
+    conversation_segmentation_failure_threshold: int = 2
+    reaction_discovery_page_limit: int = 3
     slice_base_limit: int = 150
     max_model_input_tokens: int = 100000
     collected_merge_prompt_char_threshold: int = 80000
@@ -422,6 +425,7 @@ class RuntimeConfig:
     sensitive_event_keywords: tuple[str, ...] = ()
     excluded_event_keywords: tuple[str, ...] = ()
     self_assignment_keywords: tuple[str, ...] = ()
+    reaction_catalogs_root: Path = DEFAULT_REACTION_CATALOGS_ROOT
     excluded_conversation_ids: tuple[str, ...] = ()
     data_root: Path = field(default_factory=lambda: Path("data"))
     cache_root: Path | None = None
@@ -443,7 +447,7 @@ class RuntimeConfig:
     llm_env_file_name: str = DEFAULT_LLM_ENV_FILE_NAME
     event_rules_file_name: str = DEFAULT_EVENT_RULES_FILE_NAME
     conversation_blacklist_file_name: str = DEFAULT_CONVERSATION_BLACKLIST_FILE_NAME
-    llm_stream_enabled: bool = False
+    llm_stream_enabled: bool = True
     llm_tls_verify: bool = False
     llm_sleep_min_seconds: float = 1.0
     llm_sleep_max_seconds: float = 2.0

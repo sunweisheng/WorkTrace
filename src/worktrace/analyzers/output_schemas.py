@@ -77,6 +77,128 @@ def batch_output_schema() -> dict[str, object]:
     }
 
 
+def conversation_segmentation_output_schema() -> dict[str, object]:
+    return {
+        "type": "object",
+        "properties": {
+            "segment_start_message_ids": {
+                "type": "array",
+                "minItems": 1,
+                "items": {"type": "string"},
+            },
+        },
+        "required": ["segment_start_message_ids"],
+        "additionalProperties": False,
+    }
+
+
+def segment_batch_output_schema() -> dict[str, object]:
+    return {
+        "type": "object",
+        "properties": {
+            "results": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "segment_id": {"type": "string"},
+                        "analysis": {
+                            "type": "object",
+                            "properties": {
+                                "candidate_events": {
+                                    "type": "array",
+                                    "items": _segment_candidate_schema(),
+                                },
+                                "context_requests": _context_request_schema(),
+                            },
+                            "required": ["candidate_events", "context_requests"],
+                            "additionalProperties": False,
+                        },
+                    },
+                    "required": ["segment_id", "analysis"],
+                    "additionalProperties": False,
+                },
+            },
+        },
+        "required": ["results"],
+        "additionalProperties": False,
+    }
+
+
+def _segment_candidate_schema() -> dict[str, object]:
+    return {
+        "type": "object",
+        "properties": {
+            "topic": {"type": "string"},
+            "content": {"type": "string"},
+            "action_label": {"type": "string"},
+            "object_hint": {"type": "string"},
+            "retention_reason": {
+                "type": "string",
+                "enum": [
+                    "deliverable_updated",
+                    "decision_made",
+                    "issue_or_risk_found",
+                    "follow_up_assigned",
+                    "external_business_progress",
+                    "substantive_approval",
+                ],
+            },
+            "retention_detail": {"type": "string"},
+            "referenced_link_ids": {
+                "type": "array",
+                "items": {"type": "string"},
+            },
+            "source_message_ids": {
+                "type": "array",
+                "items": {"type": "string"},
+            },
+        },
+        "required": [
+            "topic",
+            "content",
+            "action_label",
+            "object_hint",
+            "retention_reason",
+            "retention_detail",
+            "referenced_link_ids",
+            "source_message_ids",
+        ],
+        "additionalProperties": False,
+    }
+
+
+def _context_request_schema() -> dict[str, object]:
+    return {
+        "type": "array",
+        "items": {
+            "type": "object",
+            "properties": {
+                "request_type": {"type": "string"},
+                "target_message_ids": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                },
+                "target_attachment_ids": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                },
+                "target_link_ids": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                },
+            },
+            "required": [
+                "request_type",
+                "target_message_ids",
+                "target_attachment_ids",
+                "target_link_ids",
+            ],
+            "additionalProperties": False,
+        },
+    }
+
+
 def anchor_batch_output_schema() -> dict[str, object]:
     return {
         "type": "object",

@@ -27,6 +27,42 @@ def test_parse_content_extracts_media_attachments() -> None:
     assert "video_1" in attachment_ids
 
 
+def test_normalize_message_extracts_mention_and_nested_reaction_details() -> None:
+    source = FeishuCliChatSource(config=RuntimeConfig())
+
+    message = source._normalize_message(  # noqa: SLF001 - parser contract
+        {
+            "chat_id": "oc_1",
+            "chat_name": "项目群",
+            "message_id": "om_1",
+            "sender_open_id": "ou_ding",
+            "send_time": "2026-07-10T09:00:00+08:00",
+            "content": {
+                "tag": "at",
+                "user": {"open_id": "ou_yuhuan"},
+                "text": "张玉环",
+            },
+            "reactions": [
+                {
+                    "reaction_type": {"emoji_type": "THUMBSUP"},
+                    "details": [
+                        {
+                            "message_reaction_id": "reaction-1",
+                            "operator": {"open_id": "ou_self"},
+                            "create_time": "1783645260000",
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+
+    assert message.mentioned_open_ids == ["ou_yuhuan"]
+    assert [item.reaction_id for item in message.reactions] == ["reaction-1"]
+    assert [item.operator_open_id for item in message.reactions] == ["ou_self"]
+    assert [item.emoji_type for item in message.reactions] == ["THUMBSUP"]
+
+
 def test_parse_content_extracts_post_link_title() -> None:
     source = FeishuCliChatSource(config=RuntimeConfig())
 
@@ -147,6 +183,43 @@ def test_list_target_conversations_skips_blacklisted_conversation_ids() -> None:
     )
 
     assert [item.conversation_id for item in results] == ["oc_allowed"]
+
+
+def test_list_target_conversations_includes_reaction_only_conversation() -> None:
+    def fake_runner(args):
+        if "--sender" in args:
+            payload = {"items": []}
+        else:
+            payload = {
+                "items": [
+                    {
+                        "chat_id": "oc_reaction",
+                        "chat_name": "表情会话",
+                        "message_id": "om_1",
+                        "sender_open_id": "ou_other",
+                        "send_time": "2026-06-29T09:00:00+08:00",
+                        "text": "请确认发布方案",
+                        "reactions": [
+                            {
+                                "reaction_id": "reaction-1",
+                                "operator_open_id": "ou_self",
+                                "emoji_type": "THUMBSUP",
+                                "action_time": "2026-06-29T09:01:00+08:00",
+                            }
+                        ],
+                    }
+                ]
+            }
+        return SimpleNamespace(returncode=0, stdout=json.dumps(payload), stderr="")
+
+    source = FeishuCliChatSource(config=RuntimeConfig(), command_runner=fake_runner)
+
+    results = source.list_target_conversations(
+        "2026-06-29",
+        SelfIdentity(open_id="ou_self", display_name="self", source="test"),
+    )
+
+    assert [item.conversation_id for item in results] == ["oc_reaction"]
 
 
 def test_fetch_conversation_messages_skips_blacklisted_conversation_ids() -> None:

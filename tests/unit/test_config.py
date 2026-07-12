@@ -47,7 +47,7 @@ def test_load_online_llm_settings_reads_local_env(tmp_path: Path) -> None:
     assert settings.model == "provider-model"
     assert settings.api_key == "file-key"
     assert settings.timeout_seconds == 45
-    assert settings.stream_enabled is False
+    assert settings.stream_enabled is True
     assert settings.tls_verify is False
     assert settings.reasoning_effort == "none"
 
@@ -125,7 +125,11 @@ def test_load_online_llm_settings_reads_stream_tls_and_sleep_overrides(tmp_path:
     assert settings.sleep_max_seconds == 2.5
 
 
-def test_load_runtime_config_overrides_reads_three_rule_lists(
+def test_runtime_config_enables_streaming_by_default() -> None:
+    assert RuntimeConfig().llm_stream_enabled is True
+
+
+def test_load_runtime_config_overrides_reads_rule_lists(
     tmp_path: Path,
 ) -> None:
     rules_dir = tmp_path / "config"
@@ -191,7 +195,7 @@ def test_load_runtime_config_overrides_rejects_invalid_rule_file(tmp_path: Path)
     assert "event rules config" in str(exc_info.value)
 
 
-def test_repo_event_rules_use_three_rule_lists() -> None:
+def test_repo_event_rules_use_rule_lists_only() -> None:
     payload = json.loads(Path("config/event_rules.json").read_text(encoding="utf-8"))
 
     assert "劳动仲裁" in payload["sensitive_event_keywords"]

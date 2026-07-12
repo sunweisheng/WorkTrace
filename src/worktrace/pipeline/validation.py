@@ -149,6 +149,11 @@ def validate_batch_analysis_result(
                 source_conversation_id=source_conversation_id,
                 source_slice_id=source_slice_id,
                 confidence=candidate.confidence,
+                response_outcome=candidate.response_outcome,
+                response_signal_ids=list(candidate.response_signal_ids),
+                response_evidence_message_ids=list(
+                    candidate.response_evidence_message_ids
+                ),
             )
         )
 

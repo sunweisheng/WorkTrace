@@ -17,10 +17,15 @@ from ..models import (
     AnchorUnit,
     BatchAnalysisResult,
     BatchAnchorAnalysisResult,
+    BatchSegmentAnalysisResult,
     CollectedMergeResult,
     CollectedSourceEvent,
+    ConversationSegmentationResult,
     CrossConversationGroupResult,
     SourceBackedEventDraft,
+    SegmentAnalysisBatch,
+    NormalizedMessage,
+    ResponseSignal,
 )
 from ..utils.json_io import load_json_object
 from .base import Analyzer
@@ -28,19 +33,26 @@ from .output_schemas import (
     anchor_batch_output_schema,
     batch_output_schema,
     collected_merge_output_schema,
+    conversation_segmentation_output_schema,
     merge_output_schema,
+    segment_batch_output_schema,
 )
 from .prompts import (
     build_anchor_batch_analysis_prompt,
     build_batch_analysis_prompt,
     build_collected_merge_prompt,
+    build_conversation_segmentation_prompt,
     build_merge_prompt,
+    build_segment_batch_analysis_prompt,
+    restore_conversation_segmentation_references,
 )
 from .protocol import (
     parse_anchor_batch_analysis_payload,
     parse_batch_analysis_payload,
     parse_collected_merge_payload,
+    parse_conversation_segmentation_payload,
     parse_merge_payload,
+    parse_segment_batch_analysis_payload,
 )
 
 logger = logging.getLogger("worktrace")
@@ -78,6 +90,74 @@ class CodexAnalyzer(Analyzer):
             output_schema=batch_output_schema(),
         )
         return parse_batch_analysis_payload(payload)
+
+    def build_segmentation_prompt(
+        self,
+        *,
+        target_date: str,
+        conversation_id: str,
+        conversation_name: str,
+        messages: list[NormalizedMessage],
+        self_open_id: str,
+        self_display_name: str,
+        response_signals: list[ResponseSignal],
+        hard_boundary_before_ids: set[str],
+    ) -> str:
+        return build_conversation_segmentation_prompt(
+            target_date=target_date,
+            conversation_id=conversation_id,
+            conversation_name=conversation_name,
+            messages=messages,
+            self_open_id=self_open_id,
+            self_display_name=self_display_name,
+            response_signals=response_signals,
+            hard_boundary_before_ids=hard_boundary_before_ids,
+            config=self.config,
+        )
+
+    def segment_conversation(
+        self,
+        *,
+        target_date: str,
+        conversation_id: str,
+        conversation_name: str,
+        messages: list[NormalizedMessage],
+        self_open_id: str,
+        self_display_name: str,
+        response_signals: list[ResponseSignal],
+        hard_boundary_before_ids: set[str],
+    ) -> ConversationSegmentationResult:
+        payload = self._invoke_codex(
+            self.build_segmentation_prompt(
+                target_date=target_date,
+                conversation_id=conversation_id,
+                conversation_name=conversation_name,
+                messages=messages,
+                self_open_id=self_open_id,
+                self_display_name=self_display_name,
+                response_signals=response_signals,
+                hard_boundary_before_ids=hard_boundary_before_ids,
+            ),
+            output_schema=conversation_segmentation_output_schema(),
+        )
+        return restore_conversation_segmentation_references(
+            parse_conversation_segmentation_payload(payload),
+            messages=messages,
+            response_signals=response_signals,
+        )
+
+    def build_segment_batch_prompt(self, batch: SegmentAnalysisBatch) -> str:
+        return build_segment_batch_analysis_prompt(batch, config=self.config)
+
+    def analyze_segment_batch(
+        self,
+        batch: SegmentAnalysisBatch,
+    ) -> BatchSegmentAnalysisResult:
+        payload = self._invoke_codex(
+            self.build_segment_batch_prompt(batch),
+            output_schema=segment_batch_output_schema(),
+        )
+        return parse_segment_batch_analysis_payload(payload)
 
     def build_batch_prompt(self, batch_input: AnalysisBatch) -> str:
         return build_batch_analysis_prompt(batch_input, config=self.config)

@@ -1,0 +1,7 @@
+{
+  "fallback": {
+    "name": "未收录表情",
+    "description_template": "飞书返回了尚未收录的表情类型：{emoji_type}。",
+    "semantic": "other"
+  }
+}

@@ -12,6 +12,7 @@ from ..models import (
     NormalizedMessage,
 )
 from ..resolvers.base import ContentResolver
+from ..reaction_catalog import ReactionCatalog, enrich_message_reactions
 from ..sources.base import ChatSource
 
 
@@ -56,6 +57,7 @@ def expand_anchor_unit_context(
     chat_source: ChatSource,
     content_resolver: ContentResolver,
     config: RuntimeConfig,
+    reaction_catalog: ReactionCatalog | None = None,
     existing_attachment_texts: list[AttachmentTextBlock] | None = None,
     existing_linked_file_texts: list[LinkedFileTextBlock] | None = None,
 ) -> tuple[
@@ -140,6 +142,8 @@ def expand_anchor_unit_context(
             direction,
             min(request.limit, config.max_model_input_tokens),
         )
+        if reaction_catalog is not None:
+            related = enrich_message_reactions(related, reaction_catalog)
         for message in related:
             if message.message_id not in message_by_id:
                 new_message_ids.append(message.message_id)

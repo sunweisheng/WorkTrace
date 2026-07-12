@@ -22,6 +22,7 @@ logger = logging.getLogger("worktrace")
 
 @dataclass
 class FeishuCliChatSource(ChatSource):
+    source_id = "feishu"
     config: RuntimeConfig
     command_runner: Any | None = None
 
@@ -85,6 +86,44 @@ class FeishuCliChatSource(ChatSource):
             if not is_same_target_date(message.send_time, target_date, self.config.timezone):
                 continue
             if message.conversation_id in excluded_conversation_ids:
+                continue
+            conversations.setdefault(
+                message.conversation_id,
+                ConversationRef(
+                    conversation_id=message.conversation_id,
+                    conversation_name=message.conversation_name,
+                ),
+            )
+
+        reaction_payload = self._run_json(
+            (
+                "lark-cli",
+                "im",
+                "+messages-search",
+                "--as",
+                "user",
+                "--start",
+                start.isoformat(),
+                "--end",
+                end.isoformat(),
+                "--page-all",
+                "--page-limit",
+                str(self.config.reaction_discovery_page_limit),
+            )
+        )
+        for item in self._extract_items(reaction_payload):
+            message = self._normalize_message(item)
+            if message.conversation_id in excluded_conversation_ids:
+                continue
+            if not any(
+                reaction.operator_open_id == self_identity.open_id
+                and is_same_target_date(
+                    reaction.action_time or message.send_time,
+                    target_date,
+                    self.config.timezone,
+                )
+                for reaction in message.reactions
+            ):
                 continue
             conversations.setdefault(
                 message.conversation_id,
@@ -385,6 +424,13 @@ class FeishuCliChatSource(ChatSource):
         )
         links = parsed_content.get("links", [])
         attachments = parsed_content.get("attachments", [])
+        mentioned_open_ids = self._dedupe_strings(
+            [
+                *parsed_content.get("mentioned_open_ids", []),
+                *self._extract_mentioned_open_ids(raw.get("mentions")),
+            ]
+        )
+        reactions = self._parse_reactions(raw.get("reactions"))
         extra_attachments = raw.get("attachments")
         if isinstance(extra_attachments, list):
             attachments.extend(
@@ -429,6 +475,8 @@ class FeishuCliChatSource(ChatSource):
                 "links": links,
                 "attachments": attachments,
                 "is_system": is_system,
+                "mentioned_open_ids": mentioned_open_ids,
+                "reactions": reactions,
             }
         )
 
@@ -437,16 +485,33 @@ class FeishuCliChatSource(ChatSource):
             try:
                 loaded = json.loads(content)
             except json.JSONDecodeError:
-                return {"text": content, "links": [], "attachments": []}
+                return {
+                    "text": content,
+                    "links": [],
+                    "attachments": [],
+                    "mentioned_open_ids": [],
+                }
             return self._parse_content(loaded)
 
         if not isinstance(content, dict):
-            return {"text": "", "links": [], "attachments": []}
+            return {
+                "text": "",
+                "links": [],
+                "attachments": [],
+                "mentioned_open_ids": [],
+            }
 
         text_parts: list[str] = []
         links: list[dict[str, Any]] = []
         attachments: list[dict[str, Any]] = []
-        self._collect_content_parts(content, text_parts, links, attachments)
+        mentioned_open_ids: list[str] = []
+        self._collect_content_parts(
+            content,
+            text_parts,
+            links,
+            attachments,
+            mentioned_open_ids,
+        )
 
         return {
             "text": clean_text("\n".join(part for part in text_parts if part)),
@@ -454,6 +519,7 @@ class FeishuCliChatSource(ChatSource):
             "attachments": self._dedupe_attachment_dicts(
                 [item for item in attachments if item.get("attachment_id")]
             ),
+            "mentioned_open_ids": self._dedupe_strings(mentioned_open_ids),
         }
 
     def _collect_content_parts(
@@ -462,14 +528,25 @@ class FeishuCliChatSource(ChatSource):
         text_parts: list[str],
         links: list[dict[str, Any]],
         attachments: list[dict[str, Any]],
+        mentioned_open_ids: list[str],
     ) -> None:
         if isinstance(node, list):
             for item in node:
-                self._collect_content_parts(item, text_parts, links, attachments)
+                self._collect_content_parts(
+                    item,
+                    text_parts,
+                    links,
+                    attachments,
+                    mentioned_open_ids,
+                )
             return
 
         if not isinstance(node, dict):
             return
+
+        node_type = str(node.get("tag") or node.get("type") or "").lower()
+        if node_type in {"at", "mention", "user"}:
+            mentioned_open_ids.extend(self._extract_mentioned_open_ids(node))
 
         href = node.get("href") or node.get("url")
         if href:
@@ -533,7 +610,127 @@ class FeishuCliChatSource(ChatSource):
             }:
                 continue
             if isinstance(value, (dict, list)):
-                self._collect_content_parts(value, text_parts, links, attachments)
+                self._collect_content_parts(
+                    value,
+                    text_parts,
+                    links,
+                    attachments,
+                    mentioned_open_ids,
+                )
+
+    def _extract_mentioned_open_ids(self, value: Any) -> list[str]:
+        if isinstance(value, list):
+            values: list[str] = []
+            for item in value:
+                values.extend(self._extract_mentioned_open_ids(item))
+            return values
+        if not isinstance(value, dict):
+            return []
+
+        candidates = [
+            value.get("open_id"),
+            value.get("openId"),
+            value.get("user_id"),
+            value.get("userId"),
+            value.get("id"),
+        ]
+        user = value.get("user")
+        if isinstance(user, dict):
+            candidates.extend(
+                [
+                    user.get("open_id"),
+                    user.get("openId"),
+                    user.get("user_id"),
+                    user.get("userId"),
+                    user.get("id"),
+                ]
+            )
+        return [str(item) for item in candidates if isinstance(item, str) and item]
+
+    def _parse_reactions(self, value: Any) -> list[dict[str, Any]]:
+        if not isinstance(value, (dict, list)):
+            return []
+
+        records: list[dict[str, Any]] = []
+        pending: list[tuple[Any, dict[str, Any]]] = [(value, {})]
+        while pending:
+            current, inherited = pending.pop()
+            if isinstance(current, list):
+                pending.extend((item, inherited) for item in current)
+                continue
+            if not isinstance(current, dict):
+                continue
+            reaction_type = current.get("reaction_type")
+            metadata = {
+                "reaction_id": current.get("reaction_id")
+                or current.get("message_reaction_id")
+                or inherited.get("reaction_id")
+                or "",
+                "emoji_type": current.get("emoji_type")
+                or (
+                    reaction_type.get("emoji_type")
+                    if isinstance(reaction_type, dict)
+                    else ""
+                )
+                or inherited.get("emoji_type")
+                or "",
+                "action_time": current.get("action_time")
+                or current.get("create_time")
+                or inherited.get("action_time")
+                or "",
+            }
+            child_items = [
+                current.get("message_reaction_items"),
+                current.get("details"),
+                current.get("items"),
+            ]
+            for items in child_items:
+                if isinstance(items, list):
+                    pending.extend((item, metadata) for item in items)
+
+            operator = current.get("operator")
+            if operator or current.get("operator_open_id") or current.get("operator_id"):
+                operator_id = (
+                    current.get("operator_open_id")
+                    or current.get("operator_id")
+                    or (operator.get("operator_id") if isinstance(operator, dict) else "")
+                    or (operator.get("open_id") if isinstance(operator, dict) else "")
+                    or ""
+                )
+                if metadata["reaction_id"] or metadata["emoji_type"]:
+                    records.append(
+                        {
+                            "reaction_id": metadata["reaction_id"],
+                            "operator_open_id": operator_id,
+                            "emoji_type": metadata["emoji_type"],
+                            "action_time": metadata["action_time"],
+                        }
+                    )
+
+        seen: set[tuple[str, str, str, str]] = set()
+        normalized: list[dict[str, Any]] = []
+        for item in records:
+            key = (
+                str(item["reaction_id"]),
+                str(item["operator_open_id"]),
+                str(item["emoji_type"]),
+                str(item["action_time"]),
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            normalized.append(item)
+        return normalized
+
+    def _dedupe_strings(self, values: list[str]) -> list[str]:
+        seen: set[str] = set()
+        result: list[str] = []
+        for value in values:
+            cleaned = str(value).strip()
+            if cleaned and cleaned not in seen:
+                seen.add(cleaned)
+                result.append(cleaned)
+        return result
 
     def _extract_media_attachments(self, content: dict[str, Any]) -> list[dict[str, Any]]:
         media_specs = [

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 
 from .config import RuntimeConfig
 from .analyzers.base import Analyzer
@@ -25,6 +26,16 @@ class ChatSourceFactory:
         from .sources.feishu_cli import FeishuCliChatSource
 
         return FeishuCliChatSource(config=config)
+
+
+class ReactionCatalogProviderFactory:
+    @staticmethod
+    def create(source_id: str, config: RuntimeConfig, *, cwd=None):
+        if source_id == "feishu":
+            from .reaction_catalogs.feishu import FeishuReactionCatalogProvider
+
+            return FeishuReactionCatalogProvider(config=config, cwd=cwd or Path.cwd())
+        raise ValueError(f"Unsupported reaction catalog source: {source_id}.")
 
 
 class ContentResolverFactory:
