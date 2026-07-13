@@ -103,14 +103,17 @@ def test_docs_describe_enhanced_debug_artifacts() -> None:
         assert "WORKTRACE_COLLECTED_MERGE_RETRY_DELAY_SECONDS" in content
 
 
-def test_docs_describe_non_stream_default_and_necessary_names() -> None:
+def test_docs_describe_online_template_defaults_and_necessary_names() -> None:
     readme = Path("README.md").read_text(encoding="utf-8")
     online_usage = Path("docs/online-analyzer-usage.md").read_text(encoding="utf-8")
+    env_example = Path(".env.example").read_text(encoding="utf-8")
     privacy = Path("docs/privacy-note.md").read_text(encoding="utf-8")
     employee_guide = Path("docs/employee-guide.md").read_text(encoding="utf-8")
 
-    assert "WORKTRACE_LLM_STREAM=false" in readme
-    assert "WORKTRACE_LLM_STREAM=false" in online_usage
+    for content in (readme, online_usage, env_example):
+        assert "WORKTRACE_LLM_TIMEOUT_SECONDS=1200" in content
+        assert "WORKTRACE_LLM_STREAM=true" in content
+        assert "WORKTRACE_LLM_REASONING_EFFORT=none" in content
     for content in (privacy, employee_guide):
         assert "参与人名单" in content
         assert "确有必要时保留姓名" in content
