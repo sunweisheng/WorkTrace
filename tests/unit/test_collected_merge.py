@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 
 from src.worktrace.collected_merge import (
@@ -10,7 +11,11 @@ from src.worktrace.collected_merge import (
 )
 from src.worktrace.analyzers.prompts import build_collected_merge_prompt
 from src.worktrace.config import EventMetadataItem, RuntimeConfig
-from src.worktrace.errors import DeliveryError
+from src.worktrace.errors import (
+    AnalyzerProtocolError,
+    DeliveryError,
+    RetryableAnalyzerProtocolError,
+)
 from src.worktrace.models import (
     CollectedMergeGroup,
     CollectedMergeOutput,
@@ -113,6 +118,7 @@ def _build_runner(
     analyzer=None,
     delivery_channel=None,
     command_runner=None,
+    sleep_func=None,
 ) -> CollectedMergeRunner:
     return CollectedMergeRunner(
         config=config or RuntimeConfig(data_root=tmp_path / "data"),
@@ -121,6 +127,7 @@ def _build_runner(
         command_runner=command_runner or _unexpected_command,
         delivery_channel=delivery_channel or NullDelivery(),
         self_identity_resolver=_fake_self_identity,
+        sleep_func=sleep_func or (lambda seconds: None),
     )
 
 
@@ -1189,12 +1196,32 @@ def test_collected_merge_filters_sensitive_source_events_before_prompt(
         config=RuntimeConfig(
             data_root=tmp_path / "data",
             sensitive_event_keywords=("薪资",),
+            collected_merge_trace_enabled=True,
+            collected_merge_trace_root=tmp_path / "trace",
         ),
     ).run("2026-06-29")
 
     assert result.source_event_count == 1
     assert [event.event.title for event in analyzer.calls[0]["events"]] == ["需求评审"]
-    assert "Filtered sensitive event." in result.warning_messages
+    assert (
+        "Filtered sensitive source event: "
+        "2026-06-29-张三.md#evt-sensitive (薪资调整审批)."
+    ) in result.warning_messages
+    source_audit = json.loads(
+        (tmp_path / "trace" / "2026-06-29" / "source-audit.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert source_audit["filter_diagnostics"] == [
+        {
+            "event_id": "evt-sensitive",
+            "event_title": "薪资调整审批",
+            "kind": "sensitive",
+            "source_file": "2026-06-29-张三.md",
+            "source_person": "张三",
+            "stage": "source_filter",
+        }
+    ]
     content = (inbox / "2026-06-29-管理者-merged.md").read_text(encoding="utf-8")
     assert "薪资" not in content
 
@@ -1350,6 +1377,420 @@ def test_collected_merge_retries_structural_missing_retention_detail(
     assert "评审形成需求变更范围、上线排期和发布排期结论。" in content
 
 
+def test_collected_merge_partially_reads_truncated_source_file(
+    tmp_path: Path,
+) -> None:
+    inbox = tmp_path / "merge_inbox" / "2026" / "06" / "29"
+    source_path = inbox / "2026-06-29-张三.md"
+    _write_day_doc(
+        source_path,
+        [
+            _event(
+                event_id="evt-complete",
+                title="完整事件",
+                content="确认完整事件的执行结果。",
+            )
+        ],
+        tmp_path,
+    )
+    original = source_path.read_text(encoding="utf-8").replace(
+        "event_count: 1",
+        "event_count: 2",
+    )
+    original += '\n<!-- worktrace:event:start event_id="evt-truncated" -->\n'
+    source_path.write_text(original, encoding="utf-8")
+
+    trace_root = tmp_path / "trace"
+    result = _build_runner(
+        tmp_path,
+        config=RuntimeConfig(
+            data_root=tmp_path / "data",
+            collected_merge_trace_enabled=True,
+            collected_merge_trace_root=trace_root,
+        ),
+    ).run("2026-06-29")
+
+    assert result.partial_file_count == 1
+    assert result.skipped_file_count == 0
+    assert result.source_event_count == 1
+    assert source_path.read_text(encoding="utf-8") == original
+    assert any(
+        "Partially read source markdown: 2026-06-29-张三.md" in warning
+        and "skipped_event_ids=evt-truncated" in warning
+        for warning in result.warning_messages
+    )
+    source_audit = json.loads(
+        (trace_root / "2026-06-29" / "source-audit.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert source_audit["partial_file_count"] == 1
+    assert source_audit["source_files"][0]["status"] == "partial"
+    assert source_audit["source_files"][0]["partial_event_ids"] == [
+        "evt-truncated"
+    ]
+
+
+def test_collected_merge_retries_retryable_error_and_records_each_attempt(
+    tmp_path: Path,
+) -> None:
+    class RetryOnceAnalyzer:
+        def __init__(self) -> None:
+            self.attempts: list[list[str]] = []
+
+        def merge_collected_events(self, target_date, events, deterministic_groups):
+            self.attempts.append([item.draft_id for item in events])
+            if len(self.attempts) == 1:
+                raise RetryableAnalyzerProtocolError("temporary network failure")
+            return CollectedMergeResult(
+                groups=[
+                    CollectedMergeGroup(
+                        group_id="g1",
+                        draft_ids=[item.draft_id for item in events],
+                        title="项目排期",
+                        content="确认项目排期。",
+                        object_hint="项目排期",
+                        retention_reason="decision_made",
+                        retention_detail="形成项目排期确认结果。",
+                    )
+                ]
+            )
+
+    inbox = tmp_path / "merge_inbox" / "2026" / "06" / "29"
+    _write_day_doc(
+        inbox / "2026-06-29-张三.md",
+        [_event(event_id="evt-1", title="项目排期", content="确认项目排期。")],
+        tmp_path,
+    )
+    trace_dir = tmp_path / "trace" / "2026-06-29"
+    trace_dir.mkdir(parents=True)
+    (trace_dir / "step-999.json").write_text("{}", encoding="utf-8")
+    (trace_dir / "step-999-prompt.txt").write_text("stale", encoding="utf-8")
+    sleep_calls: list[float] = []
+    analyzer = RetryOnceAnalyzer()
+
+    result = _build_runner(
+        tmp_path,
+        analyzer=analyzer,
+        sleep_func=lambda seconds: sleep_calls.append(seconds),
+        config=RuntimeConfig(
+            data_root=tmp_path / "data",
+            collected_merge_retryable_error_limit=1,
+            collected_merge_retry_delay_seconds=2,
+            collected_merge_trace_enabled=True,
+            collected_merge_trace_root=tmp_path / "trace",
+        ),
+    ).run("2026-06-29")
+
+    assert result.output_path is not None
+    assert len(analyzer.attempts) == 2
+    assert analyzer.attempts[0] == analyzer.attempts[1]
+    assert sleep_calls == [2]
+    assert not (trace_dir / "step-999.json").exists()
+    assert not (trace_dir / "step-999-prompt.txt").exists()
+    steps = [
+        json.loads(path.read_text(encoding="utf-8"))
+        for path in sorted(trace_dir.glob("step-*.json"))
+    ]
+    assert [item["status"] for item in steps] == ["failed", "success"]
+    assert [item["retry_reason"] for item in steps] == [
+        "initial",
+        "retryable_error",
+    ]
+    assert [item["attempt_index"] for item in steps] == [1, 2]
+    assert (trace_dir / "step-001-prompt.txt").exists()
+    assert (trace_dir / "step-002-prompt.txt").exists()
+
+
+def test_collected_merge_terminal_retryable_failure_writes_summary(
+    tmp_path: Path,
+) -> None:
+    class AlwaysFailAnalyzer:
+        def __init__(self) -> None:
+            self.call_count = 0
+
+        def merge_collected_events(self, target_date, events, deterministic_groups):
+            self.call_count += 1
+            raise RetryableAnalyzerProtocolError("network unavailable")
+
+    inbox = tmp_path / "merge_inbox" / "2026" / "06" / "29"
+    _write_day_doc(
+        inbox / "2026-06-29-张三.md",
+        [_event(event_id="evt-1", title="项目排期", content="确认项目排期。")],
+        tmp_path,
+    )
+    trace_root = tmp_path / "trace"
+    analyzer = AlwaysFailAnalyzer()
+
+    result = _build_runner(
+        tmp_path,
+        analyzer=analyzer,
+        config=RuntimeConfig(
+            data_root=tmp_path / "data",
+            collected_merge_retryable_error_limit=1,
+            collected_merge_trace_enabled=True,
+            collected_merge_trace_root=trace_root,
+        ),
+    ).run("2026-06-29")
+
+    assert result.status == "failed"
+    assert result.output_path is None
+    assert analyzer.call_count == 2
+    assert not (inbox / "2026-06-29-管理者-merged.md").exists()
+    summary = json.loads(
+        (trace_root / "2026-06-29" / "summary.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert summary["status"] == "failed"
+    assert summary["output_path"] is None
+    assert summary["failed_step_indexes"] == [1, 2]
+    assert [item["status"] for item in summary["steps"]] == ["failed", "failed"]
+    assert all(item["error"]["retryable"] for item in summary["steps"])
+
+
+def test_collected_merge_does_not_retry_non_retryable_error(tmp_path: Path) -> None:
+    class NonRetryableAnalyzer:
+        def __init__(self) -> None:
+            self.call_count = 0
+
+        def merge_collected_events(self, target_date, events, deterministic_groups):
+            self.call_count += 1
+            raise AnalyzerProtocolError("HTTP 401: invalid API key")
+
+    inbox = tmp_path / "merge_inbox" / "2026" / "06" / "29"
+    _write_day_doc(
+        inbox / "2026-06-29-张三.md",
+        [_event(event_id="evt-1", title="项目排期", content="确认项目排期。")],
+        tmp_path,
+    )
+    sleep_calls: list[float] = []
+    analyzer = NonRetryableAnalyzer()
+    trace_root = tmp_path / "trace"
+
+    result = _build_runner(
+        tmp_path,
+        analyzer=analyzer,
+        sleep_func=lambda seconds: sleep_calls.append(seconds),
+        config=RuntimeConfig(
+            data_root=tmp_path / "data",
+            collected_merge_retryable_error_limit=1,
+            collected_merge_trace_enabled=True,
+            collected_merge_trace_root=trace_root,
+        ),
+    ).run("2026-06-29")
+
+    assert result.status == "failed"
+    assert analyzer.call_count == 1
+    assert sleep_calls == []
+    step = json.loads(
+        (trace_root / "2026-06-29" / "step-001.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert step["status"] == "failed"
+    assert step["error"]["retryable"] is False
+
+
+def test_collected_merge_rolling_retries_only_current_batch(tmp_path: Path) -> None:
+    class RollingRetryAnalyzer:
+        def __init__(self) -> None:
+            self.attempts: list[list[str]] = []
+
+        def merge_collected_events(self, target_date, events, deterministic_groups):
+            self.attempts.append([item.draft_id for item in events])
+            if len(self.attempts) == 2:
+                raise RetryableAnalyzerProtocolError("temporary rolling failure")
+            return CollectedMergeResult(
+                groups=[
+                    CollectedMergeGroup(
+                        group_id=f"g{len(self.attempts)}",
+                        draft_ids=[item.draft_id for item in events],
+                        title="滚动汇总事项",
+                        content="确认滚动汇总事项。",
+                        object_hint="滚动汇总事项",
+                        retention_reason="decision_made",
+                        retention_detail="形成滚动汇总事项确认结果。",
+                    )
+                ]
+            )
+
+    inbox = tmp_path / "merge_inbox" / "2026" / "06" / "29"
+    for index, person in enumerate(("张三", "李四", "王五"), start=1):
+        _write_day_doc(
+            inbox / f"2026-06-29-{person}.md",
+            [
+                _event(
+                    event_id=f"evt-{index}",
+                    title=f"项目{index}排期",
+                    content=f"确认项目{index}排期。",
+                )
+            ],
+            tmp_path,
+        )
+    analyzer = RollingRetryAnalyzer()
+    trace_root = tmp_path / "trace"
+
+    result = _build_runner(
+        tmp_path,
+        analyzer=analyzer,
+        config=RuntimeConfig(
+            data_root=tmp_path / "data",
+            collected_merge_prompt_char_threshold=1,
+            collected_merge_retryable_error_limit=1,
+            collected_merge_trace_enabled=True,
+            collected_merge_trace_root=trace_root,
+        ),
+    ).run("2026-06-29")
+
+    assert result.output_path is not None
+    assert len(analyzer.attempts) == 3
+    assert analyzer.attempts[0] != analyzer.attempts[1]
+    assert analyzer.attempts[1] == analyzer.attempts[2]
+    summary = json.loads(
+        (trace_root / "2026-06-29" / "summary.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert [item["rolling_step_index"] for item in summary["steps"]] == [1, 2, 2]
+    assert [item["attempt_index"] for item in summary["steps"]] == [1, 1, 2]
+
+
+def test_collected_merge_missing_field_and_error_retries_are_independent(
+    tmp_path: Path,
+) -> None:
+    class MixedRetryAnalyzer:
+        def __init__(self) -> None:
+            self.call_count = 0
+
+        def merge_collected_events(self, target_date, events, deterministic_groups):
+            self.call_count += 1
+            if self.call_count == 2:
+                raise RetryableAnalyzerProtocolError("temporary network failure")
+            return CollectedMergeResult(
+                groups=[
+                    CollectedMergeGroup(
+                        group_id=f"g{self.call_count}",
+                        draft_ids=[item.draft_id for item in events],
+                        title="项目排期",
+                        content="确认项目排期。",
+                        object_hint="项目排期",
+                        retention_reason="decision_made",
+                        retention_detail=(
+                            "" if self.call_count == 1 else "形成项目排期确认结果。"
+                        ),
+                    )
+                ]
+            )
+
+    inbox = tmp_path / "merge_inbox" / "2026" / "06" / "29"
+    _write_day_doc(
+        inbox / "2026-06-29-张三.md",
+        [_event(event_id="evt-1", title="项目排期", content="确认项目排期。")],
+        tmp_path,
+    )
+    analyzer = MixedRetryAnalyzer()
+    trace_root = tmp_path / "trace"
+
+    result = _build_runner(
+        tmp_path,
+        analyzer=analyzer,
+        config=RuntimeConfig(
+            data_root=tmp_path / "data",
+            collected_merge_missing_field_retry_limit=1,
+            collected_merge_retryable_error_limit=1,
+            collected_merge_trace_enabled=True,
+            collected_merge_trace_root=trace_root,
+        ),
+    ).run("2026-06-29")
+
+    assert result.output_path is not None
+    assert analyzer.call_count == 3
+    summary = json.loads(
+        (trace_root / "2026-06-29" / "summary.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert [item["retry_reason"] for item in summary["steps"]] == [
+        "initial",
+        "missing_required_fields",
+        "retryable_error",
+    ]
+
+
+def test_collected_merge_mixes_enhanced_legacy_and_upstream_sources(
+    tmp_path: Path,
+) -> None:
+    inbox = tmp_path / "merge_inbox" / "2026" / "06" / "29"
+    _write_day_doc(
+        inbox / "2026-06-29-新流程.md",
+        [
+            _event(
+                event_id="evt-new",
+                title="新流程事项",
+                content="确认新流程事项。",
+                workstream_name="项目工作流",
+                self_relations=["collaboration"],
+                evidence_fingerprints=["sha256:" + "a" * 64],
+            )
+        ],
+        tmp_path,
+    )
+    _write_day_doc(
+        inbox / "2026-06-29-旧流程.md",
+        [_event(event_id="evt-old", title="旧流程事项", content="确认旧流程事项。")],
+        tmp_path,
+    )
+    _write_day_doc(
+        inbox / "2026-06-29-上游-merged.md",
+        [
+            replace(
+                _event(
+                    event_id="evt-upstream",
+                    title="上游汇总事项",
+                    content="确认上游汇总事项。",
+                ),
+                source_people=["甲", "乙"],
+                source_event_ids=["evt-a", "evt-b"],
+            )
+        ],
+        tmp_path,
+    )
+    analyzer = FakeAnalyzer()
+    trace_root = tmp_path / "trace"
+
+    result = _build_runner(
+        tmp_path,
+        analyzer=analyzer,
+        config=RuntimeConfig(
+            data_root=tmp_path / "data",
+            collected_merge_trace_enabled=True,
+            collected_merge_trace_root=trace_root,
+        ),
+    ).run("2026-06-29")
+
+    assert result.source_file_count == 3
+    source_by_file = {item.source_file: item for item in analyzer.calls[0]["events"]}
+    assert source_by_file["2026-06-29-新流程.md"].event.self_relations == [
+        "collaboration"
+    ]
+    assert source_by_file["2026-06-29-旧流程.md"].event.self_relations == []
+    assert source_by_file["2026-06-29-上游-merged.md"].event.source_people == [
+        "甲",
+        "乙",
+    ]
+    source_audit = json.loads(
+        (trace_root / "2026-06-29" / "source-audit.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert {item["source_file"]: item["format"] for item in source_audit["source_files"]} == {
+        "2026-06-29-上游-merged.md": "upstream_merged",
+        "2026-06-29-新流程.md": "enhanced_personal",
+        "2026-06-29-旧流程.md": "legacy_personal",
+    }
+
+
 def test_collected_merge_trace_writes_step_summary(tmp_path: Path) -> None:
     inbox = tmp_path / "merge_inbox" / "2026" / "06" / "29"
     _write_day_doc(
@@ -1461,6 +1902,7 @@ def test_collected_merge_run_result_round_trips_outputs(tmp_path: Path) -> None:
         source_event_count=4,
         merged_event_count=2,
         skipped_file_count=1,
+        partial_file_count=1,
         warning_messages=[],
         self_delivery_status="success",
         self_delivery_target="ou_manager",
@@ -1474,6 +1916,7 @@ def test_collected_merge_run_result_round_trips_outputs(tmp_path: Path) -> None:
                 source_event_count=2,
                 merged_event_count=1,
                 skipped_file_count=0,
+                partial_file_count=1,
                 warning_messages=["warning"],
                 self_delivery_status="success",
             )
@@ -1484,4 +1927,6 @@ def test_collected_merge_run_result_round_trips_outputs(tmp_path: Path) -> None:
     restored = CollectedMergeRunResult.from_dict(payload)
 
     assert payload["outputs"][0]["source_event_count"] == 2
+    assert payload["partial_file_count"] == 1
+    assert restored.outputs[0].partial_file_count == 1
     assert restored.outputs[0].warning_messages == ["warning"]

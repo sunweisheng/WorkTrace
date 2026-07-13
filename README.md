@@ -196,6 +196,8 @@ merge_inbox/2026/07/06/
 
 根目录和 `项目A/` 会分别生成一个 `YYYY-MM-DD-登录人姓名-merged.md`。只扫描当前层，二级及更深目录不参与。
 
+新个人日报、旧个人日报和上游 `*-merged.md` 可以混合输入。若旧文件仅在尾部留下一个未闭合事件，系统保留此前完整事件、跳过残缺事件并记录 `partial_file_count` 和具体 warning；没有任何完整事件或 front matter 无效时仍整份跳过，且不会修改来源文件。
+
 两条事件都有非空工作流且名称不同，Python 会禁止合并；工作流相同也不能单独作为合并理由。共同消息指纹、共同文件、相同具体对象或连续动作只是强证据，仍由模型结合内容确认。只有标题相似、时间接近或部门相同不会触发合并。
 
 同一事件的不同员工描述会作为不同视角整合，最终不按人员逐条展示贡献。来源文件名中的姓名与当前登录用户名精确一致时，该来源会标记为“合并人来源”；只有来源间出现明确冲突时才采用合并人版本并写 warning，没有冲突时任何一方提供的有效补充都必须保留。
@@ -262,6 +264,8 @@ WORKTRACE_COLLECTED_MERGE_TRACE=false
 WORKTRACE_COLLECTED_MERGE_TRACE_ROOT=data/debug/collected_merge
 WORKTRACE_COLLECTED_MERGE_MISSING_FIELD_RETRY_RATIO=0.2
 WORKTRACE_COLLECTED_MERGE_MISSING_FIELD_RETRY_LIMIT=1
+WORKTRACE_COLLECTED_MERGE_RETRYABLE_ERROR_LIMIT=1
+WORKTRACE_COLLECTED_MERGE_RETRY_DELAY_SECONDS=2
 ```
 
 环境变量优先于 `.env`。真实密钥不能和代码一起提交到 git。正式请求统一追加 `/no_think`，主流程要求 `WORKTRACE_LLM_REASONING_EFFORT=none`。
@@ -328,7 +332,9 @@ python3 -m src.worktrace.cli --date 2026-07-06 --debug-output
 - 工作流归属补充判断和最终分组
 - `final_events.json`：最终合并草稿、完成文件聚合和排序后的事件，以及最终过滤 warning
 
-多人汇总跟踪通过 `.env` 的 `WORKTRACE_COLLECTED_MERGE_TRACE=true` 开启，默认写入 `data/debug/collected_merge/<target_date>/`。每个 step JSON 会保存本轮 `input_events`、`deterministic_groups`、模型原始分组、最终事件和 `boundary_warnings`，可用于核对共同消息、文件、工作流及强制拆组原因。
+多人汇总跟踪通过 `.env` 的 `WORKTRACE_COLLECTED_MERGE_TRACE=true` 开启，默认写入 `data/debug/collected_merge/<target_date>/`。`source-audit.json` 记录每个来源文件的格式、声明/解析/过滤数量和部分读取状态；每次真实模型调用会在请求前写入 `step-NNN.json` 与 `step-NNN-prompt.txt`，保存完整 `input_events` 和 `deterministic_groups`，成功和失败都会更新状态。`summary.json`、`summary.md` 在模型失败时也会生成，并记录失败步骤、重试、具体过滤事件、最终事件和 `boundary_warnings`。
+
+429、HTTP 5xx、连接失败、超时、流式 JSON 异常及空或无效 JSON 返回会按配置只重试当前滚动批次。401、403、TLS 证书和请求参数错误不会重试。过滤诊断只记录阶段、类别、来源文件、来源人员、事件 ID 和标题，不记录命中关键词或完整敏感正文。
 
 调试文件可能包含裁剪后的聊天、附件正文、图片摘要和模型输出，只应临时启用，不应提交或长期保留。
 

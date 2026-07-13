@@ -1477,6 +1477,7 @@ class CollectedMergeOutput:
     source_event_count: int
     merged_event_count: int
     skipped_file_count: int
+    partial_file_count: int = 0
     warning_messages: list[str] = field(default_factory=list)
     self_delivery_status: str = ""
     self_delivery_target: str = ""
@@ -1493,6 +1494,7 @@ class CollectedMergeOutput:
             source_event_count=int(data.get("source_event_count", 0)),
             merged_event_count=int(data.get("merged_event_count", 0)),
             skipped_file_count=int(data.get("skipped_file_count", 0)),
+            partial_file_count=int(data.get("partial_file_count", 0)),
             warning_messages=_string_list(data.get("warning_messages")),
             self_delivery_status=str(
                 data.get("self_delivery_status", data.get("upload_status", ""))
@@ -1513,6 +1515,7 @@ class CollectedMergeOutput:
             "source_event_count": self.source_event_count,
             "merged_event_count": self.merged_event_count,
             "skipped_file_count": self.skipped_file_count,
+            "partial_file_count": self.partial_file_count,
             "warning_messages": list(self.warning_messages),
             "self_delivery_status": self.self_delivery_status,
             "self_delivery_target": self.self_delivery_target,
@@ -1530,6 +1533,7 @@ class CollectedMergeRunResult:
     source_event_count: int
     merged_event_count: int
     skipped_file_count: int
+    partial_file_count: int = 0
     warning_messages: list[str] = field(default_factory=list)
     self_delivery_status: str = ""
     self_delivery_target: str = ""
@@ -1549,6 +1553,7 @@ class CollectedMergeRunResult:
             source_event_count=int(data.get("source_event_count", 0)),
             merged_event_count=int(data.get("merged_event_count", 0)),
             skipped_file_count=int(data.get("skipped_file_count", 0)),
+            partial_file_count=int(data.get("partial_file_count", 0)),
             warning_messages=_string_list(data.get("warning_messages")),
             self_delivery_status=str(
                 data.get("self_delivery_status", data.get("upload_status", ""))
@@ -1575,6 +1580,7 @@ class CollectedMergeRunResult:
             "source_event_count": self.source_event_count,
             "merged_event_count": self.merged_event_count,
             "skipped_file_count": self.skipped_file_count,
+            "partial_file_count": self.partial_file_count,
             "warning_messages": list(self.warning_messages),
             "self_delivery_status": self.self_delivery_status,
             "self_delivery_target": self.self_delivery_target,

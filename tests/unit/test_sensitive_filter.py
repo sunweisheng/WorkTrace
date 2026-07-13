@@ -6,6 +6,7 @@ from src.worktrace.pipeline.sensitive_filter import (
     filter_candidate_drafts,
     filter_merged_drafts,
     filter_work_events,
+    filter_work_events_with_diagnostics,
 )
 from src.worktrace.pipeline.retention_filter import (
     filter_retained_candidate_drafts,
@@ -92,6 +93,43 @@ def test_work_event_filter_removes_sensitive_file_link_without_leaking_title() -
 
     assert kept == []
     assert warnings == ["Filtered sensitive event."]
+
+
+def test_work_event_filter_returns_structured_diagnostics() -> None:
+    events = [
+        WorkEvent(
+            date="2026-06-29",
+            event_id="evt-sensitive",
+            title="薪资调整",
+            content="确认薪资调整方案。",
+        ),
+        WorkEvent(
+            date="2026-06-29",
+            event_id="evt-excluded",
+            title="测试事件",
+            content="执行 git pull。",
+        ),
+        WorkEvent(
+            date="2026-06-29",
+            event_id="evt-keep",
+            title="项目排期",
+            content="确认项目排期。",
+        ),
+    ]
+
+    kept, diagnostics = filter_work_events_with_diagnostics(
+        events,
+        RuntimeConfig(
+            sensitive_event_keywords=("薪资",),
+            excluded_event_keywords=("git pull",),
+        ),
+    )
+
+    assert [event.event_id for event in kept] == ["evt-keep"]
+    assert [(item.item_index, item.kind) for item in diagnostics] == [
+        (0, "sensitive"),
+        (1, "excluded"),
+    ]
 
 
 def test_merged_filter_removes_excluded_operational_noise_drafts() -> None:

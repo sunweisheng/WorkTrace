@@ -24,6 +24,12 @@ DEFAULT_COLLECTED_MERGE_RETRY_RATIO_ENV_VAR = (
 DEFAULT_COLLECTED_MERGE_RETRY_LIMIT_ENV_VAR = (
     "WORKTRACE_COLLECTED_MERGE_MISSING_FIELD_RETRY_LIMIT"
 )
+DEFAULT_COLLECTED_MERGE_RETRYABLE_ERROR_LIMIT_ENV_VAR = (
+    "WORKTRACE_COLLECTED_MERGE_RETRYABLE_ERROR_LIMIT"
+)
+DEFAULT_COLLECTED_MERGE_RETRY_DELAY_ENV_VAR = (
+    "WORKTRACE_COLLECTED_MERGE_RETRY_DELAY_SECONDS"
+)
 DEFAULT_LLM_ENV_FILE_NAME = ".env"
 DEFAULT_EVENT_RULES_FILE_NAME = "config/event_rules.json"
 DEFAULT_EVENT_METADATA_FILE_NAME = "config/event_metadata.json"
@@ -411,6 +417,26 @@ def _apply_runtime_env_overrides(
             env_var=config.collected_merge_retry_limit_env_var,
         )
 
+    retryable_error_limit_raw = values.get(
+        config.collected_merge_retryable_error_limit_env_var,
+        "",
+    ).strip()
+    if retryable_error_limit_raw:
+        updates["collected_merge_retryable_error_limit"] = _parse_non_negative_int(
+            retryable_error_limit_raw,
+            env_var=config.collected_merge_retryable_error_limit_env_var,
+        )
+
+    retry_delay_raw = values.get(
+        config.collected_merge_retry_delay_env_var,
+        "",
+    ).strip()
+    if retry_delay_raw:
+        updates["collected_merge_retry_delay_seconds"] = _parse_positive_float(
+            retry_delay_raw,
+            env_var=config.collected_merge_retry_delay_env_var,
+        )
+
     if not updates:
         return config
     return replace(config, **updates)
@@ -491,6 +517,8 @@ class RuntimeConfig:
     collected_merge_prompt_char_threshold: int = 80000
     collected_merge_missing_field_retry_ratio: float = 0.2
     collected_merge_missing_field_retry_limit: int = 1
+    collected_merge_retryable_error_limit: int = 1
+    collected_merge_retry_delay_seconds: float = 2.0
     collected_merge_trace_enabled: bool = False
     collected_merge_trace_root: Path = field(
         default_factory=lambda: Path("data") / "debug" / "collected_merge"
@@ -526,6 +554,10 @@ class RuntimeConfig:
     collected_merge_trace_root_env_var: str = DEFAULT_COLLECTED_MERGE_TRACE_ROOT_ENV_VAR
     collected_merge_retry_ratio_env_var: str = DEFAULT_COLLECTED_MERGE_RETRY_RATIO_ENV_VAR
     collected_merge_retry_limit_env_var: str = DEFAULT_COLLECTED_MERGE_RETRY_LIMIT_ENV_VAR
+    collected_merge_retryable_error_limit_env_var: str = (
+        DEFAULT_COLLECTED_MERGE_RETRYABLE_ERROR_LIMIT_ENV_VAR
+    )
+    collected_merge_retry_delay_env_var: str = DEFAULT_COLLECTED_MERGE_RETRY_DELAY_ENV_VAR
     llm_env_file_name: str = DEFAULT_LLM_ENV_FILE_NAME
     event_rules_file_name: str = DEFAULT_EVENT_RULES_FILE_NAME
     event_metadata_file_name: str = DEFAULT_EVENT_METADATA_FILE_NAME

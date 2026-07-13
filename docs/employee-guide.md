@@ -306,7 +306,7 @@ data/debug/conversations/2026-06-23/_merge_day_candidates/
 - 跨会话 merge 和工作流归属校正结果
 - `final_events.json` 中完成文件聚合和排序后的最终事件、证据指纹、文件标识和过滤 warning
 
-管理人员开启多人汇总 trace 后，每个 step JSON 还会保存本轮完整来源事件、确定性分组和工作流强制拆组 warning，便于判断“哪些共同证据支持合并”或“为什么被拆开”。
+管理人员开启多人汇总 trace 后，`source-audit.json` 会记录新旧来源文件、部分读取和过滤数量；每个 step JSON 与 prompt 在模型请求前保存，失败时也会生成 summary，便于定位失败批次、重试过程以及“哪些共同证据支持合并”或“为什么被拆开”。
 
 请注意：这些调试文件可能包含裁剪后的聊天上下文、附件正文、图片摘要和模型输出，只建议在排障时临时开启。
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Callable, TypeVar
 
 from ..config import RuntimeConfig
@@ -8,6 +9,12 @@ from ..utils.text import clean_text
 
 
 T = TypeVar("T")
+
+
+@dataclass(frozen=True)
+class FilterDiagnostic:
+    item_index: int
+    kind: str
 
 
 def filter_candidate_drafts(
@@ -46,7 +53,15 @@ def filter_work_events(
     events: list[WorkEvent],
     config: RuntimeConfig,
 ) -> tuple[list[WorkEvent], list[str]]:
-    return _filter_items(
+    kept, diagnostics = filter_work_events_with_diagnostics(events, config)
+    return kept, [_warning_for_diagnostic(item) for item in diagnostics]
+
+
+def filter_work_events_with_diagnostics(
+    events: list[WorkEvent],
+    config: RuntimeConfig,
+) -> tuple[list[WorkEvent], list[FilterDiagnostic]]:
+    return _filter_items_with_diagnostics(
         events,
         config,
         text_fields=lambda event: (
@@ -58,6 +73,40 @@ def filter_work_events(
             *(link.url for link in event.file_links),
         ),
     )
+
+
+def _warning_for_diagnostic(diagnostic: FilterDiagnostic) -> str:
+    if diagnostic.kind == "sensitive":
+        return "Filtered sensitive event."
+    return "Filtered excluded event."
+
+
+def _filter_items_with_diagnostics(
+    items: list[T],
+    config: RuntimeConfig,
+    *,
+    text_fields: Callable[[T], tuple[str, ...]],
+) -> tuple[list[T], list[FilterDiagnostic]]:
+    sensitive_keywords = _normalized_keywords(config.sensitive_event_keywords)
+    excluded_keywords = _normalized_keywords(config.excluded_event_keywords)
+    kept: list[T] = []
+    diagnostics: list[FilterDiagnostic] = []
+
+    for item_index, item in enumerate(items):
+        fields = tuple(
+            normalized
+            for value in text_fields(item)
+            if (normalized := clean_text(value))
+        )
+        if _contains_keyword(fields, sensitive_keywords):
+            diagnostics.append(FilterDiagnostic(item_index, "sensitive"))
+            continue
+        if _contains_keyword(fields, excluded_keywords):
+            diagnostics.append(FilterDiagnostic(item_index, "excluded"))
+            continue
+        kept.append(item)
+
+    return kept, diagnostics
 
 
 def _filter_items(

@@ -18,6 +18,10 @@ class AnalyzerProtocolError(WorkTraceError):
     """Raised when analyzer input/output violates protocol constraints."""
 
 
+class RetryableAnalyzerProtocolError(AnalyzerProtocolError):
+    """Raised when retrying the same analyzer request may succeed."""
+
+
 class StoreWriteError(WorkTraceError):
     """Raised when store write or validation fails."""
 

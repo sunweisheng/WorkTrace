@@ -14,7 +14,7 @@ from openai import APIConnectionError, APIStatusError, APITimeoutError, OpenAI, 
 from openai import AuthenticationError, BadRequestError, PermissionDeniedError, RateLimitError
 
 from ..config import OnlineLLMSettings, RuntimeConfig, load_online_llm_settings
-from ..errors import AnalyzerProtocolError
+from ..errors import AnalyzerProtocolError, RetryableAnalyzerProtocolError
 from ..logging_utils import log_timing
 from ..models import (
     AnalysisBatch,
@@ -421,7 +421,10 @@ class OnlineLLMAnalyzer(Analyzer):
             output_schema=collected_merge_output_schema(),
         )
         self.last_collected_merge_payload = payload
-        return parse_collected_merge_payload(payload)
+        try:
+            return parse_collected_merge_payload(payload)
+        except AnalyzerProtocolError as exc:
+            raise RetryableAnalyzerProtocolError(str(exc)) from exc
 
     def _invoke_online(
         self,
@@ -441,20 +444,25 @@ class OnlineLLMAnalyzer(Analyzer):
         except PermissionDeniedError as exc:
             raise AnalyzerProtocolError("HTTP 403: permission denied.") from exc
         except RateLimitError as exc:
-            raise AnalyzerProtocolError("HTTP 429: rate limited.") from exc
+            raise RetryableAnalyzerProtocolError("HTTP 429: rate limited.") from exc
         except BadRequestError as exc:
             raise AnalyzerProtocolError(str(exc)) from exc
         except APIStatusError as exc:
-            raise AnalyzerProtocolError(f"HTTP {exc.status_code}: {exc.message}") from exc
+            error_type = (
+                RetryableAnalyzerProtocolError
+                if exc.status_code == 408 or exc.status_code >= 500
+                else AnalyzerProtocolError
+            )
+            raise error_type(f"HTTP {exc.status_code}: {exc.message}") from exc
         except APITimeoutError as exc:
-            raise AnalyzerProtocolError("Request timed out.") from exc
+            raise RetryableAnalyzerProtocolError("Request timed out.") from exc
         except APIConnectionError as exc:
             reason = str(exc)
             if "certificate verify failed" in reason.lower():
                 raise AnalyzerProtocolError(f"TLS certificate verification failed: {reason}") from exc
-            raise AnalyzerProtocolError(f"Network error: {reason}") from exc
+            raise RetryableAnalyzerProtocolError(f"Network error: {reason}") from exc
         except json.JSONDecodeError as exc:
-            raise AnalyzerProtocolError(
+            raise RetryableAnalyzerProtocolError(
                 "Online LLM stream contained invalid JSON data."
             ) from exc
         except OpenAIError as exc:
@@ -470,11 +478,15 @@ class OnlineLLMAnalyzer(Analyzer):
             tls_verify=settings.tls_verify,
         )
         if not text.strip():
-            raise AnalyzerProtocolError("Online LLM response did not contain text output.")
+            raise RetryableAnalyzerProtocolError(
+                "Online LLM response did not contain text output."
+            )
         try:
             return parse_json_value_from_text(text)
         except ValueError as exc:
-            raise AnalyzerProtocolError("Online LLM response did not contain valid JSON output.") from exc
+            raise RetryableAnalyzerProtocolError(
+                "Online LLM response did not contain valid JSON output."
+            ) from exc
 
     def _invoke_via_sdk(self, settings: OnlineLLMSettings, body: dict[str, object]) -> str:
         client = _get_or_create_global_client(settings)

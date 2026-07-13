@@ -231,7 +231,9 @@ def test_load_runtime_config_overrides_reads_collected_merge_env_overrides(
         "WORKTRACE_COLLECTED_MERGE_TRACE=true\n"
         "WORKTRACE_COLLECTED_MERGE_TRACE_ROOT=custom-trace\n"
         "WORKTRACE_COLLECTED_MERGE_MISSING_FIELD_RETRY_RATIO=0.35\n"
-        "WORKTRACE_COLLECTED_MERGE_MISSING_FIELD_RETRY_LIMIT=2\n",
+        "WORKTRACE_COLLECTED_MERGE_MISSING_FIELD_RETRY_LIMIT=2\n"
+        "WORKTRACE_COLLECTED_MERGE_RETRYABLE_ERROR_LIMIT=3\n"
+        "WORKTRACE_COLLECTED_MERGE_RETRY_DELAY_SECONDS=4.5\n",
         encoding="utf-8",
     )
 
@@ -241,6 +243,29 @@ def test_load_runtime_config_overrides_reads_collected_merge_env_overrides(
     assert config.collected_merge_trace_root == Path("custom-trace")
     assert config.collected_merge_missing_field_retry_ratio == 0.35
     assert config.collected_merge_missing_field_retry_limit == 2
+    assert config.collected_merge_retryable_error_limit == 3
+    assert config.collected_merge_retry_delay_seconds == 4.5
+
+
+@pytest.mark.parametrize(
+    ("env_name", "env_value"),
+    [
+        ("WORKTRACE_COLLECTED_MERGE_RETRYABLE_ERROR_LIMIT", "-1"),
+        ("WORKTRACE_COLLECTED_MERGE_RETRY_DELAY_SECONDS", "-0.1"),
+    ],
+)
+def test_load_runtime_config_overrides_rejects_invalid_collected_merge_retry(
+    tmp_path: Path,
+    env_name: str,
+    env_value: str,
+) -> None:
+    (tmp_path / ".env").write_text(
+        f"{env_name}={env_value}\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError):
+        load_runtime_config_overrides(RuntimeConfig(), cwd=tmp_path)
 
 
 def test_load_runtime_config_overrides_rejects_invalid_rule_file(tmp_path: Path) -> None:

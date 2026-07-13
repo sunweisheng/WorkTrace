@@ -343,6 +343,8 @@ OnlineLLMAnalyzer -> openai Python SDK -> Responses API provider
 - `reaction_discovery_page_limit = 3`
 - `max_model_input_tokens = 100000`
 - `collected_merge_prompt_char_threshold = 80000`
+- `collected_merge_retryable_error_limit = 1`
+- `collected_merge_retry_delay_seconds = 2.0`
 - `slice_retry_limit = 3`
 - `anchor_batch_size = 3`
 - `llm_stream_enabled = False`
@@ -358,6 +360,8 @@ OnlineLLMAnalyzer -> openai Python SDK -> Responses API provider
 - `WORKTRACE_COLLECTED_MERGE_TRACE_ROOT`
 - `WORKTRACE_COLLECTED_MERGE_MISSING_FIELD_RETRY_RATIO`
 - `WORKTRACE_COLLECTED_MERGE_MISSING_FIELD_RETRY_LIMIT`
+- `WORKTRACE_COLLECTED_MERGE_RETRYABLE_ERROR_LIMIT`
+- `WORKTRACE_COLLECTED_MERGE_RETRY_DELAY_SECONDS`
 
 ### 9.3 JSON 配置
 
@@ -379,7 +383,7 @@ OnlineLLMAnalyzer -> openai Python SDK -> Responses API provider
 - retention HTML 注释：内部枚举
 - `merge_meta` HTML 注释：版本、参与方式英文键、消息证据 SHA-256 和文件标识 SHA-256
 
-团队汇总把“本人参与方式”显示为“协作方式”，并保留来源人员和来源事件 ID。旧 Markdown 缺少新字段时按空值读取并继续合并；新输出显示“未明确”。损坏的 `merge_meta` 被忽略并写 warning，不影响正文解析。Markdown store 同时负责回读，因此字段名或注释结构变化必须同步解析器和多人汇总测试。
+团队汇总把“本人参与方式”显示为“协作方式”，并保留来源人员和来源事件 ID。旧 Markdown 缺少新字段时按空值读取并继续合并；新输出显示“未明确”。损坏的 `merge_meta` 被忽略并写 warning，不影响正文解析。多人汇总遇到尾部残缺事件时保留此前完整事件并增加 `partial_file_count`，但不修改来源文件；没有完整事件或其他结构无效时整份跳过。Markdown store 同时负责回读，因此字段名或注释结构变化必须同步解析器和多人汇总测试。
 
 ## 11. 状态、warning 与错误
 
@@ -407,7 +411,7 @@ OnlineLLMAnalyzer -> openai Python SDK -> Responses API provider
 
 segmentation 和 segment batch 的模型失败轮次保存输入、prompt 与 `failure.json`。批次拆分后的单片段回退保存在片段目录的 `fallback-01/`；分段耗尽后的直接提炼保存在 `_anchor_fallback/<conversation>/<anchor-key>/attempt-XX/`。成功轮次继续保存输出和校验结果，异常轮次不伪造模型输出。
 
-多人汇总 trace 写 step JSON、`summary.json` 和 `summary.md`。step JSON 包含 prompt 字符数、`input_events`、`deterministic_groups`、输入/分组指标、字段缺失、覆盖修复、`boundary_warnings`、过滤和最终事件，因此可以从来源增强信息追到最终部门事件。
+多人汇总 trace 写 `source-audit.json`、step JSON、`step-NNN-prompt.txt`、`summary.json` 和 `summary.md`。每个模型请求前先保存输入和 prompt；成功、失败、重试耗尽和自送达失败都会留下 summary。step 包含状态、滚动批次、尝试次数、重试原因、prompt 字符数、`input_events`、`deterministic_groups`、错误或模型结果、覆盖修复、`boundary_warnings`、过滤和最终事件，因此可以从来源增强信息追到最终部门事件。
 
 所有主阶段同时通过 `logging_utils.log_timing(...)` 输出耗时和数量字段。
 

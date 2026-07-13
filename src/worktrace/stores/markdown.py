@@ -59,6 +59,8 @@ UNKNOWN_METADATA_VALUE = "未明确"
 class MarkdownEventStore(EventStore):
     config: RuntimeConfig
     last_warning_messages: list[str] = field(default_factory=list, init=False)
+    last_declared_event_count: int | None = field(default=None, init=False)
+    last_partial_event_ids: list[str] = field(default_factory=list, init=False)
 
     def replace_day(
         self,
@@ -321,22 +323,41 @@ class MarkdownEventStore(EventStore):
             )
         )
 
-    def parse_day_document(self, markdown_text: str) -> DayDocument:
+    def parse_day_document(
+        self,
+        markdown_text: str,
+        *,
+        allow_trailing_partial: bool = False,
+    ) -> DayDocument:
         self.last_warning_messages = []
+        self.last_declared_event_count = None
+        self.last_partial_event_ids = []
         if not markdown_text.startswith("---\n"):
             raise StoreWriteError("Markdown front matter is missing.")
         _, front_matter, body = markdown_text.split("---\n", 2)
         meta = self._parse_front_matter(front_matter)
         date = str(meta["date"])
         generated_at = str(meta["generated_at"])
-        events = self._parse_events(body)
+        try:
+            self.last_declared_event_count = int(meta.get("event_count", ""))
+        except ValueError:
+            self.last_declared_event_count = None
+        events = self._parse_events(
+            body,
+            allow_trailing_partial=allow_trailing_partial,
+        )
         return DayDocument(
             date=date,
             events=events,
             generated_at=generated_at,
         )
 
-    def _parse_events(self, body: str) -> list[WorkEvent]:
+    def _parse_events(
+        self,
+        body: str,
+        *,
+        allow_trailing_partial: bool = False,
+    ) -> list[WorkEvent]:
         events: list[WorkEvent] = []
         cursor = 0
         start_marker = '<!-- worktrace:event:start event_id="'
@@ -349,15 +370,34 @@ class MarkdownEventStore(EventStore):
             event_id_start = start + len(start_marker)
             event_id_end = body.find('" -->', event_id_start)
             if event_id_end == -1:
+                if (
+                    allow_trailing_partial
+                    and events
+                    and body.find(start_marker, event_id_start) == -1
+                ):
+                    self.last_partial_event_ids.append("unknown")
+                    self.last_warning_messages.append(
+                        "Skipped malformed trailing event block: unknown."
+                    )
+                    break
                 raise StoreWriteError("Malformed event block: missing event_id terminator.")
             event_id = body[event_id_start:event_id_end]
-            block_end, next_cursor = self._locate_event_block_end(
-                body=body,
-                event_id=event_id,
-                search_start=event_id_end,
-                start_marker=start_marker,
-                end_marker=end_marker,
-            )
+            try:
+                block_end, next_cursor = self._locate_event_block_end(
+                    body=body,
+                    event_id=event_id,
+                    search_start=event_id_end,
+                    start_marker=start_marker,
+                    end_marker=end_marker,
+                )
+            except StoreWriteError:
+                if not allow_trailing_partial or not events:
+                    raise
+                self.last_partial_event_ids.append(event_id)
+                self.last_warning_messages.append(
+                    f"Skipped malformed trailing event block: {event_id}."
+                )
+                break
             block = body[event_id_end + 5:block_end].strip()
             title = self._extract_value(
                 block,

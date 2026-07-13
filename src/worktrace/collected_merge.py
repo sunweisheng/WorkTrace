@@ -5,12 +5,18 @@ import subprocess
 from collections import Counter, defaultdict
 from dataclasses import dataclass, replace
 from pathlib import Path
+from time import sleep
 from typing import Any, Sequence
 
 from .config import RuntimeConfig
 from .constants import DailyRunStatus
 from .delivery.feishu_cli import FeishuCliSelfDelivery
-from .errors import AnalyzerProtocolError, DeliveryError, StoreWriteError
+from .errors import (
+    AnalyzerProtocolError,
+    DeliveryError,
+    RetryableAnalyzerProtocolError,
+    StoreWriteError,
+)
 from .factories import AnalyzerFactory
 from .analyzers.prompts import build_collected_merge_prompt
 from .models import (
@@ -24,7 +30,9 @@ from .models import (
     SelfIdentity,
     WorkEvent,
 )
-from .pipeline.sensitive_filter import filter_work_events
+from .pipeline.sensitive_filter import (
+    filter_work_events_with_diagnostics,
+)
 from .pipeline.retention_filter import (
     RETENTION_REASONS,
     filter_retained_work_events,
@@ -49,6 +57,7 @@ class CollectedMergeRunner:
     command_runner: Any | None = None
     delivery_channel: Any | None = None
     self_identity_resolver: Any | None = None
+    sleep_func: Any | None = None
 
     def __post_init__(self) -> None:
         if self.cwd is None:
@@ -64,10 +73,15 @@ class CollectedMergeRunner:
             )
         if self.self_identity_resolver is None:
             self.self_identity_resolver = self._resolve_self_identity
+        if self.sleep_func is None:
+            self.sleep_func = sleep
         self.store = MarkdownEventStore(config=self.config)
         self._collected_merge_trace_dir: Path | None = None
         self._collected_merge_trace_steps: list[dict[str, Any]] = []
         self._collected_merge_trace_call_index = 0
+        self._collected_merge_source_audit: list[dict[str, Any]] = []
+        self._collected_merge_filter_diagnostics: list[dict[str, Any]] = []
+        self._collected_merge_failure_warnings: list[str] = []
 
     def run(self, target_date: str) -> CollectedMergeRunResult:
         input_dir = self.build_input_dir(target_date)
@@ -83,6 +97,7 @@ class CollectedMergeRunner:
                 source_event_count=0,
                 merged_event_count=0,
                 skipped_file_count=0,
+                partial_file_count=0,
                 warning_messages=[str(exc)],
                 self_delivery_status="",
                 self_delivery_target="",
@@ -142,6 +157,7 @@ class CollectedMergeRunner:
             source_event_count=sum(output.source_event_count for output in outputs),
             merged_event_count=sum(output.merged_event_count for output in outputs),
             skipped_file_count=sum(output.skipped_file_count for output in outputs),
+            partial_file_count=sum(output.partial_file_count for output in outputs),
             warning_messages=warning_messages,
             self_delivery_status=summarize_self_delivery_status(outputs),
             self_delivery_target=first_output.self_delivery_target,
@@ -163,23 +179,53 @@ class CollectedMergeRunner:
         )
         self._start_collected_merge_trace(target_date, input_dir)
         warning_messages: list[str] = []
-        skipped_file_count = 0
-
-        source_events, source_file_count, skipped_file_count, read_warnings = (
-            self._read_source_events(
-                target_date,
-                input_dir,
-                output_path=output_path,
-                ignored_subdirectories=ignored_subdirectories,
-            )
+        (
+            source_events,
+            source_file_count,
+            skipped_file_count,
+            partial_file_count,
+            read_warnings,
+            source_audit,
+        ) = self._read_source_events(
+            target_date,
+            input_dir,
+            output_path=output_path,
+            ignored_subdirectories=ignored_subdirectories,
         )
         warning_messages.extend(read_warnings)
-        source_events, source_filter_warnings = self._filter_source_events(source_events)
+        parsed_source_events = list(source_events)
+        source_events, source_filter_warnings, source_filter_diagnostics = (
+            self._filter_source_events(source_events)
+        )
         warning_messages.extend(source_filter_warnings)
+        before_retention_events = list(source_events)
         source_events, retention_source_warnings = self._filter_retained_source_events(
             source_events,
         )
         warning_messages.extend(retention_source_warnings)
+        retention_diagnostics = self._build_source_retention_diagnostics(
+            before_retention_events,
+            source_events,
+        )
+        self._collected_merge_filter_diagnostics = [
+            *source_filter_diagnostics,
+            *retention_diagnostics,
+        ]
+        self._collected_merge_source_audit = self._finalize_source_audit(
+            source_audit,
+            parsed_source_events=parsed_source_events,
+            model_input_events=source_events,
+            filter_diagnostics=self._collected_merge_filter_diagnostics,
+        )
+        self._write_collected_merge_source_audit(
+            target_date=target_date,
+            input_dir=input_dir,
+            source_file_count=source_file_count,
+            skipped_file_count=skipped_file_count,
+            partial_file_count=partial_file_count,
+            parsed_event_count=len(parsed_source_events),
+            model_input_event_count=len(source_events),
+        )
         source_events, owner_source_warnings = self._mark_merge_owner_sources(
             source_events,
             merge_owner_person=self_identity.display_name,
@@ -197,15 +243,35 @@ class CollectedMergeRunner:
                 )
                 warning_messages.extend(merge_warnings)
             except (AnalyzerProtocolError, ValueError) as exc:
-                return CollectedMergeOutput(
+                warning_messages.extend(
+                    warning
+                    for warning in self._collected_merge_failure_warnings
+                    if warning not in warning_messages
+                )
+                warning_messages.append(str(exc))
+                output = CollectedMergeOutput(
                     input_dir=str(input_dir.resolve()),
                     output_path=None,
                     source_file_count=source_file_count,
                     source_event_count=len(source_events),
                     merged_event_count=0,
                     skipped_file_count=skipped_file_count,
-                    warning_messages=[*warning_messages, str(exc)],
+                    partial_file_count=partial_file_count,
+                    warning_messages=warning_messages,
                 )
+                self._write_collected_merge_trace_summary(
+                    status=DailyRunStatus.FAILED.value,
+                    target_date=target_date,
+                    input_dir=input_dir,
+                    output_path=None,
+                    source_file_count=source_file_count,
+                    source_event_count=len(source_events),
+                    merged_event_count=0,
+                    skipped_file_count=skipped_file_count,
+                    partial_file_count=partial_file_count,
+                    warning_messages=warning_messages,
+                )
+                return output
         else:
             warning_messages.append("No valid source events found.")
 
@@ -220,7 +286,29 @@ class CollectedMergeRunner:
             )
             output_path.write_text(day_doc, encoding="utf-8")
         except OSError as exc:
-            raise StoreWriteError(f"Failed to write merged markdown: {output_path}") from exc
+            warning_messages.append(f"Failed to write merged markdown: {output_path}")
+            self._write_collected_merge_trace_summary(
+                status=DailyRunStatus.FAILED.value,
+                target_date=target_date,
+                input_dir=input_dir,
+                output_path=None,
+                source_file_count=source_file_count,
+                source_event_count=len(source_events),
+                merged_event_count=0,
+                skipped_file_count=skipped_file_count,
+                partial_file_count=partial_file_count,
+                warning_messages=warning_messages,
+            )
+            return CollectedMergeOutput(
+                input_dir=str(input_dir.resolve()),
+                output_path=None,
+                source_file_count=source_file_count,
+                source_event_count=len(source_events),
+                merged_event_count=0,
+                skipped_file_count=skipped_file_count,
+                partial_file_count=partial_file_count,
+                warning_messages=warning_messages,
+            )
 
         self_delivery_status, self_delivery_target, self_delivery_error = (
             _deliver_markdown_to_self(
@@ -233,12 +321,19 @@ class CollectedMergeRunner:
             warning_messages.append(self_delivery_error)
 
         self._write_collected_merge_trace_summary(
+            status=(
+                DailyRunStatus.SUCCESS_WITH_WARNINGS.value
+                if warning_messages
+                else DailyRunStatus.SUCCESS.value
+            ),
             target_date=target_date,
             input_dir=input_dir,
             output_path=output_path,
             source_file_count=source_file_count,
             source_event_count=len(source_events),
             merged_event_count=len(merged_events),
+            skipped_file_count=skipped_file_count,
+            partial_file_count=partial_file_count,
             warning_messages=warning_messages,
         )
 
@@ -249,6 +344,7 @@ class CollectedMergeRunner:
             source_event_count=len(source_events),
             merged_event_count=len(merged_events),
             skipped_file_count=skipped_file_count,
+            partial_file_count=partial_file_count,
             warning_messages=warning_messages,
             self_delivery_status=self_delivery_status,
             self_delivery_target=self_delivery_target,
@@ -280,6 +376,7 @@ class CollectedMergeRunner:
                 target_date,
                 source_events,
                 deterministic_groups=deterministic_groups,
+                rolling_step_index=1,
             )
             return merged_events, [*deterministic_warnings, *merge_warnings]
 
@@ -315,6 +412,7 @@ class CollectedMergeRunner:
                 target_date,
                 batch_events,
                 deterministic_groups=deterministic_groups,
+                rolling_step_index=step_index,
             )
             call_count += 1
             warnings.extend(merge_warnings)
@@ -333,6 +431,7 @@ class CollectedMergeRunner:
         source_events: list[CollectedSourceEvent],
         *,
         deterministic_groups: list[list[str]] | None = None,
+        rolling_step_index: int = 1,
     ) -> tuple[list[WorkEvent], list[str]]:
         deterministic_groups = (
             deterministic_groups
@@ -343,6 +442,7 @@ class CollectedMergeRunner:
             target_date,
             source_events,
             deterministic_groups,
+            rolling_step_index=rolling_step_index,
         )
         merge_result, repair_warnings = repair_collected_merge_result(
             merge_result,
@@ -362,9 +462,15 @@ class CollectedMergeRunner:
             source_events,
             merge_result,
         )
-        merged_events_after_sensitive, sensitive_warnings = self._filter_events(
-            merged_events_before_filters
+        (
+            merged_events_after_sensitive,
+            sensitive_warnings,
+            merged_filter_diagnostics,
+        ) = self._filter_events(
+            merged_events_before_filters,
+            source_events=source_events,
         )
+        self._collected_merge_filter_diagnostics.extend(merged_filter_diagnostics)
         retained_events, retention_warnings = filter_retained_work_events(
             merged_events_after_sensitive,
         )
@@ -393,24 +499,60 @@ class CollectedMergeRunner:
         target_date: str,
         source_events: list[CollectedSourceEvent],
         deterministic_groups: list[list[str]],
+        *,
+        rolling_step_index: int,
     ) -> tuple[CollectedMergeResult, list[str]]:
         warnings: list[str] = []
-        retry_limit = self.config.collected_merge_missing_field_retry_limit
+        missing_field_retry_count = 0
+        retryable_error_count = 0
         attempt_index = 0
+        retry_reason = "initial"
         while True:
             attempt_index += 1
-            merge_result = self.analyzer.merge_collected_events(
-                target_date,
-                source_events,
-                deterministic_groups,
-            )
-            missing_summary = collected_merge_missing_field_summary(merge_result)
-            self._record_collected_merge_trace_attempt(
+            trace_step_index = self._start_collected_merge_trace_attempt(
                 target_date=target_date,
                 source_events=source_events,
                 deterministic_groups=deterministic_groups,
-                merge_result=merge_result,
+                rolling_step_index=rolling_step_index,
                 attempt_index=attempt_index,
+                retry_reason=retry_reason,
+            )
+            try:
+                merge_result = self.analyzer.merge_collected_events(
+                    target_date,
+                    source_events,
+                    deterministic_groups,
+                )
+            except RetryableAnalyzerProtocolError as exc:
+                self._record_collected_merge_trace_failure(
+                    step_index=trace_step_index,
+                    error=exc,
+                    retryable=True,
+                )
+                if retryable_error_count >= self.config.collected_merge_retryable_error_limit:
+                    raise
+                retryable_error_count += 1
+                warning = (
+                    "Retrying collected merge after retryable analyzer error: "
+                    f"rolling_step={rolling_step_index} "
+                    f"attempt={attempt_index} error={exc}"
+                )
+                warnings.append(warning)
+                self._collected_merge_failure_warnings.append(warning)
+                self.sleep_func(self.config.collected_merge_retry_delay_seconds)
+                retry_reason = "retryable_error"
+                continue
+            except (AnalyzerProtocolError, ValueError) as exc:
+                self._record_collected_merge_trace_failure(
+                    step_index=trace_step_index,
+                    error=exc,
+                    retryable=False,
+                )
+                raise
+            missing_summary = collected_merge_missing_field_summary(merge_result)
+            self._record_collected_merge_trace_success(
+                step_index=trace_step_index,
+                merge_result=merge_result,
                 missing_summary=missing_summary,
             )
             if not self._should_retry_collected_merge_missing_fields(
@@ -418,13 +560,19 @@ class CollectedMergeRunner:
                 missing_summary,
             ):
                 return merge_result, warnings
-            if attempt_index > retry_limit:
+            if (
+                missing_field_retry_count
+                >= self.config.collected_merge_missing_field_retry_limit
+            ):
                 return merge_result, warnings
+            missing_field_retry_count += 1
             warning = (
                 "Retrying collected merge because required fields were missing: "
                 f"{format_collected_merge_missing_field_summary(missing_summary)}"
             )
             warnings.append(warning)
+            self._collected_merge_failure_warnings.append(warning)
+            retry_reason = "missing_required_fields"
 
     def _should_retry_collected_merge_missing_fields(
         self,
@@ -585,15 +733,31 @@ class CollectedMergeRunner:
         *,
         output_path: Path,
         ignored_subdirectories: set[str] | None = None,
-    ) -> tuple[list[CollectedSourceEvent], int, int, list[str]]:
+    ) -> tuple[
+        list[CollectedSourceEvent],
+        int,
+        int,
+        int,
+        list[str],
+        list[dict[str, Any]],
+    ]:
         warnings: list[str] = []
+        source_audit: list[dict[str, Any]] = []
         source_events: list[CollectedSourceEvent] = []
         source_file_count = 0
         skipped_file_count = 0
+        partial_file_count = 0
         ignored_subdirectories = ignored_subdirectories or set()
 
         if not input_dir.exists():
-            return [], 0, 0, [f"Input directory does not exist: {input_dir}"]
+            return (
+                [],
+                0,
+                0,
+                0,
+                [f"Input directory does not exist: {input_dir}"],
+                [],
+            )
 
         for path in sorted(input_dir.iterdir()):
             if path.is_dir() and not path.name.startswith("."):
@@ -614,21 +778,92 @@ class CollectedMergeRunner:
             if not person_name:
                 skipped_file_count += 1
                 warnings.append(f"Skipped invalid source filename: {path.name}")
+                source_audit.append(
+                    {
+                        "source_file": path.name,
+                        "person_name": "",
+                        "format": "unknown",
+                        "status": "skipped",
+                        "declared_event_count": None,
+                        "parsed_event_count": 0,
+                        "partial_event_ids": [],
+                        "partial_reason": "",
+                        "warning_messages": ["Invalid source filename."],
+                    }
+                )
                 continue
             try:
-                day_doc = self.store.parse_day_document(path.read_text(encoding="utf-8"))
+                markdown_text = path.read_text(encoding="utf-8")
+                day_doc = self.store.parse_day_document(
+                    markdown_text,
+                    allow_trailing_partial=True,
+                )
             except (OSError, StoreWriteError, KeyError, ValueError) as exc:
                 skipped_file_count += 1
                 warnings.append(f"Skipped invalid source markdown: {path.name} ({exc})")
+                source_audit.append(
+                    {
+                        "source_file": path.name,
+                        "person_name": person_name,
+                        "format": _classify_source_markdown(path.name, []),
+                        "status": "skipped",
+                        "declared_event_count": self.store.last_declared_event_count,
+                        "parsed_event_count": 0,
+                        "partial_event_ids": [],
+                        "partial_reason": "",
+                        "warning_messages": [str(exc)],
+                    }
+                )
                 continue
+            partial_event_ids = list(self.store.last_partial_event_ids)
+            parser_warnings = [
+                warning
+                for warning in self.store.last_warning_messages
+                if not warning.startswith("Skipped malformed trailing event block:")
+            ]
+            if partial_event_ids:
+                partial_file_count += 1
+                partial_warning = (
+                    f"Partially read source markdown: {path.name} "
+                    f"(declared={self.store.last_declared_event_count} "
+                    f"parsed={len(day_doc.events)} "
+                    f"skipped_event_ids={','.join(partial_event_ids)} "
+                    "reason=malformed trailing event block)."
+                )
+                warnings.append(partial_warning)
             warnings.extend(
                 f"{path.name}: {warning}"
-                for warning in self.store.last_warning_messages
+                for warning in parser_warnings
             )
             if day_doc.date != target_date:
                 warnings.append(
                     f"Source markdown date mismatch: {path.name} ({day_doc.date})"
                 )
+            if (
+                self.store.last_declared_event_count is not None
+                and self.store.last_declared_event_count != len(day_doc.events)
+                and not partial_event_ids
+            ):
+                warnings.append(
+                    f"Source markdown event count mismatch: {path.name} "
+                    f"(declared={self.store.last_declared_event_count} "
+                    f"parsed={len(day_doc.events)})."
+                )
+            source_audit.append(
+                {
+                    "source_file": path.name,
+                    "person_name": person_name,
+                    "format": _classify_source_markdown(path.name, day_doc.events),
+                    "status": "partial" if partial_event_ids else "success",
+                    "declared_event_count": self.store.last_declared_event_count,
+                    "parsed_event_count": len(day_doc.events),
+                    "partial_event_ids": partial_event_ids,
+                    "partial_reason": (
+                        "malformed trailing event block" if partial_event_ids else ""
+                    ),
+                    "warning_messages": parser_warnings,
+                }
+            )
             for index, event in enumerate(day_doc.events, start=1):
                 source_events.append(
                     CollectedSourceEvent(
@@ -639,7 +874,14 @@ class CollectedMergeRunner:
                     )
                 )
 
-        return source_events, source_file_count, skipped_file_count, warnings
+        return (
+            source_events,
+            source_file_count,
+            skipped_file_count,
+            partial_file_count,
+            warnings,
+            source_audit,
+        )
 
     def _build_deterministic_groups(
         self,
@@ -680,17 +922,94 @@ class CollectedMergeRunner:
     def _filter_source_events(
         self,
         source_events: list[CollectedSourceEvent],
-    ) -> tuple[list[CollectedSourceEvent], list[str]]:
-        kept_events, warnings = filter_work_events(
-            [source_event.event for source_event in source_events],
+    ) -> tuple[list[CollectedSourceEvent], list[str], list[dict[str, Any]]]:
+        kept_events, raw_diagnostics = filter_work_events_with_diagnostics(
+            [item.event for item in source_events],
             self.config,
         )
         kept_ids = {id(event) for event in kept_events}
-        return [
+        kept_source_events = [
             source_event
             for source_event in source_events
             if id(source_event.event) in kept_ids
-        ], warnings
+        ]
+        diagnostics: list[dict[str, Any]] = []
+        warnings: list[str] = []
+        for raw in raw_diagnostics:
+            source_event = source_events[raw.item_index]
+            diagnostic = {
+                "stage": "source_filter",
+                "kind": raw.kind,
+                "source_file": source_event.source_file,
+                "source_person": source_event.person_name,
+                "event_id": source_event.event.event_id,
+                "event_title": source_event.event.title,
+            }
+            diagnostics.append(diagnostic)
+            warnings.append(_render_filter_warning(diagnostic))
+        return kept_source_events, warnings, diagnostics
+
+    def _build_source_retention_diagnostics(
+        self,
+        before_events: list[CollectedSourceEvent],
+        after_events: list[CollectedSourceEvent],
+    ) -> list[dict[str, Any]]:
+        kept_ids = {id(item.event) for item in after_events}
+        return [
+            {
+                "stage": "source_retention_filter",
+                "kind": "retention",
+                "source_file": item.source_file,
+                "source_person": item.person_name,
+                "event_id": item.event.event_id,
+                "event_title": item.event.title,
+                "rejection_reason": retention_rejection_reason_for_event(item.event),
+            }
+            for item in before_events
+            if id(item.event) not in kept_ids
+        ]
+
+    def _finalize_source_audit(
+        self,
+        source_audit: list[dict[str, Any]],
+        *,
+        parsed_source_events: list[CollectedSourceEvent],
+        model_input_events: list[CollectedSourceEvent],
+        filter_diagnostics: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        parsed_counts = Counter(item.source_file for item in parsed_source_events)
+        input_counts = Counter(item.source_file for item in model_input_events)
+        filter_counts = Counter(
+            (str(item.get("source_file", "")), str(item.get("kind", "")))
+            for item in filter_diagnostics
+            if item.get("stage") in {"source_filter", "source_retention_filter"}
+        )
+        finalized: list[dict[str, Any]] = []
+        for item in source_audit:
+            source_file = str(item.get("source_file", ""))
+            finalized.append(
+                {
+                    **item,
+                    "parsed_event_count": parsed_counts.get(
+                        source_file,
+                        int(item.get("parsed_event_count", 0)),
+                    ),
+                    "sensitive_filtered_count": filter_counts.get(
+                        (source_file, "sensitive"),
+                        0,
+                    ),
+                    "excluded_filtered_count": filter_counts.get(
+                        (source_file, "excluded"),
+                        0,
+                    ),
+                    "retention_filtered_count": filter_counts.get(
+                        (source_file, "retention"),
+                        0,
+                    ),
+                    "model_input_event_count": input_counts.get(source_file, 0),
+                }
+            )
+        return finalized
 
     def _mark_merge_owner_sources(
         self,
@@ -823,14 +1142,49 @@ class CollectedMergeRunner:
     def _filter_events(
         self,
         events: list[WorkEvent],
-    ) -> tuple[list[WorkEvent], list[str]]:
-        return filter_work_events(events, self.config)
+        *,
+        source_events: list[CollectedSourceEvent],
+    ) -> tuple[list[WorkEvent], list[str], list[dict[str, Any]]]:
+        kept_events, raw_diagnostics = filter_work_events_with_diagnostics(
+            events,
+            self.config,
+        )
+        diagnostics: list[dict[str, Any]] = []
+        warnings: list[str] = []
+        for raw in raw_diagnostics:
+            event = events[raw.item_index]
+            event_source_ids = set(event.source_event_ids or [event.event_id])
+            matching_sources = [
+                item
+                for item in source_events
+                if event_source_ids.intersection(
+                    item.event.source_event_ids or [item.event.event_id]
+                )
+            ]
+            diagnostic = {
+                "stage": "merged_filter",
+                "kind": raw.kind,
+                "source_files": list(
+                    dict.fromkeys(item.source_file for item in matching_sources)
+                ),
+                "source_people": list(
+                    dict.fromkeys(item.person_name for item in matching_sources)
+                ),
+                "event_id": event.event_id,
+                "event_title": event.title,
+            }
+            diagnostics.append(diagnostic)
+            warnings.append(_render_filter_warning(diagnostic))
+        return kept_events, warnings, diagnostics
 
     def _start_collected_merge_trace(self, target_date: str, input_dir: Path) -> None:
+        self._collected_merge_trace_steps = []
+        self._collected_merge_trace_call_index = 0
+        self._collected_merge_source_audit = []
+        self._collected_merge_filter_diagnostics = []
+        self._collected_merge_failure_warnings = []
         if not self.config.collected_merge_trace_enabled:
             self._collected_merge_trace_dir = None
-            self._collected_merge_trace_steps = []
-            self._collected_merge_trace_call_index = 0
             return
         root = self.config.collected_merge_trace_root
         trace_root = root if root.is_absolute() else self.cwd / root
@@ -838,42 +1192,112 @@ class CollectedMergeRunner:
         if input_dir.name != target_date.split("-")[-1]:
             date_dir = date_dir / input_dir.name
         date_dir.mkdir(parents=True, exist_ok=True)
+        for pattern in (
+            "step-*.json",
+            "step-*-prompt.txt",
+            "summary.json",
+            "summary.md",
+            "source-audit.json",
+        ):
+            for stale_path in date_dir.glob(pattern):
+                if stale_path.is_file():
+                    stale_path.unlink()
         self._collected_merge_trace_dir = date_dir
-        self._collected_merge_trace_steps = []
-        self._collected_merge_trace_call_index = 0
 
-    def _record_collected_merge_trace_attempt(
+    def _start_collected_merge_trace_attempt(
         self,
         *,
         target_date: str,
         source_events: list[CollectedSourceEvent],
         deterministic_groups: list[list[str]],
-        merge_result: CollectedMergeResult,
+        rolling_step_index: int,
         attempt_index: int,
-        missing_summary: dict[str, int],
-    ) -> None:
+        retry_reason: str,
+    ) -> int:
         if self._collected_merge_trace_dir is None:
-            return
+            return 0
         self._collected_merge_trace_call_index += 1
-        prompt_chars = self._count_collected_merge_prompt_chars(
+        prompt = build_collected_merge_prompt(
             target_date,
             source_events,
             deterministic_groups,
+            config=self.config,
         )
         step = {
             "step_index": self._collected_merge_trace_call_index,
+            "status": "started",
+            "rolling_step_index": rolling_step_index,
             "attempt_index": attempt_index,
-            "prompt_chars": prompt_chars,
+            "retry_reason": retry_reason,
+            "prompt_chars": len(prompt),
+            "prompt_file": f"step-{self._collected_merge_trace_call_index:03d}-prompt.txt",
             "input": collected_merge_source_metrics(source_events),
             "input_events": [item.to_dict() for item in source_events],
             "deterministic_groups": [list(group) for group in deterministic_groups],
-            "raw_group_count": len(merge_result.groups),
-            "raw_group_metrics": collected_merge_group_metrics(merge_result),
-            "missing_required_field_summary": missing_summary,
-            "raw_result": merge_result.to_dict(),
         }
         self._collected_merge_trace_steps.append(step)
         self._write_collected_merge_trace_step(step)
+        (self._collected_merge_trace_dir / step["prompt_file"]).write_text(
+            prompt,
+            encoding="utf-8",
+        )
+        return self._collected_merge_trace_call_index
+
+    def _record_collected_merge_trace_success(
+        self,
+        *,
+        step_index: int,
+        merge_result: CollectedMergeResult,
+        missing_summary: dict[str, int],
+    ) -> None:
+        step = self._collected_merge_trace_step(step_index)
+        if step is None:
+            return
+        step.update(
+            {
+                "status": "success",
+                "raw_group_count": len(merge_result.groups),
+                "raw_group_metrics": collected_merge_group_metrics(merge_result),
+                "missing_required_field_summary": missing_summary,
+                "raw_result": merge_result.to_dict(),
+            }
+        )
+        self._write_collected_merge_trace_step(step)
+
+    def _record_collected_merge_trace_failure(
+        self,
+        *,
+        step_index: int,
+        error: Exception,
+        retryable: bool,
+    ) -> None:
+        step = self._collected_merge_trace_step(step_index)
+        if step is None:
+            return
+        step.update(
+            {
+                "status": "failed",
+                "error": {
+                    "type": type(error).__name__,
+                    "summary": str(error),
+                    "retryable": retryable,
+                },
+            }
+        )
+        self._write_collected_merge_trace_step(step)
+
+    def _collected_merge_trace_step(
+        self,
+        step_index: int,
+    ) -> dict[str, Any] | None:
+        return next(
+            (
+                step
+                for step in self._collected_merge_trace_steps
+                if step.get("step_index") == step_index
+            ),
+            None,
+        )
 
     def _record_collected_merge_trace_final(
         self,
@@ -930,26 +1354,68 @@ class CollectedMergeRunner:
         path = self._collected_merge_trace_dir / f"step-{step['step_index']:03d}.json"
         path.write_text(dump_json(step, pretty=True), encoding="utf-8")
 
-    def _write_collected_merge_trace_summary(
+    def _write_collected_merge_source_audit(
         self,
         *,
         target_date: str,
         input_dir: Path,
-        output_path: Path,
+        source_file_count: int,
+        skipped_file_count: int,
+        partial_file_count: int,
+        parsed_event_count: int,
+        model_input_event_count: int,
+    ) -> None:
+        if self._collected_merge_trace_dir is None:
+            return
+        payload = {
+            "target_date": target_date,
+            "input_dir": str(input_dir.resolve()),
+            "source_file_count": source_file_count,
+            "skipped_file_count": skipped_file_count,
+            "partial_file_count": partial_file_count,
+            "parsed_event_count": parsed_event_count,
+            "model_input_event_count": model_input_event_count,
+            "source_files": self._collected_merge_source_audit,
+            "filter_diagnostics": self._collected_merge_filter_diagnostics,
+        }
+        (self._collected_merge_trace_dir / "source-audit.json").write_text(
+            dump_json(payload, pretty=True),
+            encoding="utf-8",
+        )
+
+    def _write_collected_merge_trace_summary(
+        self,
+        *,
+        status: str,
+        target_date: str,
+        input_dir: Path,
+        output_path: Path | None,
         source_file_count: int,
         source_event_count: int,
         merged_event_count: int,
+        skipped_file_count: int,
+        partial_file_count: int,
         warning_messages: list[str],
     ) -> None:
         if self._collected_merge_trace_dir is None:
             return
         summary = {
+            "status": status,
             "target_date": target_date,
             "input_dir": str(input_dir.resolve()),
-            "output_path": str(output_path.resolve()),
+            "output_path": None if output_path is None else str(output_path.resolve()),
             "source_file_count": source_file_count,
             "source_event_count": source_event_count,
             "merged_event_count": merged_event_count,
+            "skipped_file_count": skipped_file_count,
+            "partial_file_count": partial_file_count,
+            "source_files": self._collected_merge_source_audit,
+            "filter_diagnostics": self._collected_merge_filter_diagnostics,
+            "failed_step_indexes": [
+                step["step_index"]
+                for step in self._collected_merge_trace_steps
+                if step.get("status") == "failed"
+            ],
             "warning_messages": warning_messages,
             "steps": self._collected_merge_trace_steps,
         }
@@ -1009,6 +1475,42 @@ def extract_source_name_from_filename(filename: str, *, target_date: str = "") -
     if target_date and parsed.target_date != target_date:
         return ""
     return parsed.owner_name.strip()
+
+
+def _classify_source_markdown(
+    filename: str,
+    events: list[WorkEvent],
+) -> str:
+    parsed = parse_worktrace_markdown_filename(filename)
+    if parsed.is_merged:
+        return "upstream_merged"
+    if any(
+        event.workstream_name
+        or event.action_labels
+        or event.self_relations
+        or event.evidence_fingerprints
+        or event.file_keys
+        for event in events
+    ):
+        return "enhanced_personal"
+    return "legacy_personal"
+
+
+def _render_filter_warning(diagnostic: dict[str, Any]) -> str:
+    diagnostic_stage = str(diagnostic.get("stage", ""))
+    stage = "source" if diagnostic_stage.startswith("source_") else "merged"
+    source_file = str(diagnostic.get("source_file", ""))
+    if not source_file:
+        source_file = ",".join(
+            str(item) for item in diagnostic.get("source_files", []) if item
+        )
+    location = source_file or "unknown-source"
+    event_id = str(diagnostic.get("event_id", ""))
+    title = str(diagnostic.get("event_title", "")) or "(empty title)"
+    return (
+        f"Filtered {diagnostic.get('kind', 'unknown')} {stage} event: "
+        f"{location}#{event_id} ({title})."
+    )
 
 
 def collected_merge_missing_field_summary(
@@ -1171,40 +1673,63 @@ def render_collected_merge_trace_summary(summary: dict[str, Any]) -> str:
         "",
         "## Summary",
         "",
+        f"- Status: {summary.get('status', '')}",
         f"- Source files: {summary['source_file_count']}",
+        f"- Skipped files: {summary.get('skipped_file_count', 0)}",
+        f"- Partial files: {summary.get('partial_file_count', 0)}",
         f"- Source events: {summary['source_event_count']}",
         f"- Merged events: {summary['merged_event_count']}",
         f"- Output: `{summary['output_path']}`",
         "",
         "## Step Metrics",
         "",
-        "| Step | Attempt | Prompt chars | Input events | Synthetic inputs | Raw groups | Missing detail raw | Filled metadata | Retained events | Dropped by retention |",
-        "|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+        "| Step | Status | Rolling | Attempt | Retry reason | Prompt chars | Input events | Raw groups | Retained events | Error |",
+        "|---:|---|---:|---:|---|---:|---:|---:|---:|---|",
     ]
     for step in summary["steps"]:
-        missing_detail = step.get("missing_required_field_summary", {}).get(
-            "retention_detail",
-            0,
-        )
-        metadata_warnings = len(step.get("metadata_warnings", []))
         retained_events = step.get("retained_metrics", {}).get("event_count", "")
-        dropped = len(step.get("dropped_by_retention", []))
+        error_summary = str(step.get("error", {}).get("summary", "")).replace("|", "\\|")
         lines.append(
-            "| {step} | {attempt} | {prompt} | {input_events} | {synthetic} | "
-            "{raw_groups} | {missing_detail} | {metadata_warnings} | "
-            "{retained_events} | {dropped} |".format(
+            "| {step} | {status} | {rolling} | {attempt} | {retry_reason} | "
+            "{prompt} | {input_events} | {raw_groups} | {retained_events} | "
+            "{error} |".format(
                 step=step.get("step_index", ""),
+                status=step.get("status", ""),
+                rolling=step.get("rolling_step_index", ""),
                 attempt=step.get("attempt_index", ""),
+                retry_reason=step.get("retry_reason", ""),
                 prompt=step.get("prompt_chars", ""),
                 input_events=step.get("input", {}).get("event_count", ""),
-                synthetic=step.get("input", {}).get("synthetic_event_count", ""),
                 raw_groups=step.get("raw_group_count", ""),
-                missing_detail=missing_detail,
-                metadata_warnings=metadata_warnings,
                 retained_events=retained_events,
-                dropped=dropped,
+                error=error_summary,
             )
         )
+    lines.extend(["", "## Source Files", ""])
+    lines.extend(
+        [
+            "| File | Format | Status | Declared | Parsed | Model input | Sensitive | Excluded | Retention |",
+            "|---|---|---|---:|---:|---:|---:|---:|---:|",
+        ]
+    )
+    for item in summary.get("source_files", []):
+        lines.append(
+            "| {file} | {format} | {status} | {declared} | {parsed} | {model_input} | "
+            "{sensitive} | {excluded} | {retention} |".format(
+                file=item.get("source_file", ""),
+                format=item.get("format", ""),
+                status=item.get("status", ""),
+                declared=item.get("declared_event_count", ""),
+                parsed=item.get("parsed_event_count", ""),
+                model_input=item.get("model_input_event_count", ""),
+                sensitive=item.get("sensitive_filtered_count", 0),
+                excluded=item.get("excluded_filtered_count", 0),
+                retention=item.get("retention_filtered_count", 0),
+            )
+        )
+    lines.extend(["", "## Filter Diagnostics", ""])
+    for item in summary.get("filter_diagnostics", []):
+        lines.append(f"- {_render_filter_warning(item)}")
     lines.extend(["", "## Warnings", ""])
     for warning in summary["warning_messages"]:
         lines.append(f"- {warning}")

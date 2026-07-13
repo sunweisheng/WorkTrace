@@ -97,6 +97,10 @@ def test_docs_describe_enhanced_debug_artifacts() -> None:
         assert "input_events" in content
         assert "deterministic_groups" in content
         assert "boundary_warnings" in content
+        assert "source-audit.json" in content
+        assert "partial_file_count" in content
+        assert "WORKTRACE_COLLECTED_MERGE_RETRYABLE_ERROR_LIMIT" in content
+        assert "WORKTRACE_COLLECTED_MERGE_RETRY_DELAY_SECONDS" in content
 
 
 def test_docs_describe_non_stream_default_and_necessary_names() -> None:

@@ -92,11 +92,11 @@ flowchart LR
 `src/worktrace/collected_merge.py` 负责完整的 `merge-collected` 链路：
 
 1. 根目录和一级子目录分别建立 merge scope
-2. 当前层 Markdown 解析、来源姓名识别和坏文件跳过
+2. 当前层 Markdown 解析、来源姓名识别、尾部残缺事件部分恢复和坏文件跳过
 3. 来源事件配置关键词过滤与保留门槛
 4. 相同 `event_id` 的确定性预分组
 5. 小 prompt 一次合并，大 prompt 按来源文件滚动合并
-6. 缺失字段比例触发有限重试
+6. 可恢复模型错误只重试当前批次，缺失字段按独立次数重试
 7. 分组覆盖修复、工作流边界检查和非冲突内容补全
 8. 聚合工作流、动作、协作方式、消息指纹、文件标识和来源追溯信息
 9. 团队 `WorkEvent` 最终过滤、写入和自发送
@@ -121,7 +121,7 @@ flowchart LR
 ## 10. 调试入口
 
 - 个人日报：`--debug-output`，目录 `data/debug/conversations/<date>/`；失败轮次保存 `failure.json`，单片段回退使用 `fallback-01/`，直接提炼回退使用 `_anchor_fallback/`；`final_events.json` 保存最终草稿、事件和过滤 warning
-- 多人汇总：`WORKTRACE_COLLECTED_MERGE_TRACE=true`，目录默认 `data/debug/collected_merge/<date>/`；step JSON 保存完整输入、确定性组和工作流边界 warning
+- 多人汇总：`WORKTRACE_COLLECTED_MERGE_TRACE=true`，目录默认 `data/debug/collected_merge/<date>/`；`source-audit.json` 保存新旧来源解析和过滤明细，step JSON/prompt 在请求前写入，失败也生成 summary
 - 锚点独立实验：`python3 -m src.worktrace.anchor_experiment ...`
 
 独立锚点实验用于对比协议和缓存行为，不等同于正式日报；正式日报虽然已经使用本人参与的聊天窗口，并在分段失败后直接从这些窗口提炼，但不使用实验入口生成最终 Markdown。

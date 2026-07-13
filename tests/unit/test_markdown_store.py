@@ -594,6 +594,77 @@ generator: worktrace
     assert loaded.events[1].title == "第二件事"
 
 
+def test_markdown_store_partially_reads_truncated_trailing_event_when_enabled() -> None:
+    store = MarkdownEventStore(config=RuntimeConfig())
+    markdown = store.render_day_document(
+        DayDocument(
+            date="2026-07-10",
+            events=[
+                WorkEvent(
+                    date="2026-07-10",
+                    event_id="evt-complete",
+                    title="完整事件",
+                    content="完整事件内容。",
+                )
+            ],
+            generated_at="2026-07-10T10:00:00+08:00",
+        )
+    ).replace("event_count: 1", "event_count: 2")
+    markdown += '\n<!-- worktrace:event:start event_id="evt-truncated" -->\n'
+
+    with pytest.raises(StoreWriteError):
+        store.parse_day_document(markdown)
+
+    loaded = store.parse_day_document(markdown, allow_trailing_partial=True)
+
+    assert [event.event_id for event in loaded.events] == ["evt-complete"]
+    assert store.last_declared_event_count == 2
+    assert store.last_partial_event_ids == ["evt-truncated"]
+    assert store.last_warning_messages == [
+        "Skipped malformed trailing event block: evt-truncated."
+    ]
+
+
+def test_markdown_store_does_not_partially_read_first_truncated_event() -> None:
+    store = MarkdownEventStore(config=RuntimeConfig())
+    markdown = """---
+date: 2026-07-10
+event_count: 1
+generated_at: 2026-07-10T10:00:00+08:00
+generator: worktrace
+---
+
+<!-- worktrace:event:start event_id="evt-truncated" -->
+"""
+
+    with pytest.raises(StoreWriteError):
+        store.parse_day_document(markdown, allow_trailing_partial=True)
+
+
+def test_markdown_store_partially_reads_truncated_event_id_after_complete_event() -> None:
+    store = MarkdownEventStore(config=RuntimeConfig())
+    markdown = store.render_day_document(
+        DayDocument(
+            date="2026-07-10",
+            events=[
+                WorkEvent(
+                    date="2026-07-10",
+                    event_id="evt-complete",
+                    title="完整事件",
+                    content="完整事件内容。",
+                )
+            ],
+            generated_at="2026-07-10T10:00:00+08:00",
+        )
+    )
+    markdown += '\n<!-- worktrace:event:start event_id="evt-trun'
+
+    loaded = store.parse_day_document(markdown, allow_trailing_partial=True)
+
+    assert [event.event_id for event in loaded.events] == ["evt-complete"]
+    assert store.last_partial_event_ids == ["unknown"]
+
+
 def test_markdown_store_preserves_event_order(tmp_path: Path) -> None:
     store = MarkdownEventStore(config=RuntimeConfig(data_root=tmp_path / "data"))
     store.replace_day(

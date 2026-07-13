@@ -14,7 +14,10 @@ from src.worktrace.analyzers.online import (
     _close_global_client,
 )
 from src.worktrace.config import OnlineLLMSettings, RuntimeConfig
-from src.worktrace.errors import AnalyzerProtocolError
+from src.worktrace.errors import (
+    AnalyzerProtocolError,
+    RetryableAnalyzerProtocolError,
+)
 from src.worktrace.models import AnalysisBatch, ConversationSlice, NormalizedMessage
 
 
@@ -334,7 +337,7 @@ def test_online_analyzer_wraps_invalid_stream_json(
         sleep_func=lambda seconds: None,
     )
 
-    with pytest.raises(AnalyzerProtocolError) as exc_info:
+    with pytest.raises(RetryableAnalyzerProtocolError) as exc_info:
         analyzer.analyze_batch("2026-06-23", sample_batch())
 
     assert "stream contained invalid JSON" in str(exc_info.value)
@@ -372,7 +375,105 @@ def test_online_analyzer_surfaces_timeout(tmp_path: Path, monkeypatch: pytest.Mo
         sleep_func=lambda seconds: None,
     )
 
-    with pytest.raises(AnalyzerProtocolError) as exc_info:
+    with pytest.raises(RetryableAnalyzerProtocolError) as exc_info:
         analyzer.analyze_batch("2026-06-23", sample_batch())
 
     assert "timed out" in str(exc_info.value).lower()
+
+
+def test_online_analyzer_classifies_retryable_and_permanent_errors(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import httpx
+    from openai import (
+        APIConnectionError,
+        APIStatusError,
+        AuthenticationError,
+        BadRequestError,
+        PermissionDeniedError,
+        RateLimitError,
+    )
+
+    request = httpx.Request("POST", "https://llm.example/v1/responses")
+
+    def status_error(error_type, status_code: int, message: str):
+        return error_type(
+            message,
+            response=httpx.Response(status_code, request=request),
+            body=None,
+        )
+
+    cases = [
+        (
+            status_error(AuthenticationError, 401, "bad auth"),
+            AnalyzerProtocolError,
+        ),
+        (
+            status_error(PermissionDeniedError, 403, "forbidden"),
+            AnalyzerProtocolError,
+        ),
+        (
+            status_error(BadRequestError, 400, "bad request"),
+            AnalyzerProtocolError,
+        ),
+        (
+            status_error(APIStatusError, 500, "server error"),
+            RetryableAnalyzerProtocolError,
+        ),
+        (
+            status_error(APIStatusError, 408, "request timeout"),
+            RetryableAnalyzerProtocolError,
+        ),
+        (
+            status_error(RateLimitError, 429, "rate limited"),
+            RetryableAnalyzerProtocolError,
+        ),
+        (
+            APIConnectionError(message="connection failed", request=request),
+            RetryableAnalyzerProtocolError,
+        ),
+        (
+            APIConnectionError(message="certificate verify failed", request=request),
+            AnalyzerProtocolError,
+        ),
+    ]
+
+    class FakeHttpClient:
+        def close(self):
+            return None
+
+    monkeypatch.setattr(
+        "src.worktrace.analyzers.online._build_http_client",
+        lambda settings: FakeHttpClient(),
+    )
+
+    for raised_error, expected_type in cases:
+        _close_global_client()
+
+        class FakeResponses:
+            def create(self, **kwargs):
+                raise raised_error
+
+        class FakeClient:
+            def __init__(self):
+                self.responses = FakeResponses()
+
+            def close(self):
+                return None
+
+        monkeypatch.setattr(
+            "src.worktrace.analyzers.online.OpenAI",
+            lambda **kwargs: FakeClient(),
+        )
+        analyzer = OnlineLLMAnalyzer(
+            config=RuntimeConfig(data_root=tmp_path / "data"),
+            cwd=tmp_path,
+            settings_loader=lambda *args, **kwargs: build_settings(),
+            sleep_func=lambda seconds: None,
+        )
+
+        with pytest.raises(AnalyzerProtocolError) as exc_info:
+            analyzer.analyze_batch("2026-06-23", sample_batch())
+
+        assert type(exc_info.value) is expected_type
