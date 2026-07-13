@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -289,6 +290,54 @@ def test_online_analyzer_parses_stream_response(tmp_path: Path, monkeypatch: pyt
 
     assert result.candidate_events == []
     assert result.context_requests == []
+
+
+def test_online_analyzer_wraps_invalid_stream_json(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _close_global_client()
+    settings = build_settings(stream_enabled=True)
+
+    class InvalidStream:
+        def __iter__(self):
+            raise json.JSONDecodeError("invalid stream event", "", 0)
+
+    class FakeResponses:
+        def create(self, **kwargs):
+            return InvalidStream()
+
+    class FakeClient:
+        def __init__(self):
+            self.responses = FakeResponses()
+
+    class FakeHttpClient:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    monkeypatch.setattr(
+        "src.worktrace.analyzers.online._build_http_client",
+        lambda settings: FakeHttpClient(),
+    )
+    monkeypatch.setattr(
+        "src.worktrace.analyzers.online.OpenAI",
+        lambda **kwargs: FakeClient(),
+    )
+
+    analyzer = OnlineLLMAnalyzer(
+        config=RuntimeConfig(data_root=tmp_path / "data"),
+        cwd=tmp_path,
+        settings_loader=lambda *args, **kwargs: settings,
+        sleep_func=lambda seconds: None,
+    )
+
+    with pytest.raises(AnalyzerProtocolError) as exc_info:
+        analyzer.analyze_batch("2026-06-23", sample_batch())
+
+    assert "stream contained invalid JSON" in str(exc_info.value)
 
 
 def test_online_analyzer_surfaces_timeout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -453,6 +453,10 @@ class OnlineLLMAnalyzer(Analyzer):
             if "certificate verify failed" in reason.lower():
                 raise AnalyzerProtocolError(f"TLS certificate verification failed: {reason}") from exc
             raise AnalyzerProtocolError(f"Network error: {reason}") from exc
+        except json.JSONDecodeError as exc:
+            raise AnalyzerProtocolError(
+                "Online LLM stream contained invalid JSON data."
+            ) from exc
         except OpenAIError as exc:
             raise AnalyzerProtocolError(str(exc)) from exc
 

@@ -62,6 +62,11 @@ RETENTION_DETAIL_EVIDENCE_RULE = (
     "不要写 message id、open_id、conversation_id 或 om_/ou_/oc_ 等内部标识。"
 )
 
+PERSON_NAME_RETENTION_RULE = (
+    "人名只在明确责任分工、任务指派或确认沟通对象时保留；"
+    "与事件责任和推进无关的人名改写为岗位、角色或相关同事，不要输出参与人名单。"
+)
+
 
 def _build_self_relation_rule(config: RuntimeConfig) -> str:
     options = "、".join(
@@ -98,6 +103,7 @@ def build_batch_analysis_prompt(
             "咨询类事件、流程审核类事件、团建活动组织类事件、技能培训类事件，默认不要提炼；这类事项对后续公司级长期事件沉淀价值较低。",
             *LOW_RETENTION_EVENT_RULES,
             RETENTION_COMPLETENESS_RULE,
+            PERSON_NAME_RETENTION_RULE,
             _build_sensitive_rule(runtime_config),
             "一件事写一条；如果有多件事就拆开。",
             "topic 写短标题，content 写完整事项；如果有明确结果，直接融入 content，不要单独返回 result。",
@@ -324,6 +330,7 @@ def build_segment_batch_analysis_prompt(
             "表情是本人回复证据，但不能单凭表情描述事项已完成、已同意或已拒绝。",
             "普通约时间、确认开会、互通信息、泛泛审核/审批且无具体对象和结论，不要输出 candidate_event。",
             RETENTION_COMPLETENESS_RULE,
+            PERSON_NAME_RETENTION_RULE,
             "上下文消息只用于理解当前主消息，不得作为当前事件来源。",
         ],
         "input": {
@@ -641,6 +648,7 @@ def build_anchor_analysis_prompt(
             "咨询类事件、流程审核类事件、团建活动组织类事件、技能培训类事件，默认不要提炼；这类事项对后续公司级长期事件沉淀价值较低。",
             *LOW_RETENTION_EVENT_RULES,
             RETENTION_COMPLETENESS_RULE,
+            PERSON_NAME_RETENTION_RULE,
             "每个 candidate_event 只能落在当前 anchor_unit 内。",
             "每个 candidate_event 只表示一个主要动作。",
             "action_label 只写主要动作标签，例如：回复、审批、催办、撰写、核对、跟进、同步、确认。",
@@ -733,6 +741,7 @@ def build_anchor_batch_analysis_prompt(
             "咨询类事件、流程审核类事件、团建活动组织类事件、技能培训类事件，默认不要提炼；这类事项对后续公司级长期事件沉淀价值较低。",
             *LOW_RETENTION_EVENT_RULES,
             RETENTION_COMPLETENESS_RULE,
+            PERSON_NAME_RETENTION_RULE,
             "每个 candidate_event 只能留在自己的 anchor_unit 内。",
             "每个 candidate_event 只表示一个主要动作。",
             "action_label 只写主要动作标签，例如：回复、审批、催办、撰写、核对、跟进、同步、确认。",
@@ -850,6 +859,7 @@ def build_anchor_expansion_prompt(
             "每个 candidate_event 仍然只能表示一个主要动作或工作线索。",
             "每个 candidate_event 必须包含 object_hint、retention_reason 和 retention_detail。",
             RETENTION_COMPLETENESS_RULE,
+            PERSON_NAME_RETENTION_RULE,
             *LOW_RETENTION_EVENT_RULES,
             "泛泛完成审核/审批但没有具体业务对象、审批结论、问题、风险、金额、客户、项目、文档或后续动作，不要输出 candidate_event。",
             (

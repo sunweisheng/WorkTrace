@@ -345,7 +345,7 @@ OnlineLLMAnalyzer -> openai Python SDK -> Responses API provider
 - `collected_merge_prompt_char_threshold = 80000`
 - `slice_retry_limit = 3`
 - `anchor_batch_size = 3`
-- `llm_stream_enabled = True`
+- `llm_stream_enabled = False`
 - `llm_reasoning_effort = "none"`
 
 ### 9.2 `.env` 与环境变量
@@ -404,6 +404,8 @@ OnlineLLMAnalyzer -> openai Python SDK -> Responses API provider
 - workstream follow-up/resolution
 - resolved groups
 - `final_events.json`：过滤后的合并草稿、文件聚合和排序完成后的 `WorkEvent`、最终阶段 warning
+
+segmentation 和 segment batch 的模型失败轮次保存输入、prompt 与 `failure.json`。批次拆分后的单片段回退保存在片段目录的 `fallback-01/`；分段耗尽后的直接提炼保存在 `_anchor_fallback/<conversation>/<anchor-key>/attempt-XX/`。成功轮次继续保存输出和校验结果，异常轮次不伪造模型输出。
 
 多人汇总 trace 写 step JSON、`summary.json` 和 `summary.md`。step JSON 包含 prompt 字符数、`input_events`、`deterministic_groups`、输入/分组指标、字段缺失、覆盖修复、`boundary_warnings`、过滤和最终事件，因此可以从来源增强信息追到最终部门事件。
 

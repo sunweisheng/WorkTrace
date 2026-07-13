@@ -89,10 +89,27 @@ def test_docs_describe_enhanced_debug_artifacts() -> None:
 
     assert "final_events.json" in readme
     assert "final_events.json" in detailed
+    assert "failure.json" in readme
+    assert "failure.json" in detailed
+    assert "_anchor_fallback" in readme
+    assert "_anchor_fallback" in detailed
     for content in (readme, detailed, merge_design):
         assert "input_events" in content
         assert "deterministic_groups" in content
         assert "boundary_warnings" in content
+
+
+def test_docs_describe_non_stream_default_and_necessary_names() -> None:
+    readme = Path("README.md").read_text(encoding="utf-8")
+    online_usage = Path("docs/online-analyzer-usage.md").read_text(encoding="utf-8")
+    privacy = Path("docs/privacy-note.md").read_text(encoding="utf-8")
+    employee_guide = Path("docs/employee-guide.md").read_text(encoding="utf-8")
+
+    assert "WORKTRACE_LLM_STREAM=false" in readme
+    assert "WORKTRACE_LLM_STREAM=false" in online_usage
+    for content in (privacy, employee_guide):
+        assert "参与人名单" in content
+        assert "确有必要时保留姓名" in content
 
 
 def test_detailed_design_is_the_current_code_source_of_truth() -> None:

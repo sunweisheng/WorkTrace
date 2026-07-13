@@ -1,7 +1,15 @@
 from __future__ import annotations
 
-from src.worktrace.models import ConversationSlice, NormalizedMessage, SourceBackedEventDraft
+from dataclasses import replace
+
+from src.worktrace.models import (
+    ConversationSlice,
+    NormalizedMessage,
+    SelfRelationEvidence,
+    SourceBackedEventDraft,
+)
 from src.worktrace.pipeline.direct_relation_filter import (
+    filter_candidates_with_valid_self_relations,
     is_self_related_candidate_draft,
 )
 
@@ -210,3 +218,20 @@ def test_plain_name_mention_without_assignment_is_not_self_related() -> None:
         self_display_name="张玉环",
         self_assignment_keywords=SELF_ASSIGNMENT_KEYWORDS,
     )
+
+
+def test_filter_candidates_requires_validated_self_relation() -> None:
+    valid = replace(
+        _draft(["om_1"]),
+        self_relations=[SelfRelationEvidence("initiated", ["om_1"])],
+    )
+    invalid = replace(
+        _draft(["om_2"]),
+        draft_id="draft-2",
+        topic="无本人关联事项",
+    )
+
+    kept, warnings = filter_candidates_with_valid_self_relations([valid, invalid])
+
+    assert kept == [valid]
+    assert warnings == ["Filtered candidate without validated self relation: 无本人关联事项"]

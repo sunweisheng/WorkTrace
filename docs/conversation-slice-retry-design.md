@@ -159,10 +159,11 @@ analyzer 返回 `BatchSegmentAnalysisResult`，必须对每个输入 `segment_id
 
 `--debug-output` 会记录：
 
-- segmentation prompt、原始输出、校验片段和 warning
-- segment batch 输入、prompt、原始输出和候选统计
+- segmentation prompt、原始输出、校验片段和 warning；失败轮次保存 `failure.json`
+- segment batch 输入、prompt、原始输出和候选统计；失败轮次保存 `failure.json`
+- 批次失败后的单片段回退保存在 `fallback-01/`
 - context retry 前后输入与请求
-- 分段失败后直接提炼的输入输出（代码内名称为 anchor fallback）
+- 分段失败后直接提炼的输入输出保存在 `_anchor_fallback/`（代码内名称为 anchor fallback）
 
 调试目录可能包含裁剪后的消息、图片摘要、附件正文和链接正文，仅用于临时排障。
 

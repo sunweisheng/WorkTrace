@@ -4,7 +4,7 @@ import json
 from dataclasses import replace
 from pathlib import Path
 
-from src.worktrace.config import RuntimeConfig
+from src.worktrace.config import EventMetadataItem, RuntimeConfig
 from src.worktrace.constants import DailyRunStatus
 from src.worktrace.errors import AnalyzerProtocolError
 from src.worktrace.factories import RuntimeDependencies
@@ -26,11 +26,21 @@ from src.worktrace.models import (
     CrossConversationGroupResult,
     NormalizedMessage,
     LinkMeta,
+    SelfRelationEvidence,
     SelfIdentity,
     SourceBackedEventDraft,
 )
 from src.worktrace.runner import DailyTraceRunner
 from src.worktrace.stores.markdown import MarkdownEventStore
+
+
+def _config(**overrides) -> RuntimeConfig:
+    return RuntimeConfig(
+        self_relation_types=(
+            EventMetadataItem("initiated", "发起", 10),
+        ),
+        **overrides,
+    )
 
 
 def _message(
@@ -70,6 +80,8 @@ def _candidate(draft_id: str, source_message_id: str) -> SourceBackedEventDraft:
         object_hint=f"事项{draft_id}对象",
         retention_reason="decision_made",
         retention_detail=f"沟通中确认了事项{draft_id}的具体结论。",
+        self_evidence_message_ids=[source_message_id],
+        self_relations=[SelfRelationEvidence("initiated", [source_message_id])],
     )
 
 
@@ -199,7 +211,7 @@ class SegmentBatchAnalyzer:
 def test_runner_batches_multiple_self_turns_and_excludes_other_recipient_turn(
     tmp_path: Path,
 ) -> None:
-    config = RuntimeConfig(data_root=tmp_path / "data")
+    config = _config(data_root=tmp_path / "data")
     analyzer = SegmentBatchAnalyzer()
     runner = DailyTraceRunner(
         config=config,
@@ -225,6 +237,45 @@ def test_runner_batches_multiple_self_turns_and_excludes_other_recipient_turn(
     assert result.batch_count == 2
 
 
+def test_runner_filters_segment_candidate_without_validated_self_relation(
+    tmp_path: Path,
+) -> None:
+    class MissingRelationAnalyzer(SegmentBatchAnalyzer):
+        def analyze_segment_batch(self, batch):
+            unit = batch.segments[0]
+            candidate = replace(
+                _candidate("missing-relation", unit.primary_message_ids[0]),
+                self_evidence_message_ids=[],
+                self_relations=[],
+            )
+            return BatchSegmentAnalysisResult(
+                results=[
+                    BatchSegmentAnalysisItem(
+                        unit.segment_id,
+                        BatchAnalysisResult(candidate_events=[candidate]),
+                    )
+                ]
+            )
+
+    config = _config(data_root=tmp_path / "data")
+    runner = DailyTraceRunner(
+        config=config,
+        dependencies=RuntimeDependencies(
+            chat_source=SegmentSource(),
+            content_resolver=SegmentResolver(),
+            analyzer=MissingRelationAnalyzer(),
+            delivery_channel=SegmentDelivery(),
+            event_store=MarkdownEventStore(config=config),
+        ),
+    )
+
+    result = runner.run("2026-07-10")
+
+    assert result.status == DailyRunStatus.SUCCESS_WITH_WARNINGS.value
+    assert result.event_count == 0
+    assert "Filtered candidate without validated self relation" in result.error_summary
+
+
 def test_runner_debug_output_captures_segment_batch_input_output_and_filtering(
     tmp_path: Path,
 ) -> None:
@@ -240,7 +291,7 @@ def test_runner_debug_output_captures_segment_batch_input_output_and_filtering(
             ]
 
     debug_root = tmp_path / "debug"
-    config = RuntimeConfig(data_root=tmp_path / "data", conversation_debug_root=debug_root)
+    config = _config(data_root=tmp_path / "data", conversation_debug_root=debug_root)
     runner = DailyTraceRunner(
         config=config,
         dependencies=RuntimeDependencies(
@@ -274,13 +325,13 @@ def test_runner_prioritizes_self_authored_images_for_summaries(tmp_path: Path) -
 
     resolver = OrderingResolver()
     runner = DailyTraceRunner(
-        config=RuntimeConfig(data_root=tmp_path / "data"),
+        config=_config(data_root=tmp_path / "data"),
         dependencies=RuntimeDependencies(
             chat_source=SegmentSource(),
             content_resolver=resolver,
             analyzer=SegmentBatchAnalyzer(),
             delivery_channel=SegmentDelivery(),
-            event_store=MarkdownEventStore(config=RuntimeConfig(data_root=tmp_path / "data")),
+            event_store=MarkdownEventStore(config=_config(data_root=tmp_path / "data")),
         ),
     )
 
@@ -315,7 +366,7 @@ def test_runner_retries_only_the_invalid_anchor_segmentation(tmp_path: Path) -> 
                 ]
             )
 
-    config = RuntimeConfig(data_root=tmp_path / "data", anchor_retry_limit=1)
+    config = _config(data_root=tmp_path / "data", anchor_retry_limit=1)
     analyzer = RetryingAnalyzer()
     runner = DailyTraceRunner(
         config=config,
@@ -334,6 +385,66 @@ def test_runner_retries_only_the_invalid_anchor_segmentation(tmp_path: Path) -> 
     assert result.event_count == 2
     assert analyzer.segmentation_calls == 2
     assert analyzer.batch_calls == 1
+
+
+def test_runner_dumps_failed_segmentation_attempt_before_retry(tmp_path: Path) -> None:
+    class ProtocolRetryAnalyzer(SegmentBatchAnalyzer):
+        def segment_conversation(self, **kwargs):
+            self.segmentation_calls += 1
+            if self.segmentation_calls == 1:
+                raise AnalyzerProtocolError("temporary segmentation failure")
+            return ConversationSegmentationResult(
+                segments=[
+                    ConversationSegment(
+                        segment_id="turn-release",
+                        primary_message_ids=["om_1", "om_2"],
+                        self_evidence_message_ids=["om_1"],
+                    ),
+                    ConversationSegment(
+                        segment_id="turn-risk",
+                        primary_message_ids=["om_3"],
+                        self_evidence_message_ids=["om_3"],
+                    ),
+                    ConversationSegment(
+                        segment_id="turn-yuhuan",
+                        primary_message_ids=["om_4", "om_5"],
+                    ),
+                ]
+            )
+
+    debug_root = tmp_path / "debug"
+    config = _config(
+        data_root=tmp_path / "data",
+        conversation_debug_root=debug_root,
+        anchor_retry_limit=1,
+    )
+    runner = DailyTraceRunner(
+        config=config,
+        dependencies=RuntimeDependencies(
+            chat_source=SegmentSource(),
+            content_resolver=SegmentResolver(),
+            analyzer=ProtocolRetryAnalyzer(),
+            delivery_channel=SegmentDelivery(),
+            event_store=MarkdownEventStore(config=config),
+        ),
+    )
+
+    result = runner.run("2026-07-10")
+
+    assert result.status == DailyRunStatus.SUCCESS.value, result.error_summary
+    failure_paths = list(
+        debug_root.glob("2026-07-10/_segment_batches/**/segmentation-01/failure.json")
+    )
+    output_paths = list(
+        debug_root.glob(
+            "2026-07-10/_segment_batches/**/segmentation-02/segmentation_output.json"
+        )
+    )
+    assert len(failure_paths) == 1
+    assert len(output_paths) == 1
+    failure = json.loads(failure_paths[0].read_text(encoding="utf-8"))
+    assert failure["stage"] == "segmentation"
+    assert failure["attempt"] == 1
 
 
 def test_runner_segments_each_original_anchor_window_not_the_full_conversation(
@@ -390,7 +501,7 @@ def test_runner_segments_each_original_anchor_window_not_the_full_conversation(
             )
 
     analyzer = WindowAnalyzer()
-    config = RuntimeConfig(data_root=tmp_path / "data")
+    config = _config(data_root=tmp_path / "data")
     runner = DailyTraceRunner(
         config=config,
         dependencies=RuntimeDependencies(
@@ -503,7 +614,7 @@ def test_runner_resegments_only_the_context_requesting_turn(tmp_path: Path) -> N
         def merge_day_candidates(self, target_date, candidates):
             raise AssertionError("One candidate should not need day merge.")
 
-    config = RuntimeConfig(data_root=tmp_path / "data")
+    config = _config(data_root=tmp_path / "data")
     analyzer = ExpansionAnalyzer()
     runner = DailyTraceRunner(
         config=config,
@@ -550,7 +661,7 @@ def test_runner_splits_segment_batches_in_timeline_order_when_token_limit_is_hit
                 ]
             )
 
-    config = RuntimeConfig(data_root=tmp_path / "data", max_model_input_tokens=1)
+    config = _config(data_root=tmp_path / "data", max_model_input_tokens=1)
     analyzer = SplitAnalyzer()
     runner = DailyTraceRunner(
         config=config,
@@ -591,7 +702,11 @@ def test_runner_retries_failed_batch_then_degrades_to_individual_segments(
                 ]
             )
 
-    config = RuntimeConfig(data_root=tmp_path / "data")
+    debug_root = tmp_path / "debug"
+    config = _config(
+        data_root=tmp_path / "data",
+        conversation_debug_root=debug_root,
+    )
     analyzer = FallbackAnalyzer()
     runner = DailyTraceRunner(
         config=config,
@@ -615,6 +730,24 @@ def test_runner_retries_failed_batch_then_degrades_to_individual_segments(
         ["anchor-002:turn-risk"],
     ]
     assert result.skipped_slice_count == 1
+    analysis_failures = list(
+        debug_root.glob("2026-07-10/_segment_batches/**/analysis-*/failure.json")
+    )
+    fallback_outputs = list(
+        debug_root.glob("2026-07-10/_segment_batches/**/fallback-01/output.json")
+    )
+    fallback_failures = list(
+        debug_root.glob("2026-07-10/_segment_batches/**/fallback-01/failure.json")
+    )
+    assert len(analysis_failures) == 2
+    assert len(fallback_outputs) == 1
+    assert len(fallback_failures) == 1
+    assert all(
+        json.loads(path.read_text(encoding="utf-8"))["stage"] == "segment_batch"
+        for path in analysis_failures
+    )
+    fallback_failure = json.loads(fallback_failures[0].read_text(encoding="utf-8"))
+    assert fallback_failure["stage"] == "segment_fallback"
 
 
 def test_runner_falls_back_to_all_conversation_anchors_after_segmentation_exhaustion(
@@ -651,7 +784,12 @@ def test_runner_falls_back_to_all_conversation_anchors_after_segmentation_exhaus
                 ]
             )
 
-    config = RuntimeConfig(data_root=tmp_path / "data", anchor_retry_limit=0)
+    debug_root = tmp_path / "debug"
+    config = _config(
+        data_root=tmp_path / "data",
+        conversation_debug_root=debug_root,
+        anchor_retry_limit=0,
+    )
     analyzer = ConversationFallbackAnalyzer()
     runner = DailyTraceRunner(
         config=config,
@@ -671,6 +809,14 @@ def test_runner_falls_back_to_all_conversation_anchors_after_segmentation_exhaus
     assert analyzer.batch_calls == 0
     assert len(analyzer.anchor_batches) == 1
     assert len(analyzer.anchor_batches[0]) == 2
+    fallback_outputs = list(
+        debug_root.glob("2026-07-10/_anchor_fallback/**/attempt-01/output.json")
+    )
+    fallback_validations = list(
+        debug_root.glob("2026-07-10/_anchor_fallback/**/attempt-01/validation.json")
+    )
+    assert len(fallback_outputs) == 1
+    assert len(fallback_validations) == 1
 
 
 def test_anchor_fallback_retries_the_same_batch_before_splitting(tmp_path: Path) -> None:
@@ -693,8 +839,9 @@ def test_anchor_fallback_retries_the_same_batch_before_splitting(tmp_path: Path)
             )
 
     analyzer = RetryAnalyzer()
-    config = RuntimeConfig(
+    config = _config(
         data_root=tmp_path / "data",
+        conversation_debug_root=tmp_path / "debug",
         anchor_batch_size=4,
         anchor_batch_retry_limit=1,
     )
@@ -722,6 +869,18 @@ def test_anchor_fallback_retries_the_same_batch_before_splitting(tmp_path: Path)
         ["anchor-1", "anchor-2", "anchor-3", "anchor-4"],
         ["anchor-1", "anchor-2", "anchor-3", "anchor-4"],
     ]
+    failure_paths = list(
+        (tmp_path / "debug").glob(
+            "2026-07-10/_anchor_fallback/**/attempt-01/failure.json"
+        )
+    )
+    output_paths = list(
+        (tmp_path / "debug").glob(
+            "2026-07-10/_anchor_fallback/**/attempt-02/output.json"
+        )
+    )
+    assert len(failure_paths) == 1
+    assert len(output_paths) == 1
 
 
 def test_anchor_fallback_bisects_only_persistently_failing_batches(tmp_path: Path) -> None:
@@ -745,7 +904,7 @@ def test_anchor_fallback_bisects_only_persistently_failing_batches(tmp_path: Pat
             )
 
     analyzer = SplittingAnalyzer()
-    config = RuntimeConfig(
+    config = _config(
         data_root=tmp_path / "data",
         anchor_batch_size=4,
         anchor_batch_retry_limit=1,
@@ -799,7 +958,7 @@ def test_anchor_fallback_rebatches_only_missing_results(tmp_path: Path) -> None:
             )
 
     analyzer = PartialAnalyzer()
-    config = RuntimeConfig(
+    config = _config(
         data_root=tmp_path / "data",
         anchor_batch_size=4,
         anchor_batch_retry_limit=1,
@@ -890,7 +1049,7 @@ def test_anchor_fallback_rebatches_same_type_expansions(tmp_path: Path) -> None:
         )
 
     analyzer = ExpansionAnalyzer()
-    config = RuntimeConfig(data_root=tmp_path / "data", anchor_batch_size=2)
+    config = _config(data_root=tmp_path / "data", anchor_batch_size=2)
     runner = DailyTraceRunner(
         config=config,
         dependencies=RuntimeDependencies(
@@ -985,7 +1144,7 @@ def test_anchor_fallback_separates_different_expansion_types(tmp_path: Path) -> 
         attachment_refs=[attachment],
     )
     analyzer = MixedAnalyzer()
-    config = RuntimeConfig(data_root=tmp_path / "data", anchor_batch_size=2)
+    config = _config(data_root=tmp_path / "data", anchor_batch_size=2)
     runner = DailyTraceRunner(
         config=config,
         dependencies=RuntimeDependencies(
@@ -1059,7 +1218,7 @@ def test_runner_stops_remaining_segmentation_after_same_failure_threshold(
             )
 
     analyzer = CircuitAnalyzer()
-    config = RuntimeConfig(
+    config = _config(
         data_root=tmp_path / "data",
         anchor_retry_limit=0,
         conversation_segmentation_failure_threshold=2,
@@ -1142,7 +1301,7 @@ def test_runner_keeps_protocol_and_validation_segmentation_failures_separate(
             )
 
     analyzer = MixedFailureAnalyzer()
-    config = RuntimeConfig(
+    config = _config(
         data_root=tmp_path / "data",
         anchor_retry_limit=0,
         conversation_segmentation_failure_threshold=2,
@@ -1212,7 +1371,7 @@ def test_runner_hydrates_document_title_before_anchor_segmentation(tmp_path: Pat
                 ]
             )
 
-    config = RuntimeConfig(data_root=tmp_path / "data")
+    config = _config(data_root=tmp_path / "data")
     analyzer = TitleAnalyzer()
     runner = DailyTraceRunner(
         config=config,
@@ -1305,7 +1464,7 @@ def test_anchor_fallback_retries_only_context_requesting_anchor(tmp_path: Path) 
         def merge_day_candidates(self, target_date, candidates):
             raise AssertionError("One fallback candidate does not need day merge.")
 
-    config = RuntimeConfig(data_root=tmp_path / "data", anchor_retry_limit=1)
+    config = _config(data_root=tmp_path / "data", anchor_retry_limit=1)
     analyzer = AttachmentFallbackAnalyzer()
     runner = DailyTraceRunner(
         config=config,

@@ -46,6 +46,24 @@ def filter_self_related_candidate_drafts(
     return kept, warnings
 
 
+def filter_candidates_with_valid_self_relations(
+    drafts: list[SourceBackedEventDraft],
+) -> tuple[list[SourceBackedEventDraft], list[str]]:
+    kept: list[SourceBackedEventDraft] = []
+    warnings: list[str] = []
+
+    for draft in drafts:
+        if draft.self_relations:
+            kept.append(draft)
+            continue
+        warnings.append(
+            "Filtered candidate without validated self relation: "
+            f"{draft.topic or '(empty topic)'}"
+        )
+
+    return kept, warnings
+
+
 def is_self_related_candidate_draft(
     draft: SourceBackedEventDraft,
     conversation_slice: ConversationSlice,

@@ -120,7 +120,7 @@ flowchart LR
 
 ## 10. 调试入口
 
-- 个人日报：`--debug-output`，目录 `data/debug/conversations/<date>/`；`final_events.json` 保存最终草稿、事件和过滤 warning
+- 个人日报：`--debug-output`，目录 `data/debug/conversations/<date>/`；失败轮次保存 `failure.json`，单片段回退使用 `fallback-01/`，直接提炼回退使用 `_anchor_fallback/`；`final_events.json` 保存最终草稿、事件和过滤 warning
 - 多人汇总：`WORKTRACE_COLLECTED_MERGE_TRACE=true`，目录默认 `data/debug/collected_merge/<date>/`；step JSON 保存完整输入、确定性组和工作流边界 warning
 - 锚点独立实验：`python3 -m src.worktrace.anchor_experiment ...`
 

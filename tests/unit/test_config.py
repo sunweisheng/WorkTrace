@@ -47,7 +47,7 @@ def test_load_online_llm_settings_reads_local_env(tmp_path: Path) -> None:
     assert settings.model == "provider-model"
     assert settings.api_key == "file-key"
     assert settings.timeout_seconds == 45
-    assert settings.stream_enabled is True
+    assert settings.stream_enabled is False
     assert settings.tls_verify is False
     assert settings.reasoning_effort == "none"
 
@@ -125,8 +125,26 @@ def test_load_online_llm_settings_reads_stream_tls_and_sleep_overrides(tmp_path:
     assert settings.sleep_max_seconds == 2.5
 
 
-def test_runtime_config_enables_streaming_by_default() -> None:
-    assert RuntimeConfig().llm_stream_enabled is True
+def test_load_online_llm_settings_reads_false_stream_override(tmp_path: Path) -> None:
+    (tmp_path / ".env").write_text(
+        "WORKTRACE_LLM_BASE_URL=https://llm.example/v1\n"
+        "WORKTRACE_LLM_MODEL=provider-model\n"
+        "WORKTRACE_LLM_API_KEY=file-key\n"
+        "WORKTRACE_LLM_STREAM=false\n",
+        encoding="utf-8",
+    )
+
+    settings = load_online_llm_settings(
+        RuntimeConfig(llm_stream_enabled=True),
+        cwd=tmp_path,
+        environ={},
+    )
+
+    assert settings.stream_enabled is False
+
+
+def test_runtime_config_disables_streaming_by_default() -> None:
+    assert RuntimeConfig().llm_stream_enabled is False
 
 
 def test_load_runtime_config_overrides_reads_rule_lists(

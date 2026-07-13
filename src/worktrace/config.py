@@ -530,7 +530,7 @@ class RuntimeConfig:
     event_rules_file_name: str = DEFAULT_EVENT_RULES_FILE_NAME
     event_metadata_file_name: str = DEFAULT_EVENT_METADATA_FILE_NAME
     conversation_blacklist_file_name: str = DEFAULT_CONVERSATION_BLACKLIST_FILE_NAME
-    llm_stream_enabled: bool = True
+    llm_stream_enabled: bool = False
     llm_tls_verify: bool = False
     llm_sleep_min_seconds: float = 1.0
     llm_sleep_max_seconds: float = 2.0

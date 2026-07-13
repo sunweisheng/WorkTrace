@@ -124,7 +124,7 @@ flowchart TD
 
 Python 围绕本人消息和 reaction 形成 `AnchorUnit`，当前主链窗口为前后各 30 条消息。每个锚点窗口先交给 analyzer 返回 `segment_start_message_ids`，Python 再把起点扩展成连续 `ConversationSegmentUnit`。
 
-同一会话的片段会按 `max_model_input_tokens` 打包为 `SegmentAnalysisBatch`。模型为每个 `segment_id` 返回候选事件和上下文请求。候选除标题、内容和来源外，还可返回 `workstream_key`、`action_label` 和带证据消息的 `self_relations`。Python 校验参与类型是否来自 `config/event_metadata.json`，并确认每条参与证据确实是当前片段中的本人消息；无效参与项会丢弃并告警，不会删除整个候选。
+同一会话的片段会按 `max_model_input_tokens` 打包为 `SegmentAnalysisBatch`。模型为每个 `segment_id` 返回候选事件和上下文请求。候选除标题、内容和来源外，还可返回 `workstream_key`、`action_label` 和带证据消息的 `self_relations`。Python 校验参与类型是否来自 `config/event_metadata.json`，并确认每条参与证据确实是当前片段中的本人消息；无效参与项会丢弃并告警，新分段链中没有任何有效本人参与方式的候选不会进入后续合并。
 
 若分段反复失败，系统会暂停对当前会话继续分段，改为直接从本人参与的聊天窗口提炼。`ConversationSlice` 仍存在，但主要作为片段兼容载体和补充上下文输入，不再代表“整个会话只调用一次模型”。
 
@@ -254,7 +254,7 @@ WORKTRACE_LLM_REASONING_EFFORT=none
 
 ```dotenv
 WORKTRACE_LLM_TIMEOUT_SECONDS=600
-WORKTRACE_LLM_STREAM=true
+WORKTRACE_LLM_STREAM=false
 WORKTRACE_LLM_TLS_VERIFY=false
 WORKTRACE_LLM_SLEEP_MIN_SECONDS=1
 WORKTRACE_LLM_SLEEP_MAX_SECONDS=2
@@ -319,10 +319,11 @@ python3 -m src.worktrace.cli --date 2026-07-06 --debug-output
 
 调试产物位于 `data/debug/conversations/<target_date>/`，可能包含：
 
-- 锚点分段输入、prompt、原始输出和校验结果
-- 分段批次输入、prompt、原始输出和统计
+- 锚点分段输入、prompt、原始输出和校验结果；失败轮次保存 `failure.json`
+- 分段批次输入、prompt、原始输出和统计；失败轮次保存 `failure.json`
+- 批次失败后的单片段回退保存在各片段的 `fallback-01/`
 - 上下文补充前后的片段
-- 分段失败后的直接提炼结果
+- 分段失败后的直接提炼结果保存在 `_anchor_fallback/`
 - `_merge_day_candidates/` 下的全日合并输入输出
 - 工作流归属补充判断和最终分组
 - `final_events.json`：最终合并草稿、完成文件聚合和排序后的事件，以及最终过滤 warning

@@ -169,6 +169,7 @@ def test_batch_prompt_uses_original_message_ids_and_slim_rules(tmp_path: Path) -
     assert "加班、请假、补卡、考勤、调休、外出报备等行政流程审批，不要提炼为工作事项。" in prompt
     assert "泛泛完成审核/审批/工作审核/审核任务但没有具体业务对象、审批结论、问题、风险、金额、客户、项目、文档或后续动作，不要提炼为事项。" in prompt
     assert "只有同时具备具体对象、保留理由、保留依据的工作事件才输出" in prompt
+    assert "人名只在明确责任分工、任务指派或确认沟通对象时保留" in prompt
     assert "retention_detail 表示保留依据/来源证据" in prompt
     assert "不要写 message id、open_id、conversation_id 或 om_/ou_/oc_ 等内部标识。" in prompt
     assert "不要只写泛泛的价值判断" in prompt
@@ -292,6 +293,7 @@ def test_anchor_prompt_serialization_is_compact(tmp_path: Path) -> None:
     assert "个人请假、家庭原因、孩子学校证明、个人行程报备，不要提炼为工作事件。" in prompt
     assert "泛泛完成审核/审批/工作审核/审核任务但没有具体业务对象、审批结论、问题、风险、金额、客户、项目、文档或后续动作，不要提炼为事项。" in prompt
     assert "只有同时具备具体对象、保留理由、保留依据的工作事件才输出" in prompt
+    assert "人名只在明确责任分工、任务指派或确认沟通对象时保留" in prompt
     assert "retention_detail 表示保留依据/来源证据" in prompt
     assert "不要写 message id、open_id、conversation_id 或 om_/ou_/oc_ 等内部标识。" in prompt
     assert "不要单独返回 result" in prompt
@@ -403,6 +405,7 @@ def test_anchor_expansion_prompt_includes_previous_result_and_expansion(tmp_path
     assert "本人明天晚到，需去学校为孩子开证明，不要输出 candidate_event。" in prompt
     assert "泛泛完成审核/审批但没有具体业务对象、审批结论、问题、风险、金额、客户、项目、文档或后续动作，不要输出 candidate_event。" in prompt
     assert "只有同时具备具体对象、保留理由、保留依据的工作事件才输出" in prompt
+    assert "人名只在明确责任分工、任务指派或确认沟通对象时保留" in prompt
     assert "retention_detail 表示保留依据/来源证据" in prompt
     assert "不要写 message id、open_id、conversation_id 或 om_/ou_/oc_ 等内部标识。" in prompt
     assert "Do not output private meals" not in prompt
@@ -510,6 +513,7 @@ def test_anchor_batch_prompt_includes_low_retention_rules(tmp_path: Path) -> Non
     assert "个人请假、家庭原因、孩子学校证明、个人行程报备，不要提炼为工作事件。" in prompt
     assert "泛泛完成审核/审批/工作审核/审核任务但没有具体业务对象、审批结论、问题、风险、金额、客户、项目、文档或后续动作，不要提炼为事项。" in prompt
     assert "只有同时具备具体对象、保留理由、保留依据的工作事件才输出" in prompt
+    assert "人名只在明确责任分工、任务指派或确认沟通对象时保留" in prompt
     assert "retention_detail 表示保留依据/来源证据" in prompt
     assert "不要写 message id、open_id、conversation_id 或 om_/ou_/oc_ 等内部标识。" in prompt
     assert "本人明天晚到，需去学校为孩子开证明，不要输出 candidate_event。" in prompt

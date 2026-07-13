@@ -345,6 +345,10 @@ def test_segment_prompt_recombines_context_and_primary_messages_in_time_order() 
     payload = json.loads(build_segment_batch_analysis_prompt(batch))
     prompt_messages = payload["input"]["segments"][0]["messages"]
 
+    assert any(
+        "人名只在明确责任分工、任务指派或确认沟通对象时保留" in rule
+        for rule in payload["rules"]
+    )
     assert [item["id"] for item in prompt_messages] == ["om_1", "om_2"]
     assert [item["role"] for item in prompt_messages] == ["context", "primary"]
 

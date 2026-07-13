@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+from hashlib import sha1
 import logging
 from pathlib import Path
 import re
@@ -35,6 +36,7 @@ from .models import (
 )
 from .analyzers.output_schemas import workstream_assignment_output_schema
 from .analyzers.prompts import (
+    build_anchor_batch_analysis_prompt,
     build_unassigned_workstream_assignment_prompt,
     build_workstream_assignment_prompt,
 )
@@ -59,7 +61,10 @@ from .pipeline.cross_conversation_merge import (
     materialize_grouped_merged_drafts,
 )
 from .pipeline.workstream_resolution import groups_from_workstream_assignments
-from .pipeline.direct_relation_filter import filter_self_related_candidate_drafts
+from .pipeline.direct_relation_filter import (
+    filter_candidates_with_valid_self_relations,
+    filter_self_related_candidate_drafts,
+)
 from .pipeline.event_merge import build_work_events
 from .pipeline.filtering import filter_messages
 from .pipeline.retention_filter import (
@@ -699,6 +704,13 @@ class DailyTraceRunner:
                         except AnalyzerProtocolError as exc:
                             model_call_count += 1
                             segmentation_error = str(exc)
+                            self._dump_segmentation_failure_debug_artifacts(
+                                target_date=target_date,
+                                anchor_unit=anchor_unit,
+                                retry_round=retry_round,
+                                prompt=segmentation_prompt,
+                                error_summary=segmentation_error,
+                            )
                             continue
 
                         model_call_count += 1
@@ -843,6 +855,11 @@ class DailyTraceRunner:
                 warnings.extend(fallback_warnings)
                 skipped_segment_count += fallback_skipped_count
                 model_call_count += fallback_call_count
+
+        candidates, self_relation_warnings = filter_candidates_with_valid_self_relations(
+            candidates
+        )
+        warnings.extend(self_relation_warnings)
 
         return (
             candidates,
@@ -1024,14 +1041,26 @@ class DailyTraceRunner:
         final_missing: list[AnchorUnit] = list(anchor_units)
         saw_response = False
         for attempt in range(self.config.anchor_batch_retry_limit + 1):
+            prompt = build_anchor_batch_analysis_prompt(
+                target_date,
+                anchor_units,
+                config=self.config,
+            )
             try:
                 result = self.dependencies.analyzer.analyze_anchor_batch(
                     target_date,
                     anchor_units,
                 )
                 call_count += 1
-            except AnalyzerProtocolError:
+            except AnalyzerProtocolError as exc:
                 call_count += 1
+                self._dump_anchor_fallback_failure_debug_artifacts(
+                    target_date=target_date,
+                    anchor_units=anchor_units,
+                    attempt=attempt,
+                    prompt=prompt,
+                    error_summary=str(exc),
+                )
                 continue
 
             saw_response = True
@@ -1039,10 +1068,20 @@ class DailyTraceRunner:
                 result.results,
                 anchor_units,
             )
+            validation_warnings = []
             if invalid_count:
-                warnings.append(
-                    "Filtered invalid anchor fallback batch result."
-                )
+                validation_warnings.append("Filtered invalid anchor fallback batch result.")
+                warnings.extend(validation_warnings)
+            self._dump_anchor_fallback_debug_artifacts(
+                target_date=target_date,
+                anchor_units=anchor_units,
+                attempt=attempt,
+                prompt=prompt,
+                output_payload=result.to_dict(),
+                valid_results=final_valid,
+                missing_units=final_missing,
+                warnings=validation_warnings,
+            )
             if not final_missing:
                 return final_valid, warnings, 0, call_count
             if attempt < self.config.anchor_batch_retry_limit:
@@ -1139,6 +1178,14 @@ class DailyTraceRunner:
                 return candidates, warnings, skipped_count, call_count
             except AnalyzerProtocolError as exc:
                 call_count += 1
+                self._dump_segment_batch_failure_debug_artifacts(
+                    batch=batch,
+                    directory_name=f"analysis-{attempt + 1:02d}",
+                    prompt=prompt,
+                    stage="segment_batch",
+                    attempt=attempt,
+                    error_summary=str(exc),
+                )
                 if attempt == 0:
                     warnings.append("Segment batch failed; retrying the same batch once.")
                     continue
@@ -1159,10 +1206,23 @@ class DailyTraceRunner:
                 self_display_name=batch.self_display_name,
                 segments=[unit],
             )
+            prompt = (
+                self.dependencies.analyzer.build_segment_batch_prompt(single_batch)
+                if hasattr(self.dependencies.analyzer, "build_segment_batch_prompt")
+                else None
+            )
             try:
                 result = self.dependencies.analyzer.analyze_segment_batch(single_batch)
                 call_count += 1
-            except AnalyzerProtocolError:
+            except AnalyzerProtocolError as exc:
+                self._dump_segment_batch_failure_debug_artifacts(
+                    batch=single_batch,
+                    directory_name="fallback-01",
+                    prompt=prompt,
+                    stage="segment_fallback",
+                    attempt=0,
+                    error_summary=str(exc),
+                )
                 warnings.append(
                     f"Skipped segment after batch and single-segment analysis failures: {unit.segment_id}."
                 )
@@ -1185,6 +1245,16 @@ class DailyTraceRunner:
             candidates.extend(unit_candidates)
             warnings.extend(unit_warnings)
             skipped_count += unit_skipped_count
+            self._dump_segment_batch_debug_artifacts(
+                batch=single_batch,
+                retry_round=0,
+                prompt=prompt,
+                output_payload=result.to_dict(),
+                candidates=unit_candidates,
+                warnings=unit_warnings,
+                skipped_count=unit_skipped_count,
+                directory_name="fallback-01",
+            )
 
         logger.warning(
             "Segment batch fallback completed after analyzer failure: %s",
@@ -1625,6 +1695,49 @@ class DailyTraceRunner:
             encoding="utf-8",
         )
 
+    def _dump_segmentation_failure_debug_artifacts(
+        self,
+        *,
+        target_date: str,
+        anchor_unit: AnchorUnit,
+        retry_round: int,
+        prompt: str | None,
+        error_summary: str,
+    ) -> None:
+        debug_root = self.config.conversation_debug_root
+        if debug_root is None:
+            return
+        directory = (
+            debug_root
+            / target_date
+            / "_segment_batches"
+            / _safe_conversation_dir_name(anchor_unit.conversation_id)
+            / _safe_conversation_dir_name(anchor_unit.anchor_unit_id)
+            / f"segmentation-{retry_round + 1:02d}"
+        )
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / "segmentation_input.json").write_text(
+            dump_json(anchor_unit.to_dict(), pretty=True) + "\n",
+            encoding="utf-8",
+        )
+        if prompt is not None:
+            (directory / "segmentation_prompt.txt").write_text(prompt, encoding="utf-8")
+        (directory / "failure.json").write_text(
+            dump_json(
+                {
+                    "stage": "segmentation",
+                    "status": "failed",
+                    "attempt": retry_round + 1,
+                    "anchor_unit_id": anchor_unit.anchor_unit_id,
+                    "anchor_message_ids": list(anchor_unit.anchor_message_ids),
+                    "error_summary": error_summary,
+                },
+                pretty=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
     def _dump_segment_batch_debug_artifacts(
         self,
         *,
@@ -1635,6 +1748,7 @@ class DailyTraceRunner:
         candidates: list[SourceBackedEventDraft],
         warnings: list[str],
         skipped_count: int,
+        directory_name: str | None = None,
     ) -> None:
         debug_root = self.config.conversation_debug_root
         if debug_root is None:
@@ -1646,7 +1760,7 @@ class DailyTraceRunner:
             / "_segment_batches"
             / _safe_conversation_dir_name(batch.conversation_id)
             / _safe_conversation_dir_name(segment_key)
-            / f"analysis-{retry_round + 1:02d}"
+            / (directory_name or f"analysis-{retry_round + 1:02d}")
         )
         directory.mkdir(parents=True, exist_ok=True)
         (directory / "input.json").write_text(
@@ -1671,6 +1785,182 @@ class DailyTraceRunner:
             + "\n",
             encoding="utf-8",
         )
+
+    def _dump_segment_batch_failure_debug_artifacts(
+        self,
+        *,
+        batch: SegmentAnalysisBatch,
+        directory_name: str,
+        prompt: str | None,
+        stage: str,
+        attempt: int,
+        error_summary: str,
+    ) -> None:
+        debug_root = self.config.conversation_debug_root
+        if debug_root is None:
+            return
+        segment_key = "-".join(item.segment_id for item in batch.segments)
+        directory = (
+            debug_root
+            / batch.target_date
+            / "_segment_batches"
+            / _safe_conversation_dir_name(batch.conversation_id)
+            / _safe_conversation_dir_name(segment_key)
+            / directory_name
+        )
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / "input.json").write_text(
+            dump_json(batch.to_dict(), pretty=True) + "\n",
+            encoding="utf-8",
+        )
+        if prompt is not None:
+            (directory / "prompt.txt").write_text(prompt, encoding="utf-8")
+        (directory / "failure.json").write_text(
+            dump_json(
+                {
+                    "stage": stage,
+                    "status": "failed",
+                    "attempt": attempt + 1,
+                    "segment_ids": [item.segment_id for item in batch.segments],
+                    "error_summary": error_summary,
+                },
+                pretty=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+    def _dump_anchor_fallback_debug_artifacts(
+        self,
+        *,
+        target_date: str,
+        anchor_units: list[AnchorUnit],
+        attempt: int,
+        prompt: str,
+        output_payload: dict[str, object],
+        valid_results: dict[str, AnchorAnalysisResult],
+        missing_units: list[AnchorUnit],
+        warnings: list[str],
+    ) -> None:
+        directory = self._anchor_fallback_debug_directory(
+            target_date=target_date,
+            anchor_units=anchor_units,
+            attempt=attempt,
+        )
+        if directory is None:
+            return
+        self._write_anchor_fallback_debug_input(
+            directory=directory,
+            target_date=target_date,
+            anchor_units=anchor_units,
+            prompt=prompt,
+        )
+        (directory / "output.json").write_text(
+            dump_json(output_payload, pretty=True) + "\n",
+            encoding="utf-8",
+        )
+        (directory / "validation.json").write_text(
+            dump_json(
+                {
+                    "valid_results": {
+                        anchor_unit_id: result.to_dict()
+                        for anchor_unit_id, result in valid_results.items()
+                    },
+                    "missing_anchor_unit_ids": [
+                        item.anchor_unit_id for item in missing_units
+                    ],
+                    "warnings": list(warnings),
+                },
+                pretty=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+    def _dump_anchor_fallback_failure_debug_artifacts(
+        self,
+        *,
+        target_date: str,
+        anchor_units: list[AnchorUnit],
+        attempt: int,
+        prompt: str,
+        error_summary: str,
+    ) -> None:
+        directory = self._anchor_fallback_debug_directory(
+            target_date=target_date,
+            anchor_units=anchor_units,
+            attempt=attempt,
+        )
+        if directory is None:
+            return
+        self._write_anchor_fallback_debug_input(
+            directory=directory,
+            target_date=target_date,
+            anchor_units=anchor_units,
+            prompt=prompt,
+        )
+        (directory / "failure.json").write_text(
+            dump_json(
+                {
+                    "stage": "anchor_fallback",
+                    "status": "failed",
+                    "attempt": attempt + 1,
+                    "anchor_unit_ids": [item.anchor_unit_id for item in anchor_units],
+                    "error_summary": error_summary,
+                },
+                pretty=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+    def _anchor_fallback_debug_directory(
+        self,
+        *,
+        target_date: str,
+        anchor_units: list[AnchorUnit],
+        attempt: int,
+    ) -> Path | None:
+        debug_root = self.config.conversation_debug_root
+        if debug_root is None or not anchor_units:
+            return None
+        serialized_units = dump_json(
+            [item.to_dict() for item in anchor_units],
+            pretty=False,
+        )
+        input_fingerprint = sha1(serialized_units.encode("utf-8")).hexdigest()[:12]
+        anchor_key = f"{anchor_units[0].anchor_unit_id}-{input_fingerprint}"
+        directory = (
+            debug_root
+            / target_date
+            / "_anchor_fallback"
+            / _safe_conversation_dir_name(anchor_units[0].conversation_id)
+            / _safe_conversation_dir_name(anchor_key)
+            / f"attempt-{attempt + 1:02d}"
+        )
+        directory.mkdir(parents=True, exist_ok=True)
+        return directory
+
+    def _write_anchor_fallback_debug_input(
+        self,
+        *,
+        directory: Path,
+        target_date: str,
+        anchor_units: list[AnchorUnit],
+        prompt: str,
+    ) -> None:
+        (directory / "input.json").write_text(
+            dump_json(
+                {
+                    "target_date": target_date,
+                    "anchor_units": [item.to_dict() for item in anchor_units],
+                },
+                pretty=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        (directory / "prompt.txt").write_text(prompt, encoding="utf-8")
 
     def _dump_segment_context_debug_artifacts(
         self,

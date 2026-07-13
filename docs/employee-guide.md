@@ -45,7 +45,8 @@ WorkTrace 会读取你在指定日期里发过消息或做过 reaction 的飞书
 - 不会默认自动上传到公司统一数据库
 - 不会长期保存完整原始聊天记录
 - 不会把所有聊天都抓进来，只处理你在当天发过消息或做过 reaction 的会话
-- 不会在最终 Markdown 里默认显示人名、群名、open_id、消息 ID、会话 ID
+- 不会在最终 Markdown 里显示群名、open_id、消息 ID、会话 ID 或参与人名单
+- 事件正文只在责任分工、任务指派、确认沟通对象等确有必要时保留姓名
 
 ## 3. 你需要提前准备什么
 
@@ -298,10 +299,10 @@ data/debug/conversations/2026-06-23/_merge_day_candidates/
 
 这个调试根目录可能包含：
 
-- 锚点分段输入、prompt、输出和校验结果
-- 分段批次输入、prompt 和候选结果
+- 锚点分段输入、prompt、输出和校验结果；失败轮次保存 `failure.json`
+- 分段批次输入、prompt 和候选结果；失败轮次和单片段回退分别保存在 `analysis-XX/`、`fallback-01/`
 - 上下文扩展前后的片段
-- 分段失败后的直接提炼结果
+- 分段失败后的直接提炼结果保存在 `_anchor_fallback/`
 - 跨会话 merge 和工作流归属校正结果
 - `final_events.json` 中完成文件聚合和排序后的最终事件、证据指纹、文件标识和过滤 warning
 
