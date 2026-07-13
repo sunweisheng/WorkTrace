@@ -11,6 +11,7 @@ from ..models import (
     ContextRequest,
     ConversationSlice,
     MergedEventDraft,
+    SelfRelationEvidence,
     SourceBackedEventDraft,
 )
 from ..utils.link_refs import build_message_link_candidates, sort_referenced_link_ids
@@ -91,6 +92,8 @@ def validate_batch_analysis_result(
     slices_by_id: dict[str, ConversationSlice],
     *,
     self_open_id: str = "",
+    self_relation_keys: tuple[str, ...] = (),
+    warning_sink: list[str] | None = None,
 ) -> BatchAnalysisResult:
     valid_candidates: list[SourceBackedEventDraft] = []
     valid_requests: list[ContextRequest] = []
@@ -128,6 +131,13 @@ def validate_batch_analysis_result(
             conversation_slice=conversation_slice,
             self_open_id=self_open_id,
         )
+        self_relations = _filter_valid_self_relations(
+            candidate.self_relations,
+            allowed_relations=self_relation_keys,
+            valid_self_evidence_message_ids=self_evidence_message_ids,
+            candidate_id=candidate.draft_id,
+            warning_sink=warning_sink,
+        )
 
         draft_id = candidate.draft_id.strip()
         date = candidate.date.strip()
@@ -157,6 +167,7 @@ def validate_batch_analysis_result(
                 referenced_link_ids=referenced_link_ids,
                 referenced_attachment_ids=referenced_attachment_ids,
                 self_evidence_message_ids=self_evidence_message_ids,
+                self_relations=self_relations,
                 workstream_key=(candidate.workstream_key or "").strip(),
                 source_message_ids=normalized_ids,
                 source_conversation_id=source_conversation_id,
@@ -227,6 +238,9 @@ def validate_merged_event_drafts(
                 referenced_attachment_ids=list(
                     dict.fromkeys(draft.referenced_attachment_ids)
                 ),
+                workstream_name=draft.workstream_name,
+                action_labels=list(dict.fromkeys(draft.action_labels)),
+                self_relations=list(dict.fromkeys(draft.self_relations)),
                 source_message_ids=ordered_ids,
                 source_conversation_ids=sorted(set(draft.source_conversation_ids)),
             )
@@ -266,6 +280,7 @@ def validate_cross_conversation_groups(
                     group_id=group.group_id,
                     draft_ids=normalized_ids,
                     primary_draft_id=primary_draft_id,
+                    workstream_name=group.workstream_name,
                 )
             )
 
@@ -346,6 +361,64 @@ def _filter_valid_self_evidence_message_ids(
     ]
 
 
+def _filter_valid_self_relations(
+    items: list[SelfRelationEvidence],
+    *,
+    allowed_relations: tuple[str, ...],
+    valid_self_evidence_message_ids: list[str],
+    candidate_id: str,
+    warning_sink: list[str] | None,
+) -> list[SelfRelationEvidence]:
+    allowed = set(allowed_relations)
+    valid_evidence = set(valid_self_evidence_message_ids)
+    evidence_by_relation: dict[str, list[str]] = {}
+
+    for item in items:
+        relation = item.relation.strip()
+        evidence_ids = list(dict.fromkeys(item.evidence_message_ids))
+        if relation not in allowed:
+            _append_self_relation_warning(
+                warning_sink,
+                candidate_id,
+                f"unsupported relation `{relation or '<empty>'}`",
+            )
+            continue
+        if not evidence_ids or not set(evidence_ids).issubset(valid_evidence):
+            _append_self_relation_warning(
+                warning_sink,
+                candidate_id,
+                "evidence is missing, outside the current segment, or not sent by self",
+            )
+            continue
+        relation_evidence = evidence_by_relation.setdefault(relation, [])
+        relation_evidence.extend(
+            message_id
+            for message_id in evidence_ids
+            if message_id not in relation_evidence
+        )
+
+    return [
+        SelfRelationEvidence(
+            relation=relation,
+            evidence_message_ids=evidence_by_relation[relation],
+        )
+        for relation in allowed_relations
+        if relation in evidence_by_relation
+    ]
+
+
+def _append_self_relation_warning(
+    warning_sink: list[str] | None,
+    candidate_id: str,
+    reason: str,
+) -> None:
+    if warning_sink is None:
+        return
+    warning_sink.append(
+        f"Ignored invalid self relation for candidate {candidate_id or '<unknown>'}: {reason}."
+    )
+
+
 def _link_id_belongs_to_messages(link_id: str, message_ids: list[str]) -> bool:
     for candidate_message_id in message_ids:
         if link_id.startswith(f"{candidate_message_id}#link"):
@@ -385,6 +458,7 @@ def normalize_cross_conversation_groups_with_fallback(
                     group_id=group.group_id,
                     draft_ids=normalized_ids,
                     primary_draft_id=primary_draft_id,
+                    workstream_name=group.workstream_name,
                 )
             )
 
@@ -395,6 +469,14 @@ def normalize_cross_conversation_groups_with_fallback(
                 group_id=f"fallback-{index}",
                 draft_ids=[draft_id],
                 primary_draft_id=draft_id,
+                workstream_name=next(
+                    (
+                        candidate.workstream_key.strip()
+                        for candidate in candidates
+                        if candidate.draft_id == draft_id
+                    ),
+                    "",
+                ),
             )
         )
 

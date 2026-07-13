@@ -8,6 +8,7 @@ from src.worktrace.models import (
     ConversationSlice,
     LinkMeta,
     NormalizedMessage,
+    SelfRelationEvidence,
     SourceBackedEventDraft,
 )
 from src.worktrace.pipeline.validation import (
@@ -391,6 +392,82 @@ def test_validation_drops_linked_file_text_request_with_unknown_link_id() -> Non
     validated = validate_batch_analysis_result(result, {"slice-1": conversation_slice})
 
     assert validated.context_requests == []
+
+
+def test_validation_keeps_valid_self_relations_and_warns_for_invalid_items() -> None:
+    self_message = NormalizedMessage(
+        conversation_id="oc_1",
+        conversation_name="项目群",
+        message_id="om_self",
+        sender_open_id="ou_self",
+        sender_name="Me",
+        send_time="2026-06-22T10:00:00+08:00",
+        message_type="text",
+        text="我来发起并推进",
+        reply_to_message_id=None,
+        quote_message_id=None,
+        links=[],
+        attachments=[],
+        is_system=False,
+    )
+    other_message = NormalizedMessage(
+        conversation_id="oc_1",
+        conversation_name="项目群",
+        message_id="om_other",
+        sender_open_id="ou_other",
+        sender_name="Other",
+        send_time="2026-06-22T10:01:00+08:00",
+        message_type="text",
+        text="收到",
+        reply_to_message_id=None,
+        quote_message_id=None,
+        links=[],
+        attachments=[],
+        is_system=False,
+    )
+    conversation_slice = ConversationSlice(
+        slice_id="slice-1",
+        conversation_id="oc_1",
+        conversation_name="项目群",
+        anchor_message_ids=["om_self"],
+        in_day_message_ids=["om_self"],
+        messages=[self_message, other_message],
+    )
+    result = BatchAnalysisResult(
+        candidate_events=[
+            SourceBackedEventDraft(
+                draft_id="d1",
+                date="2026-06-22",
+                topic="项目发起",
+                content="发起项目并推进。",
+                source_message_ids=["om_self"],
+                source_conversation_id="oc_1",
+                source_slice_id="slice-1",
+                confidence=0.9,
+                self_evidence_message_ids=["om_self", "om_other"],
+                self_relations=[
+                    SelfRelationEvidence("initiated", ["om_self"]),
+                    SelfRelationEvidence("unknown", ["om_self"]),
+                    SelfRelationEvidence("collaboration", ["om_other"]),
+                    SelfRelationEvidence("primary_execution", ["om_outside"]),
+                ],
+            )
+        ]
+    )
+    warnings: list[str] = []
+
+    validated = validate_batch_analysis_result(
+        result,
+        {"slice-1": conversation_slice},
+        self_open_id="ou_self",
+        self_relation_keys=("initiated", "primary_execution", "collaboration"),
+        warning_sink=warnings,
+    )
+
+    assert validated.candidate_events[0].self_relations == [
+        SelfRelationEvidence("initiated", ["om_self"])
+    ]
+    assert len(warnings) == 3
 
 
 def test_validation_deduplicates_cross_conversation_groups() -> None:

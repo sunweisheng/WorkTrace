@@ -1,243 +1,247 @@
 # WorkTrace
 
-WorkTrace 是一个面向普通员工的个人工作事件整理工具。它的目标不是监控个人隐私，而是帮助员工把“今天和自己直接相关的工作沟通”整理成一份可以自己先审阅、再决定是否转发的每日 Markdown 记录，减少过几天或过几周后回忆不清当时发生了什么的问题。
+WorkTrace 是一个个人工作事件整理工具。它从当前用户在指定日期内直接参与的飞书沟通中提炼工作事件，生成可审阅的 Markdown，并先发送给当前用户自己。
 
-当前阶段，WorkTrace 主要服务使用 `Codex` 或兼容 `Codex Skill` 的 Agent 的员工用户。个人日报模式的输入来源默认是飞书聊天，输出是一份当天的本地 Markdown 文件，并通过飞书 CLI 机器人身份发给员工自己。另有管理人员汇总模式，可把多人已经生成的 WorkTrace Markdown 放入 `merge_inbox/YYYY/MM/DD/` 后生成团队汇总 `YYYY-MM-DD-登录人姓名-merged.md`；日期目录下的一级子目录会作为独立合并范围，各自生成自己的团队汇总文件，并同样通过飞书机器人发给当前登录人自己。若同一真实事项中包含“当前登录用户自己的个人事件 MD”来源，则团队汇总会以该来源为主，其它来源仅作不冲突补充。
+仓库同时提供两条正式业务链路：
+
+- 个人日报：读取当前用户可见的飞书消息，生成 `data/YYYY/MM/YYYY-MM-DD-姓名.md`
+- 多人汇总：读取已收集的个人 Markdown，生成 `merge_inbox/YYYY/MM/DD/.../YYYY-MM-DD-登录人姓名-merged.md`
+
+它不是员工监控系统，也不会默认把结果发给领导。个人日报会把必要的文本上下文和启用的图片内容发送给用户自己配置的在线模型服务，使用前必须确认模型服务和隐私边界。
 
 ## 快速使用说明
 
-员工每天不需要手工整理聊天内容。输入就是“目标日期内你自己发过消息、且和你自己直接相关的飞书工作对话”。
+对 Agent 说：
 
-- 你可以直接对 Agent 说：`帮我生成 2026-07-06 的个人事件MD`
-- 也可以说：`跑一下 2026-07-06 的 WorkTrace 个人日报`
-- 执行后，你会得到本地个人文件 `YYYY-MM-DD-姓名.md`，同时飞书机器人会把这份文件发给你自己
+- `帮我生成 2026-07-06 的个人事件MD`
+- `帮我合并 2026-07-06 的部门事件MD`
 
-管理人员先收集团队成员当天已经生成的个人 MD，放进 `merge_inbox/YYYY/MM/DD/`；如果要按项目或小组分开汇总，就放在日期目录下的一级子目录里。
+或直接执行：
 
-- 你可以直接对 Agent 说：`帮我合并 2026-07-06 的部门事件MD`
-- 也可以说：`把 merge_inbox 里 2026-07-06 的多人日报合并成部门事件MD`
-- 执行后，你会得到规范化的团队汇总文件 `YYYY-MM-DD-登录人姓名-merged.md`，同时飞书机器人会把每个生成的汇总文件发给你自己
+```bash
+python3 -m src.worktrace.cli --preflight
+python3 -m src.worktrace.cli --date 2026-07-06
+python3 -m src.worktrace.cli merge-collected --date 2026-07-06
+```
 
-仓库根目录同时作为 Codex skill 根目录使用，安装时应链接整个仓库目录，而不是单独链接某个 `skill/` 子目录。
+日常运行只读取本地表情目录。如需显式更新飞书表情目录：
 
-## 项目目标
+```bash
+python3 -m src.worktrace.cli sync-reaction-catalog --source feishu
+```
 
-当前阶段的目标是：
-
-- 帮员工提取目标日期内与自己直接相关的工作事件
-- 支持管理人员对已收集的多人 WorkTrace Markdown 做团队事项汇总
-- 自动过滤明显无关内容与部分敏感内容
-- 输出只适合转发和回顾的结构化 Markdown
-- 默认把结果先发给员工自己，而不是直接发给领导
-- 从第一天起就让输出格式兼容后续人工逐级汇总
-
-当前阶段不负责：
-
-- 自动从员工原始聊天直接给领导、部门或公司做汇总
-- 自动把结果上传到公司统一数据库
-- 处理员工所有聊天或围观会话
-- 跨天事项合并
-- 真正的定时调度
-- 其他 IM 工具或其他 Agent 的正式实现
-
-## 隐私说明
-
-这部分很重要。WorkTrace 应该让员工清楚知道它做什么，也知道它不做什么。
-
-WorkTrace 的设计目标不是抓取私人聊天，不是做个人画像，也不是把员工看不到的数据悄悄发给别人。它当前只尝试整理“目标日期内本人发过消息、且与本人直接相关的工作事件”。
-
-当前默认的隐私保护边界如下：
-
-- 只处理目标日期内本人发过消息的会话
-- 只保留与本人直接相关的工作事项
-- 可通过配置让提示词避开薪资、绩效、争吵、辱骂等敏感内容
-- 最终输出默认不显示人名、群名、open_id、消息 ID、会话 ID、发送时间点
-- 正式主流程默认不长期保存原始聊天内容
-- 长期保留的主产物是结构化 Markdown，而不是原始聊天记录
-- 生成成功后默认只通过飞书 CLI 机器人身份发给员工自己
-
-同时也要诚恳说明客观边界：
-
-- WorkTrace 会通过本地 `lark-cli` 读取飞书聊天
-- WorkTrace 会把经过裁剪和压缩后的必要上下文发送到用户自己配置的在线 LLM 服务
-- 因此，是否使用、使用什么模型服务、配置什么地址和密钥，应由当前用户或组织明确决定
-- WorkTrace 不能承诺“任何第三方永远不会接触输入内容”，除非后续改造成纯本地模型链路
-
-如果要打消员工疑虑，说明文件里必须坚持两点：
-
-- 不夸大，不写“绝对安全”
-- 告诉员工哪些数据会经过哪些系统，以及系统默认如何减少隐私暴露
+三个入口都会向 `stdout` 输出 machine-readable JSON。个人日报正式执行前会自动运行 preflight；`merge-collected` 和 `sync-reaction-catalog` 是独立子命令，不走个人日报的整套 preflight。
 
 ## 当前范围
 
-当前已经落地或将作为本阶段正式交付的能力包括：
+已经进入正式代码路径的能力：
 
-- 飞书聊天源，基于 `lark-cli`
-- Online / Codex analyzer 通道
-- Markdown 本地存储
-- 会话级首轮事件提炼
-- 首轮 / 扩窗 prompt 携带 reply / quote 关系摘要
-- 会话内扩窗重跑，以及附件正文 / 飞书文档正文按需补充
-- 同日全量候选事件的跨会话合并
-- 同日重跑覆盖
-- 管理人员收集多人 Markdown 后的同日团队汇总合并，支持日期根目录和一级子目录分别汇总
-- 默认通过内置 Online analyzer 调用兼容 OpenAI `Responses API` 的在线模型服务
-- 本地 `.env` / 环境变量私有配置在线模型参数，不随 git 提交
-- 默认只保留与本人直接相关的事项
-- 只保留具备“具体对象、保留理由、保留依据”的工作相关结果，零风险无效消息和低沉淀价值事件由 Python 过滤
-- 默认不提炼咨询类事件、流程审核类事件、团建活动组织类事件、技能培训类事件，这类事项不作为公司级长期事件沉淀重点
-- 最终直接输出事件清单，不再生成管理者总结
-- 默认通过飞书 CLI 机器人身份将当天 Markdown 文件发给当前登录用户自己
-- 管理汇总模式默认把每个汇总 Markdown 通过飞书 CLI 机器人身份发给当前登录用户自己
+- 使用 `lark-cli` user 身份发现会话和读取消息
+- 同时把“本人发言”和“本人当天 reaction”作为会话发现及锚点信号
+- 从本地表情目录补充 reaction 的中文名称、说明和语义
+- 围绕本人锚点构造窗口，由 LLM 切分工作片段
+- 将同一会话的多个片段按模型输入上限打包分析
+- 按 `context_requests` 补更早/更晚消息、文本附件正文或飞书文档正文
+- 主动下载并摘要启用范围内的图片附件
+- 分段失败时改为直接从本人参与的聊天窗口提炼，不让单个窗口中断整天
+- 对候选、合并草稿和最终事件执行多层 Python 校验与过滤
+- 全日跨会话初始分组，并通过独立工作流 assignment 生成权威分组
+- 聚合有证据支持的文件链接和附件名
+- 覆盖写入个人 Markdown，并通过飞书 bot 发给当前用户自己
+- 对已收集的多人 Markdown 做同日团队汇总，支持日期目录和一级子目录分别汇总
 
-## 当前主流程
+当前不做：
 
-当前个人日报主流程如下：
+- 定时调度
+- 跨天事件合并
+- 从员工原始聊天自动生成领导汇总
+- 自动上传到公司统一数据库
+- 其他 IM 的正式接入
 
-1. 拉取目标日期内本人参与且本人当日发过消息的飞书会话
-2. Python 过滤明显无效消息
-3. 按会话构造 `ConversationSlice`
-4. `1 个会话 = 1 次首轮 LLM`，首轮会发送当前 `ConversationSlice` 内全部消息，并携带 reply / quote 关系摘要、附件元信息、链接元信息，只提炼该会话中与本人直接相关的 `candidate_events`
-5. 若首轮返回 `context_requests`，则在同一会话内自动补充更早消息、更晚消息、附件正文或飞书文档 / wiki 正文，并重跑直到收敛、无新信息或达到重跑上限
-6. 汇总全日所有会话的 `candidate_events`
-7. Python 按结构化保留门槛过滤低价值候选事件
-8. 一次性调用 `merge_day_candidates(...)`，对全日候选事件做跨会话分组
-9. Python 根据分组结果物化 `MergedEventDraft`，并再次校验保留门槛
-10. Python 构建最终 `WorkEvent`
-11. Python 聚合每个最终事件对应的显式文档链接
-12. 将事件列表写入当天 Markdown 文件，文件名为 `YYYY-MM-DD-姓名.md`
-13. 通过飞书 CLI 机器人身份将当天 Markdown 文件发送给当前登录用户自己
+## 整体流程
 
-管理人员汇总流程如下：
+```mermaid
+flowchart TD
+    A["CLI 入口"] --> B{"命令"}
+    B -->|"--date"| C["加载配置与会话黑名单"]
+    C --> D["个人日报 preflight"]
+    D --> E["飞书消息采集与个人事件提炼"]
+    E --> F["data/YYYY/MM/个人 Markdown"]
+    F --> G["飞书 bot 发送给本人"]
 
-1. 管理人员把多人已经生成的 WorkTrace Markdown 放入 `merge_inbox/YYYY/MM/DD/`
-2. 来源文件名只要能识别出日期和姓名成分即可，例如 `YYYY-MM-DD-姓名.md`、`姓名-YYYY-MM-DD.md`、`姓名_YYYY-MM-DD.md`
-3. 日期根目录始终作为一个合并范围；日期目录下每个一级子目录也作为独立合并范围
-4. Python 读取每个合并范围当前层的标准 WorkTrace Markdown 事件块，不递归更深层目录
-5. Python 先按同一套结构化保留门槛过滤来源事件
-6. 相同 `event_id` 且标题/内容满足确定性规则时先锁定为合并组
-7. 若来源文件名中的姓名与当前登录用户名精确匹配，则该来源会被标记为“合并人来源”；若当前目录没有匹配到，则写 warning 并回退为普通多人合并
-8. 若合并 prompt 超过 `collected_merge_prompt_char_threshold`，Python 会按来源文件从小到大滚动合并，默认阈值为 `80000` 字符
-9. 其它事件交给 LLM 保守判断是否属于同一真实工作事件；若某个合并组包含“合并人来源”，则最终标题、内容、具体对象、保留理由、保留依据都以该来源为主，其它来源只补充不冲突的信息
-10. Python 校验和修复 LLM 返回的分组，保留来源人员和来源事件 ID，并在写入前再次校验保留门槛
-11. 每个合并范围生成规范化汇总文件 `YYYY-MM-DD-登录人姓名-merged.md`
-12. 通过飞书 CLI 机器人身份将每个汇总 Markdown 文件发送给当前登录用户自己
+    B -->|"merge-collected"| H["读取 merge_inbox 当日目录"]
+    H --> I["多人事件分组、修复与过滤"]
+    I --> J["当前目录 merged Markdown"]
+    J --> G
 
-## 输出原则
+    B -->|"sync-reaction-catalog"| K["同步飞书 reaction 元数据与图片"]
+    K --> L["config/reaction_catalogs + config/assets"]
+```
 
-当前阶段最终面向员工的个人 Markdown，只保留下面这些公共工作信息：
+## 个人日报流程
+
+当前默认 analyzer 是 `OnlineLLMAnalyzer`。它支持分段批处理，因此正式主链不是旧文档中的“一个会话一次首轮 LLM”，而是下面的流程。
+
+```mermaid
+flowchart TD
+    A["获取当前 user 身份"] --> B["搜索本人发言和本人 reaction 所在会话"]
+    B --> C["排除 conversation_blacklist"]
+    C --> D["分页拉取当日会话消息"]
+    D --> E["标准化消息并加载本地 reaction 语义"]
+    E --> F["过滤系统消息、撤回和空消息"]
+    F --> G["下载并摘要启用范围内的图片"]
+    G --> H["围绕本人发言/reaction 构造锚点窗口"]
+    H --> I["LLM 返回片段起始消息"]
+    I --> J["Python 校验片段、去重主消息归属"]
+    J --> K["同会话片段按 token 上限组批"]
+    K --> L["LLM 提炼事件、工作流、动作和本人参与方式"]
+    L --> M{"context_requests?"}
+    M -->|"有"| N["补消息、文本附件或飞书文档正文后重试"]
+    N --> L
+    M -->|"无"| O["候选敏感/排除过滤 + 保留门槛"]
+    O --> P["全日跨会话分组"]
+    P --> Q["独立工作流归属解析并生成权威分组"]
+    Q --> R["物化并合并工作流、动作、参与方式"]
+    R --> S["草稿过滤 + WorkEvent 构建 + 消息指纹"]
+    S --> T["聚合文件证据和文件标识 + 最终过滤 + 排序"]
+    T --> U["覆盖写 Markdown"]
+    U --> V["飞书 bot 发送给本人"]
+
+    I -. "连续分段失败" .-> W["直接从本人参与的聊天窗口提炼"]
+    W --> O
+```
+
+### 1. 会话发现与消息采集
+
+`FeishuCliChatSource` 先查当前用户身份，再用两类信号发现目标会话：
+
+- 当前用户在目标日期发送过消息
+- 当前用户在目标日期对消息做过 reaction
+
+`config/conversation_blacklist.json` 中的会话会在发现和拉取阶段同时排除。随后按会话分页拉取目标日期内消息并标准化文本、reply/quote、链接、附件和 reaction。
+
+### 2. 锚点、分段与分段批处理
+
+Python 围绕本人消息和 reaction 形成 `AnchorUnit`，当前主链窗口为前后各 30 条消息。每个锚点窗口先交给 analyzer 返回 `segment_start_message_ids`，Python 再把起点扩展成连续 `ConversationSegmentUnit`。
+
+同一会话的片段会按 `max_model_input_tokens` 打包为 `SegmentAnalysisBatch`。模型为每个 `segment_id` 返回候选事件和上下文请求。候选除标题、内容和来源外，还可返回 `workstream_key`、`action_label` 和带证据消息的 `self_relations`。Python 校验参与类型是否来自 `config/event_metadata.json`，并确认每条参与证据确实是当前片段中的本人消息；无效参与项会丢弃并告警，不会删除整个候选。
+
+若分段反复失败，系统会暂停对当前会话继续分段，改为直接从本人参与的聊天窗口提炼。`ConversationSlice` 仍存在，但主要作为片段兼容载体和补充上下文输入，不再代表“整个会话只调用一次模型”。
+
+### 3. 上下文与附件
+
+模型可请求：
+
+- `earlier_messages`
+- `later_messages`
+- `attachment_text`
+- `linked_file_text`
+
+文本附件只在明确请求时下载和读取，范围由 `config/attachment_text.json` 控制。飞书 Docx/Wiki 正文也只在明确请求时读取。
+
+图片是当前主链的主动能力：`config/image_summary.json` 启用后，系统在分段前下载符合限制的图片，通过当前在线模型生成低分辨率工作内容摘要，再把摘要附到对应片段。图片下载失败或摘要失败会记 warning 并跳过，不中断整天。
+
+### 4. 候选过滤、跨会话合并与工作流校正
+
+每个候选必须携带真实来源消息 ID、本人关联证据、具体对象、保留理由和保留依据。Python 会先执行配置关键词过滤和结构化保留门槛。
+
+候选多于一条时，LLM 先返回跨会话语义分组，Python 校验/修复覆盖关系。当前 Online analyzer 还支持结构化 `request_json`，runner 随后会对全部候选执行独立的工作流归属请求，并以 `WorkstreamAssignment` 生成权威分组；未分配候选会在已有工作流上下文中再判断一次。工作流根名称会写入最终分组；只有工作流请求失败时，才回退到候选 `workstream_key`。物化 `MergedEventDraft` 时，主要动作按来源消息顺序去重，参与方式按配置顺序去重。
+
+合并草稿和最终 `WorkEvent` 还会再次执行关键词过滤与保留门槛，因此模型输出不能绕过 Python 规则。
+
+### 5. 文件、输出与发送
+
+最终事件只聚合有来源证据支持的文档链接和附件。可点击链接会隐藏敏感 query 参数；普通附件以 `《文件名》` 展示。
+
+个人输出路径：
+
+```text
+data/YYYY/MM/YYYY-MM-DD-姓名.md
+```
+
+同日重跑采用覆盖写入。即使当天没有保留事件，也会生成一份 `event_count: 0` 的合法 Markdown。写入完成后，系统通过 `lark-cli im +messages-send --as bot` 把文件发给当前用户自己；发送失败会保留本地文件并在 JSON 摘要中返回 warning。
+
+## 多人汇总流程
+
+多人汇总只读取已经生成的 WorkTrace Markdown，不重新读取员工聊天。
+
+```mermaid
+flowchart TD
+    A["merge_inbox/YYYY/MM/DD"] --> B["根目录 + 每个一级子目录分别成为 scope"]
+    B --> C["读取当前层有效 Markdown"]
+    C --> D["解析正文、工作流、动作、协作方式和隐藏指纹"]
+    D --> E["来源事件关键词过滤 + 保留门槛"]
+    E --> F["相同 event_id 的确定性预分组"]
+    F --> G{"prompt 超过阈值?"}
+    G -->|"否"| H["一次 LLM 合并"]
+    G -->|"是"| I["按来源文件从小到大滚动合并"]
+    H --> J["按共同消息/文件/对象/连续动作确认同一事件"]
+    I --> J
+    J --> K["必要时重试、修复遗漏组、检查工作流边界"]
+    K --> L["物化团队 WorkEvent"]
+    L --> M["最终关键词过滤 + 保留门槛"]
+    M --> N["写入当前 scope 的 merged Markdown"]
+    N --> O["飞书 bot 发送给当前登录用户"]
+```
+
+输入示例：
+
+```text
+merge_inbox/2026/07/06/
+├── 2026-07-06-张三.md
+├── 李四-2026-07-06.md
+└── 项目A/
+    └── 2026-07-06-王五.md
+```
+
+根目录和 `项目A/` 会分别生成一个 `YYYY-MM-DD-登录人姓名-merged.md`。只扫描当前层，二级及更深目录不参与。
+
+两条事件都有非空工作流且名称不同，Python 会禁止合并；工作流相同也不能单独作为合并理由。共同消息指纹、共同文件、相同具体对象或连续动作只是强证据，仍由模型结合内容确认。只有标题相似、时间接近或部门相同不会触发合并。
+
+同一事件的不同员工描述会作为不同视角整合，最终不按人员逐条展示贡献。来源文件名中的姓名与当前登录用户名精确一致时，该来源会标记为“合并人来源”；只有来源间出现明确冲突时才采用合并人版本并写 warning，没有冲突时任何一方提供的有效补充都必须保留。
+
+## 输出字段
+
+个人 Markdown 事件公开字段：
 
 - 日期
 - 事件标题
-- 事件内容
+- 工作流
+- 主要动作
+- 内容
 - 具体对象
-- 保留理由（面向阅读的中文说明；内部仍保留 `retention_reason` 枚举）
-- 保留依据（来源证据，说明来自哪个会话、谁发起或确认、关键动作或结论）
+- 本人参与方式
+- 保留理由
+- 保留依据
 - 涉及文件
 
-其中“涉及文件”的用途是给员工未来回忆当时事件细节时使用，不是给 LLM 做复杂推理用的。真实链接应该尽量留在最终 Markdown 里给人看；没有可点击链接的普通附件，也应以 `《文件名》` 形式显示，避免只留下不可读的 token。
+团队汇总把“本人参与方式”改为“协作方式”，并额外显示：
 
-管理人员汇总产物 `YYYY-MM-DD-登录人姓名-merged.md` 例外：为了团队事项审阅和追溯来源，会额外显示 `来源人员` 和 `来源事件 ID`。
+- 来源人员
+- 来源事件 ID
 
-“有效工作事件”必须同时具备具体对象、保留理由和保留依据：例如产出或修改了文档、数据、配置、代码，形成了结论或决策，发现或处理了问题/风险，明确了待办、负责人、期限，推进了客户、合同、付款、交付等外部业务，或审核/审批有明确对象和结论。保留依据应写清来源证据，而不是泛泛价值判断。仅写“完成审核”“完成审核工作”，或只是“下午开会互通一下信息”的普通安排，不应进入个人日报，也不会进入管理人员汇总。
+`event_id`、内部 `retention_reason` 枚举和 `merge_meta` 保存在 HTML 注释中。`merge_meta` 只保存消息证据和稳定文件标识的 SHA-256 结果，不保存原始 `om_`、`oc_`、`ou_` 标识。旧 Markdown 没有新字段时仍可读取和参与汇总，新字段显示“未明确”。
 
-## LLM 调用原则
+允许的保留理由枚举：
 
-当前主流程中的 LLM 调用默认且强制使用两层约束：
+- `deliverable_updated`
+- `decision_made`
+- `issue_or_risk_found`
+- `follow_up_assigned`
+- `external_business_progress`
+- `substantive_approval`
 
-- prompt 末尾统一追加 `/no_think`
-- 请求体里显式要求关闭推理过程，默认配置 `WORKTRACE_LLM_REASONING_EFFORT=none`
+## 配置
 
-这意味着当前链路更偏向“直接抽取、直接归并、直接结构化输出”，而不是依赖模型展示推理过程。
+### 本地私有模型配置
 
-同时，当前 prompt 中对链接的表达也应尽量弱化：
-
-- 可以保留 `[飞书文档]`
-- 可以保留 `[飞书文档: 标题]`
-- 不应把完整 URL 列表直接展开给模型
-
-当前首轮 / 扩窗 prompt 还有两条额外约束：
-
-- 不再按消息条数把当前 slice / anchor unit 截成前 40 条；凡是已进入当前分析窗口的消息都会发送给 LLM
-- 若当前消息是在纠正或替换前文对象，模型必须优先采用当前消息确认后的对象；被 reply / quote 的内容只能作为背景
-
-## 仓库结构
-
-当前仓库结构如下：
-
-```text
-.
-├── SKILL.md
-├── README.md
-├── docs/
-├── data/
-├── src/
-└── tests/
-```
-
-说明：
-
-- 根目录既是通用脚本项目根目录，也是 Codex skill 根目录。
-- `SKILL.md` 放在仓库根目录，作为 skill 入口说明。
-- `src/` 承载可复用的 Python 逻辑。
-
-## 核心设计摘要
-
-- Python 负责确定性流程，包括抓取、过滤、切片、扩窗、校验、合并物化、链接聚合、投递和存储。
-- LLM 负责语义提炼与跨会话分组，不负责确定性流程控制。
-- 默认在线链路为 `OnlineLLMAnalyzer -> OpenAI Python SDK -> 在线 Responses API provider`。
-- `codex` analyzer 仍保留为非默认备选路径。
-- LLM 不参与数据计算，计算必须由 Python 完成。
-- 个人日报 CLI 固定为 `python -m src.worktrace.cli --date YYYY-MM-DD`，`stdout` 返回 machine-readable JSON 执行摘要。
-- 管理汇总 CLI 固定为 `python -m src.worktrace.cli merge-collected --date YYYY-MM-DD`，输入来自 `merge_inbox/YYYY/MM/DD/` 及其一级子目录，每个合并范围生成本目录 `YYYY-MM-DD-登录人姓名-merged.md`。
-- 飞书表情目录仅通过 `python3 -m src.worktrace.cli sync-reaction-catalog --source feishu` 显式更新；该命令同步官方默认 reaction、版本控制的 PNG 和 LLM 生成的中文说明。日常日报只读取本地目录，不会联网更新表情资源。
-- 如需排查真实运行中的提炼和 merge 行为，可追加 `--debug-output`，把调试文件写入本地目录。
-- `event_id` 由 Python 基于目标日期内归一化后的来源消息集合稳定生成，但不应作为员工最终看到的主要字段。
-- 正式执行默认不长期落盘原始聊天内容，最终只保留结构化事件清单。
-- 存储目标为按年月目录组织的每日 Markdown 文件，个人日报文件名为 `YYYY-MM-DD-姓名.md`。
-
-## 依赖说明
-
-当前依赖如下：
-
-- `python3`
-- `lark-cli`
-- `openai` Python SDK
-- 一个兼容 OpenAI `Responses API` 的在线模型服务
-- 已登录且具备消息读取权限的飞书 user 身份
-- 已配置可向当前用户发送消息的飞书 CLI 机器人身份
-
-当前环境默认的 Codex skill 安装目录为 `~/.codex/skills`。
-
-## 环境要求
-
-建议至少满足以下环境要求：
-
-- `python3` 已安装，且版本满足项目要求
-- `lark-cli` 已安装，并可在 `PATH` 中直接调用
-- `lark-cli` 已登录为具备消息读取权限的飞书 user 身份
-- `lark-cli` 机器人身份具备向当前用户发送文件消息的权限和可见范围
-- 本地已单独配置在线模型调用参数
-- 当前用户对仓库目录及 `data/` 结果目录具备可创建、可写权限
-- 运行环境可使用 `Asia/Shanghai` 作为业务时区
-
-## 本地私有模型配置
-
-WorkTrace 当前默认通过进程内 `OnlineLLMAnalyzer` 和 `openai` 官方 Python SDK 调用一个兼容 OpenAI `Responses API` 的在线模型服务。
-
-这些配置必须由当前用户单独保存在本地，不能和代码一起提交到 git。推荐做法：
-
-1. 复制 [.env.example](/Users/sunweisheng/Documents/GitHub/WorkTrace/.env.example) 为本地 `.env`
-2. 填入你自己的服务地址、模型名和 API Key
-3. 保持 `.env` 只存在于本地工作区
-
-示例：
+复制模板并填写本地私有值：
 
 ```bash
 cp .env.example .env
 ```
 
-`.env` 至少需要包含：
+必填：
 
 ```dotenv
 WORKTRACE_LLM_BASE_URL=https://your-openai-compatible-endpoint.example/v1
@@ -246,283 +250,130 @@ WORKTRACE_LLM_API_KEY=your-api-key
 WORKTRACE_LLM_REASONING_EFFORT=none
 ```
 
-可选项：
+可选：
 
 ```dotenv
-WORKTRACE_LLM_TIMEOUT_SECONDS=180
+WORKTRACE_LLM_TIMEOUT_SECONDS=600
 WORKTRACE_LLM_STREAM=true
 WORKTRACE_LLM_TLS_VERIFY=false
 WORKTRACE_LLM_SLEEP_MIN_SECONDS=1
 WORKTRACE_LLM_SLEEP_MAX_SECONDS=2
+WORKTRACE_COLLECTED_MERGE_TRACE=false
+WORKTRACE_COLLECTED_MERGE_TRACE_ROOT=data/debug/collected_merge
+WORKTRACE_COLLECTED_MERGE_MISSING_FIELD_RETRY_RATIO=0.2
+WORKTRACE_COLLECTED_MERGE_MISSING_FIELD_RETRY_LIMIT=1
 ```
 
-事件是否值得保留，主要还是靠结构化字段和 Python 门槛判断，不靠维护一大堆关键词。
+环境变量优先于 `.env`。真实密钥不能和代码一起提交到 git。正式请求统一追加 `/no_think`，主流程要求 `WORKTRACE_LLM_REASONING_EFFORT=none`。
 
-`event_rules.json` 只维护敏感信息、普通事件排除和本人指派判断三类词表。
+### 规则与能力配置
 
-对应规则文件是 [config/event_rules.json](/Users/sunweisheng/Documents/GitHub/WorkTrace/config/event_rules.json)：
+| 文件 | 当前作用 |
+| --- | --- |
+| `config/event_rules.json` | 敏感事件、普通事件排除和本人指派三类关键词 |
+| `config/event_metadata.json` | 本人参与方式的英文键、中文显示名和排序 |
+| `config/conversation_blacklist.json` | 在消息采集前排除整个会话 |
+| `config/attachment_text.json` | 文本附件扩窗的开关、扩展名、数量和大小限制 |
+| `config/image_summary.json` | 图片摘要开关、提示词、数量和大小限制 |
+| `config/reaction_catalogs/*.json` | reaction 的名称、说明、语义和资源路径 |
+
+可调整的敏感、普通排除和本人指派关键词，以及参与方式的显示文案和顺序，必须维护在配置文件中，不应继续写入 Python。结构化 schema、字段完整性、ID 归属、流程控制，以及当前已有的结构化保留门槛由代码负责。
+
+`event_rules.json` 当前只支持三个顶层键，旧键会直接报错：
 
 ```json
 {
-  "sensitive_event_keywords": ["工资", "薪资", "劳动仲裁", "绩效", "吵架", "辱骂"],
-  "excluded_event_keywords": ["代码同步", "git pull"],
-  "self_assignment_keywords": ["帮", "麻烦", "请", "处理", "确认", "推进"]
+  "sensitive_event_keywords": ["示例敏感词"],
+  "excluded_event_keywords": ["示例噪音词"],
+  "self_assignment_keywords": ["示例指派词"]
 }
 ```
 
-这些字段的实际效果如下：
-
-- `sensitive_event_keywords` 同时进入提示词和 Python 硬过滤。个人候选、个人最终事件、部门来源与部门最终事件任一命中时都会删除整条事件；标题、内容、具体对象、保留依据和文件链接文本均受检查。
-- `excluded_event_keywords` 用于非敏感但无需保留的固定噪音。Python 在事件标题、内容、具体对象和保留依据中执行包含匹配。
-- `self_assignment_keywords` 用于本人关联的文本兜底。消息在同一语句中明确点名本人且命中任一词时，视为本人被指派；本人发言与直接回复/引用关系不依赖该列表。
-
-旧的六个顶层规则键已不再支持；加载到旧格式会直接报错，避免规则静默失效。
-
-如果需要彻底排除某些会话，不让它们进入消息收集链路，请单独维护 [config/conversation_blacklist.json](/Users/sunweisheng/Documents/GitHub/WorkTrace/config/conversation_blacklist.json)。
-
-这份配置和 `event_rules.json` 的区别很简单：
-
-- `event_rules.json` 是“会话已经进来了，再决定哪些事件不要保留”
-- `conversation_blacklist.json` 是“这个群或会话一开始就不要进来”
-
-如果你要教别人用，可以直接这么说：
-
-- 某个群长期和自己工作事件无关，直接拉黑这个群 ID
-- 某个群虽然偶尔有工作信息，但出于隐私或噪音考虑，明确不希望 WorkTrace 读取，也直接拉黑这个群 ID
-- 只要进了这个黑名单，WorkTrace 连这个群当天的消息都不会收
-
-配置格式如下：
-
-```json
-{
-  "excluded_conversation_ids": [
-    "oc_be07388984c344d1b2d68c4a92b74c81",
-    "oc_0021bbab18a1c2311f76ea72f23cbe18"
-  ]
-}
-```
-
-字段含义只有一个：
-
-- `excluded_conversation_ids`
-  要彻底排除的飞书会话 ID 列表。支持放多个，系统会自动去重。
-
-命中黑名单后的效果也很明确：
-
-- 会在“目标会话发现”阶段直接跳过
-- 不会继续进入消息拉取
-- 不会进入会话切片
-- 不会进入 LLM 提炼
-- 不会进入后续跨会话合并
-
-适用场景：
-
-- 明确不想收的群
-- 长期噪音群
-- 敏感群
-- 和个人日报目标无关、但自己又经常发言的群
-
-不适用场景：
-
-- 不是整个群都要排除，只是想排除其中某类事件
-  这时应该优先用 `event_rules.json`
-
-一个直观例子：
-
-- 你已经确认 `oc_0021bbab18a1c2311f76ea72f23cbe18` 这个群不该进入 WorkTrace
-  就把它加到 `excluded_conversation_ids` 里，后面这个群的消息就不会再被收集
-
-环境变量会覆盖 `.env` 中的同名项，因此也可以在 CI 或个人 shell 中单独注入。
-
-如果缺少 `WORKTRACE_LLM_BASE_URL`、`WORKTRACE_LLM_MODEL` 或 `WORKTRACE_LLM_API_KEY`，当前 preflight 会直接失败，并明确要求用户先在本地补齐配置；未配置时不得继续运行 WorkTrace。
-
-## 管理人员汇总说明
-
-管理人员汇总模式用于合并多人已经生成的 WorkTrace Markdown，不重新读取员工原始聊天。
-
-汇总前会先过滤未通过结构化保留门槛的来源事件；汇总 LLM 输出的每个 group 也必须带 `retention_reason` 和 `retention_detail`。其中 `retention_detail` 作为保留依据/来源证据使用，最终团队汇总 Markdown 写入前会再次校验。
-
-若来源文件名中的姓名与当前 `lark-cli` 登录用户名精确匹配，则该来源会被标记为“合并人来源”。LLM 仍负责判断哪些事件属于同一真实事项，但如果某个合并组包含“合并人来源”，则最终内容会以该来源为主，其它来源只能补充不冲突的信息，不能覆盖其中已明确写出的版本、结论、进展、结果或待办指向。若当前目录没有匹配到“合并人来源”，系统会写 warning，并回退为普通多人合并。
-
-当单个合并范围的多人合并 prompt 超过 `collected_merge_prompt_char_threshold` 时，系统会在内存中启用滚动合并：先合并较小来源文件，再把中间结果继续与下一个来源合并；中间结果不落盘，最终仍只生成规范化 `*-merged.md`。
-
-输入目录：
-
-```text
-merge_inbox/YYYY/MM/DD/
-├── YYYY-MM-DD-张三.md
-├── 张三-YYYY-MM-DD.md
-└── 项目A/
-    └── YYYY-MM-DD-王五.md
-```
-
-日期根目录会生成一个 `YYYY-MM-DD-登录人姓名-merged.md`；日期目录下每个一级子目录也会单独生成自己的团队汇总文件。每个合并范围会读取当前目录下的 `.md` 文件，支持把上游 `*-merged.md` 继续作为输入，但仍会跳过旧 `_merged.md`、当前目录本次输出同名 `YYYY-MM-DD-登录人姓名-merged.md`、隐藏文件、非 Markdown 文件和更深层子目录。
-
-执行命令：
-
-```bash
-python3 -m src.worktrace.cli merge-collected --date 2026-06-29
-```
-
-输出文件：
-
-```text
-merge_inbox/2026/06/29/2026-06-29-管理者-merged.md
-merge_inbox/2026/06/29/项目A/2026-06-29-管理者-merged.md
-```
-
-执行成功后，飞书机器人会把每个生成的汇总 Markdown 文件发给当前 `lark-cli` 登录用户自己。
-
-## 员工使用说明
-
-如果你是第一次使用 WorkTrace，建议先读这份面向员工的小白说明：
-
-- [employee-guide.md](/Users/sunweisheng/Documents/GitHub/WorkTrace/docs/employee-guide.md)
-- [privacy-note.md](/Users/sunweisheng/Documents/GitHub/WorkTrace/docs/privacy-note.md)
-
-这份说明会重点覆盖：
-
-- Windows 优先的安装步骤
-- macOS 补充步骤
-- 首次 `.env` 配置
-- 首次使用前自检
-- 正式运行
-- 隐私边界与常见问题
-
-## 使用方式
-
-当前推荐的使用形态如下：
-
-- 在 Codex 或兼容 Codex Skill 的 Agent 对话中触发 WorkTrace
-- 指定一个目标日期执行
-- 读取目标日期内本人至少发过 1 条消息的飞书会话
-- 输出与本人直接相关的结构化工作事件清单
-- 将结果写入本地 Markdown 文件
-- 再将当天 Markdown 文件通过飞书 CLI 机器人身份发给员工自己
-
-具体触发提示词与参数约定由根目录 `SKILL.md` 定义。
-
-## 安装入口
-
-当前阶段推荐优先使用仓库自带安装脚本：
-
-- Windows：`powershell -ExecutionPolicy Bypass -File .\scripts\install_worktrace.ps1`
-- macOS：`bash ./scripts/install_worktrace.sh`
-
-安装脚本当前负责：
-
-- 检查 Python
-- 安装 `requirements.txt` 中的 Python 依赖
-- 初始化本地 `.env`
-- 检查 `lark-cli` 是否存在
-- 安装 WorkTrace skill 链接
-
-安装脚本不会替你做这些事：
-
-- 填写真实模型密钥
-- 登录飞书账号
-- 选择具体模型服务
-- 重启 Codex
-
-## 调试落盘说明
-
-正式日处理主流程 `python -m src.worktrace.cli --date YYYY-MM-DD` 默认不会把原始聊天消息、prompt 或附件正文长期写入本地结果目录。
-
-如果需要排查真实运行中的问题，可以显式开启：
-
-```bash
-python3 -m src.worktrace.cli --date 2026-06-23 --debug-output
-```
-
-开启后，WorkTrace 会把会话级分析和日级 merge 的调试产物写到：
-
-```text
-data/debug/conversations/<target_date>/
-```
-
-其中日级 merge 调试目录固定为：
-
-```text
-data/debug/conversations/<target_date>/_merge_day_candidates/
-```
-
-该目录当前会包含：
-
-- `input.json`
-- `prompt.txt`
-- `output.json`
-
-当前正式主流程在显式启用 `--debug-output` 时，以及锚点实验路径在显式启用 `--dump-dir` 时，都会把调试产物写到本地目录中，用于排查和比对模型行为。当前可能落盘的内容包括：
-
-- `input.json`：单个锚点窗口输入消息与元数据
-- `prompt.txt`：送给 analyzer 的 prompt
-- `output.json`：模型返回结果
-- `attachment_texts.json`：按需补充的附件正文
-- `linked_file_texts.json`：按需补充的飞书文档 / wiki 正文
-- 扩窗相关的请求与补充消息调试文件
-
-这些文件只用于本地调试，不属于正式主流程产物，且可能包含裁剪后的聊天上下文、prompt 与模型输出，不建议长期保留。
-
-## 命令行执行
-
-直接执行某一天的个人日报主流程：
-
-```bash
-python3 -m src.worktrace.cli --date 2026-06-23
-```
-
-成功时，`stdout` 会返回类似下面的 JSON 摘要：
-
-```json
-{
-  "status": "success",
-  "target_date": "2026-06-23",
-  "conversation_count": 12,
-  "message_count": 188,
-  "slice_count": 12,
-  "batch_count": 12,
-  "event_count": 26,
-  "warning_count": 0,
-  "skipped_slice_count": 0,
-  "output_path": "/abs/path/to/data/2026/06/2026-06-23-张三.md",
-  "error_summary": ""
-}
-```
-
-合并管理人员已收集的多人 Markdown：
-
-```bash
-python3 -m src.worktrace.cli merge-collected --date 2026-06-29
-```
-
-成功时，`stdout` 会返回包含 `source_file_count`、`source_event_count`、`merged_event_count`、`warning_messages`、`self_delivery_status` 和 `outputs` 的 JSON 摘要；`outputs` 会列出每个合并范围的输入目录、输出文件和自发送结果。
+敏感词和排除词都采用归一化后的包含匹配，并在候选、合并草稿和最终事件阶段重复执行；最终事件还会检查文件标题和 URL。指派词只作为“同一语句明确点名本人”的兜底，本人发言、reply/quote 和 reaction 证据不依赖该列表。
 
 ## 运行前检查
 
-在首次运行或环境变更后，建议先确认以下项目：
+```bash
+python3 -m src.worktrace.cli --preflight
+```
 
-- `python3 --version` 可正常返回版本信息
-- `lark-cli` 可正常执行
-- 当前 `lark-cli` user 身份已登录，可用于读取目标飞书聊天
-- `lark-cli` bot 身份可向当前用户发送文件消息
-- 本地 `.env` 或环境变量中已配置在线模型参数
+当前检查包括：
+
+- Python 3.11+
+- `lark-cli` 可执行且当前身份是 user
+- 在线模型必填配置
 - `WORKTRACE_LLM_REASONING_EFFORT=none`
-- 仓库内 `data/` 目录可创建或可写
+- Responses API 结构化探针
+- `data/` 可写
+- `Asia/Shanghai` 时区可用
 
-设计上，WorkTrace CLI 在正式处理前也应执行一次 preflight 检查；若关键依赖缺失、版本不满足、未登录、`no_think` 配置不满足或目录不可写，应直接失败并返回明确原因，而不是在处理中途报错。
+探针接受纯 JSON，也接受模型用 Markdown 代码块包裹的合法 JSON。
 
-## 设计文档
+## 调试与排障
 
-当前相关设计说明见：
+个人日报调试：
 
-- [conversation-slice-retry-design.md](/Users/sunweisheng/Documents/GitHub/WorkTrace/docs/conversation-slice-retry-design.md)
-- [cross-conversation-merge-design.md](/Users/sunweisheng/Documents/GitHub/WorkTrace/docs/cross-conversation-merge-design.md)
-- [collected-people-merge-plan.md](/Users/sunweisheng/Documents/GitHub/WorkTrace/docs/collected-people-merge-plan.md)
-- [markdown-output-simplification-design.md](/Users/sunweisheng/Documents/GitHub/WorkTrace/docs/markdown-output-simplification-design.md)
-- [detailed-design.md](/Users/sunweisheng/Documents/GitHub/WorkTrace/docs/detailed-design.md)
+```bash
+python3 -m src.worktrace.cli --date 2026-07-06 --debug-output
+```
 
-## 开发说明
+调试产物位于 `data/debug/conversations/<target_date>/`，可能包含：
 
-- 优先修改 `src/` 中的通用逻辑。
-- 仓库根目录就是 skill 根目录，不再单独维护 `skill/` 子目录。
-- 任何统计或计算必须由 Python 执行，不由 LLM 执行。
+- 锚点分段输入、prompt、原始输出和校验结果
+- 分段批次输入、prompt、原始输出和统计
+- 上下文补充前后的片段
+- 分段失败后的直接提炼结果
+- `_merge_day_candidates/` 下的全日合并输入输出
+- 工作流归属补充判断和最终分组
+- `final_events.json`：最终合并草稿、完成文件聚合和排序后的事件，以及最终过滤 warning
+
+多人汇总跟踪通过 `.env` 的 `WORKTRACE_COLLECTED_MERGE_TRACE=true` 开启，默认写入 `data/debug/collected_merge/<target_date>/`。每个 step JSON 会保存本轮 `input_events`、`deterministic_groups`、模型原始分组、最终事件和 `boundary_warnings`，可用于核对共同消息、文件、工作流及强制拆组原因。
+
+调试文件可能包含裁剪后的聊天、附件正文、图片摘要和模型输出，只应临时启用，不应提交或长期保留。
+
+## 安装
+
+macOS/Linux：
+
+```bash
+bash ./scripts/install_worktrace.sh
+```
+
+Windows PowerShell：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\install_worktrace.ps1
+```
+
+手动安装依赖：
+
+```bash
+python3 -m pip install -r requirements.txt
+```
+
+仓库根目录就是 Codex skill 根目录，安装 skill 时链接整个仓库，而不是单独链接子目录。
+
+## 文档索引
+
+- [详细设计](docs/detailed-design.md)：当前代码的权威流程、数据边界和模块职责
+- [当前实现拆解](docs/implementation-breakdown.md)：按文件查找实现入口
+- [员工使用说明](docs/employee-guide.md)：安装、运行和常见问题
+- [隐私说明](docs/privacy-note.md)：员工可直接阅读的短版隐私边界
+- [分段与扩窗设计](docs/conversation-slice-retry-design.md)：主链分段批处理、上下文重试和分段失败后直接提炼
+- [跨会话合并设计](docs/cross-conversation-merge-design.md)：全日候选分组和工作流归属校正
+- [多人汇总设计](docs/collected-people-merge-plan.md)：`merge-collected` 当前实现
+- [Online Analyzer](docs/online-analyzer-usage.md)：Responses API 调用和错误边界
+- [Markdown 输出](docs/markdown-output-simplification-design.md)：事件文件格式
+- [锚点实验使用说明](docs/anchor-experiment-usage.md)：独立实验入口，不等同于正式日报
+- [锚点能力当前状态](docs/anchor-first-implementation-breakdown.md)：正式主链与独立实验的边界
+- [锚点协议](docs/anchor-analysis-protocol.md)：分段失败后直接提炼和独立实验使用的协议
+- [锚点设计演进记录](docs/anchor-first-multi-pass-design.md)：历史设计与当前落地对照
+
+## 开发验证
+
+```bash
+python3 -m pytest
+git diff --check
+```
+
+文档行为变化应同步更新 README、`docs/detailed-design.md`、相关专题文档和 `tests/unit/test_docs_contract.py`。

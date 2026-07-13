@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from src.worktrace.config import RuntimeConfig
@@ -171,6 +172,26 @@ def test_runner_dumps_first_pass_conversation_debug_artifacts(tmp_path: Path) ->
     meta = (pass_dir / "meta.json").read_text(encoding="utf-8")
     assert '"status": "completed"' in meta
     assert '"candidate_event_count": 1' in meta
+    final_path = tmp_path / "debug" / "2026-06-22" / "final_events.json"
+    final_payload = json.loads(final_path.read_text(encoding="utf-8"))
+    assert final_payload["target_date"] == "2026-06-22"
+    assert len(final_payload["merged_drafts"]) == 1
+    assert len(final_payload["events"]) == 1
+    assert set(
+        (
+            "workstream_name",
+            "action_labels",
+            "self_relations",
+            "evidence_fingerprints",
+            "file_keys",
+        )
+    ).issubset(final_payload["events"][0])
+    assert len(final_payload["events"][0]["evidence_fingerprints"]) == 1
+    assert final_payload["warnings"] == {
+        "event_build": [],
+        "final_filter": [],
+        "retention": [],
+    }
 
 
 def test_runner_groups_multiple_self_messages_in_same_conversation_into_one_llm_call(

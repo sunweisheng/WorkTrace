@@ -737,6 +737,25 @@ class SegmentAnalysisBatch:
 
 
 @dataclass(frozen=True)
+class SelfRelationEvidence:
+    relation: str
+    evidence_message_ids: list[str] = field(default_factory=list)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> SelfRelationEvidence:
+        return cls(
+            relation=str(data.get("relation", "")),
+            evidence_message_ids=_string_list(data.get("evidence_message_ids")),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "relation": self.relation,
+            "evidence_message_ids": list(self.evidence_message_ids),
+        }
+
+
+@dataclass(frozen=True)
 class SourceBackedEventDraft:
     draft_id: str
     date: str
@@ -746,6 +765,7 @@ class SourceBackedEventDraft:
     source_conversation_id: str
     source_slice_id: str
     confidence: float
+    self_relations: list[SelfRelationEvidence] = field(default_factory=list)
     action_label: str = ""
     object_hint: str = ""
     retention_reason: str = ""
@@ -777,6 +797,10 @@ class SourceBackedEventDraft:
             source_conversation_id=str(data.get("source_conversation_id", "")),
             source_slice_id=str(data.get("source_slice_id", "")),
             confidence=float(data.get("confidence", 0.0)),
+            self_relations=[
+                SelfRelationEvidence.from_dict(item)
+                for item in _dict_list(data.get("self_relations"))
+            ],
             response_outcome=str(data.get("response_outcome", "unknown")),
             response_signal_ids=_string_list(data.get("response_signal_ids")),
             response_evidence_message_ids=_string_list(data.get("response_evidence_message_ids")),
@@ -800,6 +824,7 @@ class SourceBackedEventDraft:
             "source_conversation_id": self.source_conversation_id,
             "source_slice_id": self.source_slice_id,
             "confidence": self.confidence,
+            "self_relations": [item.to_dict() for item in self.self_relations],
             "response_outcome": self.response_outcome,
             "response_signal_ids": list(self.response_signal_ids),
             "response_evidence_message_ids": list(self.response_evidence_message_ids),
@@ -1001,6 +1026,9 @@ class MergedEventDraft:
     retention_detail: str = ""
     referenced_link_ids: list[str] = field(default_factory=list)
     referenced_attachment_ids: list[str] = field(default_factory=list)
+    workstream_name: str = ""
+    action_labels: list[str] = field(default_factory=list)
+    self_relations: list[str] = field(default_factory=list)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> MergedEventDraft:
@@ -1015,6 +1043,9 @@ class MergedEventDraft:
             retention_detail=str(data.get("retention_detail", "")),
             referenced_link_ids=_string_list(data.get("referenced_link_ids")),
             referenced_attachment_ids=_string_list(data.get("referenced_attachment_ids")),
+            workstream_name=str(data.get("workstream_name", "")),
+            action_labels=_string_list(data.get("action_labels")),
+            self_relations=_string_list(data.get("self_relations")),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -1029,6 +1060,9 @@ class MergedEventDraft:
             "retention_detail": self.retention_detail,
             "referenced_link_ids": list(self.referenced_link_ids),
             "referenced_attachment_ids": list(self.referenced_attachment_ids),
+            "workstream_name": self.workstream_name,
+            "action_labels": list(self.action_labels),
+            "self_relations": list(self.self_relations),
         }
 
 
@@ -1037,6 +1071,7 @@ class CrossConversationGroup:
     group_id: str
     draft_ids: list[str]
     primary_draft_id: str = ""
+    workstream_name: str = ""
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> CrossConversationGroup:
@@ -1044,6 +1079,7 @@ class CrossConversationGroup:
             group_id=str(data["group_id"]),
             draft_ids=_string_list(data.get("draft_ids")),
             primary_draft_id=str(data.get("primary_draft_id", "")),
+            workstream_name=str(data.get("workstream_name", "")),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -1051,6 +1087,7 @@ class CrossConversationGroup:
             "group_id": self.group_id,
             "draft_ids": list(self.draft_ids),
             "primary_draft_id": self.primary_draft_id,
+            "workstream_name": self.workstream_name,
         }
 
 
@@ -1130,6 +1167,11 @@ class WorkEvent:
     retention_detail: str = ""
     referenced_link_ids: list[str] = field(default_factory=list)
     referenced_attachment_ids: list[str] = field(default_factory=list)
+    workstream_name: str = ""
+    action_labels: list[str] = field(default_factory=list)
+    self_relations: list[str] = field(default_factory=list)
+    evidence_fingerprints: list[str] = field(default_factory=list)
+    file_keys: list[str] = field(default_factory=list)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> WorkEvent:
@@ -1150,6 +1192,11 @@ class WorkEvent:
             retention_detail=str(data.get("retention_detail", "")),
             referenced_link_ids=_string_list(data.get("referenced_link_ids")),
             referenced_attachment_ids=_string_list(data.get("referenced_attachment_ids")),
+            workstream_name=str(data.get("workstream_name", "")),
+            action_labels=_string_list(data.get("action_labels")),
+            self_relations=_string_list(data.get("self_relations")),
+            evidence_fingerprints=_string_list(data.get("evidence_fingerprints")),
+            file_keys=_string_list(data.get("file_keys")),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -1168,6 +1215,11 @@ class WorkEvent:
             "retention_detail": self.retention_detail,
             "referenced_link_ids": list(self.referenced_link_ids),
             "referenced_attachment_ids": list(self.referenced_attachment_ids),
+            "workstream_name": self.workstream_name,
+            "action_labels": list(self.action_labels),
+            "self_relations": list(self.self_relations),
+            "evidence_fingerprints": list(self.evidence_fingerprints),
+            "file_keys": list(self.file_keys),
         }
 
     @property
@@ -1367,6 +1419,8 @@ class CollectedMergeGroup:
     object_hint: str = ""
     retention_reason: str = ""
     retention_detail: str = ""
+    merge_owner_conflict: bool = False
+    conflict_detail: str = ""
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> CollectedMergeGroup:
@@ -1378,6 +1432,8 @@ class CollectedMergeGroup:
             object_hint=str(data.get("object_hint", "")),
             retention_reason=str(data.get("retention_reason", "")),
             retention_detail=str(data.get("retention_detail", "")),
+            merge_owner_conflict=bool(data.get("merge_owner_conflict", False)),
+            conflict_detail=str(data.get("conflict_detail", "")),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -1389,6 +1445,8 @@ class CollectedMergeGroup:
             "object_hint": self.object_hint,
             "retention_reason": self.retention_reason,
             "retention_detail": self.retention_detail,
+            "merge_owner_conflict": self.merge_owner_conflict,
+            "conflict_detail": self.conflict_detail,
         }
 
 

@@ -11,6 +11,7 @@ from src.worktrace.models import (
     CrossConversationGroupResult,
     ConversationRef,
     NormalizedMessage,
+    SelfRelationEvidence,
     SelfIdentity,
     SourceBackedEventDraft,
 )
@@ -34,6 +35,8 @@ def _draft(
     retention_reason: str = "decision_made",
     retention_detail: str,
     workstream_key: str = "",
+    action_label: str = "确认",
+    self_relations: list[SelfRelationEvidence] | None = None,
 ) -> SourceBackedEventDraft:
     return SourceBackedEventDraft(
         draft_id=draft_id,
@@ -44,7 +47,8 @@ def _draft(
         source_conversation_id=source_conversation_id,
         source_slice_id=source_slice_id,
         confidence=0.9,
-        action_label="确认",
+        action_label=action_label,
+        self_relations=self_relations or [],
         object_hint=object_hint,
         retention_reason=retention_reason,
         retention_detail=retention_detail,
@@ -267,6 +271,8 @@ def test_materialized_project_lifecycle_uses_primary_title_and_message_order() -
         source_slice_id="slice-root",
         object_hint="换电项目",
         retention_detail="明确项目启动和分支任务。",
+        action_label="项目启动",
+        self_relations=[SelfRelationEvidence("initiated", ["om_later"])],
     )
     task = _draft(
         draft_id="task",
@@ -277,6 +283,10 @@ def test_materialized_project_lifecycle_uses_primary_title_and_message_order() -
         source_slice_id="slice-task",
         object_hint="摄像头验收",
         retention_detail="明确验收标准。",
+        action_label="验收确认",
+        self_relations=[
+            SelfRelationEvidence("feedback_acceptance", ["om_earlier"])
+        ],
     )
 
     drafts = materialize_grouped_merged_drafts(
@@ -286,15 +296,20 @@ def test_materialized_project_lifecycle_uses_primary_title_and_message_order() -
                 group_id="project",
                 draft_ids=["root", "task"],
                 primary_draft_id="root",
+                workstream_name="换电项目",
             )
         ],
         target_date="2026-06-22",
         message_order=["om_earlier", "om_later"],
+        self_relation_order=("initiated", "feedback_acceptance"),
     )
 
     assert drafts[0].topic == "换电项目启动"
     assert drafts[0].source_message_ids == ["om_earlier", "om_later"]
     assert drafts[0].content == "确认摄像头验收标准。\n\n项目启动并分配摄像头安装任务。"
+    assert drafts[0].workstream_name == "换电项目"
+    assert drafts[0].action_labels == ["验收确认", "项目启动"]
+    assert drafts[0].self_relations == ["initiated", "feedback_acceptance"]
 
 
 def test_consolidate_workstream_groups_safely_groups_exact_named_workstreams() -> None:

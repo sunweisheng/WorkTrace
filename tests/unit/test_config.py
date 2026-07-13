@@ -165,6 +165,47 @@ def test_load_runtime_config_overrides_uses_defaults_when_rule_file_missing(
     assert config.self_assignment_keywords == ()
 
 
+def test_load_runtime_config_overrides_reads_self_relation_metadata(
+    tmp_path: Path,
+) -> None:
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    (config_dir / "event_metadata.json").write_text(
+        json.dumps(
+            {
+                "self_relations": [
+                    {"key": "collaboration", "label": "协作参与", "order": 20},
+                    {"key": "initiated", "label": "发起", "order": 10},
+                ]
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    config = load_runtime_config_overrides(RuntimeConfig(), cwd=tmp_path)
+
+    assert [item.key for item in config.self_relation_types] == [
+        "initiated",
+        "collaboration",
+    ]
+    assert [item.label for item in config.self_relation_types] == ["发起", "协作参与"]
+
+
+def test_repo_event_metadata_defines_self_relation_labels_and_order() -> None:
+    payload = json.loads(Path("config/event_metadata.json").read_text(encoding="utf-8"))
+
+    assert [item["key"] for item in payload["self_relations"]] == [
+        "initiated",
+        "primary_execution",
+        "collaboration",
+        "decision_confirmation",
+        "feedback_acceptance",
+        "assigned",
+        "response_only",
+    ]
+
+
 def test_load_runtime_config_overrides_reads_collected_merge_env_overrides(
     tmp_path: Path,
 ) -> None:

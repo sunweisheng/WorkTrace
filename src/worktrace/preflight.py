@@ -17,6 +17,7 @@ import httpx
 from .config import OnlineLLMSettings, RuntimeConfig, load_online_llm_settings
 from .errors import PreflightError
 from .analyzers.online import _extract_text_from_responses_payload
+from .utils.json_io import parse_json_value_from_text
 
 
 MIN_PYTHON = (3, 11)
@@ -302,10 +303,10 @@ def probe_online_llm(config: RuntimeConfig, *, cwd: Path) -> dict[str, str]:
         raise PreflightError("Online LLM probe returned invalid JSON.")
 
     try:
-        normalized = json.loads(output_text)
-    except json.JSONDecodeError as exc:
+        normalized = parse_json_value_from_text(output_text)
+    except ValueError as exc:
         raise PreflightError("Online LLM probe returned invalid JSON.") from exc
-    if normalized.get("probe") != "ok":
+    if not isinstance(normalized, dict) or normalized.get("probe") != "ok":
         raise PreflightError("Online LLM probe returned unexpected JSON content.")
 
     return {

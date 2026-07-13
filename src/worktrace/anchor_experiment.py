@@ -751,6 +751,10 @@ def _main_impl(
     import argparse
 
     from .cli import validate_target_date
+    from .config import (
+        load_conversation_blacklist_overrides,
+        load_runtime_config_overrides,
+    )
     from .preflight import run_preflight_checks
 
     parser = argparse.ArgumentParser(
@@ -767,6 +771,8 @@ def _main_impl(
     args = parser.parse_args(argv)
 
     target_date = validate_target_date(args.target_date)
+    config = load_runtime_config_overrides(config, cwd=Path.cwd())
+    config = load_conversation_blacklist_overrides(config, cwd=Path.cwd())
     preflight = preflight_func or run_preflight_checks
     runner = run_func or run_anchor_experiment
     report = preflight(config, cwd=Path.cwd())

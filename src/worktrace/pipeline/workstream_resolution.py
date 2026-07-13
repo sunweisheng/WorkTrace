@@ -91,6 +91,7 @@ def groups_from_workstream_assignments(
             group_id=f"workstream-{root_id}",
             draft_ids=draft_ids,
             primary_draft_id=root_id,
+            workstream_name=assignments_by_id[root_id].root_workstream_name.strip(),
         )
         for root_id, draft_ids in grouped_ids.items()
     ]
@@ -99,6 +100,7 @@ def groups_from_workstream_assignments(
             group_id=f"standalone-{draft_id}",
             draft_ids=[draft_id],
             primary_draft_id=draft_id,
+            workstream_name=candidate_by_id[draft_id].workstream_key.strip(),
         )
         for draft_id in standalone_ids
     )

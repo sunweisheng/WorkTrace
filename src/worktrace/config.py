@@ -26,6 +26,7 @@ DEFAULT_COLLECTED_MERGE_RETRY_LIMIT_ENV_VAR = (
 )
 DEFAULT_LLM_ENV_FILE_NAME = ".env"
 DEFAULT_EVENT_RULES_FILE_NAME = "config/event_rules.json"
+DEFAULT_EVENT_METADATA_FILE_NAME = "config/event_metadata.json"
 DEFAULT_REACTION_CATALOGS_ROOT = Path("config") / "reaction_catalogs"
 DEFAULT_CONVERSATION_BLACKLIST_FILE_NAME = "config/conversation_blacklist.json"
 
@@ -41,6 +42,13 @@ class OnlineLLMSettings:
     sleep_min_seconds: float
     sleep_max_seconds: float
     reasoning_effort: str | None
+
+
+@dataclass(frozen=True)
+class EventMetadataItem:
+    key: str
+    label: str
+    order: int
 
 
 def parse_dotenv_lines(text: str) -> dict[str, str]:
@@ -219,7 +227,7 @@ def load_runtime_config_overrides(
     try:
         payload = json.loads(rules_path.read_text(encoding="utf-8"))
     except FileNotFoundError:
-        return config
+        return _load_event_metadata_overrides(config, base_dir=base_dir)
     except json.JSONDecodeError as exc:
         raise ValueError(
             f"Invalid event rules config: {rules_path} is not valid JSON."
@@ -281,13 +289,86 @@ def load_runtime_config_overrides(
         and excluded_event_keywords == config.excluded_event_keywords
         and self_assignment_keywords == config.self_assignment_keywords
     ):
-        return config
+        return _load_event_metadata_overrides(config, base_dir=base_dir)
 
-    return replace(
+    config = replace(
         config,
         sensitive_event_keywords=sensitive_event_keywords,
         excluded_event_keywords=excluded_event_keywords,
         self_assignment_keywords=self_assignment_keywords,
+    )
+    return _load_event_metadata_overrides(config, base_dir=base_dir)
+
+
+def _load_event_metadata_overrides(
+    config: RuntimeConfig,
+    *,
+    base_dir: Path,
+) -> RuntimeConfig:
+    metadata_path = base_dir / config.event_metadata_file_name
+    try:
+        payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return config
+    except json.JSONDecodeError as exc:
+        raise ValueError(
+            f"Invalid event metadata config: {metadata_path} is not valid JSON."
+        ) from exc
+
+    if not isinstance(payload, dict):
+        raise ValueError(
+            f"Invalid event metadata config: {metadata_path} must contain a JSON object."
+        )
+    unexpected_keys = sorted(set(payload).difference({"self_relations"}))
+    if unexpected_keys:
+        raise ValueError(
+            "Invalid event metadata config: unsupported keys "
+            f"({', '.join(unexpected_keys)})."
+        )
+
+    raw_items = payload.get("self_relations", [])
+    if not isinstance(raw_items, list):
+        raise ValueError(
+            f"Invalid event metadata config: {metadata_path} field `self_relations` must be a list."
+        )
+
+    items: list[EventMetadataItem] = []
+    seen_keys: set[str] = set()
+    for raw_item in raw_items:
+        if not isinstance(raw_item, dict):
+            raise ValueError(
+                f"Invalid event metadata config: {metadata_path} self relation entries must be objects."
+            )
+        if set(raw_item) != {"key", "label", "order"}:
+            raise ValueError(
+                f"Invalid event metadata config: {metadata_path} self relation entries require key, label, and order."
+            )
+        key = raw_item.get("key")
+        label = raw_item.get("label")
+        order = raw_item.get("order")
+        if not isinstance(key, str) or not key.strip():
+            raise ValueError("Invalid event metadata config: self relation key must be non-empty.")
+        if not isinstance(label, str) or not label.strip():
+            raise ValueError("Invalid event metadata config: self relation label must be non-empty.")
+        if not isinstance(order, int) or isinstance(order, bool):
+            raise ValueError("Invalid event metadata config: self relation order must be an integer.")
+        cleaned_key = key.strip()
+        if cleaned_key in seen_keys:
+            raise ValueError(
+                f"Invalid event metadata config: duplicate self relation key `{cleaned_key}`."
+            )
+        seen_keys.add(cleaned_key)
+        items.append(
+            EventMetadataItem(
+                key=cleaned_key,
+                label=label.strip(),
+                order=order,
+            )
+        )
+
+    return replace(
+        config,
+        self_relation_types=tuple(sorted(items, key=lambda item: (item.order, item.key))),
     )
 
 
@@ -425,6 +506,7 @@ class RuntimeConfig:
     sensitive_event_keywords: tuple[str, ...] = ()
     excluded_event_keywords: tuple[str, ...] = ()
     self_assignment_keywords: tuple[str, ...] = ()
+    self_relation_types: tuple[EventMetadataItem, ...] = ()
     reaction_catalogs_root: Path = DEFAULT_REACTION_CATALOGS_ROOT
     excluded_conversation_ids: tuple[str, ...] = ()
     data_root: Path = field(default_factory=lambda: Path("data"))
@@ -446,6 +528,7 @@ class RuntimeConfig:
     collected_merge_retry_limit_env_var: str = DEFAULT_COLLECTED_MERGE_RETRY_LIMIT_ENV_VAR
     llm_env_file_name: str = DEFAULT_LLM_ENV_FILE_NAME
     event_rules_file_name: str = DEFAULT_EVENT_RULES_FILE_NAME
+    event_metadata_file_name: str = DEFAULT_EVENT_METADATA_FILE_NAME
     conversation_blacklist_file_name: str = DEFAULT_CONVERSATION_BLACKLIST_FILE_NAME
     llm_stream_enabled: bool = True
     llm_tls_verify: bool = False

@@ -1,87 +1,229 @@
-# 管理人员多人事件 Markdown 合并方案
+# WorkTrace 多人事件 Markdown 汇总设计
 
-## Summary
+> 状态：正式 `merge-collected` 实现说明，不是未来计划。
 
-新增 `merge-collected` 子命令，用于管理人员把多人提交的 WorkTrace Markdown 放入 `merge_inbox/YYYY/MM/DD/` 后，把日期根目录和一级子目录分别作为独立合并范围，各自生成本目录 `YYYY-MM-DD-登录人姓名-merged.md` 团队汇总文件。
+## 1. 目标与边界
 
-合并结果保持标准 WorkTrace Markdown 兼容，同时额外展示来源人员、来源事件 ID。相同原始 `event_id` 只有在标题和内容完全一致，或标题一致且内容一方包含另一方时，才先确定性归组；如果 `event_id` 相同但不满足该规则，则记录 warning 并交给 LLM 保守判断。其余事件也由 LLM 判断是否属于同一真实工作事件，并对每个合并组生成管理视角的综合描述。若某个合并组包含“当前登录用户自己的个人事件 MD”来源，则最终内容以该来源为主，其他来源仅作不冲突补充。读取来源事件和写入最终团队汇总文件前，都会执行与个人日报一致的结构化保留门槛。
+该链路面向已经收集到多人个人日报的管理人员。它只读取 WorkTrace Markdown 事件块，不重新读取员工聊天，也不做跨天合并。
 
-## Key Changes
+正式命令：
 
-- 新增 CLI：`python -m src.worktrace.cli merge-collected --date YYYY-MM-DD`，旧命令 `python -m src.worktrace.cli --date YYYY-MM-DD` 行为不变。
-- 输入固定读取 `merge_inbox/YYYY/MM/DD/` 及其一级子目录当前层的 `.md` 文件，支持普通个人日报和上游 `*-merged.md`，但仍跳过旧 `_merged.md`、当前目录本次输出同名 `YYYY-MM-DD-登录人姓名-merged.md`、隐藏文件、非 Markdown、格式错误文件。
-- 人员名从文件名提取，只要能识别出日期和姓名成分即可，例如 `2026-06-29-张三.md`、`张三-2026-06-29.md`、`张三_2026-06-29.md` 都可识别为 `张三`。
-- 若来源文件名中的姓名与当前登录用户姓名精确匹配，则该来源事件被标记为“合并人来源”；若当前目录没有匹配到合并人来源，则写 warning 并回退为普通多人合并。
-- 相同 `event_id` 只有在标题和内容完全一致，或标题一致且内容一方包含另一方时才作为确定性合并组；其它情况不锁死，交给 LLM 判断，并在 JSON 结果里记录 warning。
-- 多人合并 prompt 继续要求 LLM 不输出薪资、绩效、争吵、辱骂等敏感事项，并要求每个 group 输出 `object_hint`、`retention_reason`、`retention_detail`。
-- 输出 `YYYY-MM-DD-登录人姓名-merged.md` 保留 WorkTrace 事件注释和标准字段，并新增来源人员、来源事件 ID 字段；保留元数据继续写入 Markdown，供追溯和后续汇总使用。
-- 每个生成的团队汇总文件都会通过飞书 CLI 机器人身份发送给当前登录用户自己；发送失败只写 warning，不影响本地文件。
+```bash
+python3 -m src.worktrace.cli merge-collected --date YYYY-MM-DD
+```
 
-## Design Details
+该子命令独立执行，不复用个人日报的整套 preflight；运行中仍需要当前飞书 user 身份、在线 analyzer 配置、输入目录写权限和 bot 自发送能力。
 
-- 读取阶段
-  - 输入目录由 `--date` 拆成 `merge_inbox/YYYY/MM/DD/`，例如 `2026-06-29` 对应 `merge_inbox/2026/06/29/`。
-  - 日期根目录始终作为一个合并范围；日期目录下的每个一级子目录也作为独立合并范围。
-  - 每个合并范围只读取当前目录下的 `.md` 文件；支持上游 `*-merged.md` 继续参与汇总，但跳过旧 `_merged.md`、当前目录本次输出同名 `YYYY-MM-DD-登录人姓名-merged.md`、隐藏文件、子目录和非 Markdown 文件，不递归更深层目录。
-  - 文件名只要能识别出 `YYYY-MM-DD` 和姓名成分即可；顺序可前可后。个人日报和 `*-merged.md` 都可识别来源姓名；不匹配时跳过该文件并写 warning。
-  - Markdown 解析复用现有 WorkTrace 标准格式：front matter 加 `<!-- worktrace:event:start event_id="..." -->` 事件块。坏文件跳过并写 warning，不影响其它文件。
-  - 解析出的来源事件必须通过结构化保留门槛；缺少保留理由、保留依据或具体对象的事件会被过滤，不进入 LLM 合并 prompt。
+## 2. 输入目录与 scope
 
-- 事件身份与来源
-  - 每条来源事件在本次合并中生成临时 `draft_id`，格式可由来源文件名、事件序号和原始 `event_id` 组成，用于 LLM 分组和结果校验。
-  - 最终团队汇总文件的事件使用新的汇总 `event_id`，由日期、合并组内 `draft_id`、LLM 生成的标题和内容稳定生成。
-  - 最终事件保留 `来源人员` 和 `来源事件 ID`。如果输入本身是上游 `*-merged.md`，则继续沿用其事件里已经写好的 `来源人员` / `来源事件 ID`，避免二次合并时只剩部门负责人名字。
+```text
+merge_inbox/YYYY/MM/DD/
+├── YYYY-MM-DD-张三.md
+├── 李四-YYYY-MM-DD.md
+├── 上游-YYYY-MM-DD-merged.md
+└── 项目A/
+    ├── YYYY-MM-DD-王五.md
+    └── 更深目录/              # 不递归
+```
 
-- 确定性合并规则
-  - 相同原始 `event_id` 是强信号，但不是无条件合并依据。
-  - 只有满足以下任一条件时，才把相同 `event_id` 的事件锁定为确定性合并组：
-    - 标题相同且内容完全相同。
-    - 标题相同且内容一方包含另一方。
-  - 如果相同 `event_id` 不满足上述规则，则不锁定合并，写入 warning：`Same event_id has divergent content: ...`，并交给 LLM 判断。
+scope 规则：
 
-- LLM 合并协议
-  - LLM 输入包含两部分：已锁定的 `deterministic_groups`，以及需要判断的剩余事件。
-  - 每条来源事件都会带上是否为“合并人来源”的标记；LLM 仍负责判断哪些事项属于同一真实事件。
-  - LLM 必须返回 `groups`，每个 group 包含 `group_id`、`draft_ids`、`title`、`content`、`object_hint`、`retention_reason`、`retention_detail`。
-  - Prompt 明确要求：确定性组不能拆分；剩余事件拿不准就分开；每个输入 `draft_id` 必须且只能出现一次；不要编造未出现的信息。
-  - 若某个 group 含有“合并人来源”，最终 `title`、`content`、`object_hint`、`retention_reason`、`retention_detail` 都以该来源为主，其它来源只能补充不冲突的信息，不能改写该来源中已明确的版本、结论、进展、结果或待办指向。
-  - 当完整合并 prompt 超过 `collected_merge_prompt_char_threshold`，Python 侧按来源文件 prompt 字符数从小到大滚动合并；中间结果只保存在内存中，并继续保留来源人员、来源事件 ID、文件链接和合并人来源信号。
-  - 如果 LLM 返回漏项、重复项、未知项或破坏确定性组，Python 侧修复为安全结果：有效组保留，漏项回退为单独事件，并记录 warning。
-  - 普通约时间、互通信息、泛泛完成审核/审批但无具体对象和结论的事件不应输出；如果输出，Python 写入前会再次过滤。
+- 日期根目录始终单独合并
+- 每个非隐藏一级子目录单独合并
+- scope 只读取当前层 `.md`
+- 二级及更深目录不读取
+- 隐藏文件、本次输出同名文件和旧 `_merged.md` 跳过
+- 其他规范的上游 `*-merged.md` 可继续作为来源
 
-- 敏感内容与失败策略
-  - Prompt 按 `config/event_rules.json` 的 `sensitive_event_keywords` 要求 LLM 不输出敏感事项。
-  - Python 在读取来源事件和物化合并结果后都强制过滤敏感词；命中来源不会进入合并模型，命中最终事件不会写入 Markdown。
-  - Python 侧在读取来源事件后和写入团队汇总文件前都执行结构化保留门槛；被过滤的事件写 warning。
-  - 空目录、无有效事件、全坏文件都生成空团队汇总文件，返回 `success_with_warnings`。
-  - LLM 协议错误导致本地无法形成安全结果时返回 `failed`；上传失败不影响本地结果，只写 warning。
+每个 scope 在本目录生成：
 
-- 飞书自发送
-  - 管理人员汇总与个人日报一样，都会通过飞书 CLI 机器人身份把结果文件发送给当前登录用户自己。
-  - 若一次运行生成多个汇总文件，则根目录结果和各一级子目录结果都会分别发送。
-  - 发送失败时 `self_delivery_status=failed`，本地文件保留，整体结果降级为 `success_with_warnings`。
+```text
+YYYY-MM-DD-登录人姓名-merged.md
+```
 
-## Public Interfaces
+## 3. 总流程
 
-- CLI：
-  `python -m src.worktrace.cli merge-collected --date YYYY-MM-DD`
-- JSON 执行结果包含：
-  `status`、`target_date`、`input_dir`、`output_path`、`source_file_count`、`source_event_count`、`merged_event_count`、`skipped_file_count`、`warning_messages`、`self_delivery_status`、`self_delivery_target`、`self_delivery_error`、`outputs`。
-- `outputs` 逐项记录每个合并范围的 `input_dir`、`output_path`、`source_file_count`、`source_event_count`、`merged_event_count`、`skipped_file_count`、`warning_messages`、`self_delivery_status`、`self_delivery_target`、`self_delivery_error`。
+```mermaid
+flowchart TD
+    A["发现 merge scopes"] --> B["解析当前 user 身份"]
+    B --> C["逐 scope 读取 Markdown"]
+    C --> D["解析姓名、正文和隐藏合并信息"]
+    D --> E["关键词过滤 + 保留门槛"]
+    E --> F["标记 merge-owner source"]
+    F --> G["相同 event_id 的确定性组"]
+    G --> H{"prompt 超阈值?"}
+    H -->|"否"| I["单次 LLM merge"]
+    H -->|"是"| J["按来源文件从小到大滚动 merge"]
+    I --> K["缺失字段检查与有限重试"]
+    J --> K
+    K --> L["修复 draft 覆盖和缺失元数据"]
+    L --> M["检查工作流边界并整合不同视角"]
+    M --> N["物化团队 WorkEvent 和增强信息"]
+    N --> O["最终关键词过滤 + 保留门槛"]
+    O --> P["覆盖写 merged Markdown"]
+    P --> Q["飞书 bot 自发送"]
+```
 
-## Test Plan
+## 4. 来源文件解析
 
-- 单元测试覆盖人员名提取、标准 Markdown 解析、坏文件跳过、旧 `_merged.md` 和当前目录本次输出同名文件不参与输入、上游 `*-merged.md` 可继续参与输入、相同 `event_id` 且内容完全一致或包含时确定性合并、相同 `event_id` 但不满足确定性规则时交给 LLM 并产生 warning、输出包含来源信息、多人合并结果会自发送。
-- 单元测试覆盖“合并人来源”识别、未匹配到合并人来源时的 warning，以及相同事项中合并人版本优先信号会被送入 LLM prompt。
-- 单元测试覆盖大 prompt 触发滚动合并、低于阈值保持单次合并、滚动中间结果保留来源追溯和合并人来源信号。
-- 单元测试覆盖最终敏感兜底过滤、结构化保留门槛，以及多人合并 prompt 包含敏感事项和保留元数据要求。
-- 集成测试覆盖 `merge-collected --date` 输出结构化 JSON、多个输入生成 `YYYY-MM-DD-登录人姓名-merged.md`、坏文件不阻断有效合并、多人合并自发送结果、旧 CLI 命令行为不变。
-- 空目录、无有效事件、全坏文件均返回成功带 warning，并生成空汇总或空结果。
+支持能解析出日期和姓名的文件名，例如：
 
-## Assumptions
+- `YYYY-MM-DD-姓名.md`
+- `姓名-YYYY-MM-DD.md`
+- `姓名_YYYY-MM-DD.md`
+- 规范化 `*-merged.md`
 
-- 输入来自各人员已生成的 WorkTrace Markdown，不重新读取原始聊天。
-- 管理汇总允许展示来源人员名和来源事件 ID。
-- v1 只处理同一天多人合并，不做跨天合并。
-- “合并人自己的个人事件 MD” 识别规则固定为：来源文件名中的姓名与当前登录用户名精确匹配。
-- LLM 合并规则保守，拿不准就分开。
+每个文件通过 `MarkdownEventStore.parse_day_document(...)` 回读。文件名无姓名、Markdown 结构非法或读取失败时跳过该文件并记录 warning，不影响同 scope 其他有效文件。
+
+## 5. 来源过滤
+
+每条来源 `WorkEvent` 在进入 LLM 前执行：
+
+1. `filter_work_events(...)`：敏感词和排除词匹配，包含文件标题与 URL
+2. `filter_retained_work_events(...)`：具体对象、保留理由和保留依据门槛
+
+被过滤来源不会进入 prompt。
+
+## 6. 合并人来源
+
+当前 `lark-cli auth status` 的用户名是 merge owner。来源文件名解析出的姓名与其精确匹配时，该来源事件标记为 `is_merge_owner_source=true`。
+
+同一真实事项包含 merge-owner source 时：
+
+- 没有明确冲突时，正常整合所有人的不冲突事实、动作、结果、风险和待办
+- 只有版本号、结论、状态、结果或待办方向明确冲突时，才采用 merge owner 来源
+- 模型返回 `merge_owner_conflict` 和冲突说明，Python 写入运行 warning
+- 最终正文只显示整合结果，不按人员逐条展示贡献
+
+scope 有来源事件但没有匹配到 merge owner 时，系统写 warning 并回退为普通多人合并。
+
+## 7. 增强合并信息与边界
+
+个人 Markdown 的每条事件可提供：
+
+- `workstream_name`
+- `action_labels`
+- `self_relations`
+- `evidence_fingerprints`
+- `file_keys`
+- 现有标题、内容、具体对象、保留依据、文件、来源人员和来源事件 ID
+
+合并规则：
+
+- 两条事件都有非空工作流且名称不同：禁止合并，Python 会拆开模型误合并
+- 工作流相同：只表示可能属于同一工作范围，不能直接合并
+- 同一工作流下，共同消息指纹、共同文件、相同具体对象或连续动作是强证据，仍由模型结合内容确认
+- 工作流为空的事件，可在共同消息、文件或明确业务对象支持下并入命名工作流
+- 只有标题相似、时间接近或部门相同，不作为合并依据
+
+旧 Markdown 没有增强信息时仍可参与合并，继续使用标题、内容、对象和文件判断。损坏的隐藏合并信息会被忽略并写 warning，不会导致整个来源文件失效。
+
+## 8. 确定性预分组
+
+Python 按稳定 `event_id` 聚合来源。相同 ID 的事件只有在标题/内容满足相似性规则时才锁定为确定性组；同 ID 但内容明显分歧时写 warning，并交给 LLM 判断。
+
+确定性组是给模型的约束，不代表跳过后续验证。
+
+## 9. 单次合并与滚动合并
+
+系统先计算完整 prompt 字符数：
+
+- 不超过 `collected_merge_prompt_char_threshold`：一次调用 `merge_collected_events(...)`
+- 超过阈值：按来源文件 prompt 规模从小到大滚动合并
+
+滚动过程把前一步中间事件作为下一步来源，持续保留：
+
+- 来源人员
+- 来源事件 ID
+- merge-owner source 标记
+- 文件链接
+- 保留元数据
+- 工作流名称、主要动作和协作方式
+- 消息证据指纹和文件标识
+
+中间结果只在内存中存在，最终只写一次规范化汇总文件。
+
+## 10. 字段检查、重试与修复
+
+模型返回后先统计 group 缺少或泛化的字段：
+
+- title
+- content
+- object_hint
+- retention_reason
+- retention_detail
+
+缺失比例达到 `collected_merge_missing_field_retry_ratio` 且未超过 `collected_merge_missing_field_retry_limit` 时，重新请求。环境变量可覆盖比例和次数。
+
+最终 Python 还会：
+
+- 修复遗漏、重复或未知 draft 引用
+- 为遗漏 draft 补 singleton group
+- 从来源事件回填具体对象、保留理由和保留依据
+- 补回模型正文中遗漏的非冲突来源描述
+- 拆开包含多个不同非空工作流的错误分组
+- 对修复行为写 warning
+
+## 11. 输出与追溯
+
+团队 `WorkEvent` 在个人字段之外额外保留：
+
+- `source_people`
+- `source_event_ids`
+- `workstream_name`
+- `action_labels`
+- `self_relations`，Markdown 显示为“协作方式”
+- `evidence_fingerprints`
+- `file_keys`
+
+最终事件再次执行关键词过滤和保留门槛，再通过 `MarkdownEventStore` 写入当前 scope，并由飞书 bot 发给当前登录用户自己。
+
+空目录、无有效文件或所有事件被过滤时，scope 可以生成空汇总并以 warning 说明原因。
+
+## 12. Trace
+
+开启：
+
+```dotenv
+WORKTRACE_COLLECTED_MERGE_TRACE=true
+WORKTRACE_COLLECTED_MERGE_TRACE_ROOT=data/debug/collected_merge
+```
+
+每个 scope 会记录 step JSON、`summary.json` 和 `summary.md`，内容包括：
+
+- prompt 字符数
+- 来源文件/事件指标
+- 本轮完整 `input_events` 和 `deterministic_groups`
+- 原始 group 和字段缺失统计
+- 重试、覆盖修复和元数据回填 warning
+- 不同非空工作流强制拆组产生的 `boundary_warnings`
+- 敏感/排除过滤和保留过滤结果
+- 最终保留事件
+
+## 13. JSON 结果
+
+`CollectedMergeRunResult` 主要包含：
+
+- `target_date`
+- `input_dir`
+- `output_path`
+- `source_file_count`
+- `source_event_count`
+- `merged_event_count`
+- `skipped_file_count`
+- `warning_messages`
+- `self_delivery_status`
+- `self_delivery_target`
+- `self_delivery_error`
+
+有一级子目录时，根 scope 和子 scope 的结果会统一反映在本次运行摘要中。
+
+## 14. 当前代码落点
+
+- `src/worktrace/collected_merge.py`
+- `src/worktrace/analyzers/prompts.py`
+- `src/worktrace/analyzers/output_schemas.py`
+- `src/worktrace/pipeline/sensitive_filter.py`
+- `src/worktrace/pipeline/retention_filter.py`
+- `src/worktrace/stores/markdown.py`
+- `src/worktrace/delivery/feishu_cli.py`

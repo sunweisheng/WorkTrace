@@ -1,5 +1,7 @@
 # WorkTrace Markdown 输出简化设计
 
+> 状态：正式个人日报和多人汇总共同使用的输出契约。
+
 ## 1. 文档目标
 
 本文档说明 WorkTrace 当前已经落地的“去掉管理者总结，直接输出事件清单”实现。
@@ -10,7 +12,7 @@
 - 不再在 Markdown 中写“给上级汇报的当日总结”段落
 - 最终文件直接输出正式“工作事件日报”事件列表
 
-本文档不讨论首轮会话提炼、会话内扩窗重跑或跨会话事件合并。
+本文档不讨论上游分段提炼、上下文扩展或跨会话事件合并。
 
 ## 2. 当前背景
 
@@ -30,9 +32,9 @@
 
 当前主流程在写 Markdown 之前，已经完成：
 
-1. 单会话事件提炼
-2. 会话内扩窗与附件补充
-3. 全日跨会话分组归并
+1. 锚点窗口分段和会话内片段批处理
+2. 片段级扩窗、附件和链接正文补充
+3. 全日跨会话分组和工作流归属校正
 4. `build_work_events(...)`
 
 因此最终 `WorkEvent` 列表已经是当天相对稳定的结构化产物，不再需要额外总结层。
@@ -41,7 +43,7 @@
 
 ### 3.1 runner 主流程
 
-当前 [runner.py](/Users/sunweisheng/Documents/GitHub/WorkTrace/src/worktrace/runner.py) 中，在 `build_work_events(...)` 之后直接调用：
+当前 `runner.py` 中，在 `build_work_events(...)`、文件证据聚合和最终过滤之后调用：
 
 - `event_store.replace_day(target_date, events, owner_display_name=self_identity.display_name)`
 
@@ -51,14 +53,17 @@
 
 当前 analyzer 主契约中，管理者总结已经不属于日主流程必需接口。
 
-当前日处理链路只依赖：
+当前日处理链路的 analyzer 任务包括：
 
-- 单会话分析
+- 锚点窗口分段
+- 会话内片段批量分析
+- 锚点失败回退
 - 全日跨会话分组
+- 必要时的工作流归属补充判断
 
 ### 3.3 store 接口
 
-当前 [stores/base.py](/Users/sunweisheng/Documents/GitHub/WorkTrace/src/worktrace/stores/base.py) 中：
+当前 `stores/base.py` 中：
 
 - `replace_day(...)` 接收 `target_date`、`events` 和可选 `owner_display_name`
 
@@ -76,11 +81,11 @@
 
 不再包含任何总结层字段。
 
-对应模型位于 [models.py](/Users/sunweisheng/Documents/GitHub/WorkTrace/src/worktrace/models.py)。
+对应模型位于 `src/worktrace/models.py`。
 
 ### 4.2 Markdown store
 
-当前 [markdown.py](/Users/sunweisheng/Documents/GitHub/WorkTrace/src/worktrace/stores/markdown.py) 中：
+当前 `stores/markdown.py` 中：
 
 - front matter 仅包含日期、事件数、生成时间和生成器
 - 正文包含 `# 工作事件日报 · YYYY-MM-DD`、`## 事件列表` 和逐条编号事件
@@ -105,14 +110,35 @@
 
 - HTML 注释包裹的 `event_id`
 - 隐藏注释保存内部 `retention_reason` 枚举
+- 隐藏 `merge_meta` 保存参与方式英文键、消息证据指纹和文件标识
 - `### 序号. 事件标题`
 - `日期`
 - `事件标题`
+- `工作流`
+- `主要动作`
 - `内容`
 - `具体对象`
+- `本人参与方式`
 - 中文 `保留理由`
 - `保留依据`
 - `涉及文件`
+
+团队汇总事件把“本人参与方式”替换为“协作方式”，并额外包含：
+
+- `来源人员`
+- `来源事件 ID`
+
+个人事件字段顺序固定为：日期、事件标题、工作流、主要动作、内容、具体对象、本人参与方式、保留理由、保留依据、涉及文件。工作流、主要动作或参与方式为空时显示“未明确”。
+
+隐藏信息格式：
+
+```html
+<!-- worktrace:merge_meta {"version":1,"self_relations":["initiated"],"evidence_fingerprints":["sha256:..."],"file_keys":["sha256:..."]} -->
+```
+
+`evidence_fingerprints` 由 Python 对每个来源消息 ID 分别计算 SHA-256，`file_keys` 由去参数后的链接或附件 ID 计算 SHA-256。注释不得包含原始消息、会话、用户 ID。只有文件名而没有稳定链接或附件 ID 时不生成文件标识。
+
+旧 Markdown 没有这些字段或注释时仍按空值读取；不批量改写历史文件。损坏的 `merge_meta` 只记录 warning 并忽略，不影响正文事件回读。
 
 底部生成说明包含：
 
@@ -144,10 +170,11 @@
 
 本设计当前主要落在以下文件：
 
-- [runner.py](/Users/sunweisheng/Documents/GitHub/WorkTrace/src/worktrace/runner.py)
-- [stores/base.py](/Users/sunweisheng/Documents/GitHub/WorkTrace/src/worktrace/stores/base.py)
-- [stores/markdown.py](/Users/sunweisheng/Documents/GitHub/WorkTrace/src/worktrace/stores/markdown.py)
-- [models.py](/Users/sunweisheng/Documents/GitHub/WorkTrace/src/worktrace/models.py)
+- `src/worktrace/runner.py`
+- `src/worktrace/collected_merge.py`
+- `src/worktrace/stores/base.py`
+- `src/worktrace/stores/markdown.py`
+- `src/worktrace/models.py`
 
 ## 8. 当前状态总结
 

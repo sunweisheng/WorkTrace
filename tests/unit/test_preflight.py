@@ -33,7 +33,15 @@ def _success_runner_factory():
     return runner
 
 
-def test_preflight_success(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize(
+    "response_text",
+    ['{"probe":"ok"}', '```json\n{"probe":"ok"}\n```'],
+)
+def test_preflight_success(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    response_text: str,
+) -> None:
     (tmp_path / ".env").write_text(
         "WORKTRACE_LLM_BASE_URL=https://llm.example/v1\n"
         "WORKTRACE_LLM_MODEL=provider-model\n"
@@ -44,7 +52,7 @@ def test_preflight_success(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> N
 
     class FakeResponse:
         def model_dump(self):
-            return {"output_text": '{"probe":"ok"}'}
+            return {"output_text": response_text}
 
     class FakeResponses:
         def create(self, **kwargs):

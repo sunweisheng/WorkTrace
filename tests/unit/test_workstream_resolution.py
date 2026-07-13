@@ -62,6 +62,9 @@ def test_llm_assignments_merge_project_branches_and_policy_feedback() -> None:
     assert grouped_ids[frozenset({"policy-root", "policy-feedback"})] == "policy-root"
     assert frozenset({"unrelated"}) in grouped_ids
     assert warnings == []
+    names_by_group = {frozenset(group.draft_ids): group.workstream_name for group in groups}
+    assert names_by_group[frozenset({"project-root", "camera-task"})] == "项目甲"
+    assert names_by_group[frozenset({"policy-root", "policy-feedback"})] == "政策乙"
 
 
 def test_llm_assignment_without_source_evidence_stays_independent() -> None:

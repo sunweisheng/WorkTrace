@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import os
 import re
-from dataclasses import dataclass
+import json
+from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
@@ -10,6 +11,13 @@ from ..config import RuntimeConfig
 from ..errors import StoreWriteError
 from ..models import DayDocument, EventFileLink, StoreWriteResult, WorkEvent
 from ..utils.dates import now_iso
+from ..utils.hashing import (
+    evidence_fingerprint,
+    file_key_from_attachment_id,
+    file_key_from_url,
+    is_sha256_fingerprint,
+    stable_event_id,
+)
 from ..utils.filenames import (
     build_personal_markdown_filename,
     parse_worktrace_markdown_filename,
@@ -44,11 +52,13 @@ RETENTION_REASON_LABELS = {
 }
 
 INTERNAL_FEISHU_ID_RE = re.compile(r"\b(?:om|oc|ou)_[A-Za-z0-9_-]+\b")
-
+MERGE_META_PREFIX = "<!-- worktrace:merge_meta "
+UNKNOWN_METADATA_VALUE = "未明确"
 
 @dataclass
 class MarkdownEventStore(EventStore):
     config: RuntimeConfig
+    last_warning_messages: list[str] = field(default_factory=list, init=False)
 
     def replace_day(
         self,
@@ -153,20 +163,98 @@ class MarkdownEventStore(EventStore):
         content = self._normalize_public_text(event.content)
         object_hint = self._normalize_public_text(event.object_hint)
         retention_detail = self._normalize_public_text(event.retention_detail)
+        workstream_name = self._render_metadata_text(event.workstream_name)
+        action_labels = self._render_metadata_values(event.action_labels)
+        relation_label = (
+            "协作方式"
+            if event.source_people or event.source_event_ids
+            else "本人参与方式"
+        )
+        self_relations = self._render_self_relations(event.self_relations)
+        merge_meta = self._render_merge_meta(event)
+        event_id = event.event_id
+        if INTERNAL_FEISHU_ID_RE.search(event_id):
+            event_id = stable_event_id(event.date, [], event_id)
         return (
-            f'<!-- worktrace:event:start event_id="{event.event_id}" -->\n'
+            f'<!-- worktrace:event:start event_id="{event_id}" -->\n'
             f"<!-- worktrace:retention_reason: {event.retention_reason} -->\n"
+            f"{merge_meta}\n"
             f"### {index}. {title}\n\n"
             f"- **日期**: {event.date}\n"
             f"- **事件标题**: {title}\n"
+            f"- **工作流**: {workstream_name}\n"
+            f"- **主要动作**: {action_labels}\n"
             f"- **内容**: {content}\n"
             f"- **具体对象**: {object_hint}\n"
+            f"- **{relation_label}**: {self_relations}\n"
             f"- **保留理由**: {retention_reason_label}\n"
             f"- **保留依据**: {retention_detail}\n"
             f"{source_lines}"
             f"- **涉及文件**:\n{link_lines}\n"
             "<!-- worktrace:event:end -->"
         ).strip()
+
+    def _render_metadata_text(self, value: str) -> str:
+        cleaned = self._normalize_public_text(value.strip())
+        return cleaned or UNKNOWN_METADATA_VALUE
+
+    def _render_metadata_values(self, values: list[str]) -> str:
+        cleaned = [
+            self._normalize_public_text(value.strip())
+            for value in values
+            if value.strip()
+        ]
+        return "、".join(dict.fromkeys(cleaned)) or UNKNOWN_METADATA_VALUE
+
+    def _render_self_relations(self, relations: list[str]) -> str:
+        labels_by_key = {
+            item.key: item.label for item in self.config.self_relation_types
+        }
+        labels = [labels_by_key.get(relation, relation) for relation in relations]
+        return self._render_metadata_values(labels)
+
+    def _render_merge_meta(self, event: WorkEvent) -> str:
+        evidence_fingerprints = list(
+            dict.fromkeys(
+                [
+                    *(
+                        value
+                        for value in event.evidence_fingerprints
+                        if is_sha256_fingerprint(value)
+                    ),
+                    *(evidence_fingerprint(message_id) for message_id in event.source_message_ids),
+                ]
+            )
+        )
+        file_keys = list(
+            dict.fromkeys(
+                [
+                    *(value for value in event.file_keys if is_sha256_fingerprint(value)),
+                    *(
+                        key
+                        for link in event.file_links
+                        if (key := file_key_from_url(link.url))
+                    ),
+                    *(
+                        key
+                        for attachment_id in event.referenced_attachment_ids
+                        if (key := file_key_from_attachment_id(attachment_id))
+                    ),
+                ]
+            )
+        )
+        self_relations = [
+            relation
+            for relation in dict.fromkeys(event.self_relations)
+            if not INTERNAL_FEISHU_ID_RE.search(relation)
+        ]
+        payload = {
+            "version": 1,
+            "self_relations": self_relations,
+            "evidence_fingerprints": evidence_fingerprints,
+            "file_keys": file_keys,
+        }
+        return f"{MERGE_META_PREFIX}{json.dumps(payload, ensure_ascii=False, separators=(',', ':'))} -->"
 
     def _redact_internal_ids(self, value: str) -> str:
         return INTERNAL_FEISHU_ID_RE.sub("[内部消息ID已隐藏]", value)
@@ -234,6 +322,7 @@ class MarkdownEventStore(EventStore):
         )
 
     def parse_day_document(self, markdown_text: str) -> DayDocument:
+        self.last_warning_messages = []
         if not markdown_text.startswith("---\n"):
             raise StoreWriteError("Markdown front matter is missing.")
         _, front_matter, body = markdown_text.split("---\n", 2)
@@ -302,6 +391,23 @@ class MarkdownEventStore(EventStore):
             source_event_ids = self._parse_source_values(
                 self._extract_value(block, "- 来源事件 ID: ")
             )
+            workstream_name = self._parse_optional_metadata_value(
+                self._extract_value(block, "- **工作流**: ")
+            )
+            action_labels = self._parse_metadata_values(
+                self._extract_value(block, "- **主要动作**: ")
+            )
+            visible_relations = self._parse_metadata_values(
+                self._extract_value(
+                    block,
+                    "- **本人参与方式**: ",
+                    "- **协作方式**: ",
+                )
+            )
+            merge_meta = self._extract_merge_meta(block, event_id=event_id)
+            self_relations = merge_meta.get("self_relations", [])
+            if not self_relations:
+                self_relations = self._relation_keys_from_labels(visible_relations)
             file_links = self._extract_file_links(block)
             events.append(
                 WorkEvent(
@@ -315,6 +421,11 @@ class MarkdownEventStore(EventStore):
                     object_hint=object_hint,
                     retention_reason=retention_reason,
                     retention_detail=retention_detail,
+                    workstream_name=workstream_name,
+                    action_labels=action_labels,
+                    self_relations=self_relations,
+                    evidence_fingerprints=merge_meta.get("evidence_fingerprints", []),
+                    file_keys=merge_meta.get("file_keys", []),
                 )
             )
             cursor = next_cursor
@@ -383,7 +494,11 @@ class MarkdownEventStore(EventStore):
         return self._extract_value(block, "- 保留理由: ", "- **保留理由**: ")
 
     def _render_source_values(self, values: list[str]) -> str:
-        cleaned = [value.strip() for value in values if value.strip()]
+        cleaned = [
+            self._normalize_public_text(value.strip())
+            for value in values
+            if value.strip()
+        ]
         if not cleaned:
             return "无"
         return "、".join(cleaned)
@@ -401,6 +516,68 @@ class MarkdownEventStore(EventStore):
         if not stripped or stripped == "无":
             return []
         return [item.strip() for item in stripped.split("、") if item.strip()]
+
+    def _parse_optional_metadata_value(self, value: str) -> str:
+        stripped = value.strip()
+        if stripped == UNKNOWN_METADATA_VALUE:
+            return ""
+        return stripped
+
+    def _parse_metadata_values(self, value: str) -> list[str]:
+        stripped = value.strip()
+        if not stripped or stripped == UNKNOWN_METADATA_VALUE:
+            return []
+        return [item.strip() for item in stripped.split("、") if item.strip()]
+
+    def _relation_keys_from_labels(self, labels: list[str]) -> list[str]:
+        keys_by_label = {
+            item.label: item.key for item in self.config.self_relation_types
+        }
+        return list(
+            dict.fromkeys(keys_by_label.get(label, label) for label in labels)
+        )
+
+    def _extract_merge_meta(self, block: str, *, event_id: str) -> dict[str, list[str]]:
+        for line in block.splitlines():
+            if not line.startswith(MERGE_META_PREFIX):
+                continue
+            if not line.endswith(" -->"):
+                self._record_merge_meta_warning(event_id)
+                return {}
+            raw_payload = line[len(MERGE_META_PREFIX) : -len(" -->")]
+            try:
+                payload = json.loads(raw_payload)
+            except json.JSONDecodeError:
+                self._record_merge_meta_warning(event_id)
+                return {}
+            if not isinstance(payload, dict) or payload.get("version") != 1:
+                self._record_merge_meta_warning(event_id)
+                return {}
+            parsed: dict[str, list[str]] = {}
+            for key in ("self_relations", "evidence_fingerprints", "file_keys"):
+                value = payload.get(key, [])
+                if not isinstance(value, list) or not all(
+                    isinstance(item, str) for item in value
+                ):
+                    self._record_merge_meta_warning(event_id)
+                    return {}
+                if key == "self_relations" and any(
+                    INTERNAL_FEISHU_ID_RE.search(item) for item in value
+                ):
+                    self._record_merge_meta_warning(event_id)
+                    return {}
+                if key != "self_relations":
+                    if not all(is_sha256_fingerprint(item) for item in value):
+                        self._record_merge_meta_warning(event_id)
+                        return {}
+                parsed[key] = list(dict.fromkeys(value))
+            return parsed
+        return {}
+
+    def _record_merge_meta_warning(self, event_id: str) -> None:
+        self.last_warning_messages.append(
+            f"Ignored damaged merge metadata for event {event_id}."
+        )
 
     def _extract_file_links(self, block: str) -> list[EventFileLink]:
         lines = block.splitlines()

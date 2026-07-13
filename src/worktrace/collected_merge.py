@@ -36,9 +36,9 @@ from .utils.filenames import (
     build_merged_markdown_filename,
     parse_worktrace_markdown_filename,
 )
-from .utils.hashing import stable_event_id
+from .utils.hashing import file_key_from_url, stable_event_id
 from .utils.json_io import dump_json
-from .utils.text import choose_preferred_text, clean_text
+from .utils.text import choose_preferred_text, clean_text, merge_content_texts
 
 
 @dataclass
@@ -349,6 +349,10 @@ class CollectedMergeRunner:
             source_events,
             deterministic_groups,
         )
+        merge_result, boundary_warnings = enforce_collected_workstream_boundaries(
+            merge_result,
+            source_events,
+        )
         merge_result, metadata_warnings = self._fill_collected_merge_group_metadata(
             source_events,
             merge_result,
@@ -370,6 +374,7 @@ class CollectedMergeRunner:
             merged_events_after_sensitive=merged_events_after_sensitive,
             retained_events=retained_events,
             repair_warnings=repair_warnings,
+            boundary_warnings=boundary_warnings,
             metadata_warnings=metadata_warnings,
             sensitive_warnings=sensitive_warnings,
             retention_warnings=retention_warnings,
@@ -377,6 +382,7 @@ class CollectedMergeRunner:
         return retained_events, [
             *retry_warnings,
             *repair_warnings,
+            *boundary_warnings,
             *metadata_warnings,
             *sensitive_warnings,
             *retention_warnings,
@@ -457,6 +463,20 @@ class CollectedMergeRunner:
             )
             if content != group.content:
                 filled_fields.append("content")
+            has_merge_owner_source = any(item.is_merge_owner_source for item in items)
+            merge_owner_conflict = bool(
+                group.merge_owner_conflict and has_merge_owner_source
+            )
+            conflict_detail = clean_text(group.conflict_detail)
+            if not merge_owner_conflict:
+                integrated_content = merge_content_texts(
+                    [content, *(item.event.content for item in items)]
+                )
+                if integrated_content != content:
+                    content = integrated_content
+                conflict_detail = ""
+            elif not conflict_detail:
+                conflict_detail = "不同来源存在明确事实冲突，已采用合并人来源。"
             object_hint = clean_text(group.object_hint) or choose_preferred_text(
                 [item.event.object_hint for item in items]
             )
@@ -501,8 +521,15 @@ class CollectedMergeRunner:
                     object_hint=object_hint,
                     retention_reason=retention_reason,
                     retention_detail=retention_detail,
+                    merge_owner_conflict=merge_owner_conflict,
+                    conflict_detail=conflict_detail,
                 )
             )
+            if merge_owner_conflict:
+                warnings.append(
+                    "Resolved explicit source conflict in favor of merge owner: "
+                    f"{title or group.group_id} ({conflict_detail})"
+                )
             if filled_fields:
                 warning_title = title or group.group_id or "(empty title)"
                 warnings.append(
@@ -594,6 +621,10 @@ class CollectedMergeRunner:
                 skipped_file_count += 1
                 warnings.append(f"Skipped invalid source markdown: {path.name} ({exc})")
                 continue
+            warnings.extend(
+                f"{path.name}: {warning}"
+                for warning in self.store.last_warning_messages
+            )
             if day_doc.date != target_date:
                 warnings.append(
                     f"Source markdown date mismatch: {path.name} ({day_doc.date})"
@@ -725,6 +756,41 @@ class CollectedMergeRunner:
                 ]
             )
             file_links = _merge_file_links(items)
+            workstream_names = _dedupe(
+                [item.event.workstream_name for item in items]
+            )
+            action_labels = _dedupe(
+                [
+                    label
+                    for item in items
+                    for label in item.event.action_labels
+                ]
+            )
+            self_relations = _sort_self_relations(
+                [
+                    relation
+                    for item in items
+                    for relation in item.event.self_relations
+                ],
+                config=self.config,
+            )
+            evidence_fingerprints = _dedupe(
+                [
+                    value
+                    for item in items
+                    for value in item.event.evidence_fingerprints
+                ]
+            )
+            file_keys = _dedupe(
+                [
+                    *(value for item in items for value in item.event.file_keys),
+                    *(
+                        key
+                        for link in file_links
+                        if (key := file_key_from_url(link.url))
+                    ),
+                ]
+            )
             event_id = stable_event_id(
                 target_date,
                 group.draft_ids,
@@ -745,6 +811,11 @@ class CollectedMergeRunner:
                     object_hint=group.object_hint,
                     retention_reason=group.retention_reason,
                     retention_detail=group.retention_detail,
+                    workstream_name=workstream_names[0] if workstream_names else "",
+                    action_labels=action_labels,
+                    self_relations=self_relations,
+                    evidence_fingerprints=evidence_fingerprints,
+                    file_keys=file_keys,
                 )
             )
         return events
@@ -794,6 +865,8 @@ class CollectedMergeRunner:
             "attempt_index": attempt_index,
             "prompt_chars": prompt_chars,
             "input": collected_merge_source_metrics(source_events),
+            "input_events": [item.to_dict() for item in source_events],
+            "deterministic_groups": [list(group) for group in deterministic_groups],
             "raw_group_count": len(merge_result.groups),
             "raw_group_metrics": collected_merge_group_metrics(merge_result),
             "missing_required_field_summary": missing_summary,
@@ -810,6 +883,7 @@ class CollectedMergeRunner:
         merged_events_after_sensitive: list[WorkEvent],
         retained_events: list[WorkEvent],
         repair_warnings: list[str],
+        boundary_warnings: list[str],
         metadata_warnings: list[str],
         sensitive_warnings: list[str],
         retention_warnings: list[str],
@@ -829,6 +903,7 @@ class CollectedMergeRunner:
                 ),
                 "retained_metrics": collected_merge_work_event_metrics(retained_events),
                 "repair_warnings": repair_warnings,
+                "boundary_warnings": boundary_warnings,
                 "metadata_warnings": metadata_warnings,
                 "sensitive_warnings": sensitive_warnings,
                 "retention_warnings": retention_warnings,
@@ -1215,6 +1290,14 @@ def collected_events_are_similar(source_events: list[CollectedSourceEvent]) -> b
 
 
 def _events_are_deterministically_same(left: WorkEvent, right: WorkEvent) -> bool:
+    left_workstream = _normalize_text(left.workstream_name)
+    right_workstream = _normalize_text(right.workstream_name)
+    if (
+        left_workstream
+        and right_workstream
+        and left_workstream.casefold() != right_workstream.casefold()
+    ):
+        return False
     left_title = _normalize_text(left.title)
     right_title = _normalize_text(right.title)
     left_content = _normalize_text(left.content)
@@ -1279,6 +1362,8 @@ def repair_collected_merge_result(
                 object_hint=group.object_hint,
                 retention_reason=group.retention_reason,
                 retention_detail=group.retention_detail,
+                merge_owner_conflict=group.merge_owner_conflict,
+                conflict_detail=group.conflict_detail,
             )
         )
 
@@ -1314,6 +1399,74 @@ def repair_collected_merge_result(
     return CollectedMergeResult(groups=groups), warnings
 
 
+def enforce_collected_workstream_boundaries(
+    merge_result: CollectedMergeResult,
+    source_events: list[CollectedSourceEvent],
+) -> tuple[CollectedMergeResult, list[str]]:
+    source_by_id = {item.draft_id: item for item in source_events}
+    groups: list[CollectedMergeGroup] = []
+    warnings: list[str] = []
+
+    for group in merge_result.groups:
+        items = [
+            source_by_id[draft_id]
+            for draft_id in group.draft_ids
+            if draft_id in source_by_id
+        ]
+        named_groups: dict[str, list[CollectedSourceEvent]] = {}
+        unnamed_items: list[CollectedSourceEvent] = []
+        for item in items:
+            name = clean_text(item.event.workstream_name)
+            if not name:
+                unnamed_items.append(item)
+                continue
+            normalized_name = "".join(name.casefold().split())
+            named_groups.setdefault(normalized_name, []).append(item)
+
+        if len(named_groups) <= 1:
+            groups.append(group)
+            continue
+
+        partitions = [*named_groups.values(), *([item] for item in unnamed_items)]
+        for index, partition in enumerate(partitions, start=1):
+            groups.append(
+                _build_boundary_fallback_group(
+                    group,
+                    partition,
+                    partition_index=index,
+                )
+            )
+        warnings.append(
+            "Split collected merge group because different named workstreams cannot merge: "
+            f"{group.group_id}."
+        )
+
+    return CollectedMergeResult(groups=groups), warnings
+
+
+def _build_boundary_fallback_group(
+    original_group: CollectedMergeGroup,
+    items: list[CollectedSourceEvent],
+    *,
+    partition_index: int,
+) -> CollectedMergeGroup:
+    return CollectedMergeGroup(
+        group_id=f"{original_group.group_id}-workstream-{partition_index}",
+        draft_ids=[item.draft_id for item in items],
+        title=choose_preferred_text([item.event.title for item in items]),
+        content=merge_content_texts([item.event.content for item in items]),
+        object_hint=choose_preferred_text([item.event.object_hint for item in items]),
+        retention_reason=choose_preferred_text(
+            [
+                item.event.retention_reason
+                for item in items
+                if item.event.retention_reason in RETENTION_REASONS
+            ]
+        ),
+        retention_detail=derive_collected_merge_retention_detail(items),
+    )
+
+
 def _merge_file_links(source_events: list[CollectedSourceEvent]) -> list[EventFileLink]:
     seen: set[tuple[str, str]] = set()
     links: list[EventFileLink] = []
@@ -1337,6 +1490,17 @@ def _dedupe(values: list[str]) -> list[str]:
         seen.add(stripped)
         result.append(stripped)
     return result
+
+
+def _sort_self_relations(
+    values: list[str],
+    *,
+    config: RuntimeConfig,
+) -> list[str]:
+    deduped = _dedupe(values)
+    configured_order = [item.key for item in config.self_relation_types]
+    configured = [value for value in configured_order if value in deduped]
+    return [*configured, *(value for value in deduped if value not in configured)]
 
 
 def _deliver_markdown_to_self(

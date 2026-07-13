@@ -5,10 +5,11 @@ from pathlib import Path
 
 from src.worktrace.collected_merge import (
     CollectedMergeRunner,
+    enforce_collected_workstream_boundaries,
     extract_person_name_from_filename,
 )
 from src.worktrace.analyzers.prompts import build_collected_merge_prompt
-from src.worktrace.config import RuntimeConfig
+from src.worktrace.config import EventMetadataItem, RuntimeConfig
 from src.worktrace.errors import DeliveryError
 from src.worktrace.models import (
     CollectedMergeGroup,
@@ -60,6 +61,11 @@ def _event(
     object_hint: str | None = None,
     retention_reason: str = "decision_made",
     retention_detail: str | None = None,
+    workstream_name: str = "",
+    action_labels: list[str] | None = None,
+    self_relations: list[str] | None = None,
+    evidence_fingerprints: list[str] | None = None,
+    file_keys: list[str] | None = None,
 ) -> WorkEvent:
     return WorkEvent(
         date="2026-06-29",
@@ -69,6 +75,11 @@ def _event(
         object_hint=object_hint or title,
         retention_reason=retention_reason,
         retention_detail=retention_detail or f"确认{title}的具体结果。",
+        workstream_name=workstream_name,
+        action_labels=action_labels or [],
+        self_relations=self_relations or [],
+        evidence_fingerprints=evidence_fingerprints or [],
+        file_keys=file_keys or [],
     )
 
 
@@ -381,6 +392,11 @@ def test_collected_merge_over_threshold_rolls_sources_and_keeps_provenance(
                     object_hint=f"{person}项目排期",
                     retention_reason="decision_made",
                     retention_detail=f"{person}形成项目排期确认结果。",
+                    workstream_name="项目排期工作流",
+                    action_labels=[f"{person}确认"],
+                    self_relations=["collaboration"],
+                    evidence_fingerprints=["sha256:" + person.encode().hex().ljust(64, "0")[:64]],
+                    file_keys=["sha256:" + (person + "file").encode().hex().ljust(64, "0")[:64]],
                 )
             ],
             tmp_path,
@@ -393,6 +409,9 @@ def test_collected_merge_over_threshold_rolls_sources_and_keeps_provenance(
         config=RuntimeConfig(
             data_root=tmp_path / "data",
             collected_merge_prompt_char_threshold=1,
+            self_relation_types=(
+                EventMetadataItem("collaboration", "协作参与", 10),
+            ),
         ),
     ).run("2026-06-29")
 
@@ -401,12 +420,20 @@ def test_collected_merge_over_threshold_rolls_sources_and_keeps_provenance(
         analyzer.calls[1]["events"][0].source_file
         == "__rolling_collected_merge_step_1.md"
     )
+    rolling_event = analyzer.calls[1]["events"][0].event
+    assert rolling_event.workstream_name == "项目排期工作流"
+    assert rolling_event.action_labels
+    assert rolling_event.self_relations == ["collaboration"]
+    assert len(rolling_event.evidence_fingerprints) == 2
+    assert len(rolling_event.file_keys) >= 2
     content = Path(result.output_path or "").read_text(encoding="utf-8")
     assert "- 来源人员: 张三、李四、王五" in content
     assert "- 来源事件 ID: evt-张三、evt-李四、evt-王五" in content
     assert "张三文档" in content
     assert "李四文档" in content
     assert "王五文档" in content
+    assert "- **工作流**: 项目排期工作流" in content
+    assert "- **协作方式**: 协作参与" in content
     assert any(
         warning.startswith("Using rolling collected merge:")
         and "threshold=1" in warning
@@ -859,8 +886,161 @@ def test_collected_merge_prompt_contains_sensitive_rules() -> None:
     assert "涉及工资、薪资、薪酬、吵架、辱骂" in prompt
     assert "不要输出对应 group" in prompt
     assert "retention_reason" in prompt
-    assert "以该来源事件为主" in prompt
+    assert "只有不同来源" in prompt
+    assert "存在明确冲突" in prompt
     assert "最终 group 必须以 1.0.5 为主事实" in prompt
+    assert "workstream_name 相同只表示可能属于同一工作范围" in prompt
+    assert "只有标题相似、时间接近或部门相同，不能作为合并依据" in prompt
+
+
+def test_collected_merge_prompt_includes_new_merge_evidence() -> None:
+    prompt = build_collected_merge_prompt(
+        "2026-06-29",
+        [
+            CollectedSourceEvent(
+                draft_id="d1",
+                person_name="张三",
+                source_file="2026-06-29-张三.md",
+                event=_event(
+                    event_id="evt1",
+                    title="项目甲方案",
+                    content="确认项目甲方案。",
+                    workstream_name="项目甲",
+                    action_labels=["方案确认"],
+                    self_relations=["initiated"],
+                    evidence_fingerprints=["sha256:" + "a" * 64],
+                    file_keys=["sha256:" + "b" * 64],
+                ),
+            )
+        ],
+        [],
+        config=RuntimeConfig(
+            self_relation_types=(EventMetadataItem("initiated", "发起", 10),),
+        ),
+    )
+
+    event_payload = json.loads(prompt)["remaining_events"][0]
+
+    assert event_payload["workstream_name"] == "项目甲"
+    assert event_payload["action_labels"] == ["方案确认"]
+    assert event_payload["self_relations"] == [{"key": "initiated", "label": "发起"}]
+    assert event_payload["evidence_fingerprints"] == ["sha256:" + "a" * 64]
+    assert event_payload["file_keys"] == ["sha256:" + "b" * 64]
+
+
+def test_collected_merge_splits_different_named_workstreams() -> None:
+    source_events = [
+        CollectedSourceEvent("d1", "张三", "a.md", _event(
+            event_id="e1",
+            title="项目甲",
+            content="推进项目甲。",
+            workstream_name="项目甲",
+        )),
+        CollectedSourceEvent("d2", "李四", "b.md", _event(
+            event_id="e2",
+            title="项目乙",
+            content="推进项目乙。",
+            workstream_name="项目乙",
+        )),
+    ]
+    result, warnings = enforce_collected_workstream_boundaries(
+        CollectedMergeResult(
+            groups=[
+                CollectedMergeGroup(
+                    group_id="bad-group",
+                    draft_ids=["d1", "d2"],
+                    title="错误合并",
+                    content="错误合并内容。",
+                )
+            ]
+        ),
+        source_events,
+    )
+
+    assert [group.draft_ids for group in result.groups] == [["d1"], ["d2"]]
+    assert len(warnings) == 1
+
+
+def test_collected_merge_keeps_non_conflicting_source_details(tmp_path: Path) -> None:
+    source_events = [
+        CollectedSourceEvent(
+            "d1",
+            "管理者",
+            "a.md",
+            _event(
+                event_id="e1",
+                title="项目方案",
+                content="管理者确认了方案范围。",
+            ),
+            is_merge_owner_source=True,
+        ),
+        CollectedSourceEvent("d2", "李四", "b.md", _event(
+            event_id="e2",
+            title="项目方案",
+            content="李四完成了执行验证，并记录待办。",
+        )),
+    ]
+    runner = _build_runner(tmp_path)
+    result, warnings = runner._fill_collected_merge_group_metadata(
+        source_events,
+        CollectedMergeResult(
+            groups=[
+                CollectedMergeGroup(
+                    group_id="g1",
+                    draft_ids=["d1", "d2"],
+                    title="项目方案",
+                    content="管理者确认了方案范围。",
+                    object_hint="项目方案",
+                    retention_reason="decision_made",
+                    retention_detail="形成方案结论并完成验证。",
+                )
+            ]
+        ),
+    )
+
+    assert "管理者确认了方案范围" in result.groups[0].content
+    assert "李四完成了执行验证" in result.groups[0].content
+    assert warnings == []
+
+
+def test_collected_merge_owner_wins_only_when_conflict_is_marked(tmp_path: Path) -> None:
+    source_events = [
+        CollectedSourceEvent(
+            "d1",
+            "管理者",
+            "owner.md",
+            _event(event_id="e1", title="版本升级", content="升级到 1.0.5。"),
+            is_merge_owner_source=True,
+        ),
+        CollectedSourceEvent(
+            "d2",
+            "张三",
+            "staff.md",
+            _event(event_id="e2", title="版本升级", content="升级到 1.0.4。"),
+        ),
+    ]
+    runner = _build_runner(tmp_path)
+    result, warnings = runner._fill_collected_merge_group_metadata(
+        source_events,
+        CollectedMergeResult(
+            groups=[
+                CollectedMergeGroup(
+                    group_id="g1",
+                    draft_ids=["d1", "d2"],
+                    title="版本升级",
+                    content="升级到 1.0.5。",
+                    object_hint="版本升级",
+                    retention_reason="decision_made",
+                    retention_detail="已确认最终升级版本。",
+                    merge_owner_conflict=True,
+                    conflict_detail="来源版本号不一致。",
+                )
+            ]
+        ),
+    )
+
+    assert result.groups[0].content == "升级到 1.0.5。"
+    assert any("Resolved explicit source conflict" in warning for warning in warnings)
 
 
 def test_collected_merge_owner_signal_can_drive_final_version_output(
@@ -1181,6 +1361,11 @@ def test_collected_merge_trace_writes_step_summary(tmp_path: Path) -> None:
                 content="确认需求变更范围和上线排期。",
                 object_hint="需求变更范围和上线排期",
                 retention_detail="评审形成需求变更范围和上线排期结论。",
+                workstream_name="需求评审工作流",
+                action_labels=["范围确认"],
+                self_relations=["decision_confirmation"],
+                evidence_fingerprints=["sha256:" + "a" * 64],
+                file_keys=["sha256:" + "b" * 64],
             )
         ],
         tmp_path,
@@ -1206,6 +1391,64 @@ def test_collected_merge_trace_writes_step_summary(tmp_path: Path) -> None:
     step = json.loads(step_path.read_text(encoding="utf-8"))
     assert step["raw_group_count"] == 1
     assert step["retained_metrics"]["event_count"] == 1
+    assert len(step["input_events"]) == 1
+    input_event = step["input_events"][0]["event"]
+    assert input_event["workstream_name"] == "需求评审工作流"
+    assert input_event["action_labels"] == ["范围确认"]
+    assert input_event["self_relations"] == ["decision_confirmation"]
+    assert input_event["evidence_fingerprints"] == ["sha256:" + "a" * 64]
+    assert input_event["file_keys"] == ["sha256:" + "b" * 64]
+    assert step["deterministic_groups"] == []
+    assert step["boundary_warnings"] == []
+
+
+def test_collected_merge_trace_records_workstream_boundary_warnings(
+    tmp_path: Path,
+) -> None:
+    inbox = tmp_path / "merge_inbox" / "2026" / "06" / "29"
+    _write_day_doc(
+        inbox / "2026-06-29-张三.md",
+        [
+            _event(
+                event_id="evt-a",
+                title="项目甲推进",
+                content="推进项目甲。",
+                workstream_name="项目甲",
+            )
+        ],
+        tmp_path,
+    )
+    _write_day_doc(
+        inbox / "2026-06-29-李四.md",
+        [
+            _event(
+                event_id="evt-b",
+                title="项目乙推进",
+                content="推进项目乙。",
+                workstream_name="项目乙",
+            )
+        ],
+        tmp_path,
+    )
+    trace_root = tmp_path / "trace"
+
+    result = _build_runner(
+        tmp_path,
+        config=RuntimeConfig(
+            data_root=tmp_path / "data",
+            collected_merge_trace_enabled=True,
+            collected_merge_trace_root=trace_root,
+        ),
+    ).run("2026-06-29")
+
+    assert result.merged_event_count == 2
+    step = json.loads(
+        (trace_root / "2026-06-29" / "step-001.json").read_text(encoding="utf-8")
+    )
+    assert len(step["input_events"]) == 2
+    assert step["boundary_warnings"] == [
+        "Split collected merge group because different named workstreams cannot merge: g1."
+    ]
 
 
 def test_collected_merge_run_result_round_trips_outputs(tmp_path: Path) -> None:

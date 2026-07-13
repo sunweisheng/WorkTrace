@@ -1,0 +1,39 @@
+{
+  "self_relations": [
+    {
+      "key": "initiated",
+      "label": "发起",
+      "order": 10
+    },
+    {
+      "key": "primary_execution",
+      "label": "主责执行",
+      "order": 20
+    },
+    {
+      "key": "collaboration",
+      "label": "协作参与",
+      "order": 30
+    },
+    {
+      "key": "decision_confirmation",
+      "label": "确认决策",
+      "order": 40
+    },
+    {
+      "key": "feedback_acceptance",
+      "label": "反馈验收",
+      "order": 50
+    },
+    {
+      "key": "assigned",
+      "label": "被指派",
+      "order": 60
+    },
+    {
+      "key": "response_only",
+      "label": "参与回应",
+      "order": 70
+    }
+  ]
+}

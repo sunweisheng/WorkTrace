@@ -63,6 +63,19 @@ RETENTION_DETAIL_EVIDENCE_RULE = (
 )
 
 
+def _build_self_relation_rule(config: RuntimeConfig) -> str:
+    options = "、".join(
+        f"{item.key}={item.label}" for item in config.self_relation_types
+    )
+    if not options:
+        return "self_relations 无可用配置时返回空数组。"
+    return (
+        "self_relations 判断本人参与方式，只能使用以下配置："
+        f"{options}。每项必须返回 relation 和 evidence_message_ids；"
+        "证据必须是当前事件中能直接证明该参与方式的本人消息，不能使用他人消息。"
+    )
+
+
 def build_batch_analysis_prompt(
     batch: AnalysisBatch,
     *,
@@ -100,6 +113,7 @@ def build_batch_analysis_prompt(
             "只能使用输入里出现过的真实 message id，不要自造占位符 id。",
             "如需给事项挂涉及文件，只能从对应 source_message_ids 的 links 里选择 referenced_link_ids；拿不准就返回空数组。",
             "self_evidence_message_ids 必须列出证明本人发起、负责、审批或跟进该事项的本人消息；它可以与 source_message_ids 不同。",
+            _build_self_relation_rule(runtime_config),
             "只有在已读取对应附件正文且正文确实支撑事项时，才能填写 referenced_attachment_ids；文件名、扩展名和发送文件本身不是业务事实。",
             "workstream_key 只在消息明确命名项目、产品或政策时填写其稳定规范名称；不能使用城市、地点、部门、工具类别、环境或泛化主题，无法确定时返回空字符串。",
             "正例：本人要求他人汇报、本人审批、本人同步、本人催办、本人推进，都算与本人直接相关。",
@@ -121,6 +135,12 @@ def build_batch_analysis_prompt(
                     "referenced_link_ids": ["message_id#link1"],
                     "referenced_attachment_ids": ["attachment_id"],
                     "self_evidence_message_ids": ["message_id"],
+                    "self_relations": [
+                        {
+                            "relation": "configured relation key",
+                            "evidence_message_ids": ["message_id"],
+                        }
+                    ],
                     "workstream_key": "string or empty string",
                     "source_message_ids": ["message_id"],
                 }
@@ -295,6 +315,7 @@ def build_segment_batch_analysis_prompt(
             "每个输入 segment_id 必须且只能返回一个 result。",
             "candidate_events 的 source_message_ids 只能使用该 segment 的 primary_message_ids，不能使用 context_message_ids。",
             "每条 candidate 必须在 self_evidence_message_ids 中列出本人发起、负责、审批或跟进的消息；事实来源可由他人的执行、反馈或文件消息组成。",
+            _build_self_relation_rule(runtime_config),
             "每条 candidate 至少引用一条本人参与证据，或引用该 segment 的本人回应 signal。",
             "一个 candidate 只能描述一条工作线；若同一 segment 同时出现两个命名项目、产品、政策或不相干业务对象，必须拆成多个 candidate_events。",
             "referenced_attachment_ids 只能引用已提供正文的附件；文件名、扩展名和单纯发送附件不构成事项事实。",
@@ -334,6 +355,12 @@ def build_segment_batch_analysis_prompt(
                                 "referenced_link_ids": ["message_id#link1"],
                                 "referenced_attachment_ids": ["attachment_id"],
                                 "self_evidence_message_ids": ["message_id"],
+                                "self_relations": [
+                                    {
+                                        "relation": "configured relation key",
+                                        "evidence_message_ids": ["message_id"],
+                                    }
+                                ],
                                 "workstream_key": "string or empty string",
                                 "source_message_ids": ["primary_message_id"],
                             }
@@ -522,20 +549,24 @@ def build_collected_merge_prompt(
             "remaining_events 中只有明显属于同一真实事件的事项才合并；拿不准就分开。",
             "每个输入 draft_id 必须且只能出现在一个 group 里。",
             "每个 group 必须返回管理人员可读的 title 和 content。",
-            "title 要短，content 要综合保留来源中的关键事实、进展、结果和未决事项。",
-            "不要编造输入中没有的信息，不要丢失关键事实。",
+            "title 要短，content 要整合所有来源中不冲突的事实、动作、结果、风险和待办，不按人员逐条展示贡献。",
+            "不同员工可能从不同视角描述同一事件；不要编造输入中没有的信息，也不能丢失任何一方提供的有效补充。",
             "是否属于同一真实事件仍由你判断，不要依赖 Python 预先给出同题结论。",
             (
-                "如果某个 group 中包含 is_merge_owner_source=true 的来源事件，"
-                "最终 title、content、object_hint、retention_reason、retention_detail "
-                "都必须以该来源事件为主，其他来源只能补充不冲突的信息，"
-                "不能覆盖其中已明确写出的版本号、结论、进展、结果或待办指向。"
+                "只有不同来源对版本号、结论、进展、结果或待办指向存在明确冲突时，"
+                "才以 is_merge_owner_source=true 的来源为准，并将 merge_owner_conflict 设为 true，"
+                "conflict_detail 简要说明冲突；没有明确冲突时这两个字段分别返回 false 和空字符串。"
             ),
             (
                 "反例：普通员工写 WorkTrace 技能升级到 1.0.4，"
                 "合并人来源写升级到 1.0.5；如果你判断它们属于同一真实事件，"
-                "最终 group 必须以 1.0.5 为主事实，不能改回 1.0.4。"
+                "最终 group 必须以 1.0.5 为主事实，不能改回 1.0.4，并标记存在冲突。"
             ),
+            "两条事件都有非空 workstream_name 且名称不同，禁止放入同一 group。",
+            "workstream_name 相同只表示可能属于同一工作范围，不能据此直接合并。",
+            "共同 evidence_fingerprints、共同 file_keys、相同具体对象或 action_labels 构成连续动作时，是同一事件的强证据，仍需结合内容确认。",
+            "workstream_name 为空的事件，只有共同消息、共同文件或明确相同业务对象支持时，才能并入已命名工作流。",
+            "只有标题相似、时间接近或部门相同，不能作为合并依据。",
             (
                 "每个 group 必须返回 object_hint、retention_reason、retention_detail；"
                 "retention_reason 只能是 deliverable_updated、decision_made、issue_or_risk_found、"
@@ -559,6 +590,8 @@ def build_collected_merge_prompt(
                     "object_hint": "string",
                     "retention_reason": "deliverable_updated | decision_made | issue_or_risk_found | follow_up_assigned | external_business_progress | substantive_approval",
                     "retention_detail": "string",
+                    "merge_owner_conflict": "boolean",
+                    "conflict_detail": "string or empty string",
                 }
             ]
         },
@@ -566,13 +599,13 @@ def build_collected_merge_prompt(
         "merge_owner_person": merge_owner_person,
         "deterministic_groups": deterministic_groups,
         "remaining_events": [
-            _serialize_collected_source_event_for_prompt(item)
+            _serialize_collected_source_event_for_prompt(item, runtime_config)
             for item in events
             if item.draft_id not in deterministic_ids
         ],
         "deterministic_group_events": [
             [
-                _serialize_collected_source_event_for_prompt(item)
+                _serialize_collected_source_event_for_prompt(item, runtime_config)
                 for item in events
                 if item.draft_id in set(group)
             ]
@@ -620,6 +653,7 @@ def build_anchor_analysis_prompt(
             "普通约时间、确认开会、互通信息、泛泛完成审核/审批但没有具体对象和结论的内容，不要输出 candidate_event。",
             "如需给事项挂涉及文件，只能从对应 source_message_ids 的 links 里选择 referenced_link_ids；拿不准就返回空数组。",
             "self_evidence_message_ids 列出证明本人直接相关的本人消息；事实来源可以是他人的反馈。",
+            _build_self_relation_rule(runtime_config),
             "只有已读取正文且正文支撑事项的附件才能填写 referenced_attachment_ids；文件名不是业务事实。",
             "workstream_key 只填写消息明确命名的项目、产品或政策；无法确定时返回空字符串。",
             "如果窗口里有多个动作，就拆开。",
@@ -652,6 +686,12 @@ def build_anchor_analysis_prompt(
                 "referenced_link_ids": ["message_id#link1"],
                 "referenced_attachment_ids": ["attachment_id"],
                 "self_evidence_message_ids": ["message_id"],
+                "self_relations": [
+                    {
+                        "relation": "configured relation key",
+                        "evidence_message_ids": ["message_id"],
+                    }
+                ],
                 "workstream_key": "string or empty string",
                 "source_message_ids": ["message_id"],
             },
@@ -705,6 +745,7 @@ def build_anchor_batch_analysis_prompt(
             "普通约时间、确认开会、互通信息、泛泛完成审核/审批但没有具体对象和结论的内容，不要输出 candidate_event。",
             "如需给事项挂涉及文件，只能从对应 source_message_ids 的 links 里选择 referenced_link_ids；拿不准就返回空数组。",
             "self_evidence_message_ids 列出证明本人直接相关的本人消息；事实来源可以是他人的反馈。",
+            _build_self_relation_rule(runtime_config),
             "只有已读取正文且正文支撑事项的附件才能填写 referenced_attachment_ids；文件名不是业务事实。",
             "workstream_key 只填写消息明确命名的项目、产品或政策；无法确定时返回空字符串。",
             "如果同一窗口有多个动作，就拆开。",
@@ -740,6 +781,12 @@ def build_anchor_batch_analysis_prompt(
                             "referenced_link_ids": ["message_id#link1"],
                             "referenced_attachment_ids": ["attachment_id"],
                             "self_evidence_message_ids": ["message_id"],
+                            "self_relations": [
+                                {
+                                    "relation": "configured relation key",
+                                    "evidence_message_ids": ["message_id"],
+                                }
+                            ],
                             "workstream_key": "string or empty string",
                             "source_message_ids": ["message_id"],
                         },
@@ -799,6 +846,7 @@ def build_anchor_expansion_prompt(
             ),
             "把 previous_analysis 作为先前状态；如果新上下文改变结论，必须修正。",
             "candidate_events 应表示当前 anchor_unit 的最新综合判断。",
+            _build_self_relation_rule(runtime_config),
             "每个 candidate_event 仍然只能表示一个主要动作或工作线索。",
             "每个 candidate_event 必须包含 object_hint、retention_reason 和 retention_detail。",
             RETENTION_COMPLETENESS_RULE,
@@ -857,6 +905,12 @@ def build_anchor_expansion_prompt(
                     "referenced_link_ids": ["message_id#link1"],
                     "referenced_attachment_ids": ["attachment_id"],
                     "self_evidence_message_ids": ["message_id"],
+                    "self_relations": [
+                        {
+                            "relation": "configured relation key",
+                            "evidence_message_ids": ["message_id"],
+                        }
+                    ],
                     "workstream_key": "string or empty string",
                     "source_message_ids": ["message_id"],
                 }
@@ -1047,6 +1101,7 @@ def serialize_cross_merge_candidate_for_prompt(
 
 def _serialize_collected_source_event_for_prompt(
     source_event: CollectedSourceEvent,
+    config: RuntimeConfig,
 ) -> dict[str, object]:
     return {
         "draft_id": source_event.draft_id,
@@ -1061,6 +1116,24 @@ def _serialize_collected_source_event_for_prompt(
         "object_hint": source_event.event.object_hint,
         "retention_reason": source_event.event.retention_reason,
         "retention_detail": source_event.event.retention_detail,
+        "workstream_name": source_event.event.workstream_name,
+        "action_labels": list(source_event.event.action_labels),
+        "self_relations": [
+            {
+                "key": relation,
+                "label": next(
+                    (
+                        item.label
+                        for item in config.self_relation_types
+                        if item.key == relation
+                    ),
+                    relation,
+                ),
+            }
+            for relation in source_event.event.self_relations
+        ],
+        "evidence_fingerprints": list(source_event.event.evidence_fingerprints),
+        "file_keys": list(source_event.event.file_keys),
         "file_links": [
             {
                 "title": item.title,

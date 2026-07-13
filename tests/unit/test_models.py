@@ -264,6 +264,15 @@ def test_event_models_default_referenced_link_ids_are_empty() -> None:
     assert draft.referenced_link_ids == []
     assert merged.referenced_link_ids == []
     assert event.referenced_link_ids == []
+    assert draft.self_relations == []
+    assert merged.workstream_name == ""
+    assert merged.action_labels == []
+    assert merged.self_relations == []
+    assert event.workstream_name == ""
+    assert event.action_labels == []
+    assert event.self_relations == []
+    assert event.evidence_fingerprints == []
+    assert event.file_keys == []
 
 
 def test_constants_are_string_enums() -> None:

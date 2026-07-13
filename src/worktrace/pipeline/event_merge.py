@@ -6,7 +6,7 @@ from ..models import (
     WorkEvent,
 )
 from ..utils.link_refs import sort_referenced_link_ids
-from ..utils.hashing import stable_event_id
+from ..utils.hashing import evidence_fingerprint, stable_event_id
 from ..utils.text import choose_preferred_text, merge_content_texts
 
 
@@ -54,6 +54,25 @@ def merge_duplicate_drafts(
                         for attachment_id in item.referenced_attachment_ids
                     )
                 ),
+                workstream_name=choose_preferred_text(
+                    [item.workstream_name for item in items]
+                ),
+                action_labels=list(
+                    dict.fromkeys(
+                        label
+                        for item in items
+                        for label in item.action_labels
+                        if label
+                    )
+                ),
+                self_relations=list(
+                    dict.fromkeys(
+                        relation
+                        for item in items
+                        for relation in item.self_relations
+                        if relation
+                    )
+                ),
             )
         )
 
@@ -85,6 +104,13 @@ def build_work_events(
                 retention_reason=draft.retention_reason,
                 retention_detail=draft.retention_detail,
                 referenced_attachment_ids=list(draft.referenced_attachment_ids),
+                workstream_name=draft.workstream_name,
+                action_labels=list(draft.action_labels),
+                self_relations=list(draft.self_relations),
+                evidence_fingerprints=[
+                    evidence_fingerprint(message_id)
+                    for message_id in draft.source_message_ids
+                ],
             )
         )
 

@@ -1,94 +1,127 @@
 # WorkTrace 当前实现拆解
 
-## 1. 文档目标
+## 1. 文档定位
 
-本文档只描述当前仓库里已经在使用的主流程实现，避免历史设计稿和现有代码混在一起。
+本文档是“从业务步骤找到代码”的模块索引。完整流程和数据边界见 [detailed-design.md](detailed-design.md)。
 
-## 2. 当前主流程
+## 2. 入口层
 
-当前日处理链路如下：
+| 文件 | 当前职责 |
+| --- | --- |
+| `src/worktrace/cli.py` | 解析个人日报、`merge-collected`、`sync-reaction-catalog`，加载配置，输出 JSON 和退出码 |
+| `src/worktrace/preflight.py` | 检查 Python、lark-cli user 身份、在线模型、数据目录和时区 |
+| `src/worktrace/config.py` | 合并 `RuntimeConfig`、`.env`、进程环境变量、事件规则、事件元数据和会话黑名单 |
+| `src/worktrace/factories.py` | 装配聊天源、内容解析器、analyzer、store 和投递通道 |
 
-1. `cli.py` 解析 `--date`
-2. `preflight.py` 做依赖、身份和在线模型配置检查
-3. `runner.py` 拉取目标日期内本人参与且本人当日发过消息的会话
-4. Python 过滤明显无效消息
-5. `conversation_first_pass.py` 按会话生成 `ConversationSlice`
-6. 每个会话切片单独调用一次 analyzer，必要时按 `context_requests` 扩窗重跑
-7. 汇总全日 `candidate_events`
-8. Python 先按敏感与普通事件排除规则和结构化保留门槛过滤候选事件
-9. `merge_day_candidates(...)` 做跨会话分组
-10. Python 物化 `MergedEventDraft`，再次执行敏感与普通事件排除和结构化保留门槛
-11. Python 构建最终 `WorkEvent`，聚合涉及文件并排序
-12. `stores/markdown.py` 覆盖写入 `data/YYYY/MM/YYYY-MM-DD-姓名.md`
-13. 通过飞书 CLI 机器人身份把当天 Markdown 文件发送给当前登录用户自己
+个人日报会执行 preflight；两个子命令有各自的前置依赖，不复用个人日报整套 preflight。
 
-## 3. 当前关键模块
+## 3. 飞书输入与内容解析
 
-- `src/worktrace/cli.py`
-  负责参数解析、preflight、退出码映射和 JSON 输出。
-- `src/worktrace/runner.py`
-  负责单日主流程编排。
-- `src/worktrace/pipeline/conversation_first_pass.py`
-  负责当前主流程使用的会话级切片构造。
-- `src/worktrace/pipeline/context_expansion.py`
-  负责 `context_requests` 校验、上下文补充和单切片重跑输入构造。
-- `src/worktrace/pipeline/cross_conversation_merge.py`
-  负责把跨会话分组结果物化为 `MergedEventDraft`。
-- `src/worktrace/pipeline/event_merge.py`
-  负责最终事件构建与去重。
-- `src/worktrace/stores/markdown.py`
-  负责 Markdown 读写。
-- `src/worktrace/collected_merge.py`
-  负责管理人员收集多人 Markdown 后的同日团队汇总合并。
+| 文件 | 当前职责 |
+| --- | --- |
+| `sources/feishu_cli.py` | 当前用户身份、本人发言/reaction 会话发现、消息分页、消息标准化、附件和 reaction 解析 |
+| `reaction_catalog.py` | 加载本地 reaction 目录并补充名称、说明、语义 |
+| `reaction_catalogs/feishu.py` | 显式同步飞书 reaction 目录与图片资源 |
+| `resolvers/feishu_message.py` | 文本清洗、链接标题、飞书 Docx/Wiki 正文、文本附件和图片摘要接入 |
+| `attachments.py` | 按配置提取受支持的小型文本附件 |
+| `vision.py` | 通过当前 Responses API 模型生成图片工作内容摘要 |
 
-## 4. 当前配置
+## 4. 个人日报编排
 
-当前主流程仍在使用的关键配置位于 [src/worktrace/config.py](/Users/sunweisheng/Documents/GitHub/WorkTrace/src/worktrace/config.py:115)：
+`src/worktrace/runner.py` 是主编排器，当前默认在线链路依次执行：
 
-- `timezone = "Asia/Shanghai"`
-- `analyzer_backend = "online"`
-- `slice_base_limit = 150`
-- `max_model_input_tokens = 100000`
-- `collected_merge_prompt_char_threshold = 80000`
-- `slice_retry_limit = 3`
-- `prompt_message_char_limit = 300`
-- `prompt_attachment_char_limit = 800`
-- `analyzer_timeout_seconds = 180`
-- `codex_stdin_mode = False`
-- `llm_sleep_min_seconds = 1.0`
-- `llm_sleep_max_seconds = 2.0`
-- `llm_reasoning_effort = "none"`
+```mermaid
+flowchart LR
+    A["采集消息"] --> B["本地过滤"] --> C["锚点窗口"] --> D["LLM 分段"]
+    D --> E["片段组批并提炼动作/参与方式"] --> F["上下文重试"] --> G["候选与证据校验"]
+    G --> H["跨会话初始分组"] --> I["工作流权威分组"] --> J["增强事件物化"]
+    J --> K["消息指纹 + 文件标识"] --> L["Markdown + 自发送"]
+```
 
-当前首轮 / 扩窗 prompt 不再按消息条数截断；只保留单条消息字符截断和现有模型输入上限。
+关键方法：
 
-当前运行时还会从本地配置文件读取以下覆盖项：
+- `DailyTraceRunner.run(...)`：单日总流程
+- `_analyze_segmented_conversations(...)`：锚点、分段、组批和回退总入口
+- `_analyze_segment_batch_with_retry(...)`：片段批量分析与协议重试
+- `_retry_segment_context(...)`：按片段补消息、附件和链接正文
+- `_analyze_anchor_fallback(...)`：分段失败后，直接从本人参与的聊天窗口提炼
+- `_resolve_workstream_groups(...)`：通过独立 assignment 生成工作流权威分组；失败时回退到初始模型组整合
+- `_attach_event_file_links(...)`：只把有证据支持的文件附到最终事件
 
-- `config/event_rules.json`
-  - `sensitive_event_keywords`
-  - `excluded_event_keywords`
-  - `self_assignment_keywords`
-- `config/conversation_blacklist.json`
-  - `excluded_conversation_ids`
+## 5. Pipeline 模块
 
-以下配置当前只在锚点实验路径使用：
+| 文件 | 当前职责 |
+| --- | --- |
+| `pipeline/filtering.py` | 系统消息、撤回、群事件和空消息过滤 |
+| `pipeline/anchors.py` | 本人发言/reaction 锚点与上下文窗口 |
+| `pipeline/conversation_segments.py` | response signal、硬边界、分段校验、主消息去重、片段组批 |
+| `pipeline/context_expansion.py` | earlier/later、附件和链接正文扩窗 |
+| `pipeline/validation.py` | analyzer 返回 ID、参与类型、本人证据和分组覆盖校验/修复 |
+| `pipeline/direct_relation_filter.py` | 旧 analyzer 和分段失败后直接提炼路径的本人关联检查 |
+| `pipeline/sensitive_filter.py` | 三阶段配置关键词过滤 |
+| `pipeline/retention_filter.py` | 具体对象、保留理由、保留依据和低价值类型门槛 |
+| `pipeline/cross_conversation_merge.py` | 分组归并、主草稿选择，以及工作流、动作、参与方式的 `MergedEventDraft` 物化 |
+| `pipeline/workstream_resolution.py` | 根据结构化工作流分配结果生成校正分组 |
+| `pipeline/event_merge.py` | 最终 `WorkEvent` 构建、稳定 ID 和消息证据指纹 |
 
-- `anchor_retry_limit = 3`
-- `anchor_batch_size = 3`
+`pipeline/conversation_first_pass.py` 仍用于不支持分段批处理的 analyzer 兼容路径；它不是当前默认 Online analyzer 的主入口。
 
-## 5. 当前接口约束
+## 6. Analyzer
 
-- `EventStore.replace_day(...)` 当前签名是 `replace_day(target_date, events, *, owner_display_name="")`，个人日报用 `owner_display_name` 生成 `YYYY-MM-DD-姓名.md`。
-- `Analyzer` 当前只承担会话分析、锚点批量分析和日级 merge。
-- 主流程当前只输出结构化事件，不再生成管理者总结。
-- 管理人员汇总入口为 `python -m src.worktrace.cli merge-collected --date YYYY-MM-DD`，读取 `merge_inbox/YYYY/MM/DD/` 及其一级子目录，每个合并范围生成本目录 `YYYY-MM-DD-登录人姓名-merged.md`，并通过飞书机器人发送给当前登录用户自己。
+| 文件 | 当前职责 |
+| --- | --- |
+| `analyzers/base.py` | 分段、片段批处理、旧批处理、分段失败后直接提炼、日级合并和多人合并接口 |
+| `analyzers/online.py` | OpenAI Python SDK + Responses API 默认实现，支持流式接收 |
+| `analyzers/codex.py` | 非默认 Codex CLI 实现 |
+| `analyzers/prompts.py` | 所有语义任务 prompt |
+| `analyzers/output_schemas.py` | Responses API JSON schema |
+| `analyzers/protocol.py` | 模型 JSON 到领域对象的解析与引用恢复 |
 
-## 6. 已移除的旧路径
+当前默认 `OnlineLLMAnalyzer` 实现 `segment_conversation(...)` 和 `analyze_segment_batch(...)`，因此 `runner` 走分段主链。是否支持分段由能力检查决定，不通过配置字符串猜测。
 
-以下旧路径已不再保留或已从当前实现中清理：
+## 7. 输出与投递
 
-- 基于旧 `pipeline/slicing.py` 的多 slice 会话切分
-- 基于旧 `pipeline/batching.py` 的多 slice 批处理组批
-- 基于 bucket / cross-bucket 的旧跨会话合并链路
-- 额外的管理者总结产出层
+| 文件 | 当前职责 |
+| --- | --- |
+| `stores/markdown.py` | Markdown 新旧字段往返、隐藏合并信息、内部 ID 隐藏和 URL 敏感参数脱敏 |
+| `delivery/feishu_cli.py` | 规范化发送文件名，通过 bot 把文件发送给当前 user |
+| `models.py` | 消息、锚点、片段、候选、合并草稿、事件和运行结果模型 |
 
-如果后续需要新的实现方案，应新增对应设计文档，而不是继续维护与当前代码脱节的旧拆解稿。
+## 8. 多人汇总
+
+`src/worktrace/collected_merge.py` 负责完整的 `merge-collected` 链路：
+
+1. 根目录和一级子目录分别建立 merge scope
+2. 当前层 Markdown 解析、来源姓名识别和坏文件跳过
+3. 来源事件配置关键词过滤与保留门槛
+4. 相同 `event_id` 的确定性预分组
+5. 小 prompt 一次合并，大 prompt 按来源文件滚动合并
+6. 缺失字段比例触发有限重试
+7. 分组覆盖修复、工作流边界检查和非冲突内容补全
+8. 聚合工作流、动作、协作方式、消息指纹、文件标识和来源追溯信息
+9. 团队 `WorkEvent` 最终过滤、写入和自发送
+
+相关专题见 [collected-people-merge-plan.md](collected-people-merge-plan.md)。
+
+## 9. 配置来源
+
+| 来源 | 内容 |
+| --- | --- |
+| `RuntimeConfig` | 流程阈值、目录、analyzer backend 和默认运行参数 |
+| `.env` / 环境变量 | 在线模型和多人汇总 trace/retry 覆盖项 |
+| `config/event_rules.json` | 敏感、排除和本人指派关键词 |
+| `config/event_metadata.json` | 本人参与方式英文键、中文显示名和排序 |
+| `config/conversation_blacklist.json` | 整会话排除 |
+| `config/attachment_text.json` | 文本附件提取限制 |
+| `config/image_summary.json` | 图片摘要限制和提示词 |
+| `config/reaction_catalogs/*.json` | reaction 本地语义目录 |
+
+可调整的敏感、普通排除和本人指派关键词新增或调整必须进入配置文件，不应继续写在代码中。结构化保留门槛及现有领域判定仍位于 `retention_filter.py`。
+
+## 10. 调试入口
+
+- 个人日报：`--debug-output`，目录 `data/debug/conversations/<date>/`；`final_events.json` 保存最终草稿、事件和过滤 warning
+- 多人汇总：`WORKTRACE_COLLECTED_MERGE_TRACE=true`，目录默认 `data/debug/collected_merge/<date>/`；step JSON 保存完整输入、确定性组和工作流边界 warning
+- 锚点独立实验：`python3 -m src.worktrace.anchor_experiment ...`
+
+独立锚点实验用于对比协议和缓存行为，不等同于正式日报；正式日报虽然已经使用本人参与的聊天窗口，并在分段失败后直接从这些窗口提炼，但不使用实验入口生成最终 Markdown。

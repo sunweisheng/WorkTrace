@@ -1,64 +1,47 @@
-# WorkTrace 锚点首轮识别协议
+# WorkTrace 锚点分析协议
 
-## 1. 文档目标
+> 状态：正式主链在分段失败后直接提炼时，与独立 `anchor_experiment` 共用的聊天窗口分析协议。正式主链优先使用“聊天窗口分段 + 片段批处理”。
 
-本文档定义当前 `anchor_experiment` 使用的 `AnchorUnit` 首轮识别协议：Python 送给 LLM 的输入结构，以及 LLM 必须返回的输出结构。
+## 1. 输入
 
-## 2. 输入对象
-
-首轮锚点识别固定输入如下：
+锚点批量分析按 `AnchorUnit` 发送：
 
 - `target_date`
-- `pass_index`
-- `anchor_unit`
-
-其中 `anchor_unit` 当前实际送出的字段为：
-
+- `anchor_unit_id`
 - `conversation_name`
-- `messages`
-- `attachment_refs`
+- 压缩消息及真实消息 ID
+- reply/quote 摘要
+- 附件和链接元数据
+- 已补充的附件/链接正文
+- 当前已知 reaction/anchor signal
 
-### 2.1 `messages` 字段
+模型看到的消息 ID、附件 ID 和链接 ID 都来自 Python 输入，后续引用必须限制在该输入范围。
 
-每条消息当前使用压缩字段：
+## 2. 批量输出
 
-- `t`：时间
-- `s`：发送人
-- `x`：压缩后的消息文本
+正式回退使用 `anchor_batch_output_schema()`：
 
-每条消息当前使用以下字段：
+```json
+{
+  "results": [
+    {
+      "anchor_unit_id": "anchor-id",
+      "analysis": {
+        "anchor_status": "completed",
+        "candidate_events": [],
+        "context_requests": [],
+        "needs_cross_anchor_merge": false
+      }
+    }
+  ]
+}
+```
 
-- `id`：消息 id
-- `t`：时间
-- `s`：发送人
-- `x`：压缩后的消息文本
-- `attachments`：附件元信息，元素包含 `attachment_id`、`file_name`、`mime_type`
-- `links`：消息内链接，元素包含 `link_id`、`message_id`、`url`、`title`、`link_type`
-- `reply_to`：若当前消息是回复消息，则包含被回复消息摘要：`message_id`、`sender`、`text`、`attachments`、`links`
-- `quote_to`：若当前消息是引用消息，则包含被引用消息摘要：`message_id`、`sender`、`text`、`attachments`、`links`
+每个输入锚点必须按 `anchor_unit_id` 对应一项结果。Python 负责检查未知、缺失和重复锚点 ID。
 
-### 2.2 `attachment_refs` 字段
+## 3. `anchor_status`
 
-首轮只提供附件元信息，不提供附件正文。每个附件对象当前包含：
-
-- `id`
-- `name`
-- `mime`
-
-## 3. 输出对象
-
-LLM 必须返回单个 JSON 对象，固定包含以下顶层字段：
-
-- `anchor_status`
-- `candidate_events`
-- `context_requests`
-- `needs_cross_anchor_merge`
-
-不允许返回 Markdown、解释性文字或额外顶层键。
-
-## 4. `anchor_status` 枚举
-
-`anchor_status` 固定取值如下：
+模型可返回：
 
 - `completed`
 - `needs_more_context`
@@ -66,94 +49,76 @@ LLM 必须返回单个 JSON 对象，固定包含以下顶层字段：
 - `not_work_related`
 - `uncertain`
 
-语义约束：
+Python 领域模型还包含 `pending`、`failed`、`skipped`，用于运行状态和失败处理，不是模型正常完成值。
 
-- `completed`：当前锚点已经可以形成稳定候选事项，或可稳定判定为空结果
-- `needs_more_context`：需要补更早或更晚聊天上下文
-- `needs_attachment_text`：需要补附件正文
-- `not_work_related`：当前锚点可明确判定为非工作事项
-- `uncertain`：当前信息不足，但未形成清晰补充请求
+## 4. `candidate_events`
 
-## 5. `candidate_events`
+模型输出字段与当前 schema 一致：
 
-`candidate_events` 结构与现有首轮候选事项保持兼容，每个元素固定包含：
-
-- `draft_id`
-- `date`
 - `topic`
 - `content`
 - `action_label`
 - `object_hint`
 - `retention_reason`
 - `retention_detail`
+- `referenced_link_ids`
+- `referenced_attachment_ids`
+- `self_evidence_message_ids`
+- `workstream_key`
 - `source_message_ids`
-- `source_conversation_id`
-- `source_slice_id`
-- `confidence`
 
-补充约束：
+模型不负责生成可信的 `draft_id`、日期、会话 ID、slice ID 或 confidence；这些运行字段由 Python 根据当前锚点重建。
 
-- `source_slice_id` 在锚点协议里写 `anchor_unit_id`
-- `source_message_ids` 只能引用当前 `anchor_unit` 内已有消息
-- `action_label` 只写主要动作标签，不要写成长句
-- `object_hint` 只写核心对象或主题，不要把完整事件内容复制进去
-- `retention_reason` 只能取 `deliverable_updated`、`decision_made`、`issue_or_risk_found`、`follow_up_assigned`、`external_business_progress`、`substantive_approval`
-- `retention_detail` 表示保留依据/来源证据，用一句话写清楚来源会话、发起人或确认人、关键动作或结论，不要只写泛泛的价值判断
-- 只有同时具备具体对象、保留理由、保留依据的工作事件才输出
-- 普通约时间、确认开会、互通信息、泛泛完成审核/审批但没有具体对象和结论的内容，不要输出 candidate event
+约束：
 
-## 6. `context_requests`
+- 来源和本人证据 ID 必须来自当前锚点输入
+- link/attachment ID 必须能在当前消息中解析
+- `retention_reason` 必须是六个允许枚举之一
+- `object_hint` 和 `retention_detail` 必须具体
+- `workstream_key` 表达业务工作流归属，不是泛化标题
 
-`context_requests` 当前允许：
+## 5. `context_requests`
+
+锚点 batch schema 当前直接要求：
+
+- `request_type`
+- `target_message_ids`
+- `target_attachment_ids`
+
+领域层支持四种类型：
 
 - `earlier_messages`
 - `later_messages`
 - `attachment_text`
 - `linked_file_text`
 
-每个请求固定包含：
+锚点 expansion 的 prompt/解析层可携带 `target_link_ids`；Python 会校验请求类型与目标 ID 的组合，再决定是否扩展。
 
-- `slice_id`
-- `request_type`
-- `target_message_ids`
-- `target_attachment_ids`
-- `target_link_ids`
-- `reason`
-- `limit`
+## 6. `needs_cross_anchor_merge`
 
-补充约束：
+只有候选事实明显可能延伸到其他锚点窗口或会话时返回 `true`。
 
-- `slice_id` 在锚点协议里写 `anchor_unit_id`
-- `attachment_text` 请求必须同时提供 `target_message_ids` 与 `target_attachment_ids`
-- `linked_file_text` 请求必须同时提供 `target_message_ids` 与 `target_link_ids`
-- `earlier_messages / later_messages` 请求不允许填写附件 ID
-- `earlier_messages / later_messages` 请求不允许填写链接 ID
+当前正式个人日报不会用该布尔值直接筛掉全日 merge 输入；它主要保留协议意图和实验统计。正式跨会话阶段仍处理所有通过过滤的候选。
 
-## 7. `needs_cross_anchor_merge`
+## 7. Python 验证与回退
 
-`needs_cross_anchor_merge` 是布尔值。
+Python 会验证：
 
-只有在模型明确判断：
+- 顶层和每项结构
+- 锚点 ID 覆盖
+- status 合法性
+- candidate/context 数组
+- 所有来源引用
+- 本人直接关联证据
+- 扩窗后是否获得新信息
 
-- 当前事项可能延伸到其他锚点窗口
-- 或当前事项可能需要跨会话合并
+协议失败由调用方按 `anchor_batch_retry_limit` 重试；最终失败的锚点会跳过并写 warning，不允许模型输出绕过引用校验。
 
-时，才返回 `true`。
+## 8. 代码落点
 
-否则固定返回 `false`。
-
-## 8. 失败处理建议
-
-若输出违反以下任一条件，Python 应视为协议失败：
-
-- 顶层不是 JSON 对象
-- 缺失 `anchor_status`
-- `anchor_status` 不在允许枚举内
-- `candidate_events` 不是数组
-- `context_requests` 不是数组
-- `needs_cross_anchor_merge` 不是布尔值
-
-首版建议：
-
-- 解析失败不自动兜底改写
-- 由调用方决定重试、跳过或回退
+- `src/worktrace/analyzers/output_schemas.py`
+- `src/worktrace/analyzers/prompts.py`
+- `src/worktrace/analyzers/protocol.py`
+- `src/worktrace/pipeline/validation.py`
+- `src/worktrace/runner.py`
+- `src/worktrace/anchor_experiment.py`

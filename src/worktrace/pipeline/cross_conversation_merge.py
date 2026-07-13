@@ -29,6 +29,14 @@ def consolidate_workstream_groups(
                 draft_ids,
                 candidate_by_id,
             ),
+            workstream_name=next(
+                (
+                    candidate_by_id[draft_id].workstream_key.strip()
+                    for draft_id in draft_ids
+                    if candidate_by_id[draft_id].workstream_key.strip()
+                ),
+                "",
+            ),
         )
         for key, draft_ids in groups_by_key.items()
     ]
@@ -37,6 +45,7 @@ def consolidate_workstream_groups(
             group_id=f"standalone-{draft_id}",
             draft_ids=[draft_id],
             primary_draft_id=draft_id,
+            workstream_name=candidate_by_id[draft_id].workstream_key.strip(),
         )
         for draft_id in standalone_ids
     )
@@ -62,6 +71,7 @@ def materialize_grouped_merged_drafts(
     *,
     target_date: str,
     message_order: list[str],
+    self_relation_order: tuple[str, ...] = (),
 ) -> list[MergedEventDraft]:
     draft_map = {candidate.draft_id: candidate for candidate in candidates}
     candidate_order = {candidate.draft_id: index for index, candidate in enumerate(candidates)}
@@ -98,6 +108,18 @@ def materialize_grouped_merged_drafts(
                 object_hint=primary.object_hint or object_hint,
                 retention_reason=retention_reason,
                 retention_detail=retention_detail,
+                workstream_name=group.workstream_name.strip(),
+                action_labels=list(
+                    dict.fromkeys(
+                        item.action_label.strip()
+                        for item in items
+                        if item.action_label.strip()
+                    )
+                ),
+                self_relations=_merge_self_relations(
+                    items,
+                    relation_order=self_relation_order,
+                ),
                 referenced_link_ids=sort_referenced_link_ids(
                     [
                         link_id
@@ -125,6 +147,25 @@ def materialize_grouped_merged_drafts(
         )
 
     return merged_drafts
+
+
+def _merge_self_relations(
+    items: list[SourceBackedEventDraft],
+    *,
+    relation_order: tuple[str, ...],
+) -> list[str]:
+    encountered = list(
+        dict.fromkeys(
+            relation.relation
+            for item in items
+            for relation in item.self_relations
+            if relation.relation
+        )
+    )
+    if not relation_order:
+        return encountered
+    configured = [relation for relation in relation_order if relation in encountered]
+    return [*configured, *(relation for relation in encountered if relation not in configured)]
 
 
 def _candidate_sort_key(

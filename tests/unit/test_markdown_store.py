@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from src.worktrace.config import RuntimeConfig
+from src.worktrace.config import EventMetadataItem, RuntimeConfig
 from src.worktrace.errors import StoreWriteError
 from src.worktrace.models import DayDocument, EventFileLink, WorkEvent
 from src.worktrace.stores.markdown import MarkdownEventStore
@@ -95,6 +95,119 @@ def test_markdown_store_renders_public_event_fields(tmp_path: Path) -> None:
     assert "隐私声明: 仅含与本人直接相关的工作事件，不含原始聊天记录" in content
 
 
+def test_markdown_store_roundtrip_keeps_event_metadata_and_hidden_merge_keys(
+    tmp_path: Path,
+) -> None:
+    config = RuntimeConfig(
+        data_root=tmp_path / "data",
+        self_relation_types=(
+            EventMetadataItem("initiated", "发起", 10),
+            EventMetadataItem("primary_execution", "主责执行", 20),
+        ),
+    )
+    store = MarkdownEventStore(config=config)
+    write_result = store.replace_day(
+        "2026-06-22",
+        [
+            WorkEvent(
+                date="2026-06-22",
+                event_id="evt1",
+                title="项目方案确认",
+                content="确认方案并完成配置。",
+                source_message_ids=["om_secret_1"],
+                workstream_name="项目甲",
+                action_labels=["方案确认", "配置修改"],
+                self_relations=["initiated", "primary_execution"],
+                object_hint="项目甲方案",
+                retention_reason="decision_made",
+                retention_detail="确认项目甲方案并完成配置。",
+                referenced_attachment_ids=["attachment-secret-1"],
+                file_links=[
+                    EventFileLink(
+                        url="https://foo.feishu.cn/docx/abc?token=secret#section",
+                        title="项目方案",
+                        link_type="feishu_doc",
+                    )
+                ],
+            )
+        ],
+    )
+
+    content = Path(write_result.output_path).read_text(encoding="utf-8")
+    loaded = store.read_day("2026-06-22")
+
+    assert loaded is not None
+    event = loaded.events[0]
+    assert event.workstream_name == "项目甲"
+    assert event.action_labels == ["方案确认", "配置修改"]
+    assert event.self_relations == ["initiated", "primary_execution"]
+    assert len(event.evidence_fingerprints) == 1
+    assert len(event.file_keys) == 2
+    assert "- **工作流**: 项目甲" in content
+    assert "- **主要动作**: 方案确认、配置修改" in content
+    assert "- **本人参与方式**: 发起、主责执行" in content
+    assert content.index("- **工作流**:") < content.index("- **主要动作**:")
+    assert content.index("- **主要动作**:") < content.index("- **内容**:")
+    assert content.index("- **具体对象**:") < content.index("- **本人参与方式**:")
+    assert "sha256:" in content
+    assert "om_secret_1" not in content
+    assert "attachment-secret-1" not in content
+
+
+def test_markdown_store_renders_unknown_for_missing_new_fields(tmp_path: Path) -> None:
+    store = MarkdownEventStore(config=RuntimeConfig(data_root=tmp_path / "data"))
+    write_result = store.replace_day(
+        "2026-06-22",
+        [
+            WorkEvent(
+                date="2026-06-22",
+                event_id="evt1",
+                title="旧事件",
+                content="旧内容",
+            )
+        ],
+    )
+
+    content = Path(write_result.output_path).read_text(encoding="utf-8")
+
+    assert "- **工作流**: 未明确" in content
+    assert "- **主要动作**: 未明确" in content
+    assert "- **本人参与方式**: 未明确" in content
+
+
+def test_markdown_store_ignores_damaged_merge_meta() -> None:
+    store = MarkdownEventStore(config=RuntimeConfig())
+    markdown = """---
+date: 2026-07-06
+event_count: 1
+generated_at: 2026-07-06T10:00:00+08:00
+generator: worktrace
+---
+
+<!-- worktrace:event:start event_id="evt-a" -->
+<!-- worktrace:retention_reason: decision_made -->
+<!-- worktrace:merge_meta {bad-json} -->
+### 1. 旧事件
+
+- **日期**: 2026-07-06
+- **事件标题**: 旧事件
+- **内容**: 旧内容
+- **具体对象**: 旧对象
+- **保留理由**: 形成明确决策
+- **保留依据**: 已形成结论。
+- **涉及文件**:
+  - 无
+<!-- worktrace:event:end -->
+"""
+
+    loaded = store.parse_day_document(markdown)
+
+    assert loaded.events[0].evidence_fingerprints == []
+    assert store.last_warning_messages == [
+        "Ignored damaged merge metadata for event evt-a."
+    ]
+
+
 def test_markdown_store_redacts_sensitive_link_query_params(tmp_path: Path) -> None:
     store = MarkdownEventStore(config=RuntimeConfig(data_root=tmp_path / "data"))
     write_result = store.replace_day(
@@ -145,6 +258,9 @@ def test_markdown_store_redacts_internal_feishu_ids_from_public_fields(tmp_path:
                     "张三在消息 om_x100b6b297bcd9080c42690b1af9082a 中确认结论。"
                 ),
                 source_message_ids=["om_x100b6b297bcd9080c42690b1af9082a"],
+                source_people=["ou_user456"],
+                source_event_ids=["om_source_event"],
+                self_relations=["oc_invalid_relation"],
                 file_links=[],
             )
         ],
@@ -156,6 +272,9 @@ def test_markdown_store_redacts_internal_feishu_ids_from_public_fields(tmp_path:
     assert "om_x100b6b291342b4bcc49febe75b30fbd" not in content
     assert "oc_abc123" not in content
     assert "ou_user123" not in content
+    assert "ou_user456" not in content
+    assert "om_source_event" not in content
+    assert "oc_invalid_relation" not in content
     assert "[内部消息ID已隐藏]" in content
     assert '<!-- worktrace:event:start event_id="evt1" -->' in content
 
@@ -344,7 +463,15 @@ def test_markdown_store_roundtrip_keeps_plain_file_names(tmp_path: Path) -> None
 
 
 def test_markdown_store_roundtrip_keeps_collected_source_fields(tmp_path: Path) -> None:
-    store = MarkdownEventStore(config=RuntimeConfig(data_root=tmp_path / "data"))
+    store = MarkdownEventStore(
+        config=RuntimeConfig(
+            data_root=tmp_path / "data",
+            self_relation_types=(
+                EventMetadataItem("collaboration", "协作参与", 10),
+                EventMetadataItem("feedback_acceptance", "反馈验收", 20),
+            ),
+        )
+    )
     store.replace_day(
         "2026-06-22",
         [
@@ -358,6 +485,9 @@ def test_markdown_store_roundtrip_keeps_collected_source_fields(tmp_path: Path) 
                 object_hint="客户合同",
                 retention_reason="substantive_approval",
                 retention_detail="反馈客户合同付款条款问题。",
+                workstream_name="客户合同",
+                action_labels=["条款核对", "反馈确认"],
+                self_relations=["collaboration", "feedback_acceptance"],
                 file_links=[],
             )
         ],
@@ -371,6 +501,12 @@ def test_markdown_store_roundtrip_keeps_collected_source_fields(tmp_path: Path) 
     assert loaded.events[0].object_hint == "客户合同"
     assert loaded.events[0].retention_reason == "substantive_approval"
     assert loaded.events[0].retention_detail == "反馈客户合同付款条款问题。"
+    assert loaded.events[0].workstream_name == "客户合同"
+    assert loaded.events[0].action_labels == ["条款核对", "反馈确认"]
+    assert loaded.events[0].self_relations == ["collaboration", "feedback_acceptance"]
+    content = store.build_output_path("2026-06-22").read_text(encoding="utf-8")
+    assert "- **协作方式**: 协作参与、反馈验收" in content
+    assert "- **本人参与方式**:" not in content
 
 
 def test_markdown_store_auto_repairs_unclosed_last_event_block() -> None:

@@ -38,6 +38,7 @@ def batch_output_schema() -> dict[str, object]:
                             "type": "array",
                             "items": {"type": "string"},
                         },
+                        "self_relations": _self_relations_schema(),
                         "workstream_key": {"type": "string"},
                         "source_message_ids": {
                             "type": "array",
@@ -54,6 +55,7 @@ def batch_output_schema() -> dict[str, object]:
                         "referenced_link_ids",
                         "referenced_attachment_ids",
                         "self_evidence_message_ids",
+                        "self_relations",
                         "workstream_key",
                         "source_message_ids",
                     ],
@@ -169,6 +171,7 @@ def _segment_candidate_schema() -> dict[str, object]:
                 "type": "array",
                 "items": {"type": "string"},
             },
+            "self_relations": _self_relations_schema(),
             "workstream_key": {"type": "string"},
             "source_message_ids": {
                 "type": "array",
@@ -185,6 +188,7 @@ def _segment_candidate_schema() -> dict[str, object]:
             "referenced_link_ids",
             "referenced_attachment_ids",
             "self_evidence_message_ids",
+            "self_relations",
             "workstream_key",
             "source_message_ids",
         ],
@@ -270,6 +274,7 @@ def anchor_batch_output_schema() -> dict[str, object]:
                                                 "type": "array",
                                                 "items": {"type": "string"},
                                             },
+                                            "self_relations": _self_relations_schema(),
                                             "workstream_key": {"type": "string"},
                                             "source_message_ids": {
                                                 "type": "array",
@@ -286,6 +291,7 @@ def anchor_batch_output_schema() -> dict[str, object]:
                                             "referenced_link_ids",
                                             "referenced_attachment_ids",
                                             "self_evidence_message_ids",
+                                            "self_relations",
                                             "workstream_key",
                                             "source_message_ids",
                                         ],
@@ -333,6 +339,24 @@ def anchor_batch_output_schema() -> dict[str, object]:
         },
         "required": ["results"],
         "additionalProperties": False,
+    }
+
+
+def _self_relations_schema() -> dict[str, object]:
+    return {
+        "type": "array",
+        "items": {
+            "type": "object",
+            "properties": {
+                "relation": {"type": "string"},
+                "evidence_message_ids": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                },
+            },
+            "required": ["relation", "evidence_message_ids"],
+            "additionalProperties": False,
+        },
     }
 
 
@@ -423,6 +447,8 @@ def collected_merge_output_schema() -> dict[str, object]:
                             ],
                         },
                         "retention_detail": {"type": "string"},
+                        "merge_owner_conflict": {"type": "boolean"},
+                        "conflict_detail": {"type": "string"},
                     },
                     "required": [
                         "group_id",
@@ -432,6 +458,8 @@ def collected_merge_output_schema() -> dict[str, object]:
                         "object_hint",
                         "retention_reason",
                         "retention_detail",
+                        "merge_owner_conflict",
+                        "conflict_detail",
                     ],
                     "additionalProperties": False,
                 },

@@ -79,6 +79,7 @@ from .pipeline.validation import (
     validate_merged_event_drafts,
 )
 from .utils.link_refs import build_message_link_id
+from .utils.hashing import file_key_from_attachment_id, file_key_from_url
 from .utils.json_io import dump_json
 
 logger = logging.getLogger("worktrace")
@@ -294,10 +295,14 @@ class DailyTraceRunner:
                                 group_id="single",
                                 draft_ids=[all_candidates[0].draft_id],
                                 primary_draft_id=all_candidates[0].draft_id,
+                                workstream_name=all_candidates[0].workstream_key.strip(),
                             )
                         ],
                         target_date=target_date,
                         message_order=all_message_order,
+                        self_relation_order=tuple(
+                            item.key for item in self.config.self_relation_types
+                        ),
                     )
                 else:
                     merge_started_at = perf_counter()
@@ -344,6 +349,9 @@ class DailyTraceRunner:
                         group_result.groups,
                         target_date=target_date,
                         message_order=all_message_order,
+                        self_relation_order=tuple(
+                            item.key for item in self.config.self_relation_types
+                        ),
                     )
                     merged_drafts = validate_merged_event_drafts(
                         merged_drafts,
@@ -400,6 +408,14 @@ class DailyTraceRunner:
             events, retention_event_warnings = filter_retained_work_events(events)
             warning_messages.extend(retention_event_warnings)
             events = _sort_events_for_output(events, messages=filtered_messages)
+            self._dump_final_events_debug_artifacts(
+                target_date=target_date,
+                merged_drafts=merged_drafts,
+                events=events,
+                event_build_warnings=merge_warnings,
+                final_filter_warnings=final_event_filter_warnings,
+                retention_warnings=retention_event_warnings,
+            )
             log_timing(
                 logger,
                 "runner.stage.completed",
@@ -888,6 +904,10 @@ class DailyTraceRunner:
                     ),
                     {slice_input.slice_id: slice_input},
                     self_open_id=self_identity.open_id,
+                    self_relation_keys=tuple(
+                        item.key for item in self.config.self_relation_types
+                    ),
+                    warning_sink=warnings,
                 )
                 if not validated.context_requests:
                     candidates.extend(validated.candidate_events)
@@ -1208,6 +1228,10 @@ class DailyTraceRunner:
                 analysis,
                 {conversation_slice.slice_id: conversation_slice},
                 self_open_id=self_identity.open_id,
+                self_relation_keys=tuple(
+                    item.key for item in self.config.self_relation_types
+                ),
+                warning_sink=warnings,
             )
             if validated.context_requests:
                 if not allow_context_expansion:
@@ -1427,6 +1451,10 @@ class DailyTraceRunner:
                 batch_result,
                 {current_slice.slice_id: current_slice},
                 self_open_id=self_identity.open_id,
+                self_relation_keys=tuple(
+                    item.key for item in self.config.self_relation_types
+                ),
+                warning_sink=warning_messages,
             )
             run_count += 1
             if retry_round == 0:
@@ -1973,6 +2001,39 @@ class DailyTraceRunner:
             encoding="utf-8",
         )
 
+    def _dump_final_events_debug_artifacts(
+        self,
+        *,
+        target_date: str,
+        merged_drafts: list[MergedEventDraft],
+        events: list[WorkEvent],
+        event_build_warnings: list[str],
+        final_filter_warnings: list[str],
+        retention_warnings: list[str],
+    ) -> None:
+        debug_root = self.config.conversation_debug_root
+        if debug_root is None:
+            return
+        date_dir = debug_root / target_date
+        date_dir.mkdir(parents=True, exist_ok=True)
+        (date_dir / "final_events.json").write_text(
+            dump_json(
+                {
+                    "target_date": target_date,
+                    "merged_drafts": [draft.to_dict() for draft in merged_drafts],
+                    "events": [event.to_dict() for event in events],
+                    "warnings": {
+                        "event_build": list(event_build_warnings),
+                        "final_filter": list(final_filter_warnings),
+                        "retention": list(retention_warnings),
+                    },
+                },
+                pretty=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
 
 def _supports_segment_batches(analyzer: object) -> bool:
     return all(
@@ -2223,6 +2284,23 @@ def _attach_event_file_links(
             deduped.setdefault(_file_link_key(attachment), attachment)
 
         file_links = list(deduped.values())
+        file_keys = list(
+            dict.fromkeys(
+                [
+                    *event.file_keys,
+                    *(
+                        key
+                        for link in file_links
+                        if (key := file_key_from_url(link.url))
+                    ),
+                    *(
+                        key
+                        for attachment_id in event.referenced_attachment_ids
+                        if (key := file_key_from_attachment_id(attachment_id))
+                    ),
+                ]
+            )
+        )
         title = _make_file_references_readable(
             event.title,
             file_links,
@@ -2247,6 +2325,11 @@ def _attach_event_file_links(
                 ),
                 referenced_link_ids=list(event.referenced_link_ids),
                 referenced_attachment_ids=list(event.referenced_attachment_ids),
+                workstream_name=event.workstream_name,
+                action_labels=list(event.action_labels),
+                self_relations=list(event.self_relations),
+                evidence_fingerprints=list(event.evidence_fingerprints),
+                file_keys=file_keys,
             )
         )
 
