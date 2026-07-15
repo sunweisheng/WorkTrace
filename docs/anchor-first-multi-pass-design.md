@@ -16,16 +16,17 @@
 
 | 原设计项 | 当前状态 | 当前代码 |
 | --- | --- | --- |
-| `AnchorUnit` | 已进入正式主链 | `pipeline/anchors.py` |
-| 本人消息锚点 | 已进入正式主链 | `group_anchor_units(...)` |
-| 本人 reaction 锚点 | 已扩展并进入正式主链 | `reaction_catalog.py`、`pipeline/anchors.py` |
-| 小范围锚点窗口 | 已进入正式主链，当前前后各 30 条 | `runner._analyze_segmented_conversations(...)` |
+| `AnchorUnit` | 已进入正式主链 | `pipeline/initial_windows.py` |
+| 本人消息锚点 | 已进入正式主链 | `build_initial_anchor_windows(...)` |
+| 本人 reaction 锚点 | 已扩展并进入正式主链 | `reaction_catalog.py`、`pipeline/initial_windows.py` |
+| 小范围锚点窗口 | 已进入正式主链，群聊按时间/无关插话聚合，私聊按当天整段 | `runner._analyze_segmented_conversations(...)` |
 | LLM 先判断边界 | 已进入正式主链，输出 segment start IDs | `segment_conversation(...)` |
 | 局部按需扩窗 | 已进入正式主链，作用于 segment | `_retry_segment_context(...)` |
 | 附件/文档正文按需读取 | 已进入正式主链 | `ContentResolver` |
-| 图片理解 | 模型明确请求后下载并摘要 | `vision.py` |
+| 图片理解 | 本人发送或本人 reply/quote 关联图片首轮前摘要，其他图片按需处理 | `required_image_context.py`、`vision.py` |
 | 锚点失败回退 | 已进入正式主链 | `_analyze_anchor_fallback(...)` |
-| 持久化锚点缓存 | 仍只在独立实验 | `anchor_experiment.py`、`cache/` |
+| 实验锚点缓存 | 仍只在独立实验 | `anchor_experiment.py`、`cache/` |
+| 正式任务续跑 | 已使用独立的临时分段/提炼中间结果 | `pipeline/llm_checkpoints.py` |
 | 只合并显式标记候选 | 未按原方案落地 | 正式主链仍对过滤后的全日候选分组 |
 | 最终工作流归属校正 | 后续新增并进入正式主链 | `workstream_resolution.py` |
 
@@ -43,7 +44,7 @@ flowchart LR
 
 - 正式主链不是“每个锚点直接提炼”，而是“锚点窗口先分段，再把片段组批提炼”
 - `ConversationSlice` 没有完全删除，仍作为片段兼容和回退/扩窗载体
-- 正式主链的持久化缓存没有启用，只保留单次运行内的分段窗口缓存
+- 正式主链不读取实验锚点缓存；它另存输入完全一致的分段/提炼结果，供 `--resume` 续跑，成功写入 Markdown 后清理
 - 最终仍处理全日所有已过滤候选，不依赖 `needs_cross_anchor_merge` 来缩小 merge 范围
 - 新增 `workstream_key` 和结构化工作流归属校正，解决仅靠语义相似分组的误合并/误拆分
 
@@ -60,9 +61,9 @@ flowchart LR
 
 ## 5. 尚未进入正式主链的实验项
 
-### 5.1 持久化锚点缓存
+### 5.1 实验锚点缓存
 
-独立实验会按输入 fingerprint 复用锚点结果；正式日报尚未使用该缓存。后续接入时必须解决：
+独立实验会按输入 fingerprint 复用完整锚点分析结果；正式日报不读取该缓存。正式日报现有的 `LLMCheckpointStore` 只临时保存话题切分和事件提炼结果，并通过完整输入指纹判断是否可续跑，两者不能混用。若后续要把实验锚点缓存接入正式流程，仍必须解决：
 
 - reaction 目录版本变化如何使缓存失效
 - 图片摘要、附件正文和链接正文如何进入 fingerprint

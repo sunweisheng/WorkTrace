@@ -142,6 +142,44 @@ def test_anchor_docs_separate_main_flow_from_experiment() -> None:
     assert "独立实验入口" in experiment
 
 
+def test_docs_describe_current_initial_windows_and_resume_checkpoints() -> None:
+    readme = Path("README.md").read_text(encoding="utf-8")
+    detailed = Path("docs/detailed-design.md").read_text(encoding="utf-8")
+    segmentation = Path("docs/conversation-slice-retry-design.md").read_text(
+        encoding="utf-8"
+    )
+    implementation = Path("docs/implementation-breakdown.md").read_text(
+        encoding="utf-8"
+    )
+
+    for content in (readme, detailed, segmentation, implementation):
+        assert "config/conversation_window.json" in content
+        assert "config/llm_retry.json" in content
+        assert "pipeline/initial_windows.py" in content or "初始窗口" in content
+    for content in (readme, detailed, segmentation):
+        assert "私聊" in content
+        assert "--resume" in content
+        assert "data/cache/llm" in content
+    assert "当前主链窗口为前后各 30 条消息" not in readme
+    assert "当前正式 runner 使用 `before_limit=30`" not in segmentation
+
+
+def test_docs_describe_attachment_file_name_and_image_privacy_boundaries() -> None:
+    readme = Path("README.md").read_text(encoding="utf-8")
+    detailed = Path("docs/detailed-design.md").read_text(encoding="utf-8")
+    employee = Path("docs/employee-guide.md").read_text(encoding="utf-8")
+    privacy = Path("docs/privacy-note.md").read_text(encoding="utf-8")
+
+    for content in (readme, detailed):
+        assert "附件文件名" in content
+        assert "不能" in content and "推断" in content and "正文" in content
+        assert "无效附件引用" in content
+    for content in (employee, privacy):
+        assert "附件文件名" in content
+        assert "本人发送" in content
+        assert "reply/quote" in content
+
+
 def test_readme_indexes_every_docs_markdown() -> None:
     readme = Path("README.md").read_text(encoding="utf-8")
 

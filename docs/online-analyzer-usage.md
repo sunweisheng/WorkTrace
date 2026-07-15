@@ -50,6 +50,8 @@ WORKTRACE_LLM_SLEEP_MAX_SECONDS=2
 
 环境变量优先于仓库根目录 `.env`。真实值不能提交到 git。
 
+模型调用的重试、流式首次返回超时和并发数不在 `.env` 中配置，而由 `config/llm_retry.json` 管理。当前话题切分允许 3 个并发请求，事件提炼允许 5 个；同一会话的话题切分仍保持顺序。分段和提炼的配置值 `3` 均表示首次调用之外最多再重试 3 次。
+
 ## 3. 请求规则
 
 正式文本请求统一：
@@ -59,6 +61,7 @@ WORKTRACE_LLM_SLEEP_MAX_SECONDS=2
 - 按任务传入严格 JSON schema
 - `stream=true` 时收集 `response.output_text.delta`
 - `stream=false` 时读取完整 Responses payload
+- 流式读取当前以 60 秒作为首次返回和后续无数据读取上限
 - 第二次正式在线请求起，在配置区间内随机等待
 
 图片摘要使用 `input_image`、base64 data URL 和 `detail=low`，不走结构化 JSON schema。
@@ -107,6 +110,7 @@ python3 -m src.worktrace.cli --preflight
 - API Key
 - model
 - timeout
+- stream first response timeout
 - TLS verify
 - stream
 - reasoning effort

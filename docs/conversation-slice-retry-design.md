@@ -25,7 +25,7 @@
 ```mermaid
 flowchart TD
     A["当日标准化消息"] --> B["本人发言/reaction 锚点"]
-    B --> C["前后各 30 条的 AnchorUnit"]
+    B --> C["按会话类型构造确定性 AnchorUnit"]
     C --> D["构造 response signals 和 hard boundaries"]
     D --> E["LLM 返回 segment_start_message_ids"]
     E --> F["Python 扩展并校验连续片段"]
@@ -44,13 +44,15 @@ flowchart TD
 
 ## 4. 锚点窗口
 
-`group_anchor_units(...)` 对每个会话分别构造窗口：
+`build_initial_anchor_windows(...)` 对每个会话分别构造窗口：
 
-- 本人发送的消息形成文本锚点
+- 连续的本人消息形成文本锚点
 - 本人做出的 reaction 形成响应锚点
-- reaction 若已落在文本锚点窗口内，会作为 `AnchorSignal` 附着到该窗口
-- 独立 reaction 会形成自己的锚点窗口
-- 当前正式 runner 使用 `before_limit=30`、`after_limit=30`
+- 群聊中相邻锚点间隔不超过 10 分钟、且中间无关消息不超过 3 条时合并为同一窗口
+- 群聊窗口向前补 2 条时间上下文，并补齐当天可见的 reply/quote 直接关系
+- 私聊把当天整段会话作为一个窗口，并补一层跨日 reply/quote 直接关系
+
+这些阈值来自 `config/conversation_window.json`。`group_anchor_units(...)` 的固定前后条数窗口仍保留在兼容/实验代码中，但不是当前正式默认路径。
 
 进入分段前还会补：
 
@@ -89,9 +91,11 @@ flowchart TD
 
 ## 6. 分段重试与熔断
 
-每个锚点窗口最多尝试 `anchor_retry_limit + 1` 次。
+每个锚点窗口最多尝试 `anchor_retry_limit + 1` 次。正式配置来自 `config/llm_retry.json`，当前首次分段之外最多额外重试 3 次；事件提炼也采用独立的 3 次额外重试限制。
 
-单次运行内，相同窗口签名会复用内存中的分段结果。失败分为 analyzer 协议失败和分段校验失败；同一会话中同类失败达到 `conversation_segmentation_failure_threshold` 后打开熔断，剩余窗口不再重复请求。
+单次运行内，相同窗口签名会复用内存中的分段结果。正式 CLI 还会把成功的话题切分和事件提炼结果临时写到 `data/cache/llm/YYYY/MM/YYYY-MM-DD/`；只有使用 `--resume` 时才复用输入完全一致的中间结果，正常重跑会先清理。Markdown 写入成功后该目录删除。
+
+失败分为 analyzer 协议失败和分段校验失败；同一会话中同类失败达到 `conversation_segmentation_failure_threshold` 后打开熔断，剩余窗口不再重复请求。
 
 熔断只停止该会话后续分段，不会直接终止整天。
 
@@ -129,9 +133,9 @@ analyzer 返回 `BatchSegmentAnalysisResult`，必须对每个输入 `segment_id
 - 请求没有带来新消息或正文
 - 扩展前后签名相同
 - 请求字段或引用 ID 无效
-- 达到 `slice_retry_limit`
+- 默认分段主链达到 `context_expansion_round_limit`（当前 2 轮）
 
-达到上限时保留可验证的候选，并产生 warning；不能验证的结果不会强行进入后续流程。
+每轮更早/更晚消息由 `context_expansion_messages_per_direction` 控制，当前每个方向最多 7 条。旧 analyzer 的会话级兼容路径仍使用 `slice_retry_limit`。达到上限时跳过仍要求更多上下文的片段并产生 warning；不能验证的结果不会强行进入后续流程。
 
 ## 9. 图片与文本附件边界
 
@@ -140,6 +144,8 @@ analyzer 返回 `BatchSegmentAnalysisResult`，必须对每个输入 `segment_id
 - 图片：本人发送的图片，以及本人直接回复或引用目标消息中的图片，会在首次模型调用前下载和摘要；其他图片由模型按需请求，范围由 `config/image_summary.json` 控制
 - 文本附件：模型明确请求后才读取，范围由 `config/attachment_text.json` 控制
 - 飞书文档：模型明确请求后才读取正文
+
+普通附件的文件名和 ID 属于消息元数据，不要求先读取正文。消息明确表示发送、查看、审核、转交或处理该附件时，候选可以引用该附件；系统不得根据文件名推断正文事实。无效附件引用会被移除，不会单独删除其他事实仍有效的候选。
 
 图片摘要失败会跳过该图片并写 warning。文本附件/链接正文读取失败不会让模型获得虚构正文。
 
@@ -170,9 +176,11 @@ analyzer 返回 `BatchSegmentAnalysisResult`，必须对每个输入 `segment_id
 ## 12. 当前代码落点
 
 - `src/worktrace/runner.py`
-- `src/worktrace/pipeline/anchors.py`
+- `src/worktrace/pipeline/initial_windows.py`
 - `src/worktrace/pipeline/conversation_segments.py`
 - `src/worktrace/pipeline/context_expansion.py`
+- `src/worktrace/pipeline/llm_checkpoints.py`
+- `src/worktrace/pipeline/required_image_context.py`
 - `src/worktrace/pipeline/anchor_expansion.py`
 - `src/worktrace/analyzers/base.py`
 - `src/worktrace/analyzers/online.py`
@@ -180,4 +188,4 @@ analyzer 返回 `BatchSegmentAnalysisResult`，必须对每个输入 `segment_id
 
 ## 13. 当前与独立实验的区别
 
-正式日报已经使用本人参与的聊天窗口，并在分段失败后直接从这些窗口提炼，但不使用 `anchor_experiment.py` 的持久化缓存和实验汇总输出。独立实验的命令、缓存命中率和 `completion_mode_counts` 只用于实验评估，不能用来描述正式日报产物。
+正式日报已经使用本人参与的聊天窗口，并在分段失败后直接从这些窗口提炼。它不读取 `anchor_experiment.py` 的锚点缓存，也不输出实验统计；正式 CLI 的 `--resume` 使用的是另一套按精确输入指纹保存的临时分段/提炼中间结果。独立实验的命令、缓存命中率和 `completion_mode_counts` 只用于实验评估，不能用来描述正式日报产物。

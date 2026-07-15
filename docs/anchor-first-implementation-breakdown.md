@@ -8,7 +8,7 @@
 
 - 本人发言锚点
 - 本人 reaction 锚点
-- 锚点前后文窗口
+- 群聊确定性锚点窗口和私聊整日窗口
 - 锚点窗口的 LLM 会话分段
 - 分段失败后直接从本人参与的聊天窗口提炼
 - 锚点/片段级按需扩窗
@@ -27,7 +27,7 @@
 - `completion_mode_counts`
 - 实验专用调试目录和逐轮结果
 
-这些能力没有接入正式个人日报产物。正式 runner 只有单次运行内的分段窗口缓存，不会读取实验缓存。
+这些实验能力没有接入正式个人日报产物，正式 runner 不会读取实验缓存。正式 CLI 另有一套临时中间结果：话题切分和事件提炼按精确输入指纹写入 `data/cache/llm/...`，仅在 `--resume` 时复用，Markdown 成功写入后清理；它不是实验锚点缓存。
 
 ## 3. 两条入口
 
@@ -35,6 +35,7 @@
 
 ```bash
 python3 -m src.worktrace.cli --date YYYY-MM-DD
+python3 -m src.worktrace.cli --date YYYY-MM-DD --resume
 ```
 
 独立锚点实验：
@@ -50,9 +51,10 @@ python3 -m src.worktrace.anchor_experiment --date YYYY-MM-DD
 正式主链：
 
 - `src/worktrace/runner.py`
-- `src/worktrace/pipeline/anchors.py`
+- `src/worktrace/pipeline/initial_windows.py`
 - `src/worktrace/pipeline/conversation_segments.py`
 - `src/worktrace/pipeline/anchor_expansion.py`
+- `src/worktrace/pipeline/llm_checkpoints.py`
 
 独立实验：
 

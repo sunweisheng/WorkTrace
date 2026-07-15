@@ -10,7 +10,7 @@
 | --- | --- |
 | `src/worktrace/cli.py` | 解析个人日报、`merge-collected`、`sync-reaction-catalog`，加载配置，输出 JSON 和退出码 |
 | `src/worktrace/preflight.py` | 检查 Python、lark-cli user 身份、在线模型、数据目录和时区 |
-| `src/worktrace/config.py` | 合并 `RuntimeConfig`、`.env`、进程环境变量、事件规则、事件元数据和会话黑名单 |
+| `src/worktrace/config.py` | 合并 `RuntimeConfig`、`.env`、进程环境变量及各类 JSON 配置 |
 | `src/worktrace/factories.py` | 装配聊天源、内容解析器、analyzer、store 和投递通道 |
 
 个人日报会执行 preflight；两个子命令有各自的前置依赖，不复用个人日报整套 preflight。
@@ -32,7 +32,7 @@
 
 ```mermaid
 flowchart LR
-    A["采集消息"] --> B["本地过滤"] --> C["锚点窗口"] --> D["LLM 分段"]
+    A["采集消息"] --> B["本地过滤"] --> C["确定性初始窗口"] --> D["LLM 分段并保存中间结果"]
     D --> E["片段组批并提炼动作/参与方式"] --> F["上下文重试"] --> G["候选与证据校验"]
     G --> H["跨会话初始分组"] --> I["工作流权威分组"] --> J["增强事件物化"]
     J --> K["消息指纹 + 文件标识"] --> L["Markdown + 自发送"]
@@ -46,16 +46,19 @@ flowchart LR
 - `_retry_segment_context(...)`：按片段补消息、附件和链接正文
 - `_analyze_anchor_fallback(...)`：分段失败后，直接从本人参与的聊天窗口提炼
 - `_resolve_workstream_groups(...)`：通过独立 assignment 生成工作流权威分组；失败时回退到初始模型组整合
-- `_attach_event_file_links(...)`：只把有证据支持的文件附到最终事件
+- `_attach_event_file_links(...)`：按显式引用或精确附件文件名证据附加文件
 
 ## 5. Pipeline 模块
 
 | 文件 | 当前职责 |
 | --- | --- |
 | `pipeline/filtering.py` | 系统消息、撤回、群事件和空消息过滤 |
-| `pipeline/anchors.py` | 本人发言/reaction 锚点与上下文窗口 |
+| `pipeline/initial_windows.py` | 正式主链的群聊锚点聚合、私聊整日窗口和直接关系上下文 |
+| `pipeline/anchors.py` | 固定前后条数的兼容/实验锚点窗口 |
 | `pipeline/conversation_segments.py` | response signal、硬边界、分段校验、主消息去重、片段组批 |
 | `pipeline/context_expansion.py` | earlier/later、附件和链接正文扩窗 |
+| `pipeline/required_image_context.py` | 首轮前补本人发送或本人 reply/quote 关联的图片摘要 |
+| `pipeline/llm_checkpoints.py` | 按精确输入指纹临时保存分段与事件提炼结果 |
 | `pipeline/validation.py` | analyzer 返回 ID、参与类型、本人证据和分组覆盖校验/修复 |
 | `pipeline/direct_relation_filter.py` | 旧 analyzer 和分段失败后直接提炼路径的本人关联检查 |
 | `pipeline/sensitive_filter.py` | 三阶段配置关键词过滤 |
@@ -112,6 +115,8 @@ flowchart LR
 | `config/event_rules.json` | 敏感、排除和本人指派关键词 |
 | `config/event_metadata.json` | 本人参与方式英文键、中文显示名和排序 |
 | `config/conversation_blacklist.json` | 整会话排除 |
+| `config/conversation_window.json` | 群聊锚点聚合、初始上下文和按需扩窗阈值 |
+| `config/llm_retry.json` | 分段/提炼重试、流式首次返回超时和并发数 |
 | `config/attachment_text.json` | 文本附件提取限制 |
 | `config/image_summary.json` | 图片摘要限制和提示词 |
 | `config/reaction_catalogs/*.json` | reaction 本地语义目录 |
@@ -124,4 +129,4 @@ flowchart LR
 - 多人汇总：`WORKTRACE_COLLECTED_MERGE_TRACE=true`，目录默认 `data/debug/collected_merge/<date>/`；`source-audit.json` 保存新旧来源解析和过滤明细，step JSON/prompt 在请求前写入，失败也生成 summary
 - 锚点独立实验：`python3 -m src.worktrace.anchor_experiment ...`
 
-独立锚点实验用于对比协议和缓存行为，不等同于正式日报；正式日报虽然已经使用本人参与的聊天窗口，并在分段失败后直接从这些窗口提炼，但不使用实验入口生成最终 Markdown。
+独立锚点实验用于对比协议和缓存行为，不等同于正式日报；正式日报虽然已经使用本人参与的聊天窗口，并在分段失败后直接从这些窗口提炼，但不使用实验入口生成最终 Markdown。正式 `--resume` 只读取 `pipeline/llm_checkpoints.py` 保存的临时分段/提炼结果，不读取实验锚点缓存。
