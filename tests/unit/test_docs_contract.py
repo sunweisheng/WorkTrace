@@ -80,6 +80,21 @@ def test_docs_define_collected_merge_boundaries_and_conflict_priority() -> None:
         assert "来源事件 ID" in content
 
 
+def test_docs_describe_python_collected_evidence_relations() -> None:
+    documents = [
+        Path("README.md").read_text(encoding="utf-8"),
+        Path("docs/detailed-design.md").read_text(encoding="utf-8"),
+        Path("docs/collected-people-merge-plan.md").read_text(encoding="utf-8"),
+    ]
+
+    for content in documents:
+        assert "evidence_relations" in content
+        assert "Python" in content
+        assert "原始" in content and "指纹" in content
+        assert "完全相同" in content and "不能自动合并" in content
+        assert "input_events" in content
+
+
 def test_docs_describe_enhanced_debug_artifacts() -> None:
     readme = Path("README.md").read_text(encoding="utf-8")
     detailed = Path("docs/detailed-design.md").read_text(encoding="utf-8")

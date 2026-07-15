@@ -23,8 +23,9 @@ from ..models import (
     SegmentAnalysisBatch,
     SourceBackedEventDraft,
 )
-from ..utils.link_refs import build_message_link_candidates
+from ..utils.hashing import is_sha256_fingerprint
 from ..utils.json_io import dump_json
+from ..utils.link_refs import build_message_link_candidates
 from ..utils.text import clean_text
 
 _AUDIO_TAG_RE = re.compile(r"<audio\b[^>]*duration=\"([^\"]+)\"[^>]*/?>", re.IGNORECASE)
@@ -589,8 +590,16 @@ def build_collected_merge_prompt(
             ),
             "两条事件都有非空 workstream_name 且名称不同，禁止放入同一 group。",
             "workstream_name 相同只表示可能属于同一工作范围，不能据此直接合并。",
-            "共同 evidence_fingerprints、共同 file_keys、相同具体对象或 action_labels 构成连续动作时，是同一事件的强证据，仍需结合内容确认。",
-            "workstream_name 为空的事件，只有共同消息、共同文件或明确相同业务对象支持时，才能并入已命名工作流。",
+            (
+                "evidence_relations 由 Python 对待判断事件的消息指纹和文件指纹完成集合比较后生成；"
+                "shared_message_count、shared_file_count 是共同项数量，"
+                "message_sets_equal、file_sets_equal 仅在双方对应集合非空且完全相同时为 true。"
+            ),
+            (
+                "evidence_relations、相同具体对象或 action_labels 构成连续动作时，是同一事件的强证据，"
+                "仍需结合内容确认；即使指纹集合完全相同，也不能仅据此合并。"
+            ),
+            "workstream_name 为空的事件，只有 evidence_relations 中的共同消息/文件或明确相同业务对象支持时，才能并入已命名工作流。",
             "只有标题相似、时间接近或部门相同，不能作为合并依据。",
             (
                 "每个 group 必须返回 object_hint、retention_reason、retention_detail；"
@@ -623,6 +632,10 @@ def build_collected_merge_prompt(
         "target_date": target_date,
         "merge_owner_person": merge_owner_person,
         "deterministic_groups": deterministic_groups,
+        "evidence_relations": _build_collected_evidence_relations(
+            events,
+            excluded_draft_ids=deterministic_ids,
+        ),
         "remaining_events": [
             _serialize_collected_source_event_for_prompt(item, runtime_config)
             for item in events
@@ -1160,8 +1173,6 @@ def _serialize_collected_source_event_for_prompt(
             }
             for relation in source_event.event.self_relations
         ],
-        "evidence_fingerprints": list(source_event.event.evidence_fingerprints),
-        "file_keys": list(source_event.event.file_keys),
         "file_links": [
             {
                 "title": item.title,
@@ -1170,6 +1181,53 @@ def _serialize_collected_source_event_for_prompt(
             for item in source_event.event.file_links
         ],
     }
+
+
+def _build_collected_evidence_relations(
+    events: list[CollectedSourceEvent],
+    *,
+    excluded_draft_ids: set[str],
+) -> list[dict[str, object]]:
+    comparable_events = sorted(
+        (item for item in events if item.draft_id not in excluded_draft_ids),
+        key=lambda item: item.draft_id,
+    )
+    evidence_sets = {
+        item.draft_id: {
+            value
+            for value in item.event.evidence_fingerprints
+            if is_sha256_fingerprint(value)
+        }
+        for item in comparable_events
+    }
+    file_sets = {
+        item.draft_id: {
+            value for value in item.event.file_keys if is_sha256_fingerprint(value)
+        }
+        for item in comparable_events
+    }
+    relations: list[dict[str, object]] = []
+    for left_index, left in enumerate(comparable_events):
+        for right in comparable_events[left_index + 1 :]:
+            left_evidence = evidence_sets[left.draft_id]
+            right_evidence = evidence_sets[right.draft_id]
+            left_files = file_sets[left.draft_id]
+            right_files = file_sets[right.draft_id]
+            shared_message_count = len(left_evidence & right_evidence)
+            shared_file_count = len(left_files & right_files)
+            if not shared_message_count and not shared_file_count:
+                continue
+            relations.append(
+                {
+                    "draft_ids": [left.draft_id, right.draft_id],
+                    "shared_message_count": shared_message_count,
+                    "shared_file_count": shared_file_count,
+                    "message_sets_equal": bool(left_evidence)
+                    and left_evidence == right_evidence,
+                    "file_sets_equal": bool(left_files) and left_files == right_files,
+                }
+            )
+    return relations
 
 
 def serialize_context_request_for_prompt(request: ContextRequest) -> dict[str, object]:

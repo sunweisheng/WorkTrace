@@ -357,6 +357,9 @@ def test_collected_merge_under_threshold_uses_single_analyzer_call(
 def test_collected_merge_over_threshold_rolls_sources_and_keeps_provenance(
     tmp_path: Path,
 ) -> None:
+    shared_message_fingerprint = "sha256:" + "f" * 64
+    shared_file_key = "sha256:" + "e" * 64
+
     class ProvenanceAnalyzer(FakeAnalyzer):
         def merge_collected_events(self, target_date, events, deterministic_groups):
             self.calls.append(
@@ -402,8 +405,15 @@ def test_collected_merge_over_threshold_rolls_sources_and_keeps_provenance(
                     workstream_name="项目排期工作流",
                     action_labels=[f"{person}确认"],
                     self_relations=["collaboration"],
-                    evidence_fingerprints=["sha256:" + person.encode().hex().ljust(64, "0")[:64]],
-                    file_keys=["sha256:" + (person + "file").encode().hex().ljust(64, "0")[:64]],
+                    evidence_fingerprints=[
+                        shared_message_fingerprint,
+                        "sha256:" + person.encode().hex().ljust(64, "0")[:64],
+                    ],
+                    file_keys=[
+                        shared_file_key,
+                        "sha256:"
+                        + (person + "file").encode().hex().ljust(64, "0")[:64],
+                    ],
                 )
             ],
             tmp_path,
@@ -431,8 +441,27 @@ def test_collected_merge_over_threshold_rolls_sources_and_keeps_provenance(
     assert rolling_event.workstream_name == "项目排期工作流"
     assert rolling_event.action_labels
     assert rolling_event.self_relations == ["collaboration"]
-    assert len(rolling_event.evidence_fingerprints) == 2
-    assert len(rolling_event.file_keys) >= 2
+    assert len(rolling_event.evidence_fingerprints) == 3
+    assert len(rolling_event.file_keys) >= 3
+    second_call = analyzer.calls[1]
+    second_prompt = json.loads(
+        build_collected_merge_prompt(
+            "2026-06-29",
+            second_call["events"],
+            second_call["deterministic_groups"],
+        )
+    )
+    assert second_prompt["evidence_relations"] == [
+        {
+            "draft_ids": sorted(
+                event.draft_id for event in second_call["events"]
+            ),
+            "shared_message_count": 1,
+            "shared_file_count": 1,
+            "message_sets_equal": False,
+            "file_sets_equal": False,
+        }
+    ]
     content = Path(result.output_path or "").read_text(encoding="utf-8")
     assert "- 来源人员: 张三、李四、王五" in content
     assert "- 来源事件 ID: evt-张三、evt-李四、evt-王五" in content
@@ -682,6 +711,40 @@ def test_collected_merge_does_not_lock_same_event_id_with_divergent_content(
     )
 
 
+def test_collected_merge_does_not_lock_equal_fingerprint_sets(tmp_path: Path) -> None:
+    inbox = tmp_path / "merge_inbox" / "2026" / "06" / "29"
+    shared_message = "sha256:" + "a" * 64
+    shared_file = "sha256:" + "b" * 64
+    for person, event_id in [("张三", "evt-a"), ("李四", "evt-b")]:
+        _write_day_doc(
+            inbox / f"2026-06-29-{person}.md",
+            [
+                _event(
+                    event_id=event_id,
+                    title="项目排期",
+                    content=f"{person}确认项目排期。",
+                    evidence_fingerprints=[shared_message],
+                    file_keys=[shared_file],
+                )
+            ],
+            tmp_path,
+        )
+
+    analyzer = FakeAnalyzer()
+    _build_runner(tmp_path, analyzer=analyzer).run("2026-06-29")
+
+    assert analyzer.calls[0]["deterministic_groups"] == []
+    prompt = json.loads(
+        build_collected_merge_prompt(
+            "2026-06-29",
+            analyzer.calls[0]["events"],
+            analyzer.calls[0]["deterministic_groups"],
+        )
+    )
+    assert prompt["evidence_relations"][0]["message_sets_equal"] is True
+    assert prompt["evidence_relations"][0]["file_sets_equal"] is True
+
+
 def test_collected_merge_warns_when_merge_owner_source_is_missing(tmp_path: Path) -> None:
     inbox = tmp_path / "merge_inbox" / "2026" / "06" / "29"
     _write_day_doc(
@@ -900,10 +963,27 @@ def test_collected_merge_prompt_contains_sensitive_rules() -> None:
     assert "只有标题相似、时间接近或部门相同，不能作为合并依据" in prompt
 
 
-def test_collected_merge_prompt_includes_new_merge_evidence() -> None:
+def test_collected_merge_prompt_includes_python_evidence_relations() -> None:
+    message_a = "sha256:" + "a" * 64
+    message_b = "sha256:" + "b" * 64
+    message_c = "sha256:" + "c" * 64
+    file_a = "sha256:" + "d" * 64
     prompt = build_collected_merge_prompt(
         "2026-06-29",
         [
+            CollectedSourceEvent(
+                draft_id="d2",
+                person_name="李四",
+                source_file="2026-06-29-李四.md",
+                event=_event(
+                    event_id="evt2",
+                    title="项目甲方案补充",
+                    content="补充确认项目甲方案。",
+                    workstream_name="项目甲",
+                    evidence_fingerprints=[message_a, message_b],
+                    file_keys=[file_a],
+                ),
+            ),
             CollectedSourceEvent(
                 draft_id="d1",
                 person_name="张三",
@@ -915,8 +995,20 @@ def test_collected_merge_prompt_includes_new_merge_evidence() -> None:
                     workstream_name="项目甲",
                     action_labels=["方案确认"],
                     self_relations=["initiated"],
-                    evidence_fingerprints=["sha256:" + "a" * 64],
-                    file_keys=["sha256:" + "b" * 64],
+                    evidence_fingerprints=[message_a, message_b, message_b],
+                    file_keys=[file_a, file_a],
+                ),
+            ),
+            CollectedSourceEvent(
+                draft_id="d3",
+                person_name="王五",
+                source_file="2026-06-29-王五.md",
+                event=_event(
+                    event_id="evt3",
+                    title="项目甲排期",
+                    content="确认项目甲上线排期。",
+                    workstream_name="项目甲",
+                    evidence_fingerprints=[message_a, message_c],
                 ),
             )
         ],
@@ -926,13 +1018,96 @@ def test_collected_merge_prompt_includes_new_merge_evidence() -> None:
         ),
     )
 
-    event_payload = json.loads(prompt)["remaining_events"][0]
+    payload = json.loads(prompt)
+    event_payload = next(
+        item for item in payload["remaining_events"] if item["draft_id"] == "d1"
+    )
 
     assert event_payload["workstream_name"] == "项目甲"
     assert event_payload["action_labels"] == ["方案确认"]
     assert event_payload["self_relations"] == [{"key": "initiated", "label": "发起"}]
-    assert event_payload["evidence_fingerprints"] == ["sha256:" + "a" * 64]
-    assert event_payload["file_keys"] == ["sha256:" + "b" * 64]
+    assert "evidence_fingerprints" not in event_payload
+    assert "file_keys" not in event_payload
+    assert payload["evidence_relations"] == [
+        {
+            "draft_ids": ["d1", "d2"],
+            "shared_message_count": 2,
+            "shared_file_count": 1,
+            "message_sets_equal": True,
+            "file_sets_equal": True,
+        },
+        {
+            "draft_ids": ["d1", "d3"],
+            "shared_message_count": 1,
+            "shared_file_count": 0,
+            "message_sets_equal": False,
+            "file_sets_equal": False,
+        },
+        {
+            "draft_ids": ["d2", "d3"],
+            "shared_message_count": 1,
+            "shared_file_count": 0,
+            "message_sets_equal": False,
+            "file_sets_equal": False,
+        },
+    ]
+    assert message_a not in prompt
+    assert message_b not in prompt
+    assert message_c not in prompt
+    assert file_a not in prompt
+
+
+def test_collected_merge_prompt_handles_file_only_and_empty_evidence() -> None:
+    file_a = "sha256:" + "a" * 64
+    file_b = "sha256:" + "b" * 64
+    events = [
+        CollectedSourceEvent(
+            "d1",
+            "张三",
+            "a.md",
+            _event(
+                event_id="e1",
+                title="文件核对",
+                content="核对文件。",
+                file_keys=[file_a, file_b],
+            ),
+        ),
+        CollectedSourceEvent(
+            "d2",
+            "李四",
+            "b.md",
+            _event(
+                event_id="e2",
+                title="文件复核",
+                content="复核文件。",
+                file_keys=[file_a],
+            ),
+        ),
+        CollectedSourceEvent(
+            "d3",
+            "王五",
+            "c.md",
+            _event(event_id="e3", title="其他事项", content="处理其他事项。"),
+        ),
+        CollectedSourceEvent(
+            "d4",
+            "赵六",
+            "d.md",
+            _event(event_id="e4", title="空证据事项", content="处理空证据事项。"),
+        ),
+    ]
+
+    payload = json.loads(build_collected_merge_prompt("2026-06-29", events, []))
+
+    assert payload["evidence_relations"] == [
+        {
+            "draft_ids": ["d1", "d2"],
+            "shared_message_count": 0,
+            "shared_file_count": 1,
+            "message_sets_equal": False,
+            "file_sets_equal": False,
+        }
+    ]
 
 
 def test_collected_merge_splits_different_named_workstreams() -> None:
@@ -1825,8 +2000,10 @@ def test_collected_merge_trace_writes_step_summary(tmp_path: Path) -> None:
     assert result.merged_event_count == 1
     summary_path = trace_root / "2026-06-29" / "summary.json"
     step_path = trace_root / "2026-06-29" / "step-001.json"
+    prompt_path = trace_root / "2026-06-29" / "step-001-prompt.txt"
     assert summary_path.exists()
     assert step_path.exists()
+    assert prompt_path.exists()
     summary = json.loads(summary_path.read_text(encoding="utf-8"))
     assert summary["merged_event_count"] == 1
     step = json.loads(step_path.read_text(encoding="utf-8"))
@@ -1839,6 +2016,7 @@ def test_collected_merge_trace_writes_step_summary(tmp_path: Path) -> None:
     assert input_event["self_relations"] == ["decision_confirmation"]
     assert input_event["evidence_fingerprints"] == ["sha256:" + "a" * 64]
     assert input_event["file_keys"] == ["sha256:" + "b" * 64]
+    assert "sha256:" not in prompt_path.read_text(encoding="utf-8")
     assert step["deterministic_groups"] == []
     assert step["boundary_warnings"] == []
 
