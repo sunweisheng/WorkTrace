@@ -330,10 +330,18 @@ def _filter_valid_referenced_attachment_ids(
 ) -> list[str]:
     source_id_set = set(source_message_ids)
     available_ids = {
-        block.attachment_id
-        for block in conversation_slice.attachment_texts
-        if block.message_id in source_id_set
+        attachment.attachment_id
+        for message in conversation_slice.messages
+        if message.message_id in source_id_set
+        for attachment in message.attachments
     }
+    available_ids.update(
+        {
+            block.attachment_id
+            for block in conversation_slice.attachment_texts
+            if block.message_id in source_id_set
+        }
+    )
     return [
         attachment_id
         for attachment_id in dict.fromkeys(attachment_ids)

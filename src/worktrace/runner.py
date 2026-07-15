@@ -2847,8 +2847,10 @@ def _attach_event_file_links(
     messages: list,
     content_resolver,
 ) -> list[WorkEvent]:
+    message_by_id = {message.message_id: message for message in messages}
     link_by_id: dict[str, EventFileLink] = {}
     attachment_by_id: dict[str, EventFileLink] = {}
+    attachment_message_id_by_id: dict[str, str] = {}
     references: list[_EventFileReference] = []
     for message in messages:
         for index, link in enumerate(content_resolver.extract_links(message), start=1):
@@ -2874,6 +2876,7 @@ def _attach_event_file_links(
                 title=file_name,
                 link_type="attachment",
             )
+            attachment_message_id_by_id[attachment.attachment_id] = message.message_id
     attached: list[WorkEvent] = []
 
     for event in events:
@@ -2905,7 +2908,28 @@ def _attach_event_file_links(
                 continue
             deduped[key] = reference.file_link
 
-        for attachment_id in event.referenced_attachment_ids:
+        resolved_attachment_ids = list(event.referenced_attachment_ids)
+        source_conversation_ids = {
+            message_by_id[message_id].conversation_id
+            for message_id in event.source_message_ids
+            if message_id in message_by_id
+        }
+        for attachment_id, attachment in attachment_by_id.items():
+            if attachment_id in resolved_attachment_ids:
+                continue
+            message_id = attachment_message_id_by_id.get(attachment_id, "")
+            message = message_by_id.get(message_id)
+            if (
+                not source_conversation_ids
+                or message is None
+                or message.conversation_id not in source_conversation_ids
+            ):
+                continue
+            if not _event_supports_attachment_name(event, attachment):
+                continue
+            resolved_attachment_ids.append(attachment_id)
+
+        for attachment_id in resolved_attachment_ids:
             attachment = attachment_by_id.get(attachment_id)
             if attachment is None:
                 continue
@@ -2923,7 +2947,7 @@ def _attach_event_file_links(
                     ),
                     *(
                         key
-                        for attachment_id in event.referenced_attachment_ids
+                        for attachment_id in resolved_attachment_ids
                         if (key := file_key_from_attachment_id(attachment_id))
                     ),
                 ]
@@ -2952,7 +2976,7 @@ def _attach_event_file_links(
                     file_links,
                 ),
                 referenced_link_ids=list(event.referenced_link_ids),
-                referenced_attachment_ids=list(event.referenced_attachment_ids),
+                referenced_attachment_ids=resolved_attachment_ids,
                 workstream_name=event.workstream_name,
                 action_labels=list(event.action_labels),
                 self_relations=list(event.self_relations),
@@ -2993,6 +3017,13 @@ def _event_supports_file_reference(
         if value and value in evidence_text:
             return True
     return False
+
+
+def _event_supports_attachment_name(event: WorkEvent, attachment: EventFileLink) -> bool:
+    display_name = _file_display_name(attachment)
+    if not display_name:
+        return False
+    return display_name.casefold() in _event_file_evidence_text(event).casefold()
 
 
 def _event_file_evidence_text(event: WorkEvent) -> str:

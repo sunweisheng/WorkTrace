@@ -308,6 +308,18 @@ def validate_segment_batch_result(
         available_attachment_ids = {
             block.attachment_id for block in unit.attachment_texts
         }
+        available_attachment_ids.update(
+            attachment.attachment_id
+            for message in unit.messages
+            for attachment in message.attachments
+        )
+        attachment_ids_by_message_id = {
+            message.message_id: [
+                attachment.attachment_id for attachment in message.attachments
+            ]
+            for message in unit.messages
+            if message.attachments
+        }
         for candidate in item.analysis.candidate_events:
             candidate_sources = set(candidate.source_message_ids)
             if not candidate_sources or not candidate_sources.issubset(source_ids):
@@ -326,14 +338,33 @@ def validate_segment_batch_result(
             if not candidate_evidence and not (candidate_signals & signal_ids):
                 warnings.append("Filtered candidate without self evidence.")
                 continue
-            attachment_ids = set(candidate.referenced_attachment_ids)
-            if attachment_ids and not attachment_ids.issubset(available_attachment_ids):
-                warnings.append("Filtered candidate with unavailable attachment evidence.")
-                continue
+            resolved_attachment_ids: list[str] = []
+            repaired_attachment_reference = False
+            removed_attachment_reference = False
+            for attachment_id in candidate.referenced_attachment_ids:
+                if attachment_id in available_attachment_ids:
+                    resolved_attachment_ids.append(attachment_id)
+                    continue
+                message_attachment_ids = attachment_ids_by_message_id.get(
+                    attachment_id,
+                    [],
+                )
+                if len(message_attachment_ids) == 1:
+                    resolved_attachment_ids.extend(message_attachment_ids)
+                    repaired_attachment_reference = True
+                    continue
+                removed_attachment_reference = True
+            if repaired_attachment_reference:
+                warnings.append("Repaired candidate attachment message reference.")
+            if removed_attachment_reference:
+                warnings.append("Removed unavailable attachment reference from candidate.")
             filtered_candidates.append(
                 replace(
                     candidate,
                     self_evidence_message_ids=sorted(candidate_evidence),
+                    referenced_attachment_ids=list(
+                        dict.fromkeys(resolved_attachment_ids)
+                    ),
                 )
             )
         valid[item.segment_id] = replace(

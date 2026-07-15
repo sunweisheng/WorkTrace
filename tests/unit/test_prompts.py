@@ -995,9 +995,23 @@ def test_prompt_serialization_includes_reply_context_and_attachments(tmp_path: P
     reply_payload = payload["slices"][0]["messages"][1]
     assert reply_payload["reply_to"]["message_id"] == "om_1"
     assert reply_payload["reply_to"]["text"] == "[文件附件]"
-    assert "file_name" not in reply_payload["reply_to"]["attachments"][0]
-    assert "收款公司清单.xlsx" not in str(reply_payload)
+    assert reply_payload["reply_to"]["attachments"][0]["file_name"] == "收款公司清单.xlsx"
+    assert "收款公司清单.xlsx" in str(reply_payload)
     assert reply_payload["reply_to"]["attachments"][0]["attachment_id"] == "att_1"
+
+    prompt = build_batch_analysis_prompt(
+        AnalysisBatch(
+            target_date="2026-06-22",
+            batch_id="batch-001",
+            retry_round=0,
+            estimated_tokens=0,
+            self_open_id="ou_self",
+            self_display_name="Me",
+            slices=[conversation_slice],
+        ),
+        config=config,
+    )
+    assert "附件发送后的明确转交、查看或审核指令属于后续任务" in prompt
     assert reply_payload["reply_to"]["links"][0]["link_id"] == "om_1#link1"
 
 

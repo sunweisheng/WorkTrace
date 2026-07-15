@@ -40,6 +40,23 @@ def test_parse_content_extracts_inline_image_keys() -> None:
     }
 
 
+def test_parse_content_extracts_inline_file_metadata() -> None:
+    source = FeishuCliChatSource(config=RuntimeConfig())
+
+    parsed = source._parse_content(  # noqa: SLF001 - unit test on parser contract
+        '<file key="file_v3_001" name="全国统计表.xlsx"/>'
+    )
+
+    assert parsed["attachments"] == [
+        {
+            "attachment_id": "file_v3_001",
+            "file_name": "全国统计表.xlsx",
+            "mime_type": "application/octet-stream",
+            "file_size": None,
+        }
+    ]
+
+
 def test_normalize_message_extracts_image_key_from_raw_text() -> None:
     source = FeishuCliChatSource(config=RuntimeConfig())
 

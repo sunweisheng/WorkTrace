@@ -502,7 +502,7 @@ def test_runner_makes_doc_token_references_readable_in_event_text(tmp_path: Path
     assert "MgYnwgMIkiUDGGkjHYLcEMaEnhd" not in attached[0].content
 
 
-def test_runner_attaches_plain_attachment_only_when_explicitly_referenced(tmp_path: Path) -> None:
+def test_runner_attaches_plain_attachment_by_reference_or_exact_name(tmp_path: Path) -> None:
     resolver = FeishuMessageContentResolver(config=RuntimeConfig(data_root=tmp_path / "data"))
     message = NormalizedMessage(
         conversation_id="oc_1",
@@ -566,8 +566,27 @@ def test_runner_attaches_plain_attachment_only_when_explicitly_referenced(tmp_pa
         retention_reason=event.retention_reason,
         retention_detail=event.retention_detail,
     )
-    unattached = __import__("src.worktrace.runner", fromlist=["_attach_event_file_links"])._attach_event_file_links(
+    inferred = __import__("src.worktrace.runner", fromlist=["_attach_event_file_links"])._attach_event_file_links(
         [without_reference],
+        messages=[message],
+        content_resolver=resolver,
+    )
+
+    assert inferred[0].file_links == attached[0].file_links
+    assert inferred[0].referenced_attachment_ids == ["file_1"]
+
+    generic_event = WorkEvent(
+        date=event.date,
+        event_id="evt3",
+        title="文件审核",
+        content="发送相关文件并要求审核。",
+        source_message_ids=event.source_message_ids,
+        object_hint="管理方案",
+        retention_reason=event.retention_reason,
+        retention_detail=event.retention_detail,
+    )
+    unattached = __import__("src.worktrace.runner", fromlist=["_attach_event_file_links"])._attach_event_file_links(
+        [generic_event],
         messages=[message],
         content_resolver=resolver,
     )

@@ -67,6 +67,13 @@ PERSON_NAME_RETENTION_RULE = (
     "与事件责任和推进无关的人名改写为岗位、角色或相关同事，不要输出参与人名单。"
 )
 
+ATTACHMENT_FILE_NAME_RULE = (
+    "附件元数据中的 file_name 仅用于识别文件：当消息明确是在发送、查看、审核、"
+    "转交或处理该附件时，topic 和 object_hint 必须写明 file_name，并将 attachment_id "
+    "填入 referenced_attachment_ids。附件发送后的明确转交、查看或审核指令属于后续任务，"
+    "必须以 follow_up_assigned 输出；不得根据文件名推断文件正文事实。"
+)
+
 
 def _build_self_relation_rule(config: RuntimeConfig) -> str:
     options = "、".join(
@@ -120,7 +127,7 @@ def build_batch_analysis_prompt(
             "如需给事项挂涉及文件，只能从对应 source_message_ids 的 links 里选择 referenced_link_ids；拿不准就返回空数组。",
             "self_evidence_message_ids 必须列出证明本人发起、负责、审批或跟进该事项的本人消息；它可以与 source_message_ids 不同。",
             _build_self_relation_rule(runtime_config),
-            "只有在已读取对应附件正文且正文确实支撑事项时，才能填写 referenced_attachment_ids；文件名、扩展名和发送文件本身不是业务事实。",
+            ATTACHMENT_FILE_NAME_RULE,
             "workstream_key 只在消息明确命名项目、产品或政策时填写其稳定规范名称；不能使用城市、地点、部门、工具类别、环境或泛化主题，无法确定时返回空字符串。",
             "正例：本人要求他人汇报、本人审批、本人同步、本人催办、本人推进，都算与本人直接相关。",
             "反例：他人之间讨论自己的工作、自己的承诺、自己的处理进度，即使本人在该会话里发过言，也不算与本人直接相关。",
@@ -334,7 +341,7 @@ def build_segment_batch_analysis_prompt(
             _build_self_relation_rule(runtime_config),
             "每条 candidate 至少引用一条本人参与证据，或引用该 segment 的本人回应 signal。",
             "一个 candidate 只能描述一条工作线；若同一 segment 同时出现两个命名项目、产品、政策或不相干业务对象，必须拆成多个 candidate_events。",
-            "referenced_attachment_ids 只能引用已提供正文的附件；文件名、扩展名和单纯发送附件不构成事项事实。",
+            ATTACHMENT_FILE_NAME_RULE,
             "图片和文件附件默认只提供元数据；判断依赖其内容时，必须返回 attachment_text 的 context_requests，并给出对应消息和附件 ID，不要猜测图片或文件内容。",
             "workstream_key 只在消息明确命名项目、产品或政策时填写其稳定规范名称；不能使用城市、地点、部门、工具类别、环境或泛化主题，无法确定时返回空字符串。",
             "本人提出的问题、风险和待确认事项本身可以提炼，不要求已有处理结果。",
@@ -673,7 +680,7 @@ def build_anchor_analysis_prompt(
             "如需给事项挂涉及文件，只能从对应 source_message_ids 的 links 里选择 referenced_link_ids；拿不准就返回空数组。",
             "self_evidence_message_ids 列出证明本人直接相关的本人消息；事实来源可以是他人的反馈。",
             _build_self_relation_rule(runtime_config),
-            "只有已读取正文且正文支撑事项的附件才能填写 referenced_attachment_ids；文件名不是业务事实。",
+            ATTACHMENT_FILE_NAME_RULE,
             "workstream_key 只填写消息明确命名的项目、产品或政策；无法确定时返回空字符串。",
             "如果窗口里有多个动作，就拆开。",
             "动作类型比共享名词更重要。",
@@ -766,7 +773,7 @@ def build_anchor_batch_analysis_prompt(
             "如需给事项挂涉及文件，只能从对应 source_message_ids 的 links 里选择 referenced_link_ids；拿不准就返回空数组。",
             "self_evidence_message_ids 列出证明本人直接相关的本人消息；事实来源可以是他人的反馈。",
             _build_self_relation_rule(runtime_config),
-            "只有已读取正文且正文支撑事项的附件才能填写 referenced_attachment_ids；文件名不是业务事实。",
+            ATTACHMENT_FILE_NAME_RULE,
             "workstream_key 只填写消息明确命名的项目、产品或政策；无法确定时返回空字符串。",
             "如果同一窗口有多个动作，就拆开。",
             "动作类型比共享名词更重要。",
@@ -1338,6 +1345,7 @@ def _serialize_message_attachments(message: NormalizedMessage) -> list[dict[str,
     return [
         {
             "attachment_id": item.attachment_id,
+            "file_name": item.file_name,
             "mime_type": item.mime_type,
         }
         for item in message.attachments

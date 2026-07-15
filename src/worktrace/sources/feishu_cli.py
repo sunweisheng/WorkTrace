@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from time import perf_counter
 from typing import Any, Sequence
+from xml.etree import ElementTree
 
 from ..constants import ContextDirection
 from ..config import RuntimeConfig
@@ -471,6 +472,7 @@ class FeishuCliChatSource(ChatSource):
         links = parsed_content.get("links", [])
         attachments = parsed_content.get("attachments", [])
         attachments.extend(self._extract_inline_image_attachments(text))
+        attachments.extend(self._extract_inline_media_attachments(text))
         mentioned_open_ids = self._dedupe_strings(
             [
                 *parsed_content.get("mentioned_open_ids", []),
@@ -550,7 +552,10 @@ class FeishuCliChatSource(ChatSource):
                 return {
                     "text": content,
                     "links": [],
-                    "attachments": self._extract_inline_image_attachments(content),
+                    "attachments": [
+                        *self._extract_inline_image_attachments(content),
+                        *self._extract_inline_media_attachments(content),
+                    ],
                     "mentioned_open_ids": [],
                 }
             return self._parse_content(loaded)
@@ -830,6 +835,44 @@ class FeishuCliChatSource(ChatSource):
             }
             for key in self._dedupe_strings(keys)
         ]
+
+    def _extract_inline_media_attachments(self, content: str) -> list[dict[str, Any]]:
+        try:
+            root = ElementTree.fromstring(f"<root>{content}</root>")
+        except ElementTree.ParseError:
+            return []
+
+        media_specs = {
+            "file": ("[File]", "application/octet-stream"),
+            "image": ("[Image]", "image/*"),
+            "audio": ("[Audio]", "audio/*"),
+            "video": ("[Video]", "video/*"),
+        }
+        attachments: list[dict[str, Any]] = []
+        for element in root.iter():
+            tag = str(element.tag).rsplit("}", 1)[-1].lower()
+            spec = media_specs.get(tag)
+            if spec is None:
+                continue
+            attachment_id = (
+                element.get("key")
+                or element.get(f"{tag}_key")
+                or element.get("file_key")
+            )
+            if not attachment_id:
+                continue
+            default_name, default_mime_type = spec
+            attachments.append(
+                {
+                    "attachment_id": attachment_id,
+                    "file_name": element.get("name")
+                    or element.get("file_name")
+                    or default_name,
+                    "mime_type": element.get("mime_type") or default_mime_type,
+                    "file_size": element.get("file_size") or element.get("size"),
+                }
+            )
+        return attachments
 
     def _dedupe_attachment_dicts(
         self,

@@ -10,6 +10,7 @@ from src.worktrace.analyzers.prompts import (
 from src.worktrace.analyzers.output_schemas import conversation_segmentation_output_schema
 from src.worktrace.config import RuntimeConfig
 from src.worktrace.models import (
+    AttachmentMeta,
     AttachmentTextBlock,
     BatchAnalysisResult,
     BatchSegmentAnalysisItem,
@@ -37,6 +38,7 @@ def _message(
     text: str = "消息",
     reply_to_message_id: str | None = None,
     mentioned_open_ids: list[str] | None = None,
+    attachments: list[AttachmentMeta] | None = None,
 ) -> NormalizedMessage:
     return NormalizedMessage(
         conversation_id="oc_1",
@@ -50,6 +52,7 @@ def _message(
         reply_to_message_id=reply_to_message_id,
         quote_message_id=None,
         mentioned_open_ids=mentioned_open_ids or [],
+        attachments=attachments or [],
     )
 
 
@@ -544,7 +547,66 @@ def test_segment_batch_keeps_external_feedback_with_explicit_self_evidence() -> 
     assert valid["turn-1"].candidate_events[0].self_evidence_message_ids == ["om_command"]
 
 
-def test_segment_batch_rejects_attachment_not_backed_by_loaded_text() -> None:
+def test_segment_batch_repairs_context_attachment_message_reference() -> None:
+    attachment_message = _message(
+        "om_file",
+        sender_open_id="ou_other",
+        minute=0,
+        text="[文件附件]",
+        attachments=[
+            AttachmentMeta(
+                attachment_id="file_1",
+                file_name="全国统计表.xlsx",
+                mime_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                file_size=1,
+            )
+        ],
+    )
+    command_message = _message(
+        "om_command",
+        sender_open_id="ou_self",
+        minute=1,
+        text="发给负责人审核",
+    )
+    unit = _unit(
+        "turn-1",
+        [attachment_message, command_message],
+        primary_message_ids=["om_command"],
+        context_message_ids=["om_file"],
+        self_evidence_message_ids=["om_command"],
+    )
+    batch = SegmentAnalysisBatch(
+        target_date="2026-07-10",
+        conversation_id="oc_1",
+        conversation_name="项目群",
+        self_open_id="ou_self",
+        self_display_name="张宝华",
+        segments=[unit],
+    )
+    result = BatchSegmentAnalysisResult(
+        results=[
+            BatchSegmentAnalysisItem(
+                "turn-1",
+                BatchAnalysisResult(
+                    candidate_events=[
+                        _candidate(
+                            ["om_command"],
+                            self_evidence_message_ids=["om_command"],
+                            referenced_attachment_ids=["om_file"],
+                        )
+                    ]
+                ),
+            )
+        ]
+    )
+
+    valid, _, warnings = validate_segment_batch_result(result, batch)
+
+    assert warnings == ["Repaired candidate attachment message reference."]
+    assert valid["turn-1"].candidate_events[0].referenced_attachment_ids == ["file_1"]
+
+
+def test_segment_batch_removes_unknown_attachment_but_keeps_candidate() -> None:
     message = _message("om_1", sender_open_id="ou_self", minute=0, text="请看附件")
     unit = _unit(
         "turn-1",
@@ -575,5 +637,6 @@ def test_segment_batch_rejects_attachment_not_backed_by_loaded_text() -> None:
 
     valid, _, warnings = validate_segment_batch_result(result, batch)
 
-    assert valid["turn-1"].candidate_events == []
-    assert warnings == ["Filtered candidate with unavailable attachment evidence."]
+    assert len(valid["turn-1"].candidate_events) == 1
+    assert valid["turn-1"].candidate_events[0].referenced_attachment_ids == []
+    assert warnings == ["Removed unavailable attachment reference from candidate."]
