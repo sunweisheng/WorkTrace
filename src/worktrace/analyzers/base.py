@@ -5,6 +5,7 @@ from abc import ABC, abstractmethod
 from ..models import (
     AnalysisBatch,
     AnchorUnit,
+    AttachmentTextBlock,
     BatchAnalysisResult,
     BatchAnchorAnalysisResult,
     BatchSegmentAnalysisResult,
@@ -33,6 +34,7 @@ class Analyzer(ABC):
         self_display_name: str,
         response_signals: list[ResponseSignal],
         hard_boundary_before_ids: set[str],
+        attachment_texts: list[AttachmentTextBlock] | None = None,
     ) -> str:
         raise NotImplementedError
 
@@ -48,6 +50,7 @@ class Analyzer(ABC):
         self_display_name: str,
         response_signals: list[ResponseSignal],
         hard_boundary_before_ids: set[str],
+        attachment_texts: list[AttachmentTextBlock] | None = None,
     ) -> ConversationSegmentationResult:
         raise NotImplementedError
 

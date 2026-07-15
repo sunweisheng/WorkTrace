@@ -2,14 +2,19 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 import mimetypes
 from dataclasses import dataclass
 from pathlib import Path
+from time import perf_counter
 
 from openai import OpenAI
 
 from .config import RuntimeConfig, load_online_llm_settings
 from .errors import AnalyzerProtocolError
+from .logging_utils import log_timing
+
+logger = logging.getLogger("worktrace")
 
 
 @dataclass(frozen=True)
@@ -54,8 +59,10 @@ class OnlineImageSummarizer:
         self._client = client
         self._count = 0
 
-    def summarize(self, image_path: Path) -> str:
-        if not self.settings.enabled or self._count >= self.settings.max_images_per_run:
+    def summarize(self, image_path: Path, *, required: bool = False) -> str:
+        if not self.settings.enabled or (
+            not required and self._count >= self.settings.max_images_per_run
+        ):
             return ""
         if not image_path.is_file() or image_path.stat().st_size > self.settings.max_image_bytes:
             return ""
@@ -83,11 +90,33 @@ class OnlineImageSummarizer:
             api_key=online.api_key,
             timeout=online.timeout_seconds,
         )
+        started_at = perf_counter()
         try:
             response = client.responses.create(**body)
         except Exception as exc:
+            log_timing(
+                logger,
+                "online_llm.request.failed",
+                started_at,
+                request_kind="image_summary",
+                required=required,
+                prompt_chars=len(self.settings.prompt),
+                image_bytes=image_path.stat().st_size,
+                stream_enabled=False,
+            )
             raise AnalyzerProtocolError(f"Image summary request failed: {exc}") from exc
-        self._count += 1
+        log_timing(
+            logger,
+            "online_llm.request.completed",
+            started_at,
+            request_kind="image_summary",
+            required=required,
+            prompt_chars=len(self.settings.prompt),
+            image_bytes=image_path.stat().st_size,
+            stream_enabled=False,
+        )
+        if not required:
+            self._count += 1
         text = str(getattr(response, "output_text", "")).strip()
         if not text:
             raise AnalyzerProtocolError("Image summary response did not contain text output.")

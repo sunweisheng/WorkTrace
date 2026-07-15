@@ -23,7 +23,7 @@
 | LLM 先判断边界 | 已进入正式主链，输出 segment start IDs | `segment_conversation(...)` |
 | 局部按需扩窗 | 已进入正式主链，作用于 segment | `_retry_segment_context(...)` |
 | 附件/文档正文按需读取 | 已进入正式主链 | `ContentResolver` |
-| 图片理解 | 已进入正式主链，分段前主动摘要 | `vision.py` |
+| 图片理解 | 模型明确请求后下载并摘要 | `vision.py` |
 | 锚点失败回退 | 已进入正式主链 | `_analyze_anchor_fallback(...)` |
 | 持久化锚点缓存 | 仍只在独立实验 | `anchor_experiment.py`、`cache/` |
 | 只合并显式标记候选 | 未按原方案落地 | 正式主链仍对过滤后的全日候选分组 |

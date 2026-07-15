@@ -41,6 +41,95 @@ class FakeChatSource:
         ]
 
 
+def test_expand_slice_context_adds_relation_object_for_new_temporal_message(tmp_path: Path) -> None:
+    class RelationSource(FakeChatSource):
+        def __init__(self) -> None:
+            super().__init__()
+            self.related_object_calls: list[tuple[str, list[str]]] = []
+
+        def fetch_related_messages(self, conversation_id, target_message_ids, direction, limit):
+            self.calls.append((conversation_id, target_message_ids, direction, limit))
+            return [
+                NormalizedMessage(
+                    conversation_id=conversation_id,
+                    conversation_name="项目群",
+                    message_id="om_2",
+                    sender_open_id="ou_other",
+                    sender_name="Bob",
+                    send_time="2026-06-22T10:01:00+08:00",
+                    message_type="text",
+                    text="这是对前文的补充",
+                    reply_to_message_id="om_parent",
+                    quote_message_id=None,
+                    links=[],
+                    attachments=[],
+                    is_system=False,
+                )
+            ]
+
+        def fetch_messages_by_ids(self, conversation_id, message_ids):
+            self.related_object_calls.append((conversation_id, message_ids))
+            return [
+                NormalizedMessage(
+                    conversation_id=conversation_id,
+                    conversation_name="项目群",
+                    message_id="om_parent",
+                    sender_open_id="ou_other",
+                    sender_name="Alice",
+                    send_time="2026-06-22T09:59:00+08:00",
+                    message_type="text",
+                    text="被回复的前文",
+                    reply_to_message_id=None,
+                    quote_message_id=None,
+                    links=[],
+                    attachments=[],
+                    is_system=False,
+                )
+            ]
+
+    original = NormalizedMessage(
+        conversation_id="oc_1",
+        conversation_name="项目群",
+        message_id="om_1",
+        sender_open_id="ou_self",
+        sender_name="Me",
+        send_time="2026-06-22T10:00:00+08:00",
+        message_type="text",
+        text="请补充前文",
+        reply_to_message_id=None,
+        quote_message_id=None,
+        links=[],
+        attachments=[],
+        is_system=False,
+    )
+    source = RelationSource()
+    expanded = expand_slice_context(
+        ConversationSlice(
+            slice_id="slice-1",
+            conversation_id="oc_1",
+            conversation_name="项目群",
+            anchor_message_ids=["om_1"],
+            in_day_message_ids=["om_1"],
+            messages=[original],
+        ),
+        [
+            ContextRequest(
+                slice_id="slice-1",
+                request_type=ContextRequestType.LATER_MESSAGES.value,
+                target_message_ids=["om_1"],
+                reason="补充后文",
+            )
+        ],
+        chat_source=source,
+        content_resolver=FeishuMessageContentResolver(config=RuntimeConfig(data_root=tmp_path / "data")),
+        config=RuntimeConfig(data_root=tmp_path / "data"),
+    )
+
+    assert [item.message_id for item in expanded.messages] == ["om_parent", "om_1", "om_2"]
+    assert source.calls == [("oc_1", ["om_1"], ContextDirection.LATER, 7)]
+    assert source.related_object_calls == [("oc_1", ["om_parent"])]
+
+
 def test_expand_slice_context_adds_messages_and_attachments(tmp_path: Path) -> None:
     config = RuntimeConfig(data_root=tmp_path / "data")
     chat_source = FakeChatSource()
@@ -114,7 +203,7 @@ def test_expand_slice_context_adds_messages_and_attachments(tmp_path: Path) -> N
     assert len(expanded.messages) == 2
     assert len(expanded.attachment_texts) == 1
     assert expanded.attachment_texts[0].text == "附件正文：附件正文"
-    assert chat_source.calls == [("oc_1", ["om_1"], ContextDirection.EARLIER, 1)]
+    assert chat_source.calls == [("oc_1", ["om_1"], ContextDirection.EARLIER, 7)]
 
 
 def test_expand_slice_context_ignores_empty_related_request(tmp_path: Path) -> None:

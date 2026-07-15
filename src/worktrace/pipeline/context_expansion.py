@@ -36,6 +36,7 @@ def expand_slice_context(
     content_resolver: ContentResolver,
     config: RuntimeConfig,
     reaction_catalog: ReactionCatalog | None = None,
+    warning_sink: list[str] | None = None,
 ) -> ConversationSlice:
     if not requests:
         return conversation_slice
@@ -56,6 +57,10 @@ def expand_slice_context(
         block.link_id: block for block in conversation_slice.linked_file_texts
     }
 
+    related_requests: dict[ContextDirection, list[str]] = {
+        ContextDirection.EARLIER: [],
+        ContextDirection.LATER: [],
+    }
     for request in ordered:
         if request.request_type == ContextRequestType.ATTACHMENT_TEXT.value:
             for message_id in _normalize_target_message_ids(request.target_message_ids):
@@ -92,20 +97,55 @@ def expand_slice_context(
         target_message_ids = _normalize_target_message_ids(request.target_message_ids)
         if not target_message_ids:
             continue
+        related_requests[direction].extend(target_message_ids)
+
+    temporal_message_ids: set[str] = set()
+    relation_message_ids: set[str] = set()
+    for direction, target_ids in related_requests.items():
+        normalized_targets = _normalize_target_message_ids(target_ids)
+        if not normalized_targets:
+            continue
         related = chat_source.fetch_related_messages(
             conversation_slice.conversation_id,
-            target_message_ids,
+            normalized_targets,
             direction,
-            min(request.limit, config.max_model_input_tokens),
+            config.context_expansion_messages_per_direction,
         )
         if reaction_catalog is not None:
             related = enrich_message_reactions(related, reaction_catalog)
         for message in related:
+            temporal_message_ids.add(message.message_id)
             message_by_id.setdefault(message.message_id, message)
 
-    updated_messages = sorted(
-        message_by_id.values(),
-        key=lambda item: (item.send_time, item.message_id),
+    fetch_by_ids = getattr(chat_source, "fetch_messages_by_ids", None)
+    if callable(fetch_by_ids) and temporal_message_ids:
+        relation_targets = {
+            relation_id
+            for message_id in temporal_message_ids
+            for relation_id in (
+                message_by_id[message_id].reply_to_message_id,
+                message_by_id[message_id].quote_message_id,
+            )
+            if relation_id and relation_id not in message_by_id
+        }
+        if relation_targets:
+            related_objects = fetch_by_ids(
+                conversation_slice.conversation_id,
+                sorted(relation_targets),
+            )
+            if reaction_catalog is not None:
+                related_objects = enrich_message_reactions(related_objects, reaction_catalog)
+            for message in related_objects:
+                relation_message_ids.add(message.message_id)
+                message_by_id.setdefault(message.message_id, message)
+
+    updated_messages = _limit_expanded_messages(
+        original_messages=conversation_slice.messages,
+        all_messages=message_by_id,
+        temporal_message_ids=temporal_message_ids,
+        relation_message_ids=relation_message_ids,
+        config=config,
+        warning_sink=warning_sink,
     )
     return replace(
         conversation_slice,
@@ -118,6 +158,61 @@ def expand_slice_context(
             linked_file_blocks.values(),
             key=lambda item: (item.message_id, item.link_id),
         ),
+    )
+
+
+def _limit_expanded_messages(
+    *,
+    original_messages,
+    all_messages,
+    temporal_message_ids: set[str],
+    relation_message_ids: set[str],
+    config: RuntimeConfig,
+    warning_sink: list[str] | None,
+):
+    selected_ids = {message.message_id for message in original_messages}
+    candidates = [
+        message
+        for message in sorted(all_messages.values(), key=lambda item: (item.send_time, item.message_id))
+        if message.message_id not in selected_ids
+    ]
+    ordered = [
+        *[message for message in candidates if message.message_id in temporal_message_ids],
+        *[
+            message
+            for message in candidates
+            if message.message_id in relation_message_ids and message.message_id not in temporal_message_ids
+        ],
+    ]
+    kept = list(original_messages)
+    for message in ordered:
+        proposal = sorted([*kept, message], key=lambda item: (item.send_time, item.message_id))
+        if _estimate_messages_tokens(proposal, config) > config.max_model_input_tokens:
+            if warning_sink is not None:
+                warning_sink.append(
+                    f"Skipped expanded context message because it exceeds the model input limit: {message.message_id}."
+                )
+            continue
+        kept = proposal
+    return sorted(
+        kept,
+        key=lambda item: (item.send_time, item.message_id),
+    )
+
+
+def _estimate_messages_tokens(messages, config: RuntimeConfig) -> int:
+    from ..models import ConversationSlice
+
+    return _estimate_slice_tokens(
+        ConversationSlice(
+            slice_id="context-limit",
+            conversation_id=messages[0].conversation_id if messages else "",
+            conversation_name=messages[0].conversation_name if messages else "",
+            anchor_message_ids=[],
+            in_day_message_ids=[message.message_id for message in messages],
+            messages=messages,
+        ),
+        config,
     )
 
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import shlex
 from pathlib import Path
 
@@ -154,27 +155,81 @@ def _collect_hook_exec_summary(summary: dict[str, object]) -> dict[str, object]:
 
 def _collect_stage_totals(summary: dict[str, object]) -> list[dict[str, object]]:
     timing_summary = summary.get("timing_summary", {})
-    totals = timing_summary.get("totals_by_event_ms", {}) if isinstance(timing_summary, dict) else {}
+    if not isinstance(timing_summary, dict):
+        return []
+    totals = timing_summary.get("totals_by_event_ms", {})
     run_total = _to_float(totals.get("runner.run.completed"))
-    ordered_keys = [
-        "chat_source.get_self_identity",
-        "chat_source.list_target_conversations",
-        "chat_source.fetch_conversation_messages",
-        "hook.exec.completed",
-        "runner.run.completed",
+    stages: dict[str, dict[str, float | int]] = {}
+    events = timing_summary.get("events", [])
+    if not isinstance(events, list):
+        return []
+
+    for item in events:
+        if not isinstance(item, dict) or item.get("event") != "runner.stage.completed":
+            continue
+        raw_line = str(item.get("raw_line", ""))
+        marker = ' stage="'
+        if marker not in raw_line:
+            continue
+        stage = raw_line.split(marker, 1)[1].split('"', 1)[0]
+        value = _to_float(item.get("duration_ms"))
+        aggregate = stages.setdefault(stage, {"count": 0, "duration_ms": 0.0})
+        aggregate["count"] = int(aggregate["count"]) + 1
+        aggregate["duration_ms"] = float(aggregate["duration_ms"]) + value
+
+    return [
+        {
+            "stage": stage,
+            "count": aggregate["count"],
+            "duration_ms": round(float(aggregate["duration_ms"]), 3),
+            "duration_s": round(float(aggregate["duration_ms"]) / 1000, 3),
+            "share_of_runner_total_pct": round(
+                (float(aggregate["duration_ms"]) / run_total * 100) if run_total else 0.0,
+                2,
+            ),
+        }
+        for stage, aggregate in sorted(
+            stages.items(), key=lambda item: float(item[1]["duration_ms"]), reverse=True
+        )
     ]
-    rows: list[dict[str, object]] = []
-    for key in ordered_keys:
-        value = _to_float(totals.get(key))
-        rows.append(
+
+
+def _collect_online_llm_summary(summary: dict[str, object]) -> dict[str, object]:
+    timing_summary = summary.get("timing_summary", {})
+    events = timing_summary.get("events", []) if isinstance(timing_summary, dict) else []
+    if not isinstance(events, list):
+        events = []
+    requests: list[dict[str, object]] = []
+    for index, item in enumerate(events, start=1):
+        if not isinstance(item, dict) or item.get("event") != "online_llm.request.completed":
+            continue
+        raw_line = str(item.get("raw_line", ""))
+        request_kind_match = re.search(r'request_kind="([^"]+)"', raw_line)
+        prompt_chars_match = re.search(r'prompt_chars=(\d+)', raw_line)
+        requests.append(
             {
-                "stage": key,
-                "duration_ms": round(value, 3),
-                "duration_s": round(value / 1000, 3),
-                "share_of_runner_total_pct": round((value / run_total * 100) if run_total else 0.0, 2),
+                "call_index": len(requests) + 1,
+                "event_index": index,
+                "request_kind": (
+                    request_kind_match.group(1) if request_kind_match else "text_analysis"
+                ),
+                "duration_ms": round(_to_float(item.get("duration_ms")), 3),
+                "prompt_chars": (
+                    int(prompt_chars_match.group(1)) if prompt_chars_match else None
+                ),
             }
         )
-    return rows
+    request_durations = [_to_float(item["duration_ms"]) for item in requests]
+    delay_durations = [
+        _to_float(item.get("duration_ms"))
+        for item in events
+        if isinstance(item, dict) and item.get("event") == "online_llm.request.delay"
+    ]
+    return {
+        "request_duration_ms": _build_basic_stats(request_durations),
+        "between_request_delay_ms": _build_basic_stats(delay_durations),
+        "calls": requests,
+    }
 
 
 def _build_hook_vs_http_summary(
@@ -239,8 +294,11 @@ def main(argv: list[str] | None = None) -> int:
     payload = {
         "target_date": summary.get("target_date"),
         "trace_root": str(trace_root.resolve()),
+        "resume_requested": summary.get("resume_requested", False),
+        "llm_checkpoint": summary.get("llm_checkpoint_summary", {}),
         "result": summary.get("result"),
         "stage_totals": _collect_stage_totals(summary),
+        "online_llm": _collect_online_llm_summary(summary),
         "hook_exec": hook_exec,
         "curl_http": curl_http,
         "hook_vs_http": _build_hook_vs_http_summary(hook_exec, curl_http),

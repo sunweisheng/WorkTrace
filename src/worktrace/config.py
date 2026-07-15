@@ -35,6 +35,8 @@ DEFAULT_EVENT_RULES_FILE_NAME = "config/event_rules.json"
 DEFAULT_EVENT_METADATA_FILE_NAME = "config/event_metadata.json"
 DEFAULT_REACTION_CATALOGS_ROOT = Path("config") / "reaction_catalogs"
 DEFAULT_CONVERSATION_BLACKLIST_FILE_NAME = "config/conversation_blacklist.json"
+DEFAULT_CONVERSATION_WINDOW_FILE_NAME = "config/conversation_window.json"
+DEFAULT_LLM_RETRY_FILE_NAME = "config/llm_retry.json"
 
 
 @dataclass(frozen=True)
@@ -43,6 +45,7 @@ class OnlineLLMSettings:
     model: str
     api_key: str
     timeout_seconds: int
+    stream_first_response_timeout_seconds: int
     stream_enabled: bool
     tls_verify: bool
     sleep_min_seconds: float
@@ -214,6 +217,7 @@ def load_online_llm_settings(
         model=values[config.llm_model_env_var].strip(),
         api_key=values[config.llm_api_key_env_var].strip(),
         timeout_seconds=timeout_seconds,
+        stream_first_response_timeout_seconds=config.stream_first_response_timeout_seconds,
         stream_enabled=stream_enabled,
         tls_verify=tls_verify,
         sleep_min_seconds=sleep_min_seconds,
@@ -233,7 +237,12 @@ def load_runtime_config_overrides(
     try:
         payload = json.loads(rules_path.read_text(encoding="utf-8"))
     except FileNotFoundError:
-        return _load_event_metadata_overrides(config, base_dir=base_dir)
+        return _load_llm_retry_overrides(
+            _load_conversation_window_overrides(
+                _load_event_metadata_overrides(config, base_dir=base_dir), base_dir=base_dir
+            ),
+            base_dir=base_dir,
+        )
     except json.JSONDecodeError as exc:
         raise ValueError(
             f"Invalid event rules config: {rules_path} is not valid JSON."
@@ -295,7 +304,12 @@ def load_runtime_config_overrides(
         and excluded_event_keywords == config.excluded_event_keywords
         and self_assignment_keywords == config.self_assignment_keywords
     ):
-        return _load_event_metadata_overrides(config, base_dir=base_dir)
+        return _load_llm_retry_overrides(
+            _load_conversation_window_overrides(
+                _load_event_metadata_overrides(config, base_dir=base_dir), base_dir=base_dir
+            ),
+            base_dir=base_dir,
+        )
 
     config = replace(
         config,
@@ -303,7 +317,108 @@ def load_runtime_config_overrides(
         excluded_event_keywords=excluded_event_keywords,
         self_assignment_keywords=self_assignment_keywords,
     )
-    return _load_event_metadata_overrides(config, base_dir=base_dir)
+    return _load_llm_retry_overrides(
+        _load_conversation_window_overrides(
+            _load_event_metadata_overrides(config, base_dir=base_dir), base_dir=base_dir
+        ),
+        base_dir=base_dir,
+    )
+
+
+def _load_conversation_window_overrides(
+    config: RuntimeConfig,
+    *,
+    base_dir: Path,
+) -> RuntimeConfig:
+    window_path = base_dir / config.conversation_window_file_name
+    try:
+        payload = json.loads(window_path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return config
+    except json.JSONDecodeError as exc:
+        raise ValueError(
+            f"Invalid conversation window config: {window_path} is not valid JSON."
+        ) from exc
+    if not isinstance(payload, dict):
+        raise ValueError(f"Invalid conversation window config: {window_path} must contain a JSON object.")
+    keys = {
+        "max_anchor_gap_minutes",
+        "max_unrelated_intervening_messages",
+        "initial_context_messages_before",
+        "context_expansion_messages_per_direction",
+        "context_expansion_round_limit",
+    }
+    unexpected = sorted(set(payload).difference(keys))
+    missing = sorted(keys.difference(payload))
+    if unexpected or missing:
+        details = []
+        if unexpected:
+            details.append(f"unsupported keys {', '.join(unexpected)}")
+        if missing:
+            details.append(f"missing keys {', '.join(missing)}")
+        raise ValueError(f"Invalid conversation window config: {'; '.join(details)}.")
+    values: dict[str, int] = {}
+    for key in keys:
+        value = payload[key]
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            raise ValueError(
+                f"Invalid conversation window config: {window_path} field `{key}` must be a non-negative integer."
+            )
+        values[key] = value
+    if values["context_expansion_messages_per_direction"] < 1:
+        raise ValueError("Invalid conversation window config: context_expansion_messages_per_direction must be positive.")
+    return replace(config, **values)
+
+
+def _load_llm_retry_overrides(
+    config: RuntimeConfig,
+    *,
+    base_dir: Path,
+) -> RuntimeConfig:
+    retry_path = base_dir / config.llm_retry_file_name
+    try:
+        payload = json.loads(retry_path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return config
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Invalid LLM retry config: {retry_path} is not valid JSON.") from exc
+    if not isinstance(payload, dict):
+        raise ValueError(f"Invalid LLM retry config: {retry_path} must contain a JSON object.")
+    keys = {
+        "segmentation_retry_limit",
+        "event_extraction_retry_limit",
+        "stream_first_response_timeout_seconds",
+        "max_concurrent_llm_requests",
+        "max_concurrent_event_extraction_requests",
+    }
+    unexpected = sorted(set(payload).difference(keys))
+    missing = sorted(keys.difference(payload))
+    if unexpected or missing:
+        details = []
+        if unexpected:
+            details.append(f"unsupported keys {', '.join(unexpected)}")
+        if missing:
+            details.append(f"missing keys {', '.join(missing)}")
+        raise ValueError(f"Invalid LLM retry config: {'; '.join(details)}.")
+    values = {}
+    for key in keys:
+        value = payload[key]
+        minimum = 1 if key == "stream_first_response_timeout_seconds" else 0
+        if not isinstance(value, int) or isinstance(value, bool) or value < minimum:
+            raise ValueError(
+                f"Invalid LLM retry config: {retry_path} field `{key}` must be at least {minimum}."
+            )
+        values[key] = value
+    return replace(
+        config,
+        anchor_retry_limit=values["segmentation_retry_limit"],
+        analysis_batch_retry_limit=values["event_extraction_retry_limit"],
+        stream_first_response_timeout_seconds=values["stream_first_response_timeout_seconds"],
+        max_concurrent_llm_requests=values["max_concurrent_llm_requests"],
+        max_concurrent_event_extraction_requests=values[
+            "max_concurrent_event_extraction_requests"
+        ],
+    )
 
 
 def _load_event_metadata_overrides(
@@ -509,11 +624,15 @@ class RuntimeConfig:
     timezone: str = "Asia/Shanghai"
     analyzer_backend: str = "online"
     anchor_retry_limit: int = 3
+    analysis_batch_retry_limit: int = 3
+    stream_first_response_timeout_seconds: int = 60
+    max_concurrent_llm_requests: int = 1
+    max_concurrent_event_extraction_requests: int | None = None
     anchor_batch_retry_limit: int = 1
     conversation_segmentation_failure_threshold: int = 2
     reaction_discovery_page_limit: int = 3
     slice_base_limit: int = 150
-    max_model_input_tokens: int = 100000
+    max_model_input_tokens: int = 51200
     collected_merge_prompt_char_threshold: int = 80000
     collected_merge_missing_field_retry_ratio: float = 0.2
     collected_merge_missing_field_retry_limit: int = 1
@@ -528,6 +647,12 @@ class RuntimeConfig:
     prompt_message_char_limit: int = 300
     prompt_attachment_char_limit: int = 800
     prompt_time_format: str = "%H:%M"
+    max_anchor_gap_minutes: int = 10
+    max_unrelated_intervening_messages: int = 3
+    initial_context_messages_before: int = 2
+    context_expansion_messages_per_direction: int = 7
+    context_expansion_round_limit: int = 2
+    use_initial_conversation_windows: bool = True
     analyzer_timeout_seconds: int = 180
     codex_stdin_mode: bool = False
     anchor_batch_size: int = 3
@@ -562,6 +687,8 @@ class RuntimeConfig:
     event_rules_file_name: str = DEFAULT_EVENT_RULES_FILE_NAME
     event_metadata_file_name: str = DEFAULT_EVENT_METADATA_FILE_NAME
     conversation_blacklist_file_name: str = DEFAULT_CONVERSATION_BLACKLIST_FILE_NAME
+    conversation_window_file_name: str = DEFAULT_CONVERSATION_WINDOW_FILE_NAME
+    llm_retry_file_name: str = DEFAULT_LLM_RETRY_FILE_NAME
     llm_stream_enabled: bool = False
     llm_tls_verify: bool = False
     llm_sleep_min_seconds: float = 1.0

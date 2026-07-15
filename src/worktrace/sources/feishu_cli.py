@@ -4,7 +4,7 @@ import json
 import logging
 import re
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from time import perf_counter
 from typing import Any, Sequence
@@ -28,6 +28,7 @@ class FeishuCliChatSource(ChatSource):
     source_id = "feishu"
     config: RuntimeConfig
     command_runner: Any | None = None
+    conversation_modes: dict[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if self.command_runner is None:
@@ -90,6 +91,7 @@ class FeishuCliChatSource(ChatSource):
                 continue
             if message.conversation_id in excluded_conversation_ids:
                 continue
+            self._remember_conversation_mode(message)
             conversations.setdefault(
                 message.conversation_id,
                 ConversationRef(
@@ -128,6 +130,7 @@ class FeishuCliChatSource(ChatSource):
                 for reaction in message.reactions
             ):
                 continue
+            self._remember_conversation_mode(message)
             conversations.setdefault(
                 message.conversation_id,
                 ConversationRef(
@@ -304,6 +307,46 @@ class FeishuCliChatSource(ChatSource):
         )
         return results
 
+    def fetch_messages_by_ids(
+        self,
+        conversation_id: str,
+        message_ids: list[str],
+    ) -> list[NormalizedMessage]:
+        cleaned_ids = list(dict.fromkeys(item.strip() for item in message_ids if item.strip()))
+        if not cleaned_ids:
+            return []
+        started_at = perf_counter()
+        raw_messages: list[dict[str, Any]] = []
+        for start in range(0, len(cleaned_ids), 50):
+            payload = self._run_json(
+                (
+                    "lark-cli",
+                    "im",
+                    "+messages-mget",
+                    "--as",
+                    "user",
+                    "--message-ids",
+                    ",".join(cleaned_ids[start : start + 50]),
+                )
+            )
+            raw_messages.extend(self._extract_items(payload))
+        results = [
+            message
+            for message in self._dedupe_and_sort(
+                [self._normalize_message(item) for item in raw_messages]
+            )
+            if message.conversation_id == conversation_id
+        ]
+        log_timing(
+            logger,
+            "chat_source.fetch_messages_by_ids",
+            started_at,
+            conversation_id=conversation_id,
+            requested_count=len(cleaned_ids),
+            result_count=len(results),
+        )
+        return results
+
     def _run_command(
         self,
         args: Sequence[str],
@@ -477,6 +520,10 @@ class FeishuCliChatSource(ChatSource):
                 "quote_message_id": raw.get("root_id")
                 or raw.get("quote_message_id")
                 or raw.get("quoteMessageId"),
+                "conversation_mode": self.conversation_modes.get(
+                    str(conversation_id or ""),
+                    self._conversation_mode_from_raw(raw),
+                ),
                 "links": links,
                 "attachments": attachments,
                 "is_system": is_system,
@@ -484,6 +531,16 @@ class FeishuCliChatSource(ChatSource):
                 "reactions": reactions,
             }
         )
+
+    def _remember_conversation_mode(self, message: NormalizedMessage) -> None:
+        if message.conversation_mode:
+            self.conversation_modes[message.conversation_id] = message.conversation_mode
+
+    @staticmethod
+    def _conversation_mode_from_raw(raw: dict[str, Any]) -> str:
+        raw_mode = raw.get("chat_mode") or raw.get("chat_type") or ""
+        mode = str(raw_mode).strip().lower()
+        return mode if mode in {"p2p", "group", "topic"} else ""
 
     def _parse_content(self, content: Any) -> dict[str, Any]:
         if isinstance(content, str):

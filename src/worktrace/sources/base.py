@@ -38,3 +38,11 @@ class ChatSource(ABC):
         limit: int,
     ) -> list[NormalizedMessage]:
         raise NotImplementedError
+
+    @abstractmethod
+    def fetch_messages_by_ids(
+        self,
+        conversation_id: str,
+        message_ids: list[str],
+    ) -> list[NormalizedMessage]:
+        raise NotImplementedError

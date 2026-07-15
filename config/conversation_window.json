@@ -1,0 +1,7 @@
+{
+  "max_anchor_gap_minutes": 10,
+  "max_unrelated_intervening_messages": 3,
+  "initial_context_messages_before": 2,
+  "context_expansion_messages_per_direction": 7,
+  "context_expansion_round_limit": 2
+}

@@ -20,6 +20,8 @@ from .reaction_catalogs.base import ReactionCatalogSyncResult
 from .reaction_catalog import ReactionCatalogError
 from .preflight import run_preflight_checks
 from .runner import run_daily_trace
+from .pipeline.llm_checkpoints import clear_day_llm_checkpoints
+from .utils.filenames import parse_worktrace_markdown_filename
 from .utils.json_io import dump_json
 
 
@@ -33,6 +35,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--date", dest="target_date", required=False)
     parser.add_argument("--preflight", dest="preflight_only", action="store_true")
     parser.add_argument("--debug-output", dest="debug_output", action="store_true")
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Keep incomplete LLM checkpoints and reuse matching completed calls.",
+    )
     return parser.parse_args(argv)
 
 
@@ -197,6 +204,9 @@ def execute(
     if not report.ok:
         return build_failed_result(target_date, report.error_summary), 1
 
+    if not args.resume:
+        _clear_previous_personal_run(effective_config, target_date)
+
     result = run_func(target_date=target_date, config=replace(effective_config))
     if result.status == DailyRunStatus.INVALID_INPUT.value:
         return result, 2
@@ -210,6 +220,18 @@ def _extract_raw_date(argv: list[str]) -> str | None:
         if token == "--date" and index + 1 < len(argv):
             return argv[index + 1]
     return None
+
+
+def _clear_previous_personal_run(config: RuntimeConfig, target_date: str) -> None:
+    clear_day_llm_checkpoints(config, target_date)
+    year, month, _day = target_date.split("-")
+    output_dir = config.data_root / year / month
+    if not output_dir.exists():
+        return
+    for path in output_dir.glob("*.md"):
+        parsed = parse_worktrace_markdown_filename(path.name)
+        if parsed.target_date == target_date and not parsed.is_merged:
+            path.unlink()
 
 
 def main(

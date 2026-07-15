@@ -28,6 +28,18 @@ class ContentResolver(ABC):
     ) -> list[AttachmentTextBlock] | None:
         raise NotImplementedError
 
+    def load_required_image_summaries(
+        self,
+        message: NormalizedMessage,
+        attachment_ids: list[str],
+    ) -> list[AttachmentTextBlock] | None:
+        """Load image summaries that must be available before model analysis."""
+        return self.load_attachment_text_if_needed(
+            message,
+            attachment_ids,
+            "Required image context",
+        )
+
     @abstractmethod
     def load_link_text_if_needed(
         self,
@@ -36,7 +48,3 @@ class ContentResolver(ABC):
         hint: str,
     ) -> list[LinkedFileTextBlock] | None:
         raise NotImplementedError
-
-    def summarize_images(self, messages: list[NormalizedMessage]) -> list[AttachmentTextBlock]:
-        """Return transient LLM summaries for image attachments when supported."""
-        return []

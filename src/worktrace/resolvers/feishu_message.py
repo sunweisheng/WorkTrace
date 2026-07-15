@@ -6,6 +6,7 @@ import logging
 import re
 import subprocess
 import tempfile
+from threading import Lock
 from html import unescape
 from pathlib import Path
 from xml.etree import ElementTree
@@ -34,6 +35,10 @@ class FeishuMessageContentResolver(ContentResolver):
     attachment_downloader: Any | None = None
     _doc_title_cache: dict[str, str] = field(default_factory=dict)
     _doc_content_cache: dict[str, str] = field(default_factory=dict)
+    _image_summary_cache: dict[tuple[str, str], AttachmentTextBlock] = field(
+        default_factory=dict
+    )
+    _image_summary_lock: Lock = field(default_factory=Lock)
 
     def __post_init__(self) -> None:
         if self.command_runner is None:
@@ -167,6 +172,11 @@ class FeishuMessageContentResolver(ContentResolver):
         for attachment in message.attachments:
             if attachment.attachment_id not in selected_ids:
                 continue
+            if self._is_image_attachment(message, attachment):
+                image_summary = self._load_image_summary_if_needed(message, attachment)
+                if image_summary is not None:
+                    blocks.append(image_summary)
+                continue
             if not self.text_attachment_extractor.is_supported(attachment.file_name):
                 continue
             try:
@@ -189,6 +199,62 @@ class FeishuMessageContentResolver(ContentResolver):
                 )
 
         return blocks or None
+
+    def load_required_image_summaries(
+        self,
+        message: NormalizedMessage,
+        attachment_ids: list[str],
+    ) -> list[AttachmentTextBlock] | None:
+        selected_ids = set(attachment_ids)
+        blocks: list[AttachmentTextBlock] = []
+        for attachment in message.attachments:
+            if (
+                attachment.attachment_id not in selected_ids
+                or not self._is_image_attachment(message, attachment)
+            ):
+                continue
+            image_summary = self._load_image_summary_if_needed(
+                message,
+                attachment,
+                required=True,
+            )
+            if image_summary is not None:
+                blocks.append(image_summary)
+        return blocks or None
+
+    def _load_image_summary_if_needed(
+        self,
+        message: NormalizedMessage,
+        attachment: Any,
+        *,
+        required: bool = False,
+    ) -> AttachmentTextBlock | None:
+        if self.image_summarizer is None:
+            return None
+        key = (message.message_id, attachment.attachment_id)
+        with self._image_summary_lock:
+            cached = self._image_summary_cache.get(key)
+            if cached is not None:
+                return cached
+            try:
+                summary = self._summarize_image_attachment(
+                    message,
+                    attachment.attachment_id,
+                    required=required,
+                )
+            except Exception as exc:
+                logger.warning("Skipped image summary for message %s: %s", message.message_id, exc)
+                return None
+            if not summary:
+                return None
+            block = AttachmentTextBlock(
+                attachment_id=attachment.attachment_id,
+                message_id=message.message_id,
+                file_name=attachment.file_name,
+                text=f"图片内容摘要：{clean_text(summary)}",
+            )
+            self._image_summary_cache[key] = block
+            return block
 
     def _load_text_attachment(self, message: NormalizedMessage, attachment: Any) -> str:
         if self.text_attachment_extractor is None:
@@ -215,41 +281,20 @@ class FeishuMessageContentResolver(ContentResolver):
                 raise RuntimeError("attachment download did not produce a file")
             return self.text_attachment_extractor.extract(paths[0], file_name=attachment.file_name)
 
-    def summarize_images(self, messages: list[NormalizedMessage]) -> list[AttachmentTextBlock]:
-        if self.image_summarizer is None:
-            return []
-
-        summaries: list[AttachmentTextBlock] = []
-        seen: set[tuple[str, str]] = set()
-        for message in messages:
-            for attachment in message.attachments:
-                key = (message.message_id, attachment.attachment_id)
-                if key in seen or not self._is_image_attachment(message, attachment):
-                    continue
-                seen.add(key)
-                try:
-                    summary = self._summarize_image_attachment(message, attachment.attachment_id)
-                except Exception as exc:
-                    logger.warning("Skipped image summary for message %s: %s", message.message_id, exc)
-                    continue
-                if summary:
-                    summaries.append(
-                        AttachmentTextBlock(
-                            attachment_id=attachment.attachment_id,
-                            message_id=message.message_id,
-                            file_name=attachment.file_name,
-                            text=f"图片内容摘要：{clean_text(summary)}",
-                        )
-                    )
-        return summaries
-
     def _is_image_attachment(self, message: NormalizedMessage, attachment: Any) -> bool:
-        return message.message_type in {"image", "post"} or attachment.mime_type.startswith("image/")
+        return message.message_type in {"image", "media", "post"} or attachment.mime_type.startswith("image/")
 
-    def _summarize_image_attachment(self, message: NormalizedMessage, attachment_id: str) -> str:
+    def _summarize_image_attachment(
+        self,
+        message: NormalizedMessage,
+        attachment_id: str,
+        *,
+        required: bool = False,
+    ) -> str:
         if self.image_downloader is not None:
             return self.image_summarizer.summarize(
-                self.image_downloader(message, attachment_id)
+                self.image_downloader(message, attachment_id),
+                required=required,
             )
         with tempfile.TemporaryDirectory(prefix="worktrace-image-") as temp_dir:
             result = subprocess.run(
@@ -268,7 +313,7 @@ class FeishuMessageContentResolver(ContentResolver):
             paths = [item for item in Path(temp_dir).iterdir() if item.is_file()]
             if not paths:
                 raise RuntimeError("image download did not produce a file")
-            return self.image_summarizer.summarize(paths[0])
+            return self.image_summarizer.summarize(paths[0], required=required)
 
     def load_link_text_if_needed(
         self,

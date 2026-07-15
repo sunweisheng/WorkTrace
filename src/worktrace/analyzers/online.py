@@ -4,6 +4,7 @@ import json
 import logging
 import random
 import ssl
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from time import perf_counter, sleep
@@ -19,6 +20,7 @@ from ..logging_utils import log_timing
 from ..models import (
     AnalysisBatch,
     AnchorUnit,
+    AttachmentTextBlock,
     BatchAnalysisResult,
     BatchAnchorAnalysisResult,
     BatchSegmentAnalysisResult,
@@ -64,6 +66,7 @@ logger = logging.getLogger("worktrace")
 _GLOBAL_CLIENT_FINGERPRINT: tuple[object, ...] | None = None
 _GLOBAL_OPENAI_CLIENT: OpenAI | None = None
 _GLOBAL_HTTPX_CLIENT: httpx.Client | None = None
+_GLOBAL_CLIENT_LOCK = threading.Lock()
 
 
 def _apply_soft_no_think(prompt: str) -> str:
@@ -203,9 +206,20 @@ def _build_http_client(settings: OnlineLLMSettings) -> httpx.Client:
         ssl_context.check_hostname = False
         ssl_context.verify_mode = ssl.CERT_NONE
 
+    read_timeout = settings.timeout_seconds
+    if settings.stream_enabled:
+        read_timeout = min(
+            settings.timeout_seconds,
+            settings.stream_first_response_timeout_seconds,
+        )
     return httpx.Client(
         verify=ssl_context if settings.tls_verify else False,
-        timeout=httpx.Timeout(settings.timeout_seconds, connect=min(5.0, settings.timeout_seconds)),
+        timeout=httpx.Timeout(
+            connect=min(5.0, settings.timeout_seconds),
+            read=read_timeout,
+            write=settings.timeout_seconds,
+            pool=settings.timeout_seconds,
+        ),
     )
 
 def _build_client_fingerprint(settings: OnlineLLMSettings) -> tuple[object, ...]:
@@ -214,6 +228,7 @@ def _build_client_fingerprint(settings: OnlineLLMSettings) -> tuple[object, ...]
         settings.api_key,
         settings.model,
         settings.timeout_seconds,
+        settings.stream_first_response_timeout_seconds,
         settings.tls_verify,
         settings.stream_enabled,
         settings.reasoning_effort,
@@ -233,6 +248,12 @@ def _close_global_client() -> None:
 def _get_or_create_global_client(settings: OnlineLLMSettings) -> OpenAI:
     global _GLOBAL_CLIENT_FINGERPRINT, _GLOBAL_OPENAI_CLIENT, _GLOBAL_HTTPX_CLIENT
 
+    with _GLOBAL_CLIENT_LOCK:
+        return _get_or_create_global_client_locked(settings)
+
+
+def _get_or_create_global_client_locked(settings: OnlineLLMSettings) -> OpenAI:
+    global _GLOBAL_CLIENT_FINGERPRINT, _GLOBAL_OPENAI_CLIENT, _GLOBAL_HTTPX_CLIENT
     fingerprint = _build_client_fingerprint(settings)
     if _GLOBAL_OPENAI_CLIENT is not None and _GLOBAL_CLIENT_FINGERPRINT == fingerprint:
         logger.info(
@@ -283,6 +304,7 @@ class OnlineLLMAnalyzer(Analyzer):
         if self.cwd is None:
             self.cwd = Path.cwd()
         self._request_count = 0
+        self._request_count_lock = threading.Lock()
 
     def analyze_batch(
         self,
@@ -315,6 +337,7 @@ class OnlineLLMAnalyzer(Analyzer):
         self_display_name: str,
         response_signals: list[ResponseSignal],
         hard_boundary_before_ids: set[str],
+        attachment_texts: list[AttachmentTextBlock] | None = None,
     ) -> str:
         return build_conversation_segmentation_prompt(
             target_date=target_date,
@@ -325,6 +348,7 @@ class OnlineLLMAnalyzer(Analyzer):
             self_display_name=self_display_name,
             response_signals=response_signals,
             hard_boundary_before_ids=hard_boundary_before_ids,
+            attachment_texts=attachment_texts,
             config=self.config,
         )
 
@@ -339,6 +363,7 @@ class OnlineLLMAnalyzer(Analyzer):
         self_display_name: str,
         response_signals: list[ResponseSignal],
         hard_boundary_before_ids: set[str],
+        attachment_texts: list[AttachmentTextBlock] | None = None,
     ) -> ConversationSegmentationResult:
         payload = self._invoke_online(
             self.build_segmentation_prompt(
@@ -350,6 +375,7 @@ class OnlineLLMAnalyzer(Analyzer):
                 self_display_name=self_display_name,
                 response_signals=response_signals,
                 hard_boundary_before_ids=hard_boundary_before_ids,
+                attachment_texts=attachment_texts,
             ),
             output_schema=conversation_segmentation_output_schema(),
         )
@@ -468,7 +494,8 @@ class OnlineLLMAnalyzer(Analyzer):
         except OpenAIError as exc:
             raise AnalyzerProtocolError(str(exc)) from exc
 
-        self._request_count += 1
+        with self._request_count_lock:
+            self._request_count += 1
         log_timing(
             logger,
             "online_llm.request.completed",
@@ -502,7 +529,9 @@ class OnlineLLMAnalyzer(Analyzer):
         return _extract_text_from_responses_payload(response.model_dump())
 
     def _maybe_sleep_between_requests(self, settings: OnlineLLMSettings) -> None:
-        if self._request_count == 0:
+        with self._request_count_lock:
+            has_previous_request = self._request_count > 0
+        if not has_previous_request:
             return
         delay_seconds = self.random_uniform(
             settings.sleep_min_seconds,

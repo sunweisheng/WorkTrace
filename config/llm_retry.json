@@ -1,0 +1,7 @@
+{
+  "segmentation_retry_limit": 3,
+  "event_extraction_retry_limit": 3,
+  "stream_first_response_timeout_seconds": 60,
+  "max_concurrent_llm_requests": 3,
+  "max_concurrent_event_extraction_requests": 5
+}

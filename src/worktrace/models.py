@@ -206,6 +206,7 @@ class NormalizedMessage:
     text: str
     reply_to_message_id: str | None
     quote_message_id: str | None
+    conversation_mode: str = ""
     links: list[LinkMeta] = field(default_factory=list)
     attachments: list[AttachmentMeta] = field(default_factory=list)
     is_system: bool = False
@@ -232,6 +233,7 @@ class NormalizedMessage:
             quote_message_id=(
                 None if quote_message_id is None else str(quote_message_id)
             ),
+            conversation_mode=str(data.get("conversation_mode", "")),
             links=[LinkMeta.from_dict(item) for item in _dict_list(data.get("links"))],
             attachments=[
                 AttachmentMeta.from_dict(item)
@@ -257,6 +259,7 @@ class NormalizedMessage:
             "text": self.text,
             "reply_to_message_id": self.reply_to_message_id,
             "quote_message_id": self.quote_message_id,
+            "conversation_mode": self.conversation_mode,
             "links": [item.to_dict() for item in self.links],
             "attachments": [item.to_dict() for item in self.attachments],
             "is_system": self.is_system,
@@ -385,6 +388,8 @@ class AnchorUnit:
     in_day_message_ids: list[str]
     base_message_ids: list[str]
     messages: list[NormalizedMessage]
+    relation_context_message_ids: list[str] = field(default_factory=list)
+    timeline_context_message_ids: list[str] = field(default_factory=list)
     reply_relation_ids: list[str] = field(default_factory=list)
     quote_relation_ids: list[str] = field(default_factory=list)
     attachment_refs: list[AttachmentMeta] = field(default_factory=list)
@@ -405,6 +410,8 @@ class AnchorUnit:
                 NormalizedMessage.from_dict(item)
                 for item in _dict_list(data.get("messages"))
             ],
+            relation_context_message_ids=_string_list(data.get("relation_context_message_ids")),
+            timeline_context_message_ids=_string_list(data.get("timeline_context_message_ids")),
             reply_relation_ids=_string_list(data.get("reply_relation_ids")),
             quote_relation_ids=_string_list(data.get("quote_relation_ids")),
             attachment_refs=[
@@ -434,6 +441,8 @@ class AnchorUnit:
             "in_day_message_ids": list(self.in_day_message_ids),
             "base_message_ids": list(self.base_message_ids),
             "messages": [item.to_dict() for item in self.messages],
+            "relation_context_message_ids": list(self.relation_context_message_ids),
+            "timeline_context_message_ids": list(self.timeline_context_message_ids),
             "reply_relation_ids": list(self.reply_relation_ids),
             "quote_relation_ids": list(self.quote_relation_ids),
             "attachment_refs": [item.to_dict() for item in self.attachment_refs],
@@ -699,6 +708,22 @@ class ConversationSegmentUnit:
     messages: list[NormalizedMessage]
     attachment_texts: list[AttachmentTextBlock] = field(default_factory=list)
     linked_file_texts: list[LinkedFileTextBlock] = field(default_factory=list)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> ConversationSegmentUnit:
+        return cls(
+            segment_id=str(data.get("segment_id", "")),
+            conversation_id=str(data.get("conversation_id", "")),
+            conversation_name=str(data.get("conversation_name", "")),
+            primary_message_ids=_string_list(data.get("primary_message_ids")),
+            context_message_ids=_string_list(data.get("context_message_ids")),
+            self_evidence_message_ids=_string_list(data.get("self_evidence_message_ids")),
+            response_signals=[ResponseSignal.from_dict(item) for item in _dict_list(data.get("response_signals"))],
+            response_assessments=[ResponseAssessment.from_dict(item) for item in _dict_list(data.get("response_assessments"))],
+            messages=[NormalizedMessage.from_dict(item) for item in _dict_list(data.get("messages"))],
+            attachment_texts=[AttachmentTextBlock.from_dict(item) for item in _dict_list(data.get("attachment_texts"))],
+            linked_file_texts=[LinkedFileTextBlock.from_dict(item) for item in _dict_list(data.get("linked_file_texts"))],
+        )
 
     def to_dict(self) -> dict[str, Any]:
         return {

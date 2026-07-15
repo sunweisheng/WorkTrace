@@ -15,6 +15,7 @@ from ..logging_utils import log_timing
 from ..models import (
     AnalysisBatch,
     AnchorUnit,
+    AttachmentTextBlock,
     BatchAnalysisResult,
     BatchAnchorAnalysisResult,
     BatchSegmentAnalysisResult,
@@ -102,6 +103,7 @@ class CodexAnalyzer(Analyzer):
         self_display_name: str,
         response_signals: list[ResponseSignal],
         hard_boundary_before_ids: set[str],
+        attachment_texts: list[AttachmentTextBlock] | None = None,
     ) -> str:
         return build_conversation_segmentation_prompt(
             target_date=target_date,
@@ -112,6 +114,7 @@ class CodexAnalyzer(Analyzer):
             self_display_name=self_display_name,
             response_signals=response_signals,
             hard_boundary_before_ids=hard_boundary_before_ids,
+            attachment_texts=attachment_texts,
             config=self.config,
         )
 
@@ -126,6 +129,7 @@ class CodexAnalyzer(Analyzer):
         self_display_name: str,
         response_signals: list[ResponseSignal],
         hard_boundary_before_ids: set[str],
+        attachment_texts: list[AttachmentTextBlock] | None = None,
     ) -> ConversationSegmentationResult:
         payload = self._invoke_codex(
             self.build_segmentation_prompt(
@@ -137,6 +141,7 @@ class CodexAnalyzer(Analyzer):
                 self_display_name=self_display_name,
                 response_signals=response_signals,
                 hard_boundary_before_ids=hard_boundary_before_ids,
+                attachment_texts=attachment_texts,
             ),
             output_schema=conversation_segmentation_output_schema(),
         )

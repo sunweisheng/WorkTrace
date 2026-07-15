@@ -147,6 +147,10 @@ def test_runtime_config_disables_streaming_by_default() -> None:
     assert RuntimeConfig().llm_stream_enabled is False
 
 
+def test_runtime_config_uses_40_percent_of_128k_model_context_by_default() -> None:
+    assert RuntimeConfig().max_model_input_tokens == 51200
+
+
 def test_load_runtime_config_overrides_reads_rule_lists(
     tmp_path: Path,
 ) -> None:
@@ -181,6 +185,56 @@ def test_load_runtime_config_overrides_uses_defaults_when_rule_file_missing(
     assert config.sensitive_event_keywords == ()
     assert config.excluded_event_keywords == ()
     assert config.self_assignment_keywords == ()
+
+
+def test_load_runtime_config_overrides_reads_conversation_window_settings(tmp_path: Path) -> None:
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    (config_dir / "conversation_window.json").write_text(
+        json.dumps(
+            {
+                "max_anchor_gap_minutes": 11,
+                "max_unrelated_intervening_messages": 4,
+                "initial_context_messages_before": 2,
+                "context_expansion_messages_per_direction": 8,
+                "context_expansion_round_limit": 2,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    config = load_runtime_config_overrides(RuntimeConfig(), cwd=tmp_path)
+
+    assert config.max_anchor_gap_minutes == 11
+    assert config.max_unrelated_intervening_messages == 4
+    assert config.initial_context_messages_before == 2
+    assert config.context_expansion_messages_per_direction == 8
+    assert config.context_expansion_round_limit == 2
+
+
+def test_load_runtime_config_overrides_reads_llm_retry_settings(tmp_path: Path) -> None:
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    (config_dir / "llm_retry.json").write_text(
+        json.dumps(
+            {
+                "segmentation_retry_limit": 5,
+                "event_extraction_retry_limit": 6,
+                "stream_first_response_timeout_seconds": 61,
+                "max_concurrent_llm_requests": 3,
+                "max_concurrent_event_extraction_requests": 5,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    config = load_runtime_config_overrides(RuntimeConfig(), cwd=tmp_path)
+
+    assert config.anchor_retry_limit == 5
+    assert config.analysis_batch_retry_limit == 6
+    assert config.stream_first_response_timeout_seconds == 61
+    assert config.max_concurrent_llm_requests == 3
+    assert config.max_concurrent_event_extraction_requests == 5
 
 
 def test_load_runtime_config_overrides_reads_self_relation_metadata(

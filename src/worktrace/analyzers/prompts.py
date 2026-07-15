@@ -175,12 +175,16 @@ def build_conversation_segmentation_prompt(
     self_display_name: str,
     response_signals: list[ResponseSignal],
     hard_boundary_before_ids: set[str],
+    attachment_texts: list[AttachmentTextBlock] | None = None,
     config: RuntimeConfig | None = None,
 ) -> str:
     runtime_config = config or RuntimeConfig()
     message_lookup = {message.message_id: message for message in messages}
     message_refs = _build_segmentation_message_refs(messages)
     signal_refs = _build_segmentation_signal_refs(response_signals)
+    attachment_texts_by_message: dict[str, list[AttachmentTextBlock]] = {}
+    for block in attachment_texts or []:
+        attachment_texts_by_message.setdefault(block.message_id, []).append(block)
     serialized_messages: list[dict[str, object]] = []
     for message in messages:
         serialized = serialize_message_for_prompt(
@@ -189,6 +193,11 @@ def build_conversation_segmentation_prompt(
             message_lookup=message_lookup,
         )
         serialized = _replace_segmentation_message_refs(serialized, message_refs)
+        if message_attachment_texts := attachment_texts_by_message.get(message.message_id):
+            serialized["attachment_texts"] = [
+                serialize_attachment_for_prompt(block, runtime_config)
+                for block in message_attachment_texts
+            ]
         serialized["sent_by_self"] = message.sender_open_id == self_open_id
         serialized["mentions_self"] = self_open_id in message.mentioned_open_ids
         serialized["mentions_other"] = bool(
@@ -214,6 +223,7 @@ def build_conversation_segmentation_prompt(
             "相邻的本人消息只要明确切换到不同项目、产品、政策、客户或业务对象，就必须开始新轮次；同一发送人、相近时间或没有回复链都不能作为合并理由。",
             "标记 hard_boundary_before 的消息必须出现在 segment_start_message_ids 中。",
             "本人文本和本人表情都是参与信号，不等于同意、完成或结束；必须结合后续沟通判断是否仍为同一话题。",
+            "消息内已提供的图片摘要属于该消息的内容，应结合摘要判断是否换题。",
             "旧事项被 reply 或 quote 续谈时，回复消息在它实际发生的时间位置开始新轮次，不能移回旧事项旁边。",
         ],
         "input": {
@@ -325,6 +335,7 @@ def build_segment_batch_analysis_prompt(
             "每条 candidate 至少引用一条本人参与证据，或引用该 segment 的本人回应 signal。",
             "一个 candidate 只能描述一条工作线；若同一 segment 同时出现两个命名项目、产品、政策或不相干业务对象，必须拆成多个 candidate_events。",
             "referenced_attachment_ids 只能引用已提供正文的附件；文件名、扩展名和单纯发送附件不构成事项事实。",
+            "图片和文件附件默认只提供元数据；判断依赖其内容时，必须返回 attachment_text 的 context_requests，并给出对应消息和附件 ID，不要猜测图片或文件内容。",
             "workstream_key 只在消息明确命名项目、产品或政策时填写其稳定规范名称；不能使用城市、地点、部门、工具类别、环境或泛化主题，无法确定时返回空字符串。",
             "本人提出的问题、风险和待确认事项本身可以提炼，不要求已有处理结果。",
             "表情是本人回复证据，但不能单凭表情描述事项已完成、已同意或已拒绝。",

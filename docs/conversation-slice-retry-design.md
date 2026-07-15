@@ -137,7 +137,7 @@ analyzer 返回 `BatchSegmentAnalysisResult`，必须对每个输入 `segment_id
 
 图片与文本附件采用不同策略：
 
-- 图片：在分段前主动摘要，范围由 `config/image_summary.json` 控制
+- 图片：本人发送的图片，以及本人直接回复或引用目标消息中的图片，会在首次模型调用前下载和摘要；其他图片由模型按需请求，范围由 `config/image_summary.json` 控制
 - 文本附件：模型明确请求后才读取，范围由 `config/attachment_text.json` 控制
 - 飞书文档：模型明确请求后才读取正文
 

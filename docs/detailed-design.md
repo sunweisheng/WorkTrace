@@ -68,11 +68,11 @@ sequenceDiagram
     Runner->>Source: get_self_identity()
     Runner->>Source: list_target_conversations()
     Runner->>Source: fetch_conversation_messages()
-    Runner->>Resolver: summarize_images(messages)
-    loop 每个锚点窗口
+    Runner->>Runner: 构造窗口并摘要本人关联图片
+    loop 按输入内容大小排序的锚点窗口
         Runner->>LLM: segment_conversation(...)
     end
-    loop 每个分段批次
+    loop 按输入内容大小排序的分段批次
         Runner->>LLM: analyze_segment_batch(...)
         opt 需要上下文
             Runner->>Source: fetch_related_messages(...)
@@ -120,13 +120,13 @@ sequenceDiagram
 
 默认内容解析器装配 `OnlineImageSummarizer`。`config/image_summary.json` 启用时：
 
-1. 遍历标准化消息中的图片附件
-2. 临时下载图片
-3. 按数量和字节上限筛选
-4. 用当前在线模型、`detail=low` 生成工作内容摘要
-5. 作为 `AttachmentTextBlock` 附到对应锚点/片段
+1. 首轮前先摘要本人发送的图片，以及本人直接回复或引用目标消息中的图片
+2. 这些图片摘要直接进入话题切分与事件提炼输入；目标消息在当天窗口外时一并补入
+3. 其他图片仅在模型判断依赖图片内容时返回 `attachment_text` 请求
+4. 临时下载图片，并按字节上限筛选；按需图片另受数量上限限制
+5. 用当前在线模型、`detail=low` 生成工作内容摘要，并作为 `AttachmentTextBlock` 补回当前片段
 
-图片摘要在分段之前执行，并优先处理本人发送的图片。失败只产生 warning，临时目录结束后删除，不阻断日报。
+同一消息图片在单次运行内复用摘要。失败只产生 warning，临时目录结束后删除，不阻断日报。
 
 ### 5.5 锚点窗口
 
@@ -341,7 +341,7 @@ OnlineLLMAnalyzer -> openai Python SDK -> Responses API provider
 - `anchor_batch_retry_limit = 1`
 - `conversation_segmentation_failure_threshold = 2`
 - `reaction_discovery_page_limit = 3`
-- `max_model_input_tokens = 100000`
+- `max_model_input_tokens = 51200`（按 128K 上下文窗口的 40% 计算）
 - `collected_merge_prompt_char_threshold = 80000`
 - `collected_merge_retryable_error_limit = 1`
 - `collected_merge_retry_delay_seconds = 2.0`

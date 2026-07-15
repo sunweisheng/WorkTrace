@@ -93,6 +93,23 @@ def test_normalize_message_extracts_mention_and_nested_reaction_details() -> Non
     assert [item.emoji_type for item in message.reactions] == ["THUMBSUP"]
 
 
+def test_normalize_message_keeps_p2p_conversation_mode() -> None:
+    source = FeishuCliChatSource(config=RuntimeConfig())
+
+    message = source._normalize_message(  # noqa: SLF001 - parser contract
+        {
+            "chat_id": "oc_p2p",
+            "chat_type": "p2p",
+            "message_id": "om_1",
+            "sender_open_id": "ou_self",
+            "send_time": "2026-07-10T09:00:00+08:00",
+            "text": "私聊消息",
+        }
+    )
+
+    assert message.conversation_mode == "p2p"
+
+
 def test_parse_content_extracts_post_link_title() -> None:
     source = FeishuCliChatSource(config=RuntimeConfig())
 

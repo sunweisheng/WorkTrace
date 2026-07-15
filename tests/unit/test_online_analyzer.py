@@ -8,6 +8,7 @@ import pytest
 from src.worktrace.analyzers.online import (
     OnlineLLMAnalyzer,
     _apply_soft_no_think,
+    _build_http_client,
     _build_responses_request_body,
     _extract_text_from_responses_payload,
     _extract_text_from_responses_stream_event,
@@ -59,6 +60,7 @@ def build_settings(**overrides: object) -> OnlineLLMSettings:
         model="provider-model",
         api_key="secret",
         timeout_seconds=30,
+        stream_first_response_timeout_seconds=60,
         stream_enabled=False,
         tls_verify=False,
         sleep_min_seconds=1.0,
@@ -86,6 +88,21 @@ def test_build_responses_request_body_includes_stream_schema_and_reasoning() -> 
 def test_apply_soft_no_think_deduplicates_marker() -> None:
     assert _apply_soft_no_think("prompt") == "prompt\n/no_think"
     assert _apply_soft_no_think("prompt\n/no_think") == "prompt\n/no_think"
+
+
+def test_streaming_client_uses_first_response_timeout_for_reads() -> None:
+    client = _build_http_client(
+        build_settings(
+            timeout_seconds=1200,
+            stream_enabled=True,
+            stream_first_response_timeout_seconds=60,
+        )
+    )
+    try:
+        assert client.timeout.read == 60
+        assert client.timeout.write == 1200
+    finally:
+        client.close()
 
 
 def test_extract_text_from_responses_payload() -> None:

@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from dataclasses import replace
 from pathlib import Path
+from threading import Lock
+from time import sleep
 
 from src.worktrace.config import EventMetadataItem, RuntimeConfig
 from src.worktrace.constants import DailyRunStatus
@@ -36,6 +38,7 @@ from src.worktrace.stores.markdown import MarkdownEventStore
 
 def _config(**overrides) -> RuntimeConfig:
     return RuntimeConfig(
+        use_initial_conversation_windows=False,
         self_relation_types=(
             EventMetadataItem("initiated", "发起", 10),
         ),
@@ -276,19 +279,12 @@ def test_runner_filters_segment_candidate_without_validated_self_relation(
     assert "Filtered candidate without validated self relation" in result.error_summary
 
 
-def test_runner_debug_output_captures_segment_batch_input_output_and_filtering(
+def test_runner_does_not_summarize_images_before_segment_batch_analysis(
     tmp_path: Path,
 ) -> None:
     class DebugResolver(SegmentResolver):
         def summarize_images(self, messages):
-            return [
-                AttachmentTextBlock(
-                    attachment_id="img_1",
-                    message_id="om_1",
-                    file_name="image.png",
-                    text="图片内容摘要：截图显示发布范围。",
-                )
-            ]
+            raise AssertionError("images must be summarized only after a context request")
 
     debug_root = tmp_path / "debug"
     config = _config(data_root=tmp_path / "data", conversation_debug_root=debug_root)
@@ -309,12 +305,12 @@ def test_runner_debug_output_captures_segment_batch_input_output_and_filtering(
     batch_dirs = list((debug_root / "2026-07-10" / "_segment_batches").glob("**/analysis-01"))
     assert batch_dirs
     input_payload = json.loads((batch_dirs[0] / "input.json").read_text(encoding="utf-8"))
-    assert "图片内容摘要：截图显示发布范围。" in json.dumps(input_payload, ensure_ascii=False)
+    assert "图片内容摘要" not in json.dumps(input_payload, ensure_ascii=False)
     assert (batch_dirs[0] / "output.json").is_file()
     assert (batch_dirs[0] / "candidate_validation.json").is_file()
 
 
-def test_runner_prioritizes_self_authored_images_for_summaries(tmp_path: Path) -> None:
+def test_runner_does_not_eagerly_summarize_images(tmp_path: Path) -> None:
     class OrderingResolver(SegmentResolver):
         def __init__(self) -> None:
             self.message_ids: list[str] = []
@@ -338,7 +334,7 @@ def test_runner_prioritizes_self_authored_images_for_summaries(tmp_path: Path) -
     result = runner.run("2026-07-10")
 
     assert result.status == DailyRunStatus.SUCCESS.value
-    assert resolver.message_ids[:2] == ["om_1", "om_3"]
+    assert resolver.message_ids == []
 
 
 def test_runner_retries_only_the_invalid_anchor_segmentation(tmp_path: Path) -> None:
@@ -519,6 +515,220 @@ def test_runner_segments_each_original_anchor_window_not_the_full_conversation(
     assert analyzer.segmentation_inputs == [
         [f"om_{index:03d}" for index in range(10, 71)]
     ]
+
+
+def test_runner_limits_parallel_segmentation_and_waits_for_its_phase(
+    tmp_path: Path,
+) -> None:
+    class MultiConversationSource(SegmentSource):
+        def list_target_conversations(self, target_date, self_identity):
+            return [
+                ConversationRef(conversation_id=f"oc_{index}", conversation_name=f"项目{index}")
+                for index in range(1, 7)
+            ]
+
+        def fetch_conversation_messages(self, target_date, conversation_ids):
+            return [
+                replace(
+                    _message(
+                        f"om_{index}",
+                        sender_open_id="ou_self",
+                        minute=index,
+                        text=f"推进事项 {index}",
+                    ),
+                    conversation_id=f"oc_{index}",
+                    conversation_name=f"项目{index}",
+                )
+                for index in range(1, 7)
+            ]
+
+    class ParallelAnalyzer:
+        def __init__(self) -> None:
+            self.lock = Lock()
+            self.active_segmentations = 0
+            self.peak_segmentations = 0
+            self.completed_segmentations = 0
+            self.analysis_started_before_all_segmentations = False
+            self.active_event_extractions = 0
+            self.peak_event_extractions = 0
+
+        def segment_conversation(self, **kwargs):
+            with self.lock:
+                self.active_segmentations += 1
+                self.peak_segmentations = max(
+                    self.peak_segmentations, self.active_segmentations
+                )
+            sleep(0.04)
+            with self.lock:
+                self.active_segmentations -= 1
+                self.completed_segmentations += 1
+            message_id = kwargs["messages"][0].message_id
+            return ConversationSegmentationResult(
+                segments=[
+                    ConversationSegment(
+                        segment_id="turn",
+                        primary_message_ids=[message_id],
+                        self_evidence_message_ids=[message_id],
+                    )
+                ]
+            )
+
+        def analyze_segment_batch(self, batch):
+            with self.lock:
+                self.analysis_started_before_all_segmentations |= (
+                    self.completed_segmentations != 6
+                )
+                self.active_event_extractions += 1
+                self.peak_event_extractions = max(
+                    self.peak_event_extractions, self.active_event_extractions
+                )
+            sleep(0.04)
+            with self.lock:
+                self.active_event_extractions -= 1
+            return BatchSegmentAnalysisResult(
+                results=[
+                    BatchSegmentAnalysisItem(
+                        item.segment_id,
+                        BatchAnalysisResult(
+                            candidate_events=[
+                                _candidate(
+                                    f"{item.segment_id}:{item.primary_message_ids[0]}",
+                                    item.primary_message_ids[0],
+                                )
+                            ]
+                        ),
+                    )
+                    for item in batch.segments
+                ]
+            )
+
+        def merge_day_candidates(self, target_date, candidates):
+            return CrossConversationGroupResult(
+                groups=[
+                    CrossConversationGroup(group_id=item.draft_id, draft_ids=[item.draft_id])
+                    for item in candidates
+                ]
+            )
+
+    analyzer = ParallelAnalyzer()
+    config = _config(
+        data_root=tmp_path / "data",
+        max_concurrent_llm_requests=3,
+        max_concurrent_event_extraction_requests=5,
+    )
+    runner = DailyTraceRunner(
+        config=config,
+        dependencies=RuntimeDependencies(
+            chat_source=MultiConversationSource(),
+            content_resolver=SegmentResolver(),
+            analyzer=analyzer,
+            delivery_channel=SegmentDelivery(),
+            event_store=MarkdownEventStore(config=config),
+        ),
+    )
+
+    result = runner.run("2026-07-10")
+
+    assert result.status == DailyRunStatus.SUCCESS.value
+    assert analyzer.peak_segmentations == 3
+    assert analyzer.peak_event_extractions == 5
+    assert not analyzer.analysis_started_before_all_segmentations
+
+
+def test_runner_prioritizes_larger_inputs_for_segmentation_and_event_extraction(
+    tmp_path: Path,
+) -> None:
+    class OrderedSource(SegmentSource):
+        def list_target_conversations(self, target_date, self_identity):
+            return [
+                ConversationRef(conversation_id="oc_a_small", conversation_name="小事项"),
+                ConversationRef(conversation_id="oc_z_large", conversation_name="大事项"),
+            ]
+
+        def fetch_conversation_messages(self, target_date, conversation_ids):
+            return [
+                replace(
+                    _message("om_small", sender_open_id="ou_self", minute=0, text="简短消息"),
+                    conversation_id="oc_a_small",
+                    conversation_name="小事项",
+                ),
+                replace(
+                    _message(
+                        "om_large",
+                        sender_open_id="ou_self",
+                        minute=1,
+                        text="较长消息" * 200,
+                    ),
+                    conversation_id="oc_z_large",
+                    conversation_name="大事项",
+                ),
+            ]
+
+    class OrderedAnalyzer:
+        def __init__(self) -> None:
+            self.segmentation_order: list[str] = []
+            self.event_extraction_order: list[str] = []
+
+        def segment_conversation(self, **kwargs):
+            message_id = kwargs["messages"][0].message_id
+            self.segmentation_order.append(message_id)
+            return ConversationSegmentationResult(
+                segments=[
+                    ConversationSegment(
+                        segment_id="turn",
+                        primary_message_ids=[message_id],
+                        self_evidence_message_ids=[message_id],
+                    )
+                ]
+            )
+
+        def analyze_segment_batch(self, batch):
+            message_id = batch.segments[0].primary_message_ids[0]
+            self.event_extraction_order.append(message_id)
+            return BatchSegmentAnalysisResult(
+                results=[
+                    BatchSegmentAnalysisItem(
+                        unit.segment_id,
+                        BatchAnalysisResult(
+                            candidate_events=[_candidate(message_id, message_id)]
+                        ),
+                    )
+                    for unit in batch.segments
+                ]
+            )
+
+        def merge_day_candidates(self, target_date, candidates):
+            return CrossConversationGroupResult(
+                groups=[
+                    CrossConversationGroup(group_id=item.draft_id, draft_ids=[item.draft_id])
+                    for item in candidates
+                ]
+            )
+
+    analyzer = OrderedAnalyzer()
+    config = _config(
+        data_root=tmp_path / "data",
+        max_concurrent_llm_requests=1,
+        max_concurrent_event_extraction_requests=1,
+        max_model_input_tokens=1,
+        prompt_message_char_limit=2_000,
+    )
+    runner = DailyTraceRunner(
+        config=config,
+        dependencies=RuntimeDependencies(
+            chat_source=OrderedSource(),
+            content_resolver=SegmentResolver(),
+            analyzer=analyzer,
+            delivery_channel=SegmentDelivery(),
+            event_store=MarkdownEventStore(config=config),
+        ),
+    )
+
+    result = runner.run("2026-07-10")
+
+    assert result.status == DailyRunStatus.SUCCESS.value
+    assert analyzer.segmentation_order == ["om_large", "om_small"]
+    assert analyzer.event_extraction_order == ["om_large", "om_small"]
 
 
 def test_runner_resegments_only_the_context_requesting_turn(tmp_path: Path) -> None:
@@ -706,6 +916,7 @@ def test_runner_retries_failed_batch_then_degrades_to_individual_segments(
     config = _config(
         data_root=tmp_path / "data",
         conversation_debug_root=debug_root,
+        analysis_batch_retry_limit=1,
     )
     analyzer = FallbackAnalyzer()
     runner = DailyTraceRunner(
@@ -1223,6 +1434,7 @@ def test_runner_stops_remaining_segmentation_after_same_failure_threshold(
         anchor_retry_limit=0,
         conversation_segmentation_failure_threshold=2,
         anchor_batch_size=3,
+        max_concurrent_llm_requests=3,
     )
     runner = DailyTraceRunner(
         config=config,

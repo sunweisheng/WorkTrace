@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
+from dataclasses import dataclass, field, replace
 from hashlib import sha1
 import logging
 from pathlib import Path
@@ -50,6 +51,12 @@ from .pipeline.conversation_segments import (
     validate_conversation_segmentation,
     validate_segment_batch_result,
 )
+from .pipeline.initial_windows import (
+    append_private_window_external_relations,
+    build_initial_anchor_windows,
+)
+from .pipeline.required_image_context import enrich_required_image_context
+from .pipeline.llm_checkpoints import LLMCheckpointStore
 from .pipeline.anchors import group_anchor_units
 from .pipeline.anchor_expansion import expand_anchor_unit_context
 from .pipeline.context_expansion import (
@@ -115,11 +122,39 @@ class _EventFileReference:
     evidence_values: tuple[str, ...]
 
 
+@dataclass(frozen=True)
+class _AnchorSegmentationOutcome:
+    units: list[ConversationSegmentUnit]
+    warnings: list[str]
+    error_summary: str
+    retry_round: int
+    failure_category: str
+    model_call_count: int
+    started_at: float
+
+
+@dataclass
+class _ConversationSegmentationState:
+    conversation_id: str
+    conversation_name: str
+    anchors: list[AnchorUnit]
+    next_anchor_index: int = 0
+    circuit_open: bool = False
+    fallback_required: bool = False
+    skipped_anchor_count: int = 0
+    units: list[ConversationSegmentUnit] = field(default_factory=list)
+    cache: dict[tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]], _AnchorSegmentationOutcome] = field(
+        default_factory=dict
+    )
+    failure_counts: dict[str, int] = field(default_factory=dict)
+
+
 @dataclass
 class DailyTraceRunner:
     config: RuntimeConfig
     dependencies: RuntimeDependencies
     reaction_catalog: ReactionCatalog | None = None
+    checkpoint_store: LLMCheckpointStore | None = None
 
     def __post_init__(self) -> None:
         if self.reaction_catalog is None:
@@ -128,6 +163,7 @@ class DailyTraceRunner:
 
     def run(self, target_date: str) -> DailyRunResult:
         run_started_at = perf_counter()
+        self.checkpoint_store = LLMCheckpointStore(self.config, target_date)
         warning_messages: list[str] = []
         skipped_slice_count = 0
 
@@ -436,6 +472,8 @@ class DailyTraceRunner:
                 events,
                 owner_display_name=self_identity.display_name,
             )
+            if self.checkpoint_store is not None:
+                self.checkpoint_store.clear()
             log_timing(
                 logger,
                 "runner.stage.completed",
@@ -500,6 +538,8 @@ class DailyTraceRunner:
             [],
             owner_display_name=self_identity.display_name,
         )
+        if self.checkpoint_store is not None:
+            self.checkpoint_store.clear()
         delivery_status, delivery_target, delivery_error = _deliver_markdown_to_self(
             self.dependencies.delivery_channel,
             self_identity=self_identity,
@@ -587,274 +627,284 @@ class DailyTraceRunner:
         skipped_segment_count = 0
         model_call_count = 0
 
-        image_summary_func = getattr(self.dependencies.content_resolver, "summarize_images", None)
-        try:
-            image_summary_messages = sorted(
+        if self.config.use_initial_conversation_windows:
+            anchor_units = build_initial_anchor_windows(
                 messages,
-                key=lambda item: item.sender_open_id != self_identity.open_id,
+                self_identity.open_id,
+                max_anchor_gap_minutes=self.config.max_anchor_gap_minutes,
+                max_unrelated_intervening_messages=self.config.max_unrelated_intervening_messages,
+                initial_context_messages_before=self.config.initial_context_messages_before,
+                reaction_catalog=self.reaction_catalog,
             )
-            image_summaries = (
-                image_summary_func(image_summary_messages)
-                if callable(image_summary_func)
-                else []
+            anchor_units = append_private_window_external_relations(
+                anchor_units,
+                chat_source=self.dependencies.chat_source,
+                reaction_catalog=self.reaction_catalog,
             )
-        except Exception as exc:
-            image_summaries = []
-            warnings.append(f"Skipped image summaries: {exc}")
-        image_summaries_by_message: dict[str, list] = {}
-        for block in image_summaries:
-            image_summaries_by_message.setdefault(block.message_id, []).append(block)
-
-        anchor_units = group_anchor_units(
-            messages,
-            self_identity.open_id,
-            before_limit=30,
-            after_limit=30,
+        else:
+            anchor_units = group_anchor_units(
+                messages,
+                self_identity.open_id,
+                before_limit=30,
+                after_limit=30,
+                reaction_catalog=self.reaction_catalog,
+            )
+        required_image_started_at = perf_counter()
+        anchor_units = enrich_required_image_context(
+            anchor_units,
+            self_open_id=self_identity.open_id,
+            chat_source=self.dependencies.chat_source,
+            content_resolver=self.dependencies.content_resolver,
             reaction_catalog=self.reaction_catalog,
+        )
+        log_timing(
+            logger,
+            "runner.stage.completed",
+            required_image_started_at,
+            stage="load_required_image_context",
+            anchor_count=len(anchor_units),
+            image_summary_count=sum(
+                len(unit.attachment_texts) for unit in anchor_units
+            ),
         )
         anchors_by_conversation: dict[str, list] = {}
         for anchor_unit in anchor_units:
             anchors_by_conversation.setdefault(anchor_unit.conversation_id, []).append(
                 anchor_unit
             )
+        pending_conversation_analysis: list[
+            tuple[list[ConversationSegmentUnit], bool, list[AnchorUnit]]
+        ] = []
 
+        segmentation_states: list[_ConversationSegmentationState] = []
         for conversation_id, conversation_anchors in sorted(
             anchors_by_conversation.items()
         ):
             if not conversation_anchors:
                 continue
-            conversation_anchors = [
-                replace(
-                    self._hydrate_anchor_link_titles(item),
-                    attachment_texts=_image_summaries_for_messages(
-                        image_summaries_by_message,
-                        item.messages,
-                    ),
-                )
+            hydrated_anchors = [
+                self._hydrate_anchor_link_titles(item)
                 for item in conversation_anchors
             ]
-            conversation_name = conversation_anchors[0].conversation_name
-            conversation_units: list[ConversationSegmentUnit] = []
-            fallback_required = False
-            segmentation_cache: dict[
-                tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]],
-                tuple[list[ConversationSegmentUnit], list[str], str, int, str],
-            ] = {}
-            segmentation_failure_counts: dict[str, int] = {}
-            segmentation_circuit_open = False
-            skipped_anchor_count = 0
-            for anchor_index, anchor_unit in enumerate(conversation_anchors, start=1):
-                if segmentation_circuit_open:
-                    skipped_anchor_count += 1
-                    continue
-                segmentation_messages = anchor_unit.messages
-                response_signals = build_response_signals(
-                    segmentation_messages,
-                    self_open_id=self_identity.open_id,
-                    reaction_catalog=self.reaction_catalog,
-                )
-                hard_boundary_before_ids = build_hard_boundary_message_ids(
-                    segmentation_messages,
-                    self_open_id=self_identity.open_id,
-                )
-                units: list[ConversationSegmentUnit] = []
-                segmentation_warnings: list[str] = []
-                segmentation_error = ""
-                retry_round = 0
-                failure_category = ""
-                segmentation_started_at = perf_counter()
-                window_signature = _anchor_unit_context_signature(anchor_unit)
-                cached = segmentation_cache.get(window_signature)
-                if cached is not None:
-                    (
-                        units,
-                        segmentation_warnings,
-                        segmentation_error,
-                        retry_round,
-                        failure_category,
-                    ) = cached
-                else:
-                    for retry_round in range(self.config.anchor_retry_limit + 1):
-                        segmentation_started_at = perf_counter()
-                        segmentation_prompt = (
-                            self.dependencies.analyzer.build_segmentation_prompt(
-                                target_date=target_date,
-                                conversation_id=conversation_id,
-                                conversation_name=conversation_name,
-                                messages=segmentation_messages,
-                                self_open_id=self_identity.open_id,
-                                self_display_name=self_identity.display_name,
-                                response_signals=response_signals,
-                                hard_boundary_before_ids=hard_boundary_before_ids,
-                            )
-                            if hasattr(self.dependencies.analyzer, "build_segmentation_prompt")
-                            else None
-                        )
-                        try:
-                            segmentation_result = self.dependencies.analyzer.segment_conversation(
-                                target_date=target_date,
-                                conversation_id=conversation_id,
-                                conversation_name=conversation_name,
-                                messages=segmentation_messages,
-                                self_open_id=self_identity.open_id,
-                                self_display_name=self_identity.display_name,
-                                response_signals=response_signals,
-                                hard_boundary_before_ids=hard_boundary_before_ids,
-                            )
-                        except AnalyzerProtocolError as exc:
-                            model_call_count += 1
-                            segmentation_error = str(exc)
-                            self._dump_segmentation_failure_debug_artifacts(
-                                target_date=target_date,
-                                anchor_unit=anchor_unit,
-                                retry_round=retry_round,
-                                prompt=segmentation_prompt,
-                                error_summary=segmentation_error,
-                            )
-                            continue
-
-                        model_call_count += 1
-                        segmentation_error = ""
-                        units, segmentation_warnings = validate_conversation_segmentation(
-                            segmentation_result,
-                            segmentation_messages,
-                            self_open_id=self_identity.open_id,
-                            self_display_name=self_identity.display_name,
-                            self_assignment_keywords=self.config.self_assignment_keywords,
-                            response_signals=response_signals,
-                        )
-                        units = [
-                            replace(
-                                unit,
-                                attachment_texts=_image_summaries_for_messages(
-                                    image_summaries_by_message,
-                                    unit.messages,
-                                ),
-                            )
-                            for unit in units
-                        ]
-                        self._dump_segment_segmentation_debug_artifacts(
-                            target_date=target_date,
-                            anchor_unit=anchor_unit,
-                            retry_round=retry_round,
-                            prompt=segmentation_prompt,
-                            output_payload=segmentation_result.to_dict(),
-                            units=units,
-                            warnings=segmentation_warnings,
-                        )
-                        if units:
-                            break
-                    if not units:
-                        failure_category = (
-                            "analyzer_protocol_failure"
-                            if segmentation_error
-                            else "segmentation_validation_failure"
-                        )
-                    segmentation_cache[window_signature] = (
-                        units,
-                        segmentation_warnings,
-                        segmentation_error,
-                        retry_round,
-                        failure_category,
-                    )
-
-                if not units:
-                    fallback_required = True
-                    if cached is None:
-                        warnings.extend(segmentation_warnings)
-                        if segmentation_error:
-                            warnings.append(
-                                "Skipped anchor after segmentation retries failed: "
-                                f"{segmentation_error}"
-                            )
-                        else:
-                            warnings.append("Skipped anchor after invalid segmentation retries.")
-                        segmentation_failure_counts[failure_category] = (
-                            segmentation_failure_counts.get(failure_category, 0) + 1
-                        )
-                        if (
-                            segmentation_failure_counts[failure_category]
-                            >= self.config.conversation_segmentation_failure_threshold
-                        ):
-                            segmentation_circuit_open = True
-                            warnings.append(
-                                "Stopped remaining anchor segmentation after repeated "
-                                f"{failure_category}."
-                            )
-                    continue
-
-                conversation_units.extend(
-                    replace(
-                        unit,
-                        segment_id=f"anchor-{anchor_index:03d}:{unit.segment_id}",
-                    )
-                    for unit in units
-                    if set(unit.primary_message_ids)
-                    & set(anchor_unit.anchor_message_ids)
-                )
-                warnings.extend(segmentation_warnings)
-                log_timing(
-                    logger,
-                    "runner.stage.completed",
-                    segmentation_started_at,
-                    stage="segment_conversation",
+            segmentation_states.append(
+                _ConversationSegmentationState(
                     conversation_id=conversation_id,
-                    segment_count=len(units),
-                    anchor_index=anchor_index,
-                    anchor_count=len(conversation_anchors),
-                    anchor_message_count=len(anchor_unit.anchor_message_ids),
-                    input_message_count=len(segmentation_messages),
-                    retry_round=retry_round,
+                    conversation_name=hydrated_anchors[0].conversation_name,
+                    anchors=hydrated_anchors,
                 )
-            if skipped_anchor_count:
+            )
+
+        ready_states = list(segmentation_states)
+        running: dict[
+            Future[_AnchorSegmentationOutcome],
+            tuple[_ConversationSegmentationState, int, AnchorUnit],
+        ] = {}
+
+        def apply_outcome(
+            state: _ConversationSegmentationState,
+            anchor_index: int,
+            anchor_unit: AnchorUnit,
+            outcome: _AnchorSegmentationOutcome,
+            *,
+            cached: bool,
+        ) -> None:
+            nonlocal model_call_count
+            if not cached:
+                model_call_count += outcome.model_call_count
+            if not outcome.units:
+                state.fallback_required = True
+                if not cached:
+                    warnings.extend(outcome.warnings)
+                    if outcome.error_summary:
+                        warnings.append(
+                            "Skipped anchor after segmentation retries failed: "
+                            f"{outcome.error_summary}"
+                        )
+                    else:
+                        warnings.append("Skipped anchor after invalid segmentation retries.")
+                    state.failure_counts[outcome.failure_category] = (
+                        state.failure_counts.get(outcome.failure_category, 0) + 1
+                    )
+                    if (
+                        state.failure_counts[outcome.failure_category]
+                        >= self.config.conversation_segmentation_failure_threshold
+                    ):
+                        state.circuit_open = True
+                        state.skipped_anchor_count += (
+                            len(state.anchors) - state.next_anchor_index
+                        )
+                        state.next_anchor_index = len(state.anchors)
+                        warnings.append(
+                            "Stopped remaining anchor segmentation after repeated "
+                            f"{outcome.failure_category}."
+                        )
+                return
+
+            state.units.extend(
+                replace(
+                    unit,
+                    segment_id=f"anchor-{anchor_index:03d}:{unit.segment_id}",
+                )
+                for unit in outcome.units
+                if set(unit.primary_message_ids) & set(anchor_unit.anchor_message_ids)
+            )
+            warnings.extend(outcome.warnings)
+            log_timing(
+                logger,
+                "runner.stage.completed",
+                outcome.started_at,
+                stage="segment_conversation",
+                conversation_id=state.conversation_id,
+                segment_count=len(outcome.units),
+                anchor_index=anchor_index,
+                anchor_count=len(state.anchors),
+                anchor_message_count=len(anchor_unit.anchor_message_ids),
+                input_message_count=len(anchor_unit.messages),
+                retry_round=outcome.retry_round,
+            )
+
+        with ThreadPoolExecutor(
+            max_workers=self.config.max_concurrent_llm_requests
+        ) as executor:
+            while ready_states or running:
+                while ready_states and len(running) < self.config.max_concurrent_llm_requests:
+                    ready_states.sort(
+                        key=lambda item: (
+                            -_anchor_unit_input_size(
+                                item.anchors[item.next_anchor_index], self.config
+                            ),
+                            item.conversation_id,
+                        )
+                    )
+                    state = ready_states.pop(0)
+                    if state.circuit_open or state.next_anchor_index >= len(state.anchors):
+                        continue
+                    anchor_index = state.next_anchor_index + 1
+                    anchor_unit = state.anchors[state.next_anchor_index]
+                    state.next_anchor_index += 1
+                    signature = _anchor_unit_context_signature(anchor_unit)
+                    cached = state.cache.get(signature)
+                    if cached is not None:
+                        apply_outcome(
+                            state,
+                            anchor_index,
+                            anchor_unit,
+                            cached,
+                            cached=True,
+                        )
+                        if not state.circuit_open and state.next_anchor_index < len(state.anchors):
+                            ready_states.append(state)
+                        continue
+                    future = executor.submit(
+                        self._segment_anchor_window_with_retry,
+                        target_date=target_date,
+                        conversation_id=state.conversation_id,
+                        conversation_name=state.conversation_name,
+                        anchor_unit=anchor_unit,
+                        self_identity=self_identity,
+                    )
+                    running[future] = (state, anchor_index, anchor_unit)
+
+                if not running:
+                    continue
+                completed, _ = wait(running, return_when=FIRST_COMPLETED)
+                for future in completed:
+                    state, anchor_index, anchor_unit = running.pop(future)
+                    outcome = future.result()
+                    state.cache[_anchor_unit_context_signature(anchor_unit)] = outcome
+                    apply_outcome(
+                        state,
+                        anchor_index,
+                        anchor_unit,
+                        outcome,
+                        cached=False,
+                    )
+                    if not state.circuit_open and state.next_anchor_index < len(state.anchors):
+                        ready_states.append(state)
+
+        for state in segmentation_states:
+            if state.skipped_anchor_count:
                 warnings.append(
                     "Skipped remaining anchor segmentation windows after circuit open: "
-                    f"{skipped_anchor_count}."
+                    f"{state.skipped_anchor_count}."
                 )
-            conversation_units = _dedupe_segment_primary_ownership(conversation_units)
+            pending_conversation_analysis.append(
+                (
+                    _dedupe_segment_primary_ownership(state.units),
+                    state.fallback_required,
+                    state.anchors,
+                )
+            )
+
+        # Complete and persist every topic split before starting event extraction.
+        analysis_jobs: list[tuple[SegmentAnalysisBatch, SelfIdentity]] = []
+        fallback_jobs: list[list[AnchorUnit]] = []
+        for conversation_units, fallback_required, conversation_anchors in pending_conversation_analysis:
             if conversation_units:
                 conversation_slices.extend(
                     segment_unit_to_slice(unit) for unit in conversation_units
                 )
-                for batch in pack_segment_units(
+                analysis_jobs.extend(
+                    (batch, self_identity)
+                    for batch in pack_segment_units(
                     target_date=target_date,
                     self_open_id=self_identity.open_id,
                     self_display_name=self_identity.display_name,
                     units=conversation_units,
                     config=self.config,
-                ):
-                    (
-                        batch_candidates,
-                        batch_warnings,
-                        batch_skipped_count,
-                        batch_call_count,
-                    ) = self._analyze_segment_batch_with_retry(
-                        batch=batch,
-                        self_identity=self_identity,
                     )
-                    candidates.extend(batch_candidates)
-                    warnings.extend(batch_warnings)
-                    skipped_segment_count += batch_skipped_count
-                    model_call_count += batch_call_count
+                )
 
             if fallback_required:
                 warnings.append(
                     "Anchor segmentation retries were exhausted; running full-conversation anchor fallback."
                 )
-                (
-                    fallback_candidates,
-                    fallback_warnings,
-                    fallback_skipped_count,
-                    fallback_call_count,
-                ) = self._analyze_anchor_fallback(
-                    target_date=target_date,
-                    anchor_units=conversation_anchors,
-                    self_identity=self_identity,
+                fallback_jobs.append(conversation_anchors)
+
+        analysis_jobs.sort(
+            key=lambda item: _segment_batch_input_size(item[0], self.config),
+            reverse=True,
+        )
+        event_extraction_workers = (
+            self.config.max_concurrent_event_extraction_requests
+            or self.config.max_concurrent_llm_requests
+        )
+        with ThreadPoolExecutor(max_workers=event_extraction_workers) as executor:
+            futures = [
+                executor.submit(
+                    self._analyze_segment_batch_with_retry,
+                    batch=batch,
+                    self_identity=identity,
                 )
-                candidates.extend(fallback_candidates)
-                warnings.extend(fallback_warnings)
-                skipped_segment_count += fallback_skipped_count
-                model_call_count += fallback_call_count
+                for batch, identity in analysis_jobs
+            ]
+            for future in futures:
+                (
+                    batch_candidates,
+                    batch_warnings,
+                    batch_skipped_count,
+                    batch_call_count,
+                ) = future.result()
+                candidates.extend(batch_candidates)
+                warnings.extend(batch_warnings)
+                skipped_segment_count += batch_skipped_count
+                model_call_count += batch_call_count
+
+        for conversation_anchors in fallback_jobs:
+            (
+                fallback_candidates,
+                fallback_warnings,
+                fallback_skipped_count,
+                fallback_call_count,
+            ) = self._analyze_anchor_fallback(
+                target_date=target_date,
+                anchor_units=conversation_anchors,
+                self_identity=self_identity,
+            )
+            candidates.extend(fallback_candidates)
+            warnings.extend(fallback_warnings)
+            skipped_segment_count += fallback_skipped_count
+            model_call_count += fallback_call_count
 
         candidates, self_relation_warnings = filter_candidates_with_valid_self_relations(
             candidates
@@ -868,6 +918,145 @@ class DailyTraceRunner:
             skipped_segment_count,
             model_call_count,
         )
+
+    def _segment_anchor_window_with_retry(
+        self,
+        *,
+        target_date: str,
+        conversation_id: str,
+        conversation_name: str,
+        anchor_unit: AnchorUnit,
+        self_identity: SelfIdentity,
+    ) -> _AnchorSegmentationOutcome:
+        segmentation_messages = anchor_unit.messages
+        response_signals = build_response_signals(
+            segmentation_messages,
+            self_open_id=self_identity.open_id,
+            reaction_catalog=self.reaction_catalog,
+        )
+        hard_boundary_before_ids = build_hard_boundary_message_ids(
+            segmentation_messages,
+            self_open_id=self_identity.open_id,
+        )
+        started_at = perf_counter()
+        checkpoint = (
+            self.checkpoint_store.load_segmentation(anchor_unit)
+            if self.checkpoint_store is not None
+            else None
+        )
+        if checkpoint is not None:
+            units, warnings = checkpoint
+            units = _attach_anchor_attachment_texts(units, anchor_unit)
+            return _AnchorSegmentationOutcome(
+                units=units,
+                warnings=warnings,
+                error_summary="",
+                retry_round=0,
+                failure_category="",
+                model_call_count=0,
+                started_at=started_at,
+            )
+
+        units: list[ConversationSegmentUnit] = []
+        segmentation_warnings: list[str] = []
+        segmentation_error = ""
+        model_call_count = 0
+        retry_round = 0
+        for retry_round in range(self.config.anchor_retry_limit + 1):
+            started_at = perf_counter()
+            segmentation_prompt = (
+                self.dependencies.analyzer.build_segmentation_prompt(
+                    target_date=target_date,
+                    conversation_id=conversation_id,
+                    conversation_name=conversation_name,
+                    messages=segmentation_messages,
+                    self_open_id=self_identity.open_id,
+                    self_display_name=self_identity.display_name,
+                    response_signals=response_signals,
+                    hard_boundary_before_ids=hard_boundary_before_ids,
+                    attachment_texts=anchor_unit.attachment_texts,
+                )
+                if hasattr(self.dependencies.analyzer, "build_segmentation_prompt")
+                else None
+            )
+            try:
+                segmentation_result = self.dependencies.analyzer.segment_conversation(
+                    target_date=target_date,
+                    conversation_id=conversation_id,
+                    conversation_name=conversation_name,
+                    messages=segmentation_messages,
+                    self_open_id=self_identity.open_id,
+                    self_display_name=self_identity.display_name,
+                    response_signals=response_signals,
+                    hard_boundary_before_ids=hard_boundary_before_ids,
+                    attachment_texts=anchor_unit.attachment_texts,
+                )
+            except AnalyzerProtocolError as exc:
+                model_call_count += 1
+                segmentation_error = str(exc)
+                self._dump_segmentation_failure_debug_artifacts(
+                    target_date=target_date,
+                    anchor_unit=anchor_unit,
+                    retry_round=retry_round,
+                    prompt=segmentation_prompt,
+                    error_summary=segmentation_error,
+                )
+                continue
+
+            model_call_count += 1
+            segmentation_error = ""
+            units, segmentation_warnings = validate_conversation_segmentation(
+                segmentation_result,
+                segmentation_messages,
+                self_open_id=self_identity.open_id,
+                self_display_name=self_identity.display_name,
+                self_assignment_keywords=self.config.self_assignment_keywords,
+                response_signals=response_signals,
+            )
+            units = _keep_relation_context_out_of_event_sources(
+                units,
+                relation_context_message_ids=set(
+                    [
+                        *anchor_unit.relation_context_message_ids,
+                        *anchor_unit.timeline_context_message_ids,
+                    ]
+                ),
+            )
+            self._dump_segment_segmentation_debug_artifacts(
+                target_date=target_date,
+                anchor_unit=anchor_unit,
+                retry_round=retry_round,
+                prompt=segmentation_prompt,
+                output_payload=segmentation_result.to_dict(),
+                units=units,
+                warnings=segmentation_warnings,
+            )
+            if units:
+                units = _attach_anchor_attachment_texts(units, anchor_unit)
+                if self.checkpoint_store is not None:
+                    self.checkpoint_store.save_segmentation(
+                        anchor_unit, units, segmentation_warnings
+                    )
+                break
+
+        return _AnchorSegmentationOutcome(
+            units=units,
+            warnings=segmentation_warnings,
+            error_summary=segmentation_error,
+            retry_round=retry_round,
+            failure_category=(
+                ""
+                if units
+                else (
+                    "analyzer_protocol_failure"
+                    if segmentation_error
+                    else "segmentation_validation_failure"
+                )
+            ),
+            model_call_count=model_call_count,
+            started_at=started_at,
+        )
+
 
     def _hydrate_anchor_link_titles(self, anchor_unit: AnchorUnit) -> AnchorUnit:
         messages = [
@@ -1132,11 +1321,21 @@ class DailyTraceRunner:
         batch: SegmentAnalysisBatch,
         self_identity: SelfIdentity,
         allow_context_expansion: bool = True,
+        context_expansion_round: int = 0,
     ) -> tuple[list[SourceBackedEventDraft], list[str], int, int]:
+        checkpoint = (
+            self.checkpoint_store.load_analysis(batch)
+            if self.checkpoint_store is not None
+            else None
+        )
+        if checkpoint is not None:
+            candidates, warnings, skipped_count = checkpoint
+            return candidates, warnings, skipped_count, 0
+
         warnings: list[str] = []
         call_count = 0
 
-        for attempt in range(2):
+        for attempt in range(self.config.analysis_batch_retry_limit + 1):
             try:
                 batch_started_at = perf_counter()
                 prompt = (
@@ -1152,6 +1351,7 @@ class DailyTraceRunner:
                         batch=batch,
                         self_identity=self_identity,
                         allow_context_expansion=allow_context_expansion,
+                        context_expansion_round=context_expansion_round,
                     )
                 )
                 call_count += nested_call_count
@@ -1165,6 +1365,10 @@ class DailyTraceRunner:
                     warnings=result_warnings,
                     skipped_count=skipped_count,
                 )
+                if self.checkpoint_store is not None:
+                    self.checkpoint_store.save_analysis(
+                        batch, candidates, warnings, skipped_count
+                    )
                 log_timing(
                     logger,
                     "runner.stage.completed",
@@ -1186,10 +1390,10 @@ class DailyTraceRunner:
                     attempt=attempt,
                     error_summary=str(exc),
                 )
-                if attempt == 0:
-                    warnings.append("Segment batch failed; retrying the same batch once.")
+                if attempt < self.config.analysis_batch_retry_limit:
+                    warnings.append("Segment batch failed; retrying the same batch.")
                     continue
-                warnings.append("Segment batch failed twice; retrying its segments separately.")
+                warnings.append("Segment batch failed repeatedly; retrying its segments separately.")
                 batch_error = exc
                 break
         else:
@@ -1239,6 +1443,7 @@ class DailyTraceRunner:
                     batch=single_batch,
                     self_identity=self_identity,
                     allow_context_expansion=allow_context_expansion,
+                    context_expansion_round=context_expansion_round,
                 )
             )
             call_count += nested_call_count
@@ -1269,6 +1474,7 @@ class DailyTraceRunner:
         batch: SegmentAnalysisBatch,
         self_identity: SelfIdentity,
         allow_context_expansion: bool,
+        context_expansion_round: int,
     ) -> tuple[list[SourceBackedEventDraft], list[str], int, int]:
         analyses_by_segment, missing_units, warnings = validate_segment_batch_result(
             result,
@@ -1304,7 +1510,10 @@ class DailyTraceRunner:
                 warning_sink=warnings,
             )
             if validated.context_requests:
-                if not allow_context_expansion:
+                if (
+                    not allow_context_expansion
+                    or context_expansion_round >= self.config.context_expansion_round_limit
+                ):
                     warnings.append(
                         f"Skipped segment that still needs additional context: {unit.segment_id}."
                     )
@@ -1320,6 +1529,7 @@ class DailyTraceRunner:
                     unit=unit,
                     requests=validated.context_requests,
                     self_identity=self_identity,
+                    context_expansion_round=context_expansion_round + 1,
                 )
                 candidates.extend(retry_candidates)
                 warnings.extend(retry_warnings)
@@ -1337,6 +1547,7 @@ class DailyTraceRunner:
         unit: ConversationSegmentUnit,
         requests: list[ContextRequest],
         self_identity: SelfIdentity,
+        context_expansion_round: int,
     ) -> tuple[list[SourceBackedEventDraft], list[str], int, int]:
         warnings: list[str] = []
         base_slice = segment_unit_to_slice(unit)
@@ -1353,6 +1564,7 @@ class DailyTraceRunner:
             content_resolver=self.dependencies.content_resolver,
             config=self.config,
             reaction_catalog=self.reaction_catalog,
+            warning_sink=warnings,
         )
         self._dump_segment_context_debug_artifacts(
             target_date=target_date,
@@ -1460,7 +1672,8 @@ class DailyTraceRunner:
             ) = self._analyze_segment_batch_with_retry(
                 batch=retry_batch,
                 self_identity=self_identity,
-                allow_context_expansion=False,
+                allow_context_expansion=True,
+                context_expansion_round=context_expansion_round,
             )
             candidates.extend(retry_candidates)
             warnings.extend(retry_warnings)
@@ -1759,7 +1972,7 @@ class DailyTraceRunner:
             / batch.target_date
             / "_segment_batches"
             / _safe_conversation_dir_name(batch.conversation_id)
-            / _safe_conversation_dir_name(segment_key)
+            / _safe_segment_batch_dir_name(segment_key)
             / (directory_name or f"analysis-{retry_round + 1:02d}")
         )
         directory.mkdir(parents=True, exist_ok=True)
@@ -1805,7 +2018,7 @@ class DailyTraceRunner:
             / batch.target_date
             / "_segment_batches"
             / _safe_conversation_dir_name(batch.conversation_id)
-            / _safe_conversation_dir_name(segment_key)
+            / _safe_segment_batch_dir_name(segment_key)
             / directory_name
         )
         directory.mkdir(parents=True, exist_ok=True)
@@ -2375,30 +2588,92 @@ def _build_known_workstream_context(
     return context
 
 
-def _image_summaries_for_messages(
-    summaries_by_message: dict[str, list],
-    messages: list[NormalizedMessage],
-) -> list:
-    message_ids = {item.message_id for item in messages}
-    return [
-        summary
-        for message_id, summaries in summaries_by_message.items()
-        if message_id in message_ids
-        for summary in summaries
-    ]
-
-
 def _anchor_unit_to_slice(anchor_unit: AnchorUnit) -> ConversationSlice:
+    main_ids = list(anchor_unit.base_message_ids)
+    relation_ids = list(
+        dict.fromkeys(
+            [
+                *anchor_unit.relation_context_message_ids,
+                *anchor_unit.timeline_context_message_ids,
+            ]
+        )
+    )
     return ConversationSlice(
         slice_id=f"{anchor_unit.conversation_id}:anchor:{anchor_unit.anchor_unit_id}",
         conversation_id=anchor_unit.conversation_id,
         conversation_name=anchor_unit.conversation_name,
         anchor_message_ids=list(anchor_unit.anchor_message_ids),
-        in_day_message_ids=[item.message_id for item in anchor_unit.messages],
+        in_day_message_ids=main_ids,
         messages=list(anchor_unit.messages),
         attachment_texts=list(anchor_unit.attachment_texts),
         linked_file_texts=list(anchor_unit.linked_file_texts),
+        primary_message_ids=main_ids,
+        context_message_ids=relation_ids,
+        self_evidence_message_ids=[
+            message_id
+            for message_id in anchor_unit.anchor_message_ids
+            if message_id in set(main_ids)
+        ],
     )
+
+
+def _message_input_size(message: NormalizedMessage, config: RuntimeConfig) -> int:
+    return (
+        min(len(message.text), config.prompt_message_char_limit)
+        + sum(
+            len(item.file_name) + len(item.mime_type) + len(item.attachment_id)
+            for item in message.attachments
+        )
+        + sum(len(item.url) + len(item.title) for item in message.links)
+        + len(message.reactions) * 24
+        + 64
+    )
+
+
+def _anchor_unit_input_size(anchor_unit: AnchorUnit, config: RuntimeConfig) -> int:
+    return (
+        sum(_message_input_size(message, config) for message in anchor_unit.messages)
+        + sum(
+            min(len(block.text), config.prompt_attachment_char_limit) + 32
+            for block in anchor_unit.attachment_texts
+        )
+        + sum(
+            min(len(block.text), config.prompt_attachment_char_limit) + 32
+            for block in anchor_unit.linked_file_texts
+        )
+    )
+
+
+def _segment_batch_input_size(batch: SegmentAnalysisBatch, config: RuntimeConfig) -> int:
+    return sum(
+        sum(_message_input_size(message, config) for message in unit.messages)
+        + sum(
+            min(len(block.text), config.prompt_attachment_char_limit) + 32
+            for block in unit.attachment_texts
+        )
+        + sum(
+            min(len(block.text), config.prompt_attachment_char_limit) + 32
+            for block in unit.linked_file_texts
+        )
+        for unit in batch.segments
+    )
+
+
+def _attach_anchor_attachment_texts(
+    units: list[ConversationSegmentUnit],
+    anchor_unit: AnchorUnit,
+) -> list[ConversationSegmentUnit]:
+    return [
+        replace(
+            unit,
+            attachment_texts=[
+                block
+                for block in anchor_unit.attachment_texts
+                if block.message_id in {message.message_id for message in unit.messages}
+            ],
+        )
+        for unit in units
+    ]
 
 
 def _anchor_unit_context_signature(
@@ -2475,8 +2750,71 @@ def _dedupe_segment_primary_ownership(
     return deduped
 
 
+def _keep_relation_context_out_of_event_sources(
+    units: list[ConversationSegmentUnit],
+    *,
+    relation_context_message_ids: set[str],
+) -> list[ConversationSegmentUnit]:
+    """Keep externally related messages visible, but never let them support an event."""
+    if not relation_context_message_ids:
+        return units
+    adjusted: list[ConversationSegmentUnit] = []
+    for unit in units:
+        primary_ids = [
+            message_id
+            for message_id in unit.primary_message_ids
+            if message_id not in relation_context_message_ids
+        ]
+        if not primary_ids:
+            continue
+        context_ids = list(
+            dict.fromkeys(
+                [
+                    *unit.context_message_ids,
+                    *(
+                        message_id
+                        for message_id in unit.primary_message_ids
+                        if message_id in relation_context_message_ids
+                    ),
+                ]
+            )
+        )
+        included_ids = set(primary_ids) | set(context_ids)
+        adjusted.append(
+            replace(
+                unit,
+                primary_message_ids=primary_ids,
+                context_message_ids=context_ids,
+                self_evidence_message_ids=[
+                    message_id
+                    for message_id in unit.self_evidence_message_ids
+                    if message_id in primary_ids
+                ],
+                response_signals=[
+                    signal for signal in unit.response_signals if signal.message_id in primary_ids
+                ],
+                messages=[
+                    message for message in unit.messages if message.message_id in included_ids
+                ],
+            )
+        )
+    return adjusted
+
+
 def _safe_conversation_dir_name(slice_id: str) -> str:
     return slice_id.replace("/", "_").replace(":", "__")
+
+
+def _safe_segment_batch_dir_name(segment_key: str) -> str:
+    safe_name = _safe_conversation_dir_name(segment_key)
+    max_length = 96
+    if len(safe_name) <= max_length:
+        return safe_name
+    suffix = sha1(segment_key.encode("utf-8")).hexdigest()[:12]
+    prefix = safe_name[: max_length - len(suffix) - 2].rstrip("_-")
+    return f"{prefix}--{suffix}"
+
+
 def run_daily_trace(target_date: str, config: RuntimeConfig) -> DailyRunResult:
     runner = DailyTraceRunner(config=config, dependencies=build_runtime_dependencies(config))
     return runner.run(target_date)

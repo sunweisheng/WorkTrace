@@ -10,6 +10,7 @@ from src.worktrace.analyzers.prompts import (
 from src.worktrace.analyzers.output_schemas import conversation_segmentation_output_schema
 from src.worktrace.config import RuntimeConfig
 from src.worktrace.models import (
+    AttachmentTextBlock,
     BatchAnalysisResult,
     BatchSegmentAnalysisItem,
     BatchSegmentAnalysisResult,
@@ -223,6 +224,34 @@ def test_segmentation_prompt_uses_short_references_and_restores_them() -> None:
     assert restored.segments == []
 
 
+def test_segmentation_prompt_includes_preloaded_image_summary() -> None:
+    messages = [_message("om_1", sender_open_id="ou_self", minute=0, text="[图片]")]
+
+    prompt = build_conversation_segmentation_prompt(
+        target_date="2026-07-10",
+        conversation_id="oc_1",
+        conversation_name="项目群",
+        messages=messages,
+        self_open_id="ou_self",
+        self_display_name="张宝华",
+        response_signals=[],
+        hard_boundary_before_ids=set(),
+        attachment_texts=[
+            AttachmentTextBlock(
+                attachment_id="img_1",
+                message_id="om_1",
+                file_name="image.png",
+                text="图片内容摘要：发布计划已确认。",
+            )
+        ],
+    )
+
+    payload = json.loads(prompt)
+    summary = payload["input"]["messages"][0]["attachment_texts"][0]
+    assert summary["id"] == "img_1"
+    assert summary["text"] == "图片内容摘要：发布计划已确认。"
+
+
 def test_segmentation_prompt_requires_boundary_for_adjacent_named_workstreams() -> None:
     prompt = build_conversation_segmentation_prompt(
         target_date="2026-07-10",
@@ -349,6 +378,7 @@ def test_segment_prompt_recombines_context_and_primary_messages_in_time_order() 
         "人名只在明确责任分工、任务指派或确认沟通对象时保留" in rule
         for rule in payload["rules"]
     )
+    assert any("图片和文件附件默认只提供元数据" in rule for rule in payload["rules"])
     assert [item["id"] for item in prompt_messages] == ["om_1", "om_2"]
     assert [item["role"] for item in prompt_messages] == ["context", "primary"]
 

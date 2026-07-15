@@ -81,9 +81,13 @@ def test_message_resolver_skips_unsupported_attachment_without_download(tmp_path
     assert resolver.load_attachment_text_if_needed(message, ["file_1"], "需要正文") is None
 
 
-def test_message_resolver_summarizes_image_with_transient_download(tmp_path: Path) -> None:
+def test_message_resolver_summarizes_image_only_when_requested(tmp_path: Path) -> None:
     class FakeImageSummarizer:
-        def summarize(self, image_path: Path) -> str:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def summarize(self, image_path: Path, *, required: bool = False) -> str:
+            self.calls += 1
             assert image_path.read_bytes() == b"image-bytes"
             return "图片中标注了两家代理商。"
 
@@ -94,9 +98,10 @@ def test_message_resolver_summarizes_image_with_transient_download(tmp_path: Pat
         path.write_bytes(b"image-bytes")
         return path
 
+    summarizer = FakeImageSummarizer()
     resolver = FeishuMessageContentResolver(
         config=RuntimeConfig(data_root=tmp_path / "data"),
-        image_summarizer=FakeImageSummarizer(),
+        image_summarizer=summarizer,
         image_downloader=fake_download,
     )
     message = NormalizedMessage(
@@ -120,11 +125,17 @@ def test_message_resolver_summarizes_image_with_transient_download(tmp_path: Pat
         ],
     )
 
-    summaries = resolver.summarize_images([message])
+    summaries = resolver.load_attachment_text_if_needed(message, ["img_1"], "需要核对图片")
+    cached_summaries = resolver.load_attachment_text_if_needed(
+        message, ["img_1"], "再次核对图片"
+    )
 
+    assert summaries is not None
     assert len(summaries) == 1
     assert summaries[0].message_id == "om_image"
     assert summaries[0].text == "图片内容摘要：图片中标注了两家代理商。"
+    assert cached_summaries == summaries
+    assert summarizer.calls == 1
 
 
 def test_message_resolver_fetches_doc_title_for_bare_feishu_url(tmp_path: Path) -> None:

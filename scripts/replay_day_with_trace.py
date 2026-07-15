@@ -25,8 +25,15 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Default: data/replay-trace/<date>",
     )
     parser.add_argument(
-        "--hook-command",
-        default="python3 -m src.worktrace.hook_runner --mode chat-completions-http",
+        "--resume",
+        action="store_true",
+        help="Keep previous debug artifacts and LLM checkpoints, then resume matching calls.",
+    )
+    parser.add_argument(
+        "--max-model-input-tokens",
+        type=int,
+        default=None,
+        help="Override the model batch input limit for this replay only.",
     )
     return parser.parse_args(argv)
 
@@ -144,8 +151,24 @@ def _collect_first_pass_summary(conversation_debug_root: Path) -> dict[str, obje
     }
 
 
+def _collect_checkpoint_summary(checkpoint_root: Path) -> dict[str, object]:
+    stages = ("segmentation", "analysis")
+    return {
+        "path": str(checkpoint_root.resolve()),
+        "exists": checkpoint_root.exists(),
+        "counts_by_stage": {
+            stage: len(list((checkpoint_root / stage).glob("*.json")))
+            if (checkpoint_root / stage).exists()
+            else 0
+            for stage in stages
+        },
+    }
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
+    if args.max_model_input_tokens is not None and args.max_model_input_tokens <= 0:
+        raise SystemExit("--max-model-input-tokens must be positive.")
     repo_root = Path.cwd()
     trace_root = Path(args.trace_root) if args.trace_root else repo_root / "data" / "replay-trace" / args.date
     conversation_debug_root = trace_root / "conversation_debug"
@@ -153,15 +176,20 @@ def main(argv: list[str] | None = None) -> int:
 
     trace_root.mkdir(parents=True, exist_ok=True)
 
-    old_output = repo_root / "data" / args.date[:4] / args.date[5:7] / f"{args.date}.md"
+    output_dir = repo_root / "data" / args.date[:4] / args.date[5:7]
+    old_outputs = sorted(output_dir.glob(f"{args.date}-*.md"))
     old_anchor_cache = repo_root / "data" / "cache" / "anchors" / args.date[:4] / args.date[5:7] / args.date
     old_anchor_debug = repo_root / "data" / "anchor-debug" / args.date
+    checkpoint_root = repo_root / "data" / "cache" / "llm" / args.date[:4] / args.date[5:7] / args.date
     old_replay_trace = trace_root
 
-    _safe_unlink(old_output)
-    _safe_rmtree(old_anchor_cache)
-    _safe_rmtree(old_anchor_debug)
-    _safe_rmtree(old_replay_trace)
+    if not args.resume:
+        for old_output in old_outputs:
+            _safe_unlink(old_output)
+        _safe_rmtree(old_anchor_cache)
+        _safe_rmtree(old_anchor_debug)
+        _safe_rmtree(checkpoint_root)
+        _safe_rmtree(old_replay_trace)
 
     trace_root.mkdir(parents=True, exist_ok=True)
     conversation_debug_root.mkdir(parents=True, exist_ok=True)
@@ -171,17 +199,14 @@ def main(argv: list[str] | None = None) -> int:
     env["PYTHONPATH"] = str(repo_root)
     env["WORKTRACE_REPLAY_TRACE_ROOT"] = str(trace_root)
     env["WORKTRACE_REPLAY_TARGET_DATE"] = args.date
-    env["WORKTRACE_REPLAY_ORIGINAL_HOOK_COMMAND"] = args.hook_command
-    env["WORKTRACE_REPLAY_COUNTER_PATH"] = str(counter_path)
-
-    wrapper_command = (
-        "python3 scripts/hook_trace_wrapper.py "
-        f"--trace-root {json.dumps(str(trace_root), ensure_ascii=False)} "
-        f"--counter-path {json.dumps(str(counter_path), ensure_ascii=False)} "
-        f"--target-date {json.dumps(args.date, ensure_ascii=False)} "
-        f"--hook-command {json.dumps(args.hook_command, ensure_ascii=False)}"
-    )
-
+    cli_args = ["--date", args.date]
+    if args.resume:
+        cli_args.append("--resume")
+    config_overrides = ""
+    if args.max_model_input_tokens is not None:
+        config_overrides = (
+            f"    max_model_input_tokens={args.max_model_input_tokens},\n"
+        )
     runner_script = (
         "from dataclasses import replace\n"
         "from pathlib import Path\n"
@@ -189,10 +214,10 @@ def main(argv: list[str] | None = None) -> int:
         "from src.worktrace.config import DEFAULT_CONFIG\n"
         "config = replace(\n"
         "    DEFAULT_CONFIG,\n"
-        f"    hook_command={wrapper_command!r},\n"
         f"    conversation_debug_root=Path({str(conversation_debug_root)!r}),\n"
+        f"{config_overrides}"
         ")\n"
-        f"raise SystemExit(main(['--date', {args.date!r}], config=config))\n"
+        f"raise SystemExit(main({cli_args!r}, config=config))\n"
     )
 
     completed = subprocess.run(
@@ -222,16 +247,20 @@ def main(argv: list[str] | None = None) -> int:
 
     summary = {
         "target_date": args.date,
+        "resume_requested": args.resume,
+        "max_model_input_tokens": args.max_model_input_tokens,
         "trace_root": str(trace_root.resolve()),
         "returncode": completed.returncode,
         "result": result_payload,
         "first_pass_summary": first_pass_summary,
         "llm_summary": llm_summary,
         "timing_summary": timing_summary,
+        "llm_checkpoint_summary": _collect_checkpoint_summary(checkpoint_root),
         "cleared_paths": {
-            "output_file": str(old_output.resolve()),
+            "output_files": [str(path.resolve()) for path in old_outputs],
             "anchor_cache_dir": str(old_anchor_cache.resolve()),
             "anchor_debug_dir": str(old_anchor_debug.resolve()),
+            "llm_checkpoint_dir": str(checkpoint_root.resolve()),
             "trace_root": str(trace_root.resolve()),
         },
     }
