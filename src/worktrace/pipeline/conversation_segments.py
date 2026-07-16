@@ -18,6 +18,7 @@ from ..models import (
 )
 from ..reaction_catalog import ReactionCatalog
 from ..utils.text import clean_text
+from ..utils.token_estimation import estimate_text_tokens
 
 
 def build_response_signals(
@@ -469,7 +470,7 @@ def _explicitly_assigns_to_self(
 
 def _estimate_unit_tokens(unit: ConversationSegmentUnit) -> int:
     serialized = json.dumps(unit.to_dict(), ensure_ascii=False, separators=(",", ":"))
-    return max(1, len(serialized) // 3 + 50)
+    return estimate_text_tokens(serialized)
 
 
 def _normalize_action_time(value: str, fallback: str) -> str:

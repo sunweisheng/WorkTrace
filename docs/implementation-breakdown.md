@@ -111,7 +111,7 @@ flowchart LR
 
 | 来源 | 内容 |
 | --- | --- |
-| `RuntimeConfig` | 流程阈值、目录、analyzer backend 和默认运行参数 |
+| `RuntimeConfig` | 流程阈值、目录、analyzer backend 和默认运行参数；`max_model_input_tokens` 统一约束个人日报和多人合并输入 |
 | `.env` / 环境变量 | 在线模型和多人汇总 trace/retry 覆盖项 |
 | `config/event_rules.json` | 敏感、排除和本人指派关键词 |
 | `config/event_metadata.json` | 本人参与方式英文键、中文显示名和排序 |

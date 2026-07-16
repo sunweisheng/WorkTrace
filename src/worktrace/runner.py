@@ -621,6 +621,7 @@ class DailyTraceRunner:
                     "target_date": target_date,
                     "status": status,
                     "usage": self.dependencies.llm_usage_recorder.summary(),
+                    "requests": self.dependencies.llm_usage_recorder.records(),
                 },
                 pretty=True,
             )

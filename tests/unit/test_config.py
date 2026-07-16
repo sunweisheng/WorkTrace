@@ -148,7 +148,10 @@ def test_runtime_config_disables_streaming_by_default() -> None:
 
 
 def test_runtime_config_uses_40_percent_of_128k_model_context_by_default() -> None:
-    assert RuntimeConfig().max_model_input_tokens == 51200
+    config = RuntimeConfig()
+
+    assert config.max_model_input_tokens == 51200
+    assert not hasattr(config, "collected_merge_prompt_char_threshold")
 
 
 def test_load_runtime_config_overrides_reads_rule_lists(

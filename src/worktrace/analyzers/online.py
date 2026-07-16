@@ -17,7 +17,7 @@ from openai import AuthenticationError, BadRequestError, PermissionDeniedError, 
 from ..config import OnlineLLMSettings, RuntimeConfig, load_online_llm_settings
 from ..errors import AnalyzerProtocolError, RetryableAnalyzerProtocolError
 from ..logging_utils import log_timing
-from ..llm_usage import LLMUsageRecorder
+from ..llm_usage import LLMUsageRecorder, extract_usage
 from ..models import (
     AnalysisBatch,
     AnchorUnit,
@@ -544,15 +544,23 @@ class OnlineLLMAnalyzer(Analyzer):
 
         with self._request_count_lock:
             self._request_count += 1
-        usage = self.usage_recorder.record(request_kind, usage_payload)
-        log_timing(
+        usage = extract_usage(usage_payload)
+        duration_ms = log_timing(
             logger,
             "online_llm.request.completed",
             started_at,
             prompt_chars=len(prompt),
             stream_enabled=settings.stream_enabled,
             tls_verify=settings.tls_verify,
+            input_tokens=usage["input_tokens"],
             output_tokens=usage["output_tokens"],
+            total_tokens=usage["total_tokens"],
+        )
+        self.usage_recorder.record(
+            request_kind,
+            usage_payload,
+            duration_ms=duration_ms,
+            prompt_chars=len(prompt),
         )
         if not text.strip():
             raise RetryableAnalyzerProtocolError(

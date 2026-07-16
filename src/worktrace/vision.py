@@ -13,7 +13,7 @@ from openai import OpenAI
 from .config import RuntimeConfig, load_online_llm_settings
 from .errors import AnalyzerProtocolError
 from .logging_utils import log_timing
-from .llm_usage import LLMUsageRecorder
+from .llm_usage import LLMUsageRecorder, extract_usage
 
 logger = logging.getLogger("worktrace")
 
@@ -109,8 +109,8 @@ class OnlineImageSummarizer:
             )
             raise AnalyzerProtocolError(f"Image summary request failed: {exc}") from exc
         payload = response.model_dump() if hasattr(response, "model_dump") else {}
-        usage = self.usage_recorder.record("image_summary", payload)
-        log_timing(
+        usage = extract_usage(payload)
+        duration_ms = log_timing(
             logger,
             "online_llm.request.completed",
             started_at,
@@ -119,7 +119,15 @@ class OnlineImageSummarizer:
             prompt_chars=len(self.settings.prompt),
             image_bytes=image_path.stat().st_size,
             stream_enabled=False,
+            input_tokens=usage["input_tokens"],
             output_tokens=usage["output_tokens"],
+            total_tokens=usage["total_tokens"],
+        )
+        self.usage_recorder.record(
+            "image_summary",
+            payload,
+            duration_ms=duration_ms,
+            prompt_chars=len(self.settings.prompt),
         )
         if not required:
             self._count += 1

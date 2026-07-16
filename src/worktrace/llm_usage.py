@@ -41,20 +41,50 @@ def _read_token_count(usage: dict[str, object], *keys: str) -> int | None:
 
 @dataclass
 class LLMUsageRecorder:
-    _records: list[tuple[str, dict[str, int | None]]] = field(default_factory=list)
+    _records: list[dict[str, int | str | None]] = field(default_factory=list)
     _lock: Lock = field(default_factory=Lock)
 
-    def record(self, request_kind: str, payload: object) -> dict[str, int | None]:
+    def record(
+        self,
+        request_kind: str,
+        payload: object,
+        *,
+        duration_ms: float | None = None,
+        prompt_chars: int | None = None,
+    ) -> dict[str, int | None]:
         usage = extract_usage(payload)
         with self._lock:
-            self._records.append((request_kind, usage))
+            self._records.append(
+                {
+                    "request_kind": request_kind,
+                    "duration_ms": round(duration_ms, 3) if duration_ms is not None else None,
+                    "prompt_chars": prompt_chars,
+                    **usage,
+                }
+            )
         return usage
 
     def summary(self) -> dict[str, object]:
         with self._lock:
             records = list(self._records)
 
-        return _summarize_records(records)
+        return _summarize_records(
+            [
+                (
+                    str(record["request_kind"]),
+                    {
+                        "input_tokens": record["input_tokens"],
+                        "output_tokens": record["output_tokens"],
+                        "total_tokens": record["total_tokens"],
+                    },
+                )
+                for record in records
+            ]
+        )
+
+    def records(self) -> list[dict[str, int | str | None]]:
+        with self._lock:
+            return [dict(record) for record in self._records]
 
 
 def _summarize_records(

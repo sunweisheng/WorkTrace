@@ -14,6 +14,7 @@ from ..models import (
 from ..resolvers.base import ContentResolver
 from ..reaction_catalog import ReactionCatalog, enrich_message_reactions
 from ..sources.base import ChatSource
+from ..utils.token_estimation import estimate_text_tokens
 
 
 def _normalize_target_message_ids(message_ids: list[str]) -> list[str]:
@@ -248,4 +249,4 @@ def _estimate_slice_tokens(
 
     payload = serialize_slice_for_prompt(conversation_slice, config)
     serialized = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
-    return max(1, len(serialized) // 3 + 50)
+    return estimate_text_tokens(serialized)

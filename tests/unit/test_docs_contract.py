@@ -79,6 +79,8 @@ def test_docs_define_collected_merge_boundaries_and_conflict_priority() -> None:
         assert "合并人" in content
         assert "关系优先" in content
         assert "来源事件 ID" in content
+        assert "max_model_input_tokens" in content
+        assert "collected_merge_prompt_char_threshold" not in content
 
 
 def test_docs_describe_python_collected_evidence_relations() -> None:

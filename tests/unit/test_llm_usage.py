@@ -15,6 +15,8 @@ def test_usage_recorder_reports_output_tokens_and_missing_values() -> None:
     recorder.record(
         "segment_batch_analysis",
         {"usage": {"input_tokens": 100, "output_tokens": 20, "total_tokens": 120}},
+        duration_ms=1234.5,
+        prompt_chars=456,
     )
     recorder.record("image_summary", {})
 
@@ -26,3 +28,11 @@ def test_usage_recorder_reports_output_tokens_and_missing_values() -> None:
     assert summary["missing_output_tokens_request_count"] == 1
     assert summary["by_request_kind"]["segment_batch_analysis"]["output_tokens"] == 20
     assert summary["by_request_kind"]["image_summary"]["missing_output_tokens_request_count"] == 1
+    assert recorder.records()[0] == {
+        "request_kind": "segment_batch_analysis",
+        "duration_ms": 1234.5,
+        "prompt_chars": 456,
+        "input_tokens": 100,
+        "output_tokens": 20,
+        "total_tokens": 120,
+    }

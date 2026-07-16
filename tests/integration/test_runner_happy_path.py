@@ -206,6 +206,7 @@ def test_runner_dumps_first_pass_conversation_debug_artifacts(tmp_path: Path) ->
     )
     assert usage_payload["usage"]["output_tokens"] == 23
     assert usage_payload["usage"]["missing_output_tokens_request_count"] == 0
+    assert usage_payload["requests"][0]["request_kind"] == "segment_batch_analysis"
 
 
 def test_runner_groups_multiple_self_messages_in_same_conversation_into_one_llm_call(

@@ -349,13 +349,12 @@ OnlineLLMAnalyzer -> openai Python SDK -> Responses API provider
 - `anchor_batch_retry_limit = 1`
 - `conversation_segmentation_failure_threshold = 2`
 - `reaction_discovery_page_limit = 3`
-- `max_model_input_tokens = 51200`（按 128K 上下文窗口的 40% 计算）
+- `max_model_input_tokens = 51200`（按 128K 上下文窗口的 40% 计算；统一约束个人日报和多人合并的估算输入 token）
 - `max_anchor_gap_minutes = 10`
 - `max_unrelated_intervening_messages = 3`
 - `initial_context_messages_before = 2`
 - `context_expansion_messages_per_direction = 7`
 - `context_expansion_round_limit = 2`
-- `collected_merge_prompt_char_threshold = 80000`
 - `collected_merge_retryable_error_limit = 1`
 - `collected_merge_retry_delay_seconds = 2.0`
 - `slice_retry_limit = 3`
@@ -423,11 +422,11 @@ OnlineLLMAnalyzer -> openai Python SDK -> Responses API provider
 - workstream follow-up/resolution
 - resolved groups
 - `final_events.json`：过滤后的合并草稿、文件聚合和排序完成后的 `WorkEvent`、最终阶段 warning
-- `llm_usage.json`：每次模型调用从 Responses API 返回值读取的 token 汇总，包含输出 token 总数、已返回数量、缺失数量和按调用类型统计；缺失时不估算
+- `llm_usage.json`：每次模型调用的耗时、输入字符数和 Responses API 返回的输入/输出/总 token，以及汇总、缺失数量和按调用类型统计；缺失时不估算
 
 segmentation 和 segment batch 的模型失败轮次保存输入、prompt 与 `failure.json`。批次拆分后的单片段回退保存在片段目录的 `fallback-01/`；分段耗尽后的直接提炼保存在 `_anchor_fallback/<conversation>/<anchor-key>/attempt-XX/`。成功轮次继续保存输出和校验结果，异常轮次不伪造模型输出。
 
-多人汇总 trace 写 `source-audit.json`、step JSON、`step-NNN-prompt.txt`、`summary.json` 和 `summary.md`。每个模型请求前先保存输入和 prompt；成功、失败、重试耗尽和自送达失败都会留下 summary。step 包含候选发现或正式内容阶段、批次、尝试次数、重试原因、prompt 字符数、`input_events`、`deterministic_groups`、错误或模型结果、覆盖修复、`boundary_warnings`、过滤和最终事件，因此可以从来源增强信息追到最终部门事件。
+多人汇总 trace 写 `source-audit.json`、step JSON、`step-NNN-prompt.txt`、`summary.json` 和 `summary.md`。每个模型请求前先保存输入和 prompt；成功、失败、重试耗尽和自送达失败都会留下 summary。step 包含候选发现或正式内容阶段、批次、尝试次数、重试原因、估算 token、`max_model_input_tokens` 上限、辅助字符数、`input_events`、`deterministic_groups`、错误或模型结果、覆盖修复、`boundary_warnings`、过滤和最终事件，因此可以从来源增强信息追到最终部门事件。
 
 所有主阶段同时通过 `logging_utils.log_timing(...)` 输出耗时和数量字段。
 

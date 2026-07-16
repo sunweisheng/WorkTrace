@@ -410,7 +410,7 @@ def test_collected_merge_under_threshold_uses_single_analyzer_call(
         analyzer=analyzer,
         config=RuntimeConfig(
             data_root=tmp_path / "data",
-            collected_merge_prompt_char_threshold=1_000_000,
+            max_model_input_tokens=1_000_000,
         ),
     ).run("2026-06-29")
 
@@ -496,7 +496,7 @@ def test_collected_merge_over_threshold_rolls_sources_and_keeps_provenance(
         analyzer=analyzer,
         config=RuntimeConfig(
             data_root=tmp_path / "data",
-            collected_merge_prompt_char_threshold=1,
+            max_model_input_tokens=1,
             self_relation_types=(
                 EventMetadataItem("collaboration", "协作参与", 10),
             ),
@@ -543,7 +543,7 @@ def test_collected_merge_over_threshold_rolls_sources_and_keeps_provenance(
     assert "- **协作方式**: 协作参与" in content
     assert any(
         warning.startswith("Using rolling collected merge:")
-        and "threshold=1" in warning
+        and "input_limit_tokens=1" in warning
         and "calls=2" in warning
         for warning in result.warning_messages
     )
@@ -606,7 +606,7 @@ def test_collected_merge_rolling_preserves_owner_signal_between_steps(
         analyzer=analyzer,
         config=RuntimeConfig(
             data_root=tmp_path / "data",
-            collected_merge_prompt_char_threshold=1,
+            max_model_input_tokens=1,
         ),
     ).run("2026-06-29")
 
@@ -1883,7 +1883,7 @@ def test_collected_merge_rolling_retries_only_current_batch(tmp_path: Path) -> N
         analyzer=analyzer,
         config=RuntimeConfig(
             data_root=tmp_path / "data",
-            collected_merge_prompt_char_threshold=1,
+            max_model_input_tokens=1,
             collected_merge_retryable_error_limit=1,
             collected_merge_trace_enabled=True,
             collected_merge_trace_root=trace_root,
@@ -2453,7 +2453,7 @@ def test_relation_priority_batches_preserve_same_conversation_candidates(
         analyzer=analyzer,
         config=RuntimeConfig(
             data_root=tmp_path / "data",
-            collected_merge_prompt_char_threshold=6000,
+            max_model_input_tokens=2000,
             collected_merge_trace_enabled=True,
             collected_merge_trace_root=trace_root,
         ),
@@ -2465,7 +2465,8 @@ def test_relation_priority_batches_preserve_same_conversation_candidates(
     summary = json.loads(
         (trace_root / "2026-06-29" / "summary.json").read_text(encoding="utf-8")
     )
-    assert max(step["prompt_chars"] for step in summary["steps"]) <= 6000
+    assert max(step["prompt_estimated_tokens"] for step in summary["steps"]) <= 2000
+    assert {step["input_limit_tokens"] for step in summary["steps"]} == {2000}
     output = MarkdownEventStore(config=RuntimeConfig()).parse_day_document(
         Path(result.output_path or "").read_text(encoding="utf-8")
     )
@@ -2544,13 +2545,13 @@ def test_relation_priority_batches_match_july_14_event_scale(tmp_path: Path) -> 
 
     analyzer = ConversationGroupingAnalyzer()
     trace_root = tmp_path / "trace"
-    threshold = 7000
+    input_limit_tokens = 7000
     result = _build_runner(
         tmp_path,
         analyzer=analyzer,
         config=RuntimeConfig(
             data_root=tmp_path / "data",
-            collected_merge_prompt_char_threshold=threshold,
+            max_model_input_tokens=input_limit_tokens,
             collected_merge_trace_enabled=True,
             collected_merge_trace_root=trace_root,
         ),
@@ -2562,7 +2563,13 @@ def test_relation_priority_batches_match_july_14_event_scale(tmp_path: Path) -> 
     summary = json.loads(
         (trace_root / "2026-06-29" / "summary.json").read_text(encoding="utf-8")
     )
-    assert max(step["prompt_chars"] for step in summary["steps"]) <= threshold
+    assert (
+        max(step["prompt_estimated_tokens"] for step in summary["steps"])
+        <= input_limit_tokens
+    )
+    assert {step["input_limit_tokens"] for step in summary["steps"]} == {
+        input_limit_tokens
+    }
     stages = {step["stage"] for step in summary["steps"]}
     assert any(stage.startswith("candidate_grouping_batch_") for stage in stages)
     assert any(stage.startswith("candidate_reconciliation") for stage in stages)

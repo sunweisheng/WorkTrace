@@ -53,6 +53,7 @@ from .utils.filenames import (
 from .utils.hashing import file_key_from_url, stable_event_id
 from .utils.json_io import dump_json
 from .utils.text import choose_preferred_text, clean_text, merge_content_texts
+from .utils.token_estimation import estimate_text_tokens
 
 
 @dataclass
@@ -549,7 +550,7 @@ class CollectedMergeRunner:
         source_events: list[CollectedSourceEvent],
         groups: list[CollectedGroupingGroup],
     ) -> tuple[list[CollectedMergeGroup], list[str]]:
-        threshold = self.config.collected_merge_prompt_char_threshold
+        input_limit_tokens = self.config.max_model_input_tokens
         batches: list[list[CollectedGroupingGroup]] = []
         current: list[CollectedGroupingGroup] = []
 
@@ -563,12 +564,12 @@ class CollectedMergeRunner:
             candidate_events = [
                 item for item in source_events if item.draft_id in candidate_ids
             ]
-            candidate_chars = self._count_collected_render_prompt_chars(
+            candidate_tokens = self._estimate_collected_render_prompt_tokens(
                 target_date,
                 candidate_events,
                 [list(item.draft_ids) for item in candidate_groups],
             )
-            if current and candidate_chars > threshold:
+            if current and candidate_tokens > input_limit_tokens:
                 batches.append(current)
                 current = []
             current.append(group)
@@ -587,12 +588,12 @@ class CollectedMergeRunner:
                 item for item in source_events if item.draft_id in batch_ids
             ]
             batch_locked = [list(group.draft_ids) for group in batch_groups]
-            batch_chars = self._count_collected_render_prompt_chars(
+            batch_tokens = self._estimate_collected_render_prompt_tokens(
                 target_date,
                 batch_events,
                 batch_locked,
             )
-            if len(batch_groups) == 1 and batch_chars > threshold:
+            if len(batch_groups) == 1 and batch_tokens > input_limit_tokens:
                 rendered_group, group_warnings = self._render_oversized_locked_group(
                     target_date,
                     batch_events,
@@ -619,7 +620,7 @@ class CollectedMergeRunner:
             warnings.insert(
                 0,
                 "Using locked-group collected content batches: "
-                f"batches={len(batches)} threshold={threshold}.",
+                f"batches={len(batches)} input_limit_tokens={input_limit_tokens}.",
             )
         return rendered_groups, warnings
 
@@ -631,14 +632,18 @@ class CollectedMergeRunner:
         *,
         depth: int,
     ) -> tuple[CollectedMergeGroup, list[str]]:
-        threshold = self.config.collected_merge_prompt_char_threshold
+        input_limit_tokens = self.config.max_model_input_tokens
         locked_group = [item.draft_id for item in source_events]
-        prompt_chars = self._count_collected_render_prompt_chars(
+        prompt_tokens = self._estimate_collected_render_prompt_tokens(
             target_date,
             source_events,
             [locked_group],
         )
-        if prompt_chars <= threshold or len(source_events) <= 1 or depth >= 3:
+        if (
+            prompt_tokens <= input_limit_tokens
+            or len(source_events) <= 1
+            or depth >= 3
+        ):
             result, retry_warnings = self._invoke_collected_merge_with_retry(
                 target_date,
                 source_events,
@@ -660,12 +665,12 @@ class CollectedMergeRunner:
         current: list[CollectedSourceEvent] = []
         for item in source_events:
             candidate = [*current, item]
-            candidate_chars = self._count_collected_render_prompt_chars(
+            candidate_tokens = self._estimate_collected_render_prompt_tokens(
                 target_date,
                 candidate,
                 [[event.draft_id for event in candidate]],
             )
-            if current and candidate_chars > threshold:
+            if current and candidate_tokens > input_limit_tokens:
                 chunks.append(current)
                 current = []
             current.append(item)
@@ -727,7 +732,7 @@ class CollectedMergeRunner:
         deterministic_groups, deterministic_warnings = self._build_deterministic_groups(
             source_events,
         )
-        prompt_chars = self._count_collected_merge_prompt_chars(
+        prompt_tokens = self._estimate_collected_merge_prompt_tokens(
             target_date,
             source_events,
             deterministic_groups,
@@ -736,8 +741,8 @@ class CollectedMergeRunner:
             target_date,
             source_events,
         )
-        threshold = self.config.collected_merge_prompt_char_threshold
-        if prompt_chars <= threshold or len(source_groups) < 3:
+        input_limit_tokens = self.config.max_model_input_tokens
+        if prompt_tokens <= input_limit_tokens or len(source_groups) < 3:
             merged_events, merge_warnings = self._merge_collected_event_batch(
                 target_date,
                 source_events,
@@ -753,7 +758,8 @@ class CollectedMergeRunner:
         )
         rolling_notice = (
             "Using rolling collected merge: "
-            f"prompt_chars={prompt_chars} threshold={threshold} calls={call_count}"
+            f"prompt_estimated_tokens={prompt_tokens} "
+            f"input_limit_tokens={input_limit_tokens} calls={call_count}"
         )
         return merged_events, [*deterministic_warnings, rolling_notice, *rolling_warnings]
 
@@ -897,16 +903,13 @@ class CollectedMergeRunner:
         *,
         depth: int,
     ) -> tuple[CollectedGroupingResult, list[str]]:
-        prompt_chars = len(
-            build_collected_grouping_prompt(
-                target_date,
-                source_events,
-                deterministic_groups,
-                config=self.config,
-            )
+        prompt_tokens = self._estimate_collected_grouping_prompt_tokens(
+            target_date,
+            source_events,
+            deterministic_groups,
         )
-        threshold = self.config.collected_merge_prompt_char_threshold
-        if prompt_chars <= threshold or len(source_events) <= 1:
+        input_limit_tokens = self.config.max_model_input_tokens
+        if prompt_tokens <= input_limit_tokens or len(source_events) <= 1:
             return self._invoke_collected_grouping_once(
                 target_date,
                 source_events,
@@ -925,7 +928,8 @@ class CollectedMergeRunner:
         )
         warnings = [
             "Using relation-priority collected candidate grouping: "
-            f"prompt_chars={prompt_chars} threshold={threshold} batches={len(batches)}."
+            f"prompt_estimated_tokens={prompt_tokens} "
+            f"input_limit_tokens={input_limit_tokens} batches={len(batches)}."
         ]
         partial_groups: list[CollectedGroupingGroup] = []
         deterministic_sets = {tuple(group) for group in deterministic_groups}
@@ -1005,7 +1009,7 @@ class CollectedMergeRunner:
         source_events: list[CollectedSourceEvent],
         deterministic_groups: list[list[str]],
     ) -> list[list[CollectedSourceEvent]]:
-        threshold = self.config.collected_merge_prompt_char_threshold
+        input_limit_tokens = self.config.max_model_input_tokens
         components = build_collected_relation_components(
             source_events,
             deterministic_groups,
@@ -1027,33 +1031,27 @@ class CollectedMergeRunner:
                 for group in deterministic_groups
                 if set(group).issubset(candidate_ids)
             ]
-            candidate_chars = len(
-                build_collected_grouping_prompt(
-                    target_date,
-                    candidate,
-                    candidate_deterministic,
-                    config=self.config,
-                )
+            candidate_tokens = self._estimate_collected_grouping_prompt_tokens(
+                target_date,
+                candidate,
+                candidate_deterministic,
             )
-            if current and candidate_chars > threshold:
+            if current and candidate_tokens > input_limit_tokens:
                 batches.append(current)
                 current = []
 
-            component_chars = len(
-                build_collected_grouping_prompt(
-                    target_date,
-                    component,
-                    [
-                        list(group)
-                        for group in deterministic_groups
-                        if set(group).issubset(
-                            {item.draft_id for item in component}
-                        )
-                    ],
-                    config=self.config,
-                )
+            component_tokens = self._estimate_collected_grouping_prompt_tokens(
+                target_date,
+                component,
+                [
+                    list(group)
+                    for group in deterministic_groups
+                    if set(group).issubset(
+                        {item.draft_id for item in component}
+                    )
+                ],
             )
-            if component_chars <= threshold:
+            if component_tokens <= input_limit_tokens:
                 current.extend(component)
                 continue
 
@@ -1079,15 +1077,12 @@ class CollectedMergeRunner:
 
             for unit in atomic_units:
                 candidate = [*current, *unit]
-                candidate_chars = len(
-                    build_collected_grouping_prompt(
-                        target_date,
-                        candidate,
-                        [],
-                        config=self.config,
-                    )
+                candidate_tokens = self._estimate_collected_grouping_prompt_tokens(
+                    target_date,
+                    candidate,
+                    [],
                 )
-                if current and candidate_chars > threshold:
+                if current and candidate_tokens > input_limit_tokens:
                     batches.append(current)
                     current = []
                 current.extend(unit)
@@ -1348,13 +1343,13 @@ class CollectedMergeRunner:
                 )
         return CollectedMergeResult(groups=groups), warnings
 
-    def _count_collected_merge_prompt_chars(
+    def _estimate_collected_merge_prompt_tokens(
         self,
         target_date: str,
         source_events: list[CollectedSourceEvent],
         deterministic_groups: list[list[str]],
     ) -> int:
-        return len(
+        return estimate_text_tokens(
             build_collected_merge_prompt(
                 target_date,
                 source_events,
@@ -1363,14 +1358,29 @@ class CollectedMergeRunner:
             )
         )
 
-    def _count_collected_render_prompt_chars(
+    def _estimate_collected_render_prompt_tokens(
         self,
         target_date: str,
         source_events: list[CollectedSourceEvent],
         deterministic_groups: list[list[str]],
     ) -> int:
-        return len(
+        return estimate_text_tokens(
             build_collected_render_prompt(
+                target_date,
+                source_events,
+                deterministic_groups,
+                config=self.config,
+            )
+        )
+
+    def _estimate_collected_grouping_prompt_tokens(
+        self,
+        target_date: str,
+        source_events: list[CollectedSourceEvent],
+        deterministic_groups: list[list[str]],
+    ) -> int:
+        return estimate_text_tokens(
+            build_collected_grouping_prompt(
                 target_date,
                 source_events,
                 deterministic_groups,
@@ -1390,7 +1400,7 @@ class CollectedMergeRunner:
         return sorted(
             grouped.values(),
             key=lambda items: (
-                self._count_collected_merge_prompt_chars(
+                self._estimate_collected_merge_prompt_tokens(
                     target_date,
                     items,
                     self._build_deterministic_groups(items)[0],
@@ -1934,6 +1944,8 @@ class CollectedMergeRunner:
             "attempt_index": attempt_index,
             "retry_reason": retry_reason,
             "prompt_chars": len(prompt),
+            "prompt_estimated_tokens": estimate_text_tokens(prompt),
+            "input_limit_tokens": self.config.max_model_input_tokens,
             "prompt_file": f"step-{self._collected_merge_trace_call_index:03d}-prompt.txt",
             "input": collected_merge_source_metrics(source_events),
             "input_events": [item.to_dict() for item in source_events],
@@ -2405,23 +2417,25 @@ def render_collected_merge_trace_summary(summary: dict[str, Any]) -> str:
         "",
         "## Step Metrics",
         "",
-        "| Step | Stage | Status | Batch/Rolling step | Attempt | Retry reason | Prompt chars | Input events | Raw groups | Retained events | Error |",
-        "|---:|---|---|---:|---:|---|---:|---:|---:|---:|---|",
+        "| Step | Stage | Status | Batch/Rolling step | Attempt | Retry reason | Estimated tokens | Input limit | Prompt chars | Input events | Raw groups | Retained events | Error |",
+        "|---:|---|---|---:|---:|---|---:|---:|---:|---:|---:|---:|---|",
     ]
     for step in summary["steps"]:
         retained_events = step.get("retained_metrics", {}).get("event_count", "")
         error_summary = str(step.get("error", {}).get("summary", "")).replace("|", "\\|")
         lines.append(
             "| {step} | {stage} | {status} | {rolling} | {attempt} | {retry_reason} | "
-            "{prompt} | {input_events} | {raw_groups} | {retained_events} | "
-            "{error} |".format(
+            "{prompt_tokens} | {input_limit} | {prompt_chars} | {input_events} | "
+            "{raw_groups} | {retained_events} | {error} |".format(
                 step=step.get("step_index", ""),
                 stage=step.get("stage", ""),
                 status=step.get("status", ""),
                 rolling=step.get("rolling_step_index", ""),
                 attempt=step.get("attempt_index", ""),
                 retry_reason=step.get("retry_reason", ""),
-                prompt=step.get("prompt_chars", ""),
+                prompt_tokens=step.get("prompt_estimated_tokens", ""),
+                input_limit=step.get("input_limit_tokens", ""),
+                prompt_chars=step.get("prompt_chars", ""),
                 input_events=step.get("input", {}).get("event_count", ""),
                 raw_groups=step.get("raw_group_count", ""),
                 retained_events=retained_events,
