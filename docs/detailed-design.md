@@ -304,7 +304,7 @@ flowchart TD
     L --> M["最终过滤、写入、自发送"]
 ```
 
-多人合并先用受限长度事件卡执行候选发现：Python 根据共同消息、共同文件形成 `evidence_relations`，并根据同日会话形成 `conversation_groups`；会话哈希本身不进入模型输入。即使消息或文件集合完全相同也不能自动合并，候选组确认后才分批生成正式内容。关系集合超过阈值时优先保持在同一批，并用压缩后的组摘要做跨批汇合；中间 `WorkEvent` 持续携带会话指纹、消息指纹、文件标识、来源人员和来源事件 ID。最终只生成规范化 `YYYY-MM-DD-登录人姓名-merged.md`。
+多人合并候选发现默认发送来源 MD 中的完整事件正文：Python 根据共同消息、共同文件形成 `evidence_relations`，并根据同日会话形成 `conversation_groups`；会话哈希本身不进入模型输入。即使消息或文件集合完全相同也不能自动合并。输入超过 `max_model_input_tokens` 时按关系优先分批，局部分组模型在同一次调用中为多成员组返回候选摘要，单成员组由 Python 直接保留原事件；摘要缺失或组成员被修复时使用按来源平均分配的内容卡。跨批确认后展开回原始事件，再生成正式内容。中间 `WorkEvent` 持续携带会话指纹、消息指纹、文件标识、来源人员和来源事件 ID，最终只生成规范化 `YYYY-MM-DD-登录人姓名-merged.md`。
 
 合并边界：不同非空工作流默认拆开；只有共享同日会话或共同消息、且候选发现确认属于同一事项时才允许跨工作流合并。允许合并时冲突工作流字段留空并记录 warning。同名工作流、标题相似或部门相同都不能单独证明是同一事件。
 
@@ -349,7 +349,7 @@ OnlineLLMAnalyzer -> openai Python SDK -> Responses API provider
 - `anchor_batch_retry_limit = 1`
 - `conversation_segmentation_failure_threshold = 2`
 - `reaction_discovery_page_limit = 3`
-- `max_model_input_tokens = 51200`（按 128K 上下文窗口的 40% 计算；统一约束个人日报和多人合并的估算输入 token）
+- `max_model_input_tokens = 6200`（统一约束个人日报和多人合并的估算输入 token）
 - `max_anchor_gap_minutes = 10`
 - `max_unrelated_intervening_messages = 3`
 - `initial_context_messages_before = 2`

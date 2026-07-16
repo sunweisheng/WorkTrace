@@ -36,6 +36,7 @@ from ..models import (
     ResponseSignal,
 )
 from ..utils.json_io import parse_json_value_from_text
+from ..utils.token_estimation import estimate_text_tokens
 from .base import Analyzer
 from .output_schemas import (
     anchor_batch_output_schema,
@@ -506,6 +507,15 @@ class OnlineLLMAnalyzer(Analyzer):
         output_schema: dict[str, object] | None = None,
         request_kind: str,
     ) -> object:
+        prepared_prompt = _apply_soft_no_think(prompt)
+        estimated_tokens = estimate_text_tokens(prepared_prompt)
+        if estimated_tokens > self.config.max_model_input_tokens:
+            raise AnalyzerProtocolError(
+                "Model input exceeds max_model_input_tokens before online request: "
+                f"estimated_tokens={estimated_tokens} "
+                f"limit={self.config.max_model_input_tokens} "
+                f"request_kind={request_kind}"
+            )
         started_at = perf_counter()
         settings = self.settings_loader(self.config, cwd=self.cwd, environ=None)
         self._maybe_sleep_between_requests(settings)

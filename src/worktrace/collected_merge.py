@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 from collections import Counter, defaultdict
 from dataclasses import dataclass, replace
@@ -639,11 +640,7 @@ class CollectedMergeRunner:
             source_events,
             [locked_group],
         )
-        if (
-            prompt_tokens <= input_limit_tokens
-            or len(source_events) <= 1
-            or depth >= 3
-        ):
+        if prompt_tokens <= input_limit_tokens:
             result, retry_warnings = self._invoke_collected_merge_with_retry(
                 target_date,
                 source_events,
@@ -660,6 +657,36 @@ class CollectedMergeRunner:
                 replace(rendered, draft_ids=list(group.draft_ids)),
                 [*retry_warnings, *repair_warnings],
             )
+
+        expanded_events: list[CollectedSourceEvent] = []
+        split_warnings: list[str] = []
+        for item in source_events:
+            single_tokens = self._estimate_collected_render_prompt_tokens(
+                target_date,
+                [item],
+                [[item.draft_id]],
+            )
+            if single_tokens <= input_limit_tokens:
+                expanded_events.append(item)
+                continue
+            shards = self._split_collected_source_event_for_render(
+                target_date,
+                item,
+                depth=depth,
+            )
+            expanded_events.extend(shards)
+            split_warnings.append(
+                "Split oversized collected source event content: "
+                f"draft_id={item.draft_id} shards={len(shards)} "
+                f"input_limit_tokens={input_limit_tokens}."
+            )
+        source_events = expanded_events
+        locked_group = [item.draft_id for item in source_events]
+        expanded_prompt_tokens = self._estimate_collected_render_prompt_tokens(
+            target_date,
+            source_events,
+            [locked_group],
+        )
 
         chunks: list[list[CollectedSourceEvent]] = []
         current: list[CollectedSourceEvent] = []
@@ -679,6 +706,7 @@ class CollectedMergeRunner:
 
         summary_events: list[CollectedSourceEvent] = []
         warnings = [
+            *split_warnings,
             "Using hierarchical collected content rendering: "
             f"group={group.group_id} depth={depth + 1} chunks={len(chunks)}."
         ]
@@ -710,6 +738,23 @@ class CollectedMergeRunner:
             )
             warnings.extend([*retry_warnings, *repair_warnings])
 
+        summary_prompt_tokens = self._estimate_collected_render_prompt_tokens(
+            target_date,
+            summary_events,
+            [[item.draft_id for item in summary_events]],
+        )
+        if (
+            summary_prompt_tokens > input_limit_tokens
+            and summary_prompt_tokens >= expanded_prompt_tokens
+        ):
+            raise ValueError(
+                "Hierarchical collected content rendering did not reduce model input: "
+                f"group={group.group_id} depth={depth + 1} "
+                f"before_tokens={expanded_prompt_tokens} "
+                f"after_tokens={summary_prompt_tokens} "
+                f"limit={input_limit_tokens}"
+            )
+
         rendered, recursive_warnings = self._render_oversized_locked_group(
             target_date,
             summary_events,
@@ -721,6 +766,122 @@ class CollectedMergeRunner:
         )
         warnings.extend(recursive_warnings)
         return replace(rendered, draft_ids=list(group.draft_ids)), warnings
+
+    def _split_collected_source_event_for_render(
+        self,
+        target_date: str,
+        source_event: CollectedSourceEvent,
+        *,
+        depth: int,
+    ) -> list[CollectedSourceEvent]:
+        input_limit_tokens = self.config.max_model_input_tokens
+        original_content = clean_text(source_event.event.content)
+        empty_event = replace(
+            source_event,
+            event=replace(source_event.event, content=""),
+            prompt_original_content_chars=len(original_content),
+        )
+        empty_tokens = self._estimate_collected_render_prompt_tokens(
+            target_date,
+            [empty_event],
+            [[empty_event.draft_id]],
+        )
+        if empty_tokens > input_limit_tokens:
+            raise ValueError(
+                "Collected source event fixed fields exceed max_model_input_tokens: "
+                f"draft_id={source_event.draft_id} "
+                f"estimated_tokens={empty_tokens} limit={input_limit_tokens}"
+            )
+        if not original_content:
+            raise ValueError(
+                "Collected source event exceeds max_model_input_tokens without "
+                f"splittable content: draft_id={source_event.draft_id}"
+            )
+
+        shards: list[CollectedSourceEvent] = []
+        remaining = original_content
+        part_index = 1
+        while remaining:
+            low = 1
+            high = len(remaining)
+            best_length = 0
+            while low <= high:
+                length = (low + high) // 2
+                probe = self._build_collected_content_shard(
+                    target_date,
+                    source_event,
+                    remaining[:length],
+                    depth=depth,
+                    part_index=part_index,
+                    original_content_chars=len(original_content),
+                )
+                probe_tokens = self._estimate_collected_render_prompt_tokens(
+                    target_date,
+                    [probe],
+                    [[probe.draft_id]],
+                )
+                if probe_tokens <= input_limit_tokens:
+                    best_length = length
+                    low = length + 1
+                else:
+                    high = length - 1
+            if best_length <= 0:
+                raise ValueError(
+                    "Unable to split collected source event below model input limit: "
+                    f"draft_id={source_event.draft_id} limit={input_limit_tokens}"
+                )
+            split_length = _preferred_content_split_index(remaining, best_length)
+            content = remaining[:split_length].strip()
+            if not content:
+                split_length = best_length
+                content = remaining[:split_length]
+            shards.append(
+                self._build_collected_content_shard(
+                    target_date,
+                    source_event,
+                    content,
+                    depth=depth,
+                    part_index=part_index,
+                    original_content_chars=len(original_content),
+                )
+            )
+            remaining = remaining[split_length:].lstrip()
+            part_index += 1
+        return shards
+
+    def _build_collected_content_shard(
+        self,
+        target_date: str,
+        source_event: CollectedSourceEvent,
+        content: str,
+        *,
+        depth: int,
+        part_index: int,
+        original_content_chars: int,
+    ) -> CollectedSourceEvent:
+        draft_id = (
+            f"{source_event.draft_id}::__content_part_{depth}_{part_index}"
+        )
+        source_ids = list(
+            source_event.event.source_event_ids
+            or [source_event.event.event_id]
+        )
+        return replace(
+            source_event,
+            draft_id=draft_id,
+            event=replace(
+                source_event.event,
+                date=target_date,
+                event_id=stable_event_id(
+                    target_date,
+                    [source_event.draft_id, str(depth), str(part_index)],
+                    "content-shard",
+                ),
+                content=content,
+                source_event_ids=source_ids,
+            ),
+            prompt_original_content_chars=original_content_chars,
+        )
 
     def _merge_source_events_single_stage(
         self,
@@ -909,7 +1070,7 @@ class CollectedMergeRunner:
             deterministic_groups,
         )
         input_limit_tokens = self.config.max_model_input_tokens
-        if prompt_tokens <= input_limit_tokens or len(source_events) <= 1:
+        if prompt_tokens <= input_limit_tokens:
             return self._invoke_collected_grouping_once(
                 target_date,
                 source_events,
@@ -940,9 +1101,16 @@ class CollectedMergeRunner:
                 for group in deterministic_groups
                 if set(group).issubset(batch_ids)
             ]
+            fitted_batch_events, fit_warnings = (
+                self._fit_collected_grouping_events_to_limit(
+                    target_date,
+                    batch_events,
+                    batch_deterministic,
+                )
+            )
             batch_result, batch_warnings = self._invoke_collected_grouping_once(
                 target_date,
-                batch_events,
+                fitted_batch_events,
                 batch_deterministic,
                 stage=(
                     f"candidate_grouping_batch_{batch_index}"
@@ -956,7 +1124,9 @@ class CollectedMergeRunner:
                 batch_deterministic,
             )
             partial_groups.extend(batch_result.groups)
-            warnings.extend([*batch_warnings, *batch_repair_warnings])
+            warnings.extend(
+                [*fit_warnings, *batch_warnings, *batch_repair_warnings]
+            )
 
         if len(batches) <= 1:
             return CollectedGroupingResult(groups=partial_groups), warnings
@@ -1091,6 +1261,88 @@ class CollectedMergeRunner:
             batches.append(current)
         return batches or [list(source_events)]
 
+    def _fit_collected_grouping_events_to_limit(
+        self,
+        target_date: str,
+        source_events: list[CollectedSourceEvent],
+        deterministic_groups: list[list[str]],
+    ) -> tuple[list[CollectedSourceEvent], list[str]]:
+        input_limit_tokens = self.config.max_model_input_tokens
+        full_tokens = self._estimate_collected_grouping_prompt_tokens(
+            target_date,
+            source_events,
+            deterministic_groups,
+        )
+        if full_tokens <= input_limit_tokens:
+            return source_events, []
+
+        empty_events = [
+            replace(
+                item,
+                event=replace(item.event, content=""),
+                prompt_original_content_chars=len(clean_text(item.event.content)),
+            )
+            for item in source_events
+        ]
+        fixed_tokens = self._estimate_collected_grouping_prompt_tokens(
+            target_date,
+            empty_events,
+            deterministic_groups,
+        )
+        if fixed_tokens > input_limit_tokens:
+            locked_ids = [
+                draft_id
+                for group in deterministic_groups
+                for draft_id in group
+            ]
+            raise ValueError(
+                "Collected candidate fixed fields exceed max_model_input_tokens: "
+                f"estimated_tokens={fixed_tokens} limit={input_limit_tokens} "
+                f"draft_ids={[item.draft_id for item in source_events]} "
+                f"deterministic_ids={locked_ids}"
+            )
+
+        source_totals: dict[str, int] = defaultdict(int)
+        for item in source_events:
+            source_key = item.source_file or item.person_name or item.draft_id
+            source_totals[source_key] += len(clean_text(item.event.content))
+        low = 0
+        high = max(source_totals.values(), default=0)
+        best_events = empty_events
+        best_tokens = fixed_tokens
+        while low <= high:
+            quota = (low + high) // 2
+            candidate = _apply_balanced_source_content_quota(
+                source_events,
+                per_source_char_quota=quota,
+            )
+            candidate_tokens = self._estimate_collected_grouping_prompt_tokens(
+                target_date,
+                candidate,
+                deterministic_groups,
+            )
+            if candidate_tokens <= input_limit_tokens:
+                best_events = candidate
+                best_tokens = candidate_tokens
+                low = quota + 1
+            else:
+                high = quota - 1
+
+        shortened_sources = sorted(
+            {
+                item.source_file or item.person_name or item.draft_id
+                for original, item in zip(source_events, best_events, strict=True)
+                if len(clean_text(item.event.content))
+                < len(clean_text(original.event.content))
+            }
+        )
+        warning = (
+            "Used balanced collected candidate content to fit model input: "
+            f"estimated_tokens={best_tokens} limit={input_limit_tokens} "
+            f"shortened_sources={shortened_sources}."
+        )
+        return best_events, [warning]
+
     def _invoke_collected_grouping_once(
         self,
         target_date: str,
@@ -1105,6 +1357,17 @@ class CollectedMergeRunner:
         retry_reason = "initial"
         while True:
             attempt_index += 1
+            prompt_tokens = self._estimate_collected_grouping_prompt_tokens(
+                target_date,
+                source_events,
+                deterministic_groups,
+            )
+            if prompt_tokens > self.config.max_model_input_tokens:
+                raise ValueError(
+                    "Collected candidate prompt exceeds max_model_input_tokens: "
+                    f"estimated_tokens={prompt_tokens} "
+                    f"limit={self.config.max_model_input_tokens}"
+                )
             trace_step_index = self._start_collected_merge_trace_attempt(
                 target_date=target_date,
                 source_events=source_events,
@@ -1166,6 +1429,17 @@ class CollectedMergeRunner:
         retry_reason = "initial"
         while True:
             attempt_index += 1
+            prompt_tokens = self._estimate_collected_render_prompt_tokens(
+                target_date,
+                source_events,
+                deterministic_groups,
+            )
+            if prompt_tokens > self.config.max_model_input_tokens:
+                raise ValueError(
+                    "Collected render prompt exceeds max_model_input_tokens: "
+                    f"estimated_tokens={prompt_tokens} "
+                    f"limit={self.config.max_model_input_tokens}"
+                )
             trace_step_index = self._start_collected_merge_trace_attempt(
                 target_date=target_date,
                 source_events=source_events,
@@ -1349,7 +1623,7 @@ class CollectedMergeRunner:
         source_events: list[CollectedSourceEvent],
         deterministic_groups: list[list[str]],
     ) -> int:
-        return estimate_text_tokens(
+        return _estimate_prepared_model_prompt_tokens(
             build_collected_merge_prompt(
                 target_date,
                 source_events,
@@ -1364,7 +1638,7 @@ class CollectedMergeRunner:
         source_events: list[CollectedSourceEvent],
         deterministic_groups: list[list[str]],
     ) -> int:
-        return estimate_text_tokens(
+        return _estimate_prepared_model_prompt_tokens(
             build_collected_render_prompt(
                 target_date,
                 source_events,
@@ -1379,7 +1653,7 @@ class CollectedMergeRunner:
         source_events: list[CollectedSourceEvent],
         deterministic_groups: list[list[str]],
     ) -> int:
-        return estimate_text_tokens(
+        return _estimate_prepared_model_prompt_tokens(
             build_collected_grouping_prompt(
                 target_date,
                 source_events,
@@ -1944,12 +2218,39 @@ class CollectedMergeRunner:
             "attempt_index": attempt_index,
             "retry_reason": retry_reason,
             "prompt_chars": len(prompt),
-            "prompt_estimated_tokens": estimate_text_tokens(prompt),
+            "prompt_estimated_tokens": _estimate_prepared_model_prompt_tokens(prompt),
             "input_limit_tokens": self.config.max_model_input_tokens,
             "prompt_file": f"step-{self._collected_merge_trace_call_index:03d}-prompt.txt",
             "input": collected_merge_source_metrics(source_events),
             "input_events": [item.to_dict() for item in source_events],
             "deterministic_groups": [list(group) for group in deterministic_groups],
+            "content_fit": [
+                {
+                    "draft_id": item.draft_id,
+                    "source_file": item.source_file,
+                    "original_chars": (
+                        item.prompt_original_content_chars
+                        if item.prompt_original_content_chars is not None
+                        else len(clean_text(item.event.content))
+                    ),
+                    "sent_chars": len(clean_text(item.event.content)),
+                    "shortened": bool(
+                        item.prompt_original_content_chars is not None
+                        and len(clean_text(item.event.content))
+                        < item.prompt_original_content_chars
+                    ),
+                }
+                for item in source_events
+            ],
+            "candidate_summary_sources": [
+                {
+                    "draft_id": item.draft_id,
+                    "source": item.candidate_summary_source,
+                    "source_event_ids": list(item.event.source_event_ids),
+                }
+                for item in source_events
+                if item.candidate_summary_source
+            ],
         }
         self._collected_merge_trace_steps.append(step)
         self._write_collected_merge_trace_step(step)
@@ -2615,6 +2916,34 @@ def build_grouping_summary_events(
         normalized_workstreams = {
             "".join(name.casefold().split()) for name in workstream_names
         }
+        is_singleton = len(items) == 1
+        has_model_summary = all(
+            clean_text(value)
+            for value in (
+                group.summary_title,
+                group.summary_content,
+                group.summary_object_hint,
+            )
+        )
+        if is_singleton:
+            summary_title = items[0].event.title
+            summary_content = items[0].event.content
+            summary_object_hint = items[0].event.object_hint
+            summary_source = "original_singleton"
+        elif has_model_summary:
+            summary_title = clean_text(group.summary_title)
+            summary_content = clean_text(group.summary_content)
+            summary_object_hint = clean_text(group.summary_object_hint)
+            summary_source = "model"
+        else:
+            summary_title = choose_preferred_text(
+                [item.event.title for item in items]
+            )
+            summary_content = build_balanced_group_content(items)
+            summary_object_hint = choose_preferred_text(
+                [item.event.object_hint for item in items]
+            )
+            summary_source = "balanced_fallback"
         synthetic_id = f"__grouping_summary_{depth}_{index}"
         source_ids_by_synthetic[synthetic_id] = list(group.draft_ids)
         summaries.append(
@@ -2622,6 +2951,7 @@ def build_grouping_summary_events(
                 draft_id=synthetic_id,
                 person_name="grouping-summary",
                 source_file=f"__grouping_summary_{depth}.md",
+                candidate_summary_source=summary_source,
                 is_merge_owner_source=any(
                     item.is_merge_owner_source for item in items
                 ),
@@ -2632,12 +2962,8 @@ def build_grouping_summary_events(
                         list(group.draft_ids),
                         "grouping-summary",
                     ),
-                    title=choose_preferred_text(
-                        [item.event.title for item in items]
-                    ),
-                    content=merge_content_texts(
-                        [item.event.content for item in items]
-                    ),
+                    title=summary_title,
+                    content=summary_content,
                     source_people=_dedupe(
                         [
                             person
@@ -2657,9 +2983,7 @@ def build_grouping_summary_events(
                             )
                         ]
                     ),
-                    object_hint=choose_preferred_text(
-                        [item.event.object_hint for item in items]
-                    ),
+                    object_hint=summary_object_hint,
                     retention_reason=choose_preferred_text(
                         [item.event.retention_reason for item in items]
                     ),
@@ -2708,6 +3032,161 @@ def build_grouping_summary_events(
             )
         )
     return summaries, source_ids_by_synthetic
+
+
+_SENTENCE_PART_RE = re.compile(r".+?(?:[。！？!?；;]+|\n+|$)", re.DOTALL)
+_CONTENT_SPLIT_BOUNDARY_RE = re.compile(r"[。！？!?；;\n]")
+
+
+def _preferred_content_split_index(value: str, max_length: int) -> int:
+    if len(value) <= max_length:
+        return len(value)
+    prefix = value[:max_length]
+    boundaries = [match.end() for match in _CONTENT_SPLIT_BOUNDARY_RE.finditer(prefix)]
+    if boundaries and boundaries[-1] >= max_length // 2:
+        return boundaries[-1]
+    return max_length
+
+
+def _apply_balanced_source_content_quota(
+    source_events: list[CollectedSourceEvent],
+    *,
+    per_source_char_quota: int,
+) -> list[CollectedSourceEvent]:
+    indexes_by_source: dict[str, list[int]] = {}
+    for index, item in enumerate(source_events):
+        source_key = item.source_file or item.person_name or item.draft_id
+        indexes_by_source.setdefault(source_key, []).append(index)
+
+    allocations = [0] * len(source_events)
+    for indexes in indexes_by_source.values():
+        lengths = [
+            len(clean_text(source_events[index].event.content))
+            for index in indexes
+        ]
+        source_allocations = _allocate_balanced_lengths(
+            lengths,
+            per_source_char_quota,
+        )
+        for index, allocated in zip(indexes, source_allocations, strict=True):
+            allocations[index] = allocated
+
+    fitted: list[CollectedSourceEvent] = []
+    for item, allocated in zip(source_events, allocations, strict=True):
+        original_content = clean_text(item.event.content)
+        fitted.append(
+            replace(
+                item,
+                event=replace(
+                    item.event,
+                    content=_balanced_text_excerpt(original_content, allocated),
+                ),
+                prompt_original_content_chars=len(original_content),
+            )
+        )
+    return fitted
+
+
+def _allocate_balanced_lengths(lengths: list[int], budget: int) -> list[int]:
+    allocations = [0] * len(lengths)
+    remaining = list(range(len(lengths)))
+    remaining_budget = max(0, budget)
+    while remaining and remaining_budget > 0:
+        share, extra = divmod(remaining_budget, len(remaining))
+        completed = [index for index in remaining if lengths[index] <= share]
+        if completed:
+            for index in completed:
+                allocations[index] = lengths[index]
+                remaining_budget -= lengths[index]
+                remaining.remove(index)
+            continue
+        for position, index in enumerate(remaining):
+            allocations[index] = min(
+                lengths[index],
+                share + (1 if position < extra else 0),
+            )
+        break
+    return allocations
+
+
+def _balanced_text_excerpt(value: str, limit: int) -> str:
+    cleaned = clean_text(value)
+    if limit <= 0:
+        return ""
+    if len(cleaned) <= limit:
+        return cleaned
+    if limit <= 3:
+        return cleaned[:limit]
+
+    parts = [
+        clean_text(match.group(0))
+        for match in _SENTENCE_PART_RE.finditer(cleaned)
+        if clean_text(match.group(0))
+    ]
+    available = limit - 3
+    prefix_budget = available // 2
+    prefix_parts: list[str] = []
+    prefix_chars = 0
+    prefix_count = 0
+    for part in parts:
+        added_chars = len(part) + (1 if prefix_parts else 0)
+        if prefix_chars + added_chars > prefix_budget:
+            break
+        prefix_parts.append(part)
+        prefix_chars += added_chars
+        prefix_count += 1
+
+    suffix_budget = available - prefix_chars
+    suffix_parts: list[str] = []
+    suffix_chars = 0
+    for part in reversed(parts[prefix_count:]):
+        added_chars = len(part) + (1 if suffix_parts else 0)
+        if suffix_chars + added_chars > suffix_budget:
+            break
+        suffix_parts.append(part)
+        suffix_chars += added_chars
+    suffix_parts.reverse()
+
+    prefix = "\n".join(prefix_parts)
+    suffix = "\n".join(suffix_parts)
+    if prefix or suffix:
+        excerpt = f"{prefix}...{suffix}"
+        if len(excerpt) <= limit:
+            return excerpt
+
+    prefix_length = available // 2
+    suffix_length = available - prefix_length
+    return f"{cleaned[:prefix_length].rstrip()}...{cleaned[-suffix_length:].lstrip()}"[
+        :limit
+    ]
+
+
+def build_balanced_group_content(
+    source_events: list[CollectedSourceEvent],
+) -> str:
+    contents_by_source: dict[str, list[str]] = {}
+    for item in source_events:
+        content = clean_text(item.event.content)
+        if not content:
+            continue
+        source_key = item.source_file or item.person_name or item.draft_id
+        values = contents_by_source.setdefault(source_key, [])
+        if content not in values:
+            values.append(content)
+
+    balanced: list[str] = []
+    position = 0
+    while True:
+        added = False
+        for values in contents_by_source.values():
+            if position >= len(values):
+                continue
+            balanced.append(values[position])
+            added = True
+        if not added:
+            break
+        position += 1
+    return "\n\n".join(balanced)
 
 
 def collected_events_are_similar(source_events: list[CollectedSourceEvent]) -> bool:
@@ -2851,18 +3330,79 @@ def repair_collected_grouping_result(
         source_events,
         deterministic_groups,
     )
-    return (
-        CollectedGroupingResult(
-            groups=[
-                CollectedGroupingGroup(
-                    group_id=group.group_id,
-                    draft_ids=list(group.draft_ids),
+    original_by_group_id = {
+        group.group_id: group for group in grouping_result.groups
+    }
+    repaired_groups: list[CollectedGroupingGroup] = []
+    discarded_summary_groups: list[str] = []
+    missing_summary_groups: list[str] = []
+    for group in repaired.groups:
+        original = original_by_group_id.get(group.group_id)
+        membership_unchanged = bool(
+            original
+            and len(original.draft_ids) == len(group.draft_ids)
+            and set(original.draft_ids) == set(group.draft_ids)
+        )
+        if membership_unchanged and original is not None:
+            is_singleton = len(group.draft_ids) == 1
+            has_model_summary = all(
+                clean_text(value)
+                for value in (
+                    original.summary_title,
+                    original.summary_content,
+                    original.summary_object_hint,
                 )
-                for group in repaired.groups
-            ]
-        ),
-        warnings,
-    )
+            )
+            summary_source = (
+                "original_singleton"
+                if is_singleton
+                else "model"
+                if has_model_summary
+                else "balanced_fallback"
+            )
+            if not is_singleton and not has_model_summary:
+                missing_summary_groups.append(group.group_id)
+            repaired_groups.append(
+                replace(
+                    original,
+                    draft_ids=list(group.draft_ids),
+                    summary_source=summary_source,
+                )
+            )
+            continue
+
+        if original and any(
+            clean_text(value)
+            for value in (
+                original.summary_title,
+                original.summary_content,
+                original.summary_object_hint,
+            )
+        ):
+            discarded_summary_groups.append(group.group_id)
+        repaired_groups.append(
+            CollectedGroupingGroup(
+                group_id=group.group_id,
+                draft_ids=list(group.draft_ids),
+                summary_source=(
+                    "original_singleton"
+                    if len(group.draft_ids) == 1
+                    else "balanced_fallback"
+                ),
+            )
+        )
+
+    if discarded_summary_groups:
+        warnings.append(
+            "Discarded collected candidate summaries after group membership repair: "
+            + ", ".join(discarded_summary_groups)
+        )
+    if missing_summary_groups:
+        warnings.append(
+            "Used balanced candidate content because model summaries were missing: "
+            + ", ".join(missing_summary_groups)
+        )
+    return CollectedGroupingResult(groups=repaired_groups), warnings
 
 
 def _build_singleton_collected_group(
@@ -3018,6 +3558,13 @@ def _dedupe(values: list[str]) -> list[str]:
         seen.add(stripped)
         result.append(stripped)
     return result
+
+
+def _estimate_prepared_model_prompt_tokens(prompt: str) -> int:
+    stripped = prompt.strip()
+    if not stripped.endswith("/no_think"):
+        stripped = f"{stripped}\n/no_think"
+    return estimate_text_tokens(stripped)
 
 
 def _sort_self_relations(

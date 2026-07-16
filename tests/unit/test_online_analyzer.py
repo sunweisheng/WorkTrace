@@ -90,6 +90,25 @@ def test_apply_soft_no_think_deduplicates_marker() -> None:
     assert _apply_soft_no_think("prompt\n/no_think") == "prompt\n/no_think"
 
 
+def test_online_analyzer_rejects_oversized_prompt_before_request(
+    tmp_path: Path,
+) -> None:
+    settings_calls = []
+    analyzer = OnlineLLMAnalyzer(
+        config=RuntimeConfig(
+            data_root=tmp_path / "data",
+            max_model_input_tokens=1,
+        ),
+        cwd=tmp_path,
+        settings_loader=lambda *args, **kwargs: settings_calls.append(True),
+    )
+
+    with pytest.raises(AnalyzerProtocolError, match="max_model_input_tokens"):
+        analyzer.analyze_batch("2026-06-23", sample_batch())
+
+    assert settings_calls == []
+
+
 def test_streaming_client_uses_first_response_timeout_for_reads() -> None:
     client = _build_http_client(
         build_settings(

@@ -1429,6 +1429,8 @@ class CollectedSourceEvent:
     source_file: str
     event: WorkEvent
     is_merge_owner_source: bool = False
+    candidate_summary_source: str = ""
+    prompt_original_content_chars: int | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -1437,6 +1439,8 @@ class CollectedSourceEvent:
             "source_file": self.source_file,
             "event": self.event.to_dict(),
             "is_merge_owner_source": self.is_merge_owner_source,
+            "candidate_summary_source": self.candidate_summary_source,
+            "prompt_original_content_chars": self.prompt_original_content_chars,
         }
 
 
@@ -1444,18 +1448,30 @@ class CollectedSourceEvent:
 class CollectedGroupingGroup:
     group_id: str
     draft_ids: list[str]
+    summary_title: str = ""
+    summary_content: str = ""
+    summary_object_hint: str = ""
+    summary_source: str = ""
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "CollectedGroupingGroup":
         return cls(
             group_id=str(data.get("group_id", "")),
             draft_ids=_string_list(data.get("draft_ids")),
+            summary_title=str(data.get("summary_title", "")),
+            summary_content=str(data.get("summary_content", "")),
+            summary_object_hint=str(data.get("summary_object_hint", "")),
+            summary_source=str(data.get("summary_source", "")),
         )
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "group_id": self.group_id,
             "draft_ids": list(self.draft_ids),
+            "summary_title": self.summary_title,
+            "summary_content": self.summary_content,
+            "summary_object_hint": self.summary_object_hint,
+            "summary_source": self.summary_source,
         }
 
 

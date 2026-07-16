@@ -147,10 +147,10 @@ def test_runtime_config_disables_streaming_by_default() -> None:
     assert RuntimeConfig().llm_stream_enabled is False
 
 
-def test_runtime_config_uses_40_percent_of_128k_model_context_by_default() -> None:
+def test_runtime_config_uses_conservative_model_input_limit_by_default() -> None:
     config = RuntimeConfig()
 
-    assert config.max_model_input_tokens == 51200
+    assert config.max_model_input_tokens == 6200
     assert not hasattr(config, "collected_merge_prompt_char_threshold")
 
 

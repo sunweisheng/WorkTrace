@@ -3,8 +3,10 @@ from __future__ import annotations
 from src.worktrace.analyzers.protocol import (
     parse_anchor_analysis_payload,
     parse_batch_analysis_payload,
+    parse_collected_grouping_payload,
     parse_merge_payload,
 )
+from src.worktrace.analyzers.output_schemas import collected_grouping_output_schema
 
 
 def test_protocol_parsers_accept_valid_payloads() -> None:
@@ -22,6 +24,33 @@ def test_protocol_parsers_accept_valid_payloads() -> None:
     assert anchor.anchor_status == "completed"
     assert batch.candidate_events == []
     assert merged.groups == []
+
+
+def test_collected_grouping_protocol_carries_candidate_summary() -> None:
+    payload = {
+        "groups": [
+            {
+                "group_id": "g1",
+                "draft_ids": ["d1", "d2"],
+                "summary_title": "价格方案评估",
+                "summary_content": "提出价格方案并反馈执行影响。",
+                "summary_object_hint": "价格方案",
+            }
+        ]
+    }
+
+    parsed = parse_collected_grouping_payload(payload)
+    schema = collected_grouping_output_schema()
+    item_schema = schema["properties"]["groups"]["items"]
+
+    assert parsed.groups[0].summary_content == payload["groups"][0]["summary_content"]
+    assert item_schema["required"] == [
+        "group_id",
+        "draft_ids",
+        "summary_title",
+        "summary_content",
+        "summary_object_hint",
+    ]
 
 
 def test_anchor_status_list_string_is_normalized_to_single_status() -> None:

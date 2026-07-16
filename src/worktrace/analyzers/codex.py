@@ -30,6 +30,7 @@ from ..models import (
     ResponseSignal,
 )
 from ..utils.json_io import load_json_object
+from ..utils.token_estimation import estimate_text_tokens
 from .base import Analyzer
 from .output_schemas import (
     anchor_batch_output_schema,
@@ -259,6 +260,13 @@ class CodexAnalyzer(Analyzer):
         *,
         output_schema: dict[str, object] | None = None,
     ) -> object:
+        estimated_tokens = estimate_text_tokens(prompt)
+        if estimated_tokens > self.config.max_model_input_tokens:
+            raise AnalyzerProtocolError(
+                "Model input exceeds max_model_input_tokens before Codex request: "
+                f"estimated_tokens={estimated_tokens} "
+                f"limit={self.config.max_model_input_tokens}"
+            )
         with tempfile.NamedTemporaryFile(
             prefix="worktrace-codex-",
             suffix=".json",

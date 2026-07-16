@@ -6,8 +6,10 @@ from pathlib import Path
 
 from src.worktrace.collected_merge import (
     CollectedMergeRunner,
+    build_grouping_summary_events,
     enforce_collected_workstream_boundaries,
     extract_person_name_from_filename,
+    repair_collected_grouping_result,
 )
 from src.worktrace.analyzers.prompts import (
     build_collected_grouping_prompt,
@@ -82,11 +84,25 @@ class TwoStageAnalyzer:
             groups = [[item.draft_id for item in events]]
         if groups is None:
             groups = [[item.draft_id] for item in events]
+        event_by_id = {item.draft_id: item for item in events}
         return CollectedGroupingResult(
             groups=[
                 CollectedGroupingGroup(
                     group_id=f"candidate-{index}",
                     draft_ids=list(group),
+                    summary_title=(
+                        "多人候选事项" if len(group) > 1 else ""
+                    ),
+                    summary_content=(
+                        "多人从不同角度补充了同一候选事项。"
+                        if len(group) > 1
+                        else ""
+                    ),
+                    summary_object_hint=(
+                        event_by_id[group[0]].event.object_hint
+                        if len(group) > 1
+                        else ""
+                    ),
                 )
                 for index, group in enumerate(groups, start=1)
             ]
@@ -496,7 +512,7 @@ def test_collected_merge_over_threshold_rolls_sources_and_keeps_provenance(
         analyzer=analyzer,
         config=RuntimeConfig(
             data_root=tmp_path / "data",
-            max_model_input_tokens=1,
+            max_model_input_tokens=1000,
             self_relation_types=(
                 EventMetadataItem("collaboration", "协作参与", 10),
             ),
@@ -606,7 +622,7 @@ def test_collected_merge_rolling_preserves_owner_signal_between_steps(
         analyzer=analyzer,
         config=RuntimeConfig(
             data_root=tmp_path / "data",
-            max_model_input_tokens=1,
+            max_model_input_tokens=1000,
         ),
     ).run("2026-06-29")
 
@@ -1883,7 +1899,7 @@ def test_collected_merge_rolling_retries_only_current_batch(tmp_path: Path) -> N
         analyzer=analyzer,
         config=RuntimeConfig(
             data_root=tmp_path / "data",
-            max_model_input_tokens=1,
+            max_model_input_tokens=500,
             collected_merge_retryable_error_limit=1,
             collected_merge_trace_enabled=True,
             collected_merge_trace_root=trace_root,
@@ -2186,6 +2202,7 @@ def test_collected_grouping_prompt_uses_same_day_conversation_candidates() -> No
     conversation = "sha256:" + "c" * 64
     message_a = "sha256:" + "a" * 64
     message_b = "sha256:" + "b" * 64
+    long_content = "张三提出完整方案并补充执行细节。" * 30
     events = [
         CollectedSourceEvent(
             draft_id="d1",
@@ -2194,7 +2211,7 @@ def test_collected_grouping_prompt_uses_same_day_conversation_candidates() -> No
             event=_event(
                 event_id="e1",
                 title="方案确认",
-                content="张三提出方案。",
+                content=long_content,
                 evidence_fingerprints=[message_a],
                 conversation_fingerprints=[conversation],
             ),
@@ -2213,7 +2230,12 @@ def test_collected_grouping_prompt_uses_same_day_conversation_candidates() -> No
         ),
     ]
 
-    prompt = build_collected_grouping_prompt("2026-06-29", events, [])
+    prompt = build_collected_grouping_prompt(
+        "2026-06-29",
+        events,
+        [],
+        config=RuntimeConfig(prompt_message_char_limit=12),
+    )
     payload = json.loads(prompt)
 
     assert payload["conversation_groups"] == [
@@ -2223,6 +2245,174 @@ def test_collected_grouping_prompt_uses_same_day_conversation_candidates() -> No
     assert conversation not in prompt
     assert message_a not in prompt
     assert message_b not in prompt
+    assert payload["events"][0]["content"] == long_content
+
+
+def test_grouping_repair_preserves_only_matching_candidate_summary() -> None:
+    events = [
+        CollectedSourceEvent(
+            draft_id="d1",
+            person_name="张三",
+            source_file="a.md",
+            event=_event(event_id="e1", title="方案", content="提出方案。"),
+        ),
+        CollectedSourceEvent(
+            draft_id="d2",
+            person_name="李四",
+            source_file="b.md",
+            event=_event(event_id="e2", title="反馈", content="反馈方案。"),
+        ),
+    ]
+    valid = CollectedGroupingResult(
+        groups=[
+            CollectedGroupingGroup(
+                group_id="g1",
+                draft_ids=["d1", "d2"],
+                summary_title="方案确认",
+                summary_content="提出方案并完成反馈。",
+                summary_object_hint="方案",
+            )
+        ]
+    )
+
+    repaired, warnings = repair_collected_grouping_result(valid, events, [])
+
+    assert warnings == []
+    assert repaired.groups[0].summary_content == "提出方案并完成反馈。"
+    assert repaired.groups[0].summary_source == "model"
+
+    changed = replace(
+        valid,
+        groups=[replace(valid.groups[0], draft_ids=["d1", "d2", "unknown"])],
+    )
+    repaired_changed, changed_warnings = repair_collected_grouping_result(
+        changed,
+        events,
+        [],
+    )
+
+    assert repaired_changed.groups[0].summary_content == ""
+    assert repaired_changed.groups[0].summary_source == "balanced_fallback"
+    assert any("Discarded collected candidate summaries" in item for item in changed_warnings)
+
+
+def test_grouping_summary_event_uses_model_summary_and_keeps_evidence() -> None:
+    conversation = "sha256:" + "c" * 64
+    events = [
+        CollectedSourceEvent(
+            draft_id="d1",
+            person_name="张三",
+            source_file="a.md",
+            event=_event(
+                event_id="e1",
+                title="方案提出",
+                content="张三提出价格方案。",
+                action_labels=["提出"],
+                conversation_fingerprints=[conversation],
+            ),
+        ),
+        CollectedSourceEvent(
+            draft_id="d2",
+            person_name="李四",
+            source_file="b.md",
+            event=_event(
+                event_id="e2",
+                title="方案反馈",
+                content="李四反馈执行影响。",
+                action_labels=["反馈"],
+                conversation_fingerprints=[conversation],
+            ),
+        ),
+    ]
+    group = CollectedGroupingGroup(
+        group_id="g1",
+        draft_ids=["d1", "d2"],
+        summary_title="价格方案评估",
+        summary_content="提出价格方案并反馈执行影响。",
+        summary_object_hint="价格方案",
+        summary_source="model",
+    )
+
+    summaries, source_ids = build_grouping_summary_events(
+        "2026-06-29",
+        events,
+        [group],
+        depth=1,
+    )
+
+    assert source_ids[summaries[0].draft_id] == ["d1", "d2"]
+    assert summaries[0].candidate_summary_source == "model"
+    assert summaries[0].event.content == "提出价格方案并反馈执行影响。"
+    assert summaries[0].event.source_people == ["张三", "李四"]
+    assert summaries[0].event.source_event_ids == ["e1", "e2"]
+    assert summaries[0].event.action_labels == ["提出", "反馈"]
+    assert summaries[0].event.conversation_fingerprints == [conversation]
+
+
+def test_balanced_candidate_content_fits_limit_across_sources(tmp_path: Path) -> None:
+    config = RuntimeConfig(data_root=tmp_path / "data", max_model_input_tokens=900)
+    runner = _build_runner(tmp_path, config=config, analyzer=TwoStageAnalyzer())
+    events = [
+        CollectedSourceEvent(
+            draft_id=f"d{index}",
+            person_name=person,
+            source_file=f"{person}.md",
+            event=_event(
+                event_id=f"e{index}",
+                title=f"{person}方案",
+                content=(f"{person}补充方案执行过程和最终结论。" * 100),
+            ),
+        )
+        for index, person in enumerate(("张三", "李四"), start=1)
+    ]
+
+    fitted, warnings = runner._fit_collected_grouping_events_to_limit(
+        "2026-06-29",
+        events,
+        [],
+    )
+
+    assert runner._estimate_collected_grouping_prompt_tokens(
+        "2026-06-29", fitted, []
+    ) <= 900
+    assert all(item.event.content for item in fitted)
+    assert all(
+        len(item.event.content) < len(original.event.content)
+        for item, original in zip(fitted, events, strict=True)
+    )
+    assert all(item.prompt_original_content_chars for item in fitted)
+    assert any("balanced collected candidate content" in item for item in warnings)
+
+
+def test_single_oversized_render_event_is_split_below_limit(tmp_path: Path) -> None:
+    config = RuntimeConfig(data_root=tmp_path / "data", max_model_input_tokens=900)
+    runner = _build_runner(tmp_path, config=config, analyzer=TwoStageAnalyzer())
+    source = CollectedSourceEvent(
+        draft_id="d1",
+        person_name="张三",
+        source_file="张三.md",
+        event=_event(
+            event_id="e1",
+            title="超大事项",
+            content=("完成一段处理并记录具体结论。" * 400),
+            conversation_fingerprints=["sha256:" + "d" * 64],
+        ),
+    )
+
+    shards = runner._split_collected_source_event_for_render(
+        "2026-06-29",
+        source,
+        depth=0,
+    )
+
+    assert len(shards) > 1
+    assert all(
+        runner._estimate_collected_render_prompt_tokens(
+            "2026-06-29", [item], [[item.draft_id]]
+        ) <= 900
+        for item in shards
+    )
+    assert all(item.event.source_event_ids == ["e1"] for item in shards)
 
 
 def test_two_stage_merge_combines_same_conversation_across_workstreams(
@@ -2467,6 +2657,11 @@ def test_relation_priority_batches_preserve_same_conversation_candidates(
     )
     assert max(step["prompt_estimated_tokens"] for step in summary["steps"]) <= 2000
     assert {step["input_limit_tokens"] for step in summary["steps"]} == {2000}
+    assert any(
+        item["source"] == "model"
+        for step in summary["steps"]
+        for item in step.get("candidate_summary_sources", [])
+    )
     output = MarkdownEventStore(config=RuntimeConfig()).parse_day_document(
         Path(result.output_path or "").read_text(encoding="utf-8")
     )
@@ -2484,6 +2679,7 @@ def test_relation_priority_batches_match_july_14_event_scale(tmp_path: Path) -> 
                 }
             )
             grouped: dict[str, list[str]] = {}
+            event_by_id = {item.draft_id: item for item in events}
             for item in events:
                 conversation = item.event.conversation_fingerprints[0]
                 grouped.setdefault(conversation, []).append(item.draft_id)
@@ -2492,6 +2688,11 @@ def test_relation_priority_batches_match_july_14_event_scale(tmp_path: Path) -> 
                     CollectedGroupingGroup(
                         group_id=f"candidate-{index}",
                         draft_ids=draft_ids,
+                        summary_title=event_by_id[draft_ids[0]].event.title,
+                        summary_content="多人围绕同一事项补充了执行信息。",
+                        summary_object_hint=(
+                            event_by_id[draft_ids[0]].event.object_hint
+                        ),
                     )
                     for index, draft_ids in enumerate(grouped.values(), start=1)
                 ]
@@ -2545,7 +2746,7 @@ def test_relation_priority_batches_match_july_14_event_scale(tmp_path: Path) -> 
 
     analyzer = ConversationGroupingAnalyzer()
     trace_root = tmp_path / "trace"
-    input_limit_tokens = 7000
+    input_limit_tokens = 6200
     result = _build_runner(
         tmp_path,
         analyzer=analyzer,
@@ -2591,3 +2792,49 @@ def test_relation_priority_batches_match_july_14_event_scale(tmp_path: Path) -> 
             for fingerprint in event.conversation_fingerprints
         }
     ) == 39
+
+
+def test_relation_priority_batching_fits_138_and_195_event_scales(
+    tmp_path: Path,
+) -> None:
+    config = RuntimeConfig(
+        data_root=tmp_path / "data",
+        max_model_input_tokens=6200,
+    )
+    runner = _build_runner(tmp_path, config=config, analyzer=TwoStageAnalyzer())
+
+    for event_count in (138, 195):
+        events = [
+            CollectedSourceEvent(
+                draft_id=f"d-{event_count}-{index}",
+                person_name=f"人员{index % 6}",
+                source_file=f"人员{index % 6}.md",
+                event=_event(
+                    event_id=f"e-{event_count}-{index}",
+                    title=f"事项{index // 5}",
+                    content=f"来源记录{index}补充事项执行过程和结果。",
+                    conversation_fingerprints=[
+                        "sha256:" + f"{index // 5:064x}"
+                    ],
+                ),
+            )
+            for index in range(event_count)
+        ]
+        batches = runner._pack_collected_grouping_batches(
+            "2026-06-29",
+            events,
+            [],
+        )
+
+        assert len(batches) > 1
+        for batch in batches:
+            fitted, _ = runner._fit_collected_grouping_events_to_limit(
+                "2026-06-29",
+                batch,
+                [],
+            )
+            assert runner._estimate_collected_grouping_prompt_tokens(
+                "2026-06-29",
+                fitted,
+                [],
+            ) <= 6200

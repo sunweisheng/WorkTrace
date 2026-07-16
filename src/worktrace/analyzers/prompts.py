@@ -667,7 +667,7 @@ def build_collected_grouping_prompt(
     protocol = {
         "instruction": (
             "先判断多人 WorkTrace 事件中哪些属于同一真实事项。"
-            "只返回 groups 和 draft_ids，不生成正式汇总正文。"
+            "返回 groups、draft_ids 和供跨批判断使用的候选摘要，不生成正式汇总正文。"
             "请直接返回 JSON，不要展示推理过程。"
         ),
         "rules": [
@@ -679,12 +679,21 @@ def build_collected_grouping_prompt(
             "不同员工或部门从不同视角描述同一真实事项时可以合并。",
             "拿不准是否同一事项时必须分开。",
             "不同非空工作流名称通常应分开；只有共享会话或共同消息且内容明确一致时才可合并。",
+            (
+                "多条记录组成的组必须返回非空 summary_title、summary_content 和 "
+                "summary_object_hint；摘要应整合具体对象、动作、进展、结果、风险、"
+                "待办和明确冲突，不得按人员逐条罗列或补充来源中没有的事实。"
+            ),
+            "只有一条记录的组将三个 summary 字段返回空字符串，由 Python 保留原事件。",
         ],
         "required_output_schema": {
             "groups": [
                 {
                     "group_id": "string",
                     "draft_ids": ["draft_id"],
+                    "summary_title": "string or empty for singleton",
+                    "summary_content": "string or empty for singleton",
+                    "summary_object_hint": "string or empty for singleton",
                 }
             ]
         },
@@ -704,10 +713,7 @@ def build_collected_grouping_prompt(
                 "person": item.person_name,
                 "source_people": list(item.event.source_people),
                 "title": item.event.title,
-                "content": _trim_text(
-                    clean_text(item.event.content),
-                    runtime_config.prompt_message_char_limit,
-                ),
+                "content": clean_text(item.event.content),
                 "object_hint": item.event.object_hint,
                 "workstream_name": item.event.workstream_name,
                 "action_labels": list(item.event.action_labels),
