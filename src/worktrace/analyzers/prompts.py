@@ -69,6 +69,12 @@ PERSON_NAME_RETENTION_RULE = (
     "与事件责任和推进无关的人名改写为岗位、角色或相关同事，不要输出参与人名单。"
 )
 
+EVENT_TITLE_RULE = (
+    "topic 或 title 必须让读者脱离正文也能识别具体事项；"
+    "优先采用‘具体对象 + 关键动作、进展、结果或风险’的结构，"
+    "保持简洁，不得只写无法区分实际事项的通用类别。"
+)
+
 ATTACHMENT_FILE_NAME_RULE = (
     "附件元数据中的 file_name 仅用于识别文件：当消息明确是在发送、查看、审核、"
     "转交或处理该附件时，topic 和 object_hint 必须写明 file_name，并将 attachment_id "
@@ -115,7 +121,8 @@ def build_batch_analysis_prompt(
             PERSON_NAME_RETENTION_RULE,
             _build_sensitive_rule(runtime_config),
             "一件事写一条；如果有多件事就拆开。",
-            "topic 写短标题，content 写完整事项；如果有明确结果，直接融入 content，不要单独返回 result。",
+            EVENT_TITLE_RULE,
+            "content 写完整事项；如果有明确结果，直接融入 content，不要单独返回 result。",
             "action_label 只写主要动作标签，例如：回复、审批、催办、撰写、核对、跟进、同步、确认。",
             "object_hint 只写该事项的核心对象或主题，例如：提前付款、优惠券配置、汇报文档、上海点位签约方案。",
             (
@@ -347,6 +354,7 @@ def build_segment_batch_analysis_prompt(
             "图片和文件附件默认只提供元数据；判断依赖其内容时，必须返回 attachment_text 的 context_requests，并给出对应消息和附件 ID，不要猜测图片或文件内容。",
             "workstream_key 只在消息明确命名项目、产品或政策时填写其稳定规范名称；不能使用城市、地点、部门、工具类别、环境或泛化主题，无法确定时返回空字符串。",
             "本人提出的问题、风险和待确认事项本身可以提炼，不要求已有处理结果。",
+            EVENT_TITLE_RULE,
             "表情是本人回复证据，但不能单凭表情描述事项已完成、已同意或已拒绝。",
             "普通约时间、确认开会、互通信息、泛泛审核/审批且无具体对象和结论，不要输出 candidate_event。",
             RETENTION_COMPLETENESS_RULE,
@@ -576,7 +584,8 @@ def build_collected_merge_prompt(
             "remaining_events 中只有明显属于同一真实事件的事项才合并；拿不准就分开。",
             "每个输入 draft_id 必须且只能出现在一个 group 里。",
             "每个 group 必须返回管理人员可读的 title 和 content。",
-            "title 要短，content 要整合所有来源中不冲突的事实、动作、结果、风险和待办，不按人员逐条展示贡献。",
+            EVENT_TITLE_RULE,
+            "content 要整合所有来源中不冲突的事实、动作、结果、风险和待办，不按人员逐条展示贡献。",
             "不同员工可能从不同视角描述同一事件；不要编造输入中没有的信息，也不能丢失任何一方提供的有效补充。",
             "是否属于同一真实事件仍由你判断，不要依赖 Python 预先给出同题结论。",
             (
@@ -878,7 +887,8 @@ def build_collected_render_prompt(
         ),
         "rules": [
             "每个 locked_group 必须原样返回为一个 group，draft_ids 不得增删或移动。",
-            "title 要简短，content 要整合全部来源中不冲突的事实、动作、结果、风险和待办。",
+            EVENT_TITLE_RULE,
+            "content 要整合全部来源中不冲突的事实、动作、结果、风险和待办。",
             "不得按人员逐条罗列，不得编造来源中没有的信息。",
             (
                 "只有版本号、结论、状态、结果或待办方向明确冲突时，"
@@ -973,6 +983,7 @@ def build_anchor_analysis_prompt(
             PERSON_NAME_RETENTION_RULE,
             "每个 candidate_event 只能落在当前 anchor_unit 内。",
             "每个 candidate_event 只表示一个主要动作。",
+            EVENT_TITLE_RULE,
             "action_label 只写主要动作标签，例如：回复、审批、催办、撰写、核对、跟进、同步、确认。",
             "object_hint 只写该事项的核心对象或主题。",
             (
@@ -1066,6 +1077,7 @@ def build_anchor_batch_analysis_prompt(
             PERSON_NAME_RETENTION_RULE,
             "每个 candidate_event 只能留在自己的 anchor_unit 内。",
             "每个 candidate_event 只表示一个主要动作。",
+            EVENT_TITLE_RULE,
             "action_label 只写主要动作标签，例如：回复、审批、催办、撰写、核对、跟进、同步、确认。",
             "object_hint 只写该事项的核心对象或主题。",
             (
@@ -1180,6 +1192,7 @@ def build_anchor_expansion_prompt(
             _build_self_relation_rule(runtime_config),
             "每个 candidate_event 仍然只能表示一个主要动作或工作线索。",
             "每个 candidate_event 必须包含 object_hint、retention_reason 和 retention_detail。",
+            EVENT_TITLE_RULE,
             RETENTION_COMPLETENESS_RULE,
             PERSON_NAME_RETENTION_RULE,
             *LOW_RETENTION_EVENT_RULES,

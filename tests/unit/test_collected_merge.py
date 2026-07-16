@@ -18,6 +18,7 @@ from src.worktrace.collected_merge import (
 from src.worktrace.analyzers.prompts import (
     build_collected_grouping_prompt,
     build_collected_merge_prompt,
+    build_collected_render_prompt,
     build_collected_review_prompt,
 )
 from src.worktrace.config import EventMetadataItem, RuntimeConfig
@@ -1152,6 +1153,39 @@ def test_collected_merge_prompt_includes_python_evidence_relations() -> None:
     assert message_b not in prompt
     assert message_c not in prompt
     assert file_a not in prompt
+
+
+def test_collected_content_prompts_require_specific_event_titles() -> None:
+    events = [
+        CollectedSourceEvent(
+            "d1",
+            "张三",
+            "a.md",
+            _event(
+                event_id="e1",
+                title="项目风险反馈",
+                content="反馈项目方案尚未确定。",
+                object_hint="项目方案",
+            ),
+        )
+    ]
+
+    merge_payload = json.loads(
+        build_collected_merge_prompt("2026-06-29", events, [])
+    )
+    render_payload = json.loads(
+        build_collected_render_prompt("2026-06-29", events, [["d1"]])
+    )
+
+    for payload in (merge_payload, render_payload):
+        assert any(
+            "具体对象 + 关键动作、进展、结果或风险" in rule
+            for rule in payload["rules"]
+        )
+        assert any(
+            "不得只写无法区分实际事项的通用类别" in rule
+            for rule in payload["rules"]
+        )
 
 
 def test_collected_merge_prompt_handles_file_only_and_empty_evidence() -> None:

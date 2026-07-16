@@ -381,6 +381,10 @@ def test_segment_prompt_recombines_context_and_primary_messages_in_time_order() 
         "人名只在明确责任分工、任务指派或确认沟通对象时保留" in rule
         for rule in payload["rules"]
     )
+    assert any(
+        "具体对象 + 关键动作、进展、结果或风险" in rule
+        for rule in payload["rules"]
+    )
     assert any("图片和文件附件默认只提供元数据" in rule for rule in payload["rules"])
     assert [item["id"] for item in prompt_messages] == ["om_1", "om_2"]
     assert [item["role"] for item in prompt_messages] == ["context", "primary"]

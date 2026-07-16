@@ -187,6 +187,8 @@ def test_batch_prompt_uses_original_message_ids_and_slim_rules(tmp_path: Path) -
     assert "每条事项附上最相关的消息 id。" in prompt
     assert "referenced_link_ids" in prompt
     assert "只能从对应 source_message_ids 的 links 里选择 referenced_link_ids" in prompt
+    assert "具体对象 + 关键动作、进展、结果或风险" in prompt
+    assert "不得只写无法区分实际事项的通用类别" in prompt
     assert "如果有明确结果，直接融入 content，不要单独返回 result。" in prompt
     assert "请给我简洁的答案，不要推理，跳过思考步骤。" in prompt
     assert "直接作答，不要展示你的推理过程。" in prompt
@@ -287,6 +289,7 @@ def test_anchor_prompt_serialization_is_compact(tmp_path: Path) -> None:
     assert '"anchor_status"' in prompt
     assert AnchorStatus.NEEDS_MORE_CONTEXT.value in prompt
     assert "每个 candidate_event 只表示一个主要动作。" in prompt
+    assert "具体对象 + 关键动作、进展、结果或风险" in prompt
     assert "例如：已同步给老板、老板未回复可视为已知悉" in prompt
     assert "咨询类事件、流程审核类事件、团建活动组织类事件、技能培训类事件，默认不要提炼；这类事项对后续公司级长期事件沉淀价值较低。" in prompt
     assert "私人饭局、约饭、离职告别聚餐、同事口碑评价、人际寒暄，不要提炼为事项。" in prompt
@@ -399,6 +402,7 @@ def test_anchor_expansion_prompt_includes_previous_result_and_expansion(tmp_path
     assert '"linked_file_texts"' in prompt
     assert AnchorStatus.NEEDS_ATTACHMENT_TEXT.value in prompt
     assert "如果新上下文显示某个先前 candidate_event 实际混合了多个动作" in prompt
+    assert "具体对象 + 关键动作、进展、结果或风险" in prompt
     assert "该结果只能归属于同一个 candidate_event 的主要动作" in prompt
     assert "私人饭局、约饭、离职告别聚餐、同事口碑评价、人际寒暄，不要提炼为事项。" in prompt
     assert "个人请假、家庭原因、孩子学校证明、个人行程报备，不要提炼为工作事件。" in prompt
@@ -513,6 +517,7 @@ def test_anchor_batch_prompt_includes_low_retention_rules(tmp_path: Path) -> Non
     assert "个人请假、家庭原因、孩子学校证明、个人行程报备，不要提炼为工作事件。" in prompt
     assert "泛泛完成审核/审批/工作审核/审核任务但没有具体业务对象、审批结论、问题、风险、金额、客户、项目、文档或后续动作，不要提炼为事项。" in prompt
     assert "只有同时具备具体对象、保留理由、保留依据的工作事件才输出" in prompt
+    assert "具体对象 + 关键动作、进展、结果或风险" in prompt
     assert "人名只在明确责任分工、任务指派或确认沟通对象时保留" in prompt
     assert "retention_detail 表示保留依据/来源证据" in prompt
     assert "不要写 message id、open_id、conversation_id 或 om_/ou_/oc_ 等内部标识。" in prompt
