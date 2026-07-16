@@ -20,6 +20,22 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(add_help=True)
     parser.add_argument("--date", required=True)
     parser.add_argument(
+        "--analyzer-backend",
+        choices=("online", "codex"),
+        default="online",
+        help="LLM analyzer backend used for this replay.",
+    )
+    parser.add_argument(
+        "--data-root",
+        default=None,
+        help="Isolated data root for output and caches. Default: data",
+    )
+    parser.add_argument(
+        "--codex-stdin-mode",
+        action="store_true",
+        help="Send Codex prompts through stdin and enforce the output schema.",
+    )
+    parser.add_argument(
         "--trace-root",
         default=None,
         help="Default: data/replay-trace/<date>",
@@ -211,16 +227,17 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit("--max-model-input-tokens must be positive.")
     repo_root = Path.cwd()
     trace_root = Path(args.trace_root) if args.trace_root else repo_root / "data" / "replay-trace" / args.date
+    data_root = Path(args.data_root) if args.data_root else repo_root / "data"
     conversation_debug_root = trace_root / "conversation_debug"
     counter_path = trace_root / "run_state" / "llm_call_counter.txt"
 
     trace_root.mkdir(parents=True, exist_ok=True)
 
-    output_dir = repo_root / "data" / args.date[:4] / args.date[5:7]
+    output_dir = data_root / args.date[:4] / args.date[5:7]
     old_outputs = sorted(output_dir.glob(f"{args.date}-*.md"))
-    old_anchor_cache = repo_root / "data" / "cache" / "anchors" / args.date[:4] / args.date[5:7] / args.date
-    old_anchor_debug = repo_root / "data" / "anchor-debug" / args.date
-    checkpoint_root = repo_root / "data" / "cache" / "llm" / args.date[:4] / args.date[5:7] / args.date
+    old_anchor_cache = data_root / "cache" / "anchors" / args.date[:4] / args.date[5:7] / args.date
+    old_anchor_debug = data_root / "anchor-debug" / args.date
+    checkpoint_root = data_root / "cache" / "llm" / args.date[:4] / args.date[5:7] / args.date
     old_replay_trace = trace_root
 
     if not args.resume:
@@ -239,7 +256,7 @@ def main(argv: list[str] | None = None) -> int:
     env["PYTHONPATH"] = str(repo_root)
     env["WORKTRACE_REPLAY_TRACE_ROOT"] = str(trace_root)
     env["WORKTRACE_REPLAY_TARGET_DATE"] = args.date
-    cli_args = ["--date", args.date]
+    cli_args = ["--date", args.date, "--debug-output"]
     if args.resume:
         cli_args.append("--resume")
     config_overrides = ""
@@ -254,6 +271,9 @@ def main(argv: list[str] | None = None) -> int:
         "from src.worktrace.config import DEFAULT_CONFIG\n"
         "config = replace(\n"
         "    DEFAULT_CONFIG,\n"
+        f"    analyzer_backend={args.analyzer_backend!r},\n"
+        f"    codex_stdin_mode={args.codex_stdin_mode!r},\n"
+        f"    data_root=Path({str(data_root)!r}),\n"
         f"    conversation_debug_root=Path({str(conversation_debug_root)!r}),\n"
         f"{config_overrides}"
         ")\n"
@@ -291,6 +311,9 @@ def main(argv: list[str] | None = None) -> int:
 
     summary = {
         "target_date": args.date,
+        "analyzer_backend": args.analyzer_backend,
+        "codex_stdin_mode": args.codex_stdin_mode,
+        "data_root": str(data_root.resolve()),
         "resume_requested": args.resume,
         "max_model_input_tokens": args.max_model_input_tokens,
         "trace_root": str(trace_root.resolve()),

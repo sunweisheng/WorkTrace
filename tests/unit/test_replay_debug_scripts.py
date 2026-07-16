@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from scripts.replay_day_with_trace import _collect_review_artifact_summary
+from scripts.replay_day_with_trace import _collect_review_artifact_summary, _parse_args
 from scripts.report_replay_call_inputs import _review_records
 
 
@@ -41,6 +41,24 @@ def test_replay_summary_collects_review_artifact_status(tmp_path: Path) -> None:
     assert fact_review["failed_attempt_count"] == 1
     assert fact_review["summary"]["revised_candidate_count"] == 1
     assert summary["retention_review"]["exists"] is False
+
+
+def test_replay_args_support_isolated_analyzer_runs(tmp_path: Path) -> None:
+    args = _parse_args(
+        [
+            "--date",
+            "2026-07-15",
+            "--analyzer-backend",
+            "codex",
+            "--codex-stdin-mode",
+            "--data-root",
+            str(tmp_path / "codex-data"),
+        ]
+    )
+
+    assert args.analyzer_backend == "codex"
+    assert args.codex_stdin_mode is True
+    assert args.data_root == str(tmp_path / "codex-data")
 
 
 def test_call_input_report_includes_each_review_attempt(tmp_path: Path) -> None:
