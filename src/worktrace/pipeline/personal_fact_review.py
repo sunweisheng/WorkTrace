@@ -210,11 +210,16 @@ def validate_personal_fact_review_result(
             raise AnalyzerProtocolError(
                 "Supported personal fact review result is missing required event fields."
             )
-        fact_items = validate_personal_fact_items(
-            text_fields,
-            item.fact_items,
-            allowed_message_ids=review_candidate.allowed_evidence_message_ids,
-        )
+        try:
+            fact_items = validate_personal_fact_items(
+                text_fields,
+                item.fact_items,
+                allowed_message_ids=review_candidate.allowed_evidence_message_ids,
+            )
+        except AnalyzerProtocolError as exc:
+            raise AnalyzerProtocolError(
+                f"Personal fact review draft_id={item.draft_id}: {exc}"
+            ) from exc
         validated[item.draft_id] = replace(item, fact_items=fact_items)
     return validated
 
@@ -337,18 +342,20 @@ def validate_personal_fact_items(
         if not field_text:
             if items:
                 raise AnalyzerProtocolError(
-                    "Personal fact items include evidence for an empty event field."
+                    "Personal fact items include evidence for empty field "
+                    f"{field_name}."
                 )
             continue
         if field_name == "content":
             if not items or clean_text("".join(item.text for item in items)) != field_text:
                 raise AnalyzerProtocolError(
-                    "Personal content fact items do not exactly cover the content field."
+                    "Personal content fact items do not exactly cover field content."
                 )
             continue
         if len(items) != 1 or items[0].text != field_text:
             raise AnalyzerProtocolError(
-                "Personal fact items do not exactly cover an event field."
+                "Personal fact items do not exactly cover field "
+                f"{field_name}."
             )
     return normalized
 

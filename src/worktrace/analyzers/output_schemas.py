@@ -212,7 +212,7 @@ def personal_fact_review_output_schema(config: RuntimeConfig) -> dict[str, objec
                         "object_hint": {"type": "string"},
                         "retention_detail": {"type": "string"},
                         "workstream_key": {"type": "string"},
-                        "fact_items": _personal_fact_items_schema(),
+                        "fact_items": _personal_fact_review_items_schema(),
                         "removed_claims": {
                             "type": "array",
                             "items": {"type": "string"},
@@ -295,6 +295,40 @@ def _segment_candidate_schema(config: RuntimeConfig) -> dict[str, object]:
             "fact_items",
             "fact_risk_flags",
         ],
+        "additionalProperties": False,
+    }
+
+
+def _personal_fact_review_items_schema() -> dict[str, object]:
+    single_item = {
+        "type": "object",
+        "properties": {
+            "text": {"type": "string"},
+            "evidence_message_ids": {
+                "type": "array",
+                "items": {"type": "string"},
+            },
+        },
+        "required": ["text", "evidence_message_ids"],
+        "additionalProperties": False,
+    }
+    field_names = (
+        "topic",
+        "action_label",
+        "object_hint",
+        "retention_detail",
+        "workstream_key",
+    )
+    return {
+        "type": "object",
+        "properties": {
+            **{field_name: single_item for field_name in field_names},
+            "content": {
+                "type": "array",
+                "items": single_item,
+            },
+        },
+        "required": ["topic", "content", *field_names[1:]],
         "additionalProperties": False,
     }
 

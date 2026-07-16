@@ -765,10 +765,13 @@ class DailyTraceRunner:
             last_error = ""
             for attempt in range(self.config.analysis_batch_retry_limit + 1):
                 result = None
+                attempt_batch = (
+                    batch if not last_error else replace(batch, retry_feedback=last_error)
+                )
                 try:
                     call_count += 1
-                    result = review_method(batch)
-                    validated = validate_personal_fact_review_result(batch, result)
+                    result = review_method(attempt_batch)
+                    validated = validate_personal_fact_review_result(attempt_batch, result)
                     reviewed.update(validated)
                     debug_batches.append(
                         _personal_fact_review_debug_entry(

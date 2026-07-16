@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from src.worktrace.analyzers.prompts import build_personal_fact_review_prompt
 from src.worktrace.config import RuntimeConfig, load_runtime_config_overrides
 from src.worktrace.errors import AnalyzerProtocolError
 from src.worktrace.models import (
@@ -264,3 +265,22 @@ def test_review_batches_obey_model_token_limit() -> None:
             candidates=review_candidates,
             config=replace(CONFIG, max_model_input_tokens=1),
         )
+
+
+def test_fact_review_prompt_states_exact_fact_item_coverage_contract() -> None:
+    review_candidate = build_personal_fact_review_candidates(
+        [_candidate()],
+        slices=[_slice()],
+        messages=_messages(),
+        policy=POLICY,
+    )[0]
+    batch = PersonalFactReviewBatch(
+        target_date="2026-07-15",
+        batch_id="personal-fact-review-001",
+        candidates=[review_candidate],
+    )
+
+    prompt = build_personal_fact_review_prompt(batch, config=CONFIG)
+
+    assert "action_label、object_hint、retention_detail" in prompt
+    assert "不加任何分隔符直接拼接后" in prompt

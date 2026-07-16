@@ -117,6 +117,26 @@ def _personal_fact_output_shape() -> dict[str, object]:
     }
 
 
+def _personal_fact_review_items_shape() -> dict[str, object]:
+    single_item = {
+        "text": "must exactly equal the corresponding output field, or empty",
+        "evidence_message_ids": ["message_id"],
+    }
+    return {
+        "topic": single_item,
+        "content": [
+            {
+                "text": "ordered content fragment",
+                "evidence_message_ids": ["message_id"],
+            }
+        ],
+        "action_label": single_item,
+        "object_hint": single_item,
+        "retention_detail": single_item,
+        "workstream_key": single_item,
+    }
+
+
 def _build_self_relation_rule(config: RuntimeConfig) -> str:
     options = "、".join(
         f"{item.key}={item.label}" for item in config.self_relation_types
@@ -546,12 +566,15 @@ def build_personal_fact_review_prompt(
             "每个输入 draft_id 必须且只能返回一次，并保持输入顺序。",
             "只能使用 role=evidence 且属于 allowed_evidence_message_ids 的消息作为事实证据；context 只能帮助理解。",
             "supported=true 时，只保留原聊天直接支持的事实，并完整返回 topic、content、action_label、object_hint、retention_detail、workstream_key 和 fact_items。",
+            "supported=true 时，topic、action_label、object_hint、retention_detail 以及非空 workstream_key 各返回且只返回一个同名 fact_item；fact_item.text 必须与对应输出字段逐字完全一致，workstream_key 为空时不得返回它的 fact_item。",
+            "content 可以拆成一个或多个 content fact_items，但必须按正文顺序返回；所有 content fact_item.text 不加任何分隔符直接拼接后，必须与 content 逐字完全一致，包括标点，不能把 topic、action_label、object_hint 或 retention_detail 的文字放入 content fact_items。",
             "supported=false 只表示原聊天没有任何可形成该事件的事实；此时六个文字字段和 fact_items 必须为空，removed_claims 至少写一项。",
             "不要因为事件包含多人、多地点、多步骤或较长聊天就返回 supported=false。",
             "fact_items 的字段覆盖、文字一致性和消息证据要求与首次提炼相同。",
             "removed_claims 只写被删除或改写的原候选表述，不要写内部消息 ID。",
             *policy.fact_review_rules,
         ],
+        "retry_feedback": batch.retry_feedback,
         "risk_signal_definitions": fact_risk_types,
         "required_output_schema": {
             "results": [
@@ -564,7 +587,7 @@ def build_personal_fact_review_prompt(
                     "object_hint": "string",
                     "retention_detail": "string",
                     "workstream_key": "string or empty string",
-                    "fact_items": _personal_fact_output_shape()["fact_items"],
+                    "fact_items": _personal_fact_review_items_shape(),
                     "removed_claims": ["removed or revised claim"],
                 }
             ]

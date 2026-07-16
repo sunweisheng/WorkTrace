@@ -157,6 +157,52 @@ def test_personnel_retention_compensation_is_filtered_at_all_three_layers() -> N
     assert event_warnings == ["Filtered sensitive event."]
 
 
+def test_retention_synonym_in_visible_metadata_is_filtered_at_all_three_layers() -> None:
+    candidate = SourceBackedEventDraft(
+        draft_id="evt-retention-synonym",
+        date="2026-07-15",
+        topic="人员安排确认",
+        content="确认后续处理方案。",
+        source_message_ids=["m1"],
+        source_conversation_id="c1",
+        source_slice_id="s1",
+        confidence=0.9,
+        action_label="争取留人",
+        object_hint="陈某",
+        retention_reason="decision_made",
+        retention_detail="已确认处理预算。",
+    )
+    merged = MergedEventDraft(
+        date=candidate.date,
+        topic=candidate.topic,
+        content=candidate.content,
+        source_message_ids=candidate.source_message_ids,
+        source_conversation_ids=[candidate.source_conversation_id],
+        action_labels=[candidate.action_label],
+        object_hint=candidate.object_hint,
+        retention_reason=candidate.retention_reason,
+        retention_detail=candidate.retention_detail,
+    )
+    event = WorkEvent(
+        date=candidate.date,
+        event_id=candidate.draft_id,
+        title=candidate.topic,
+        content=candidate.content,
+        action_labels=[candidate.action_label],
+        object_hint=candidate.object_hint,
+        retention_reason=candidate.retention_reason,
+        retention_detail=candidate.retention_detail,
+    )
+
+    candidate_kept, _ = filter_candidate_drafts([candidate], REPO_CONFIG)
+    merged_kept, _ = filter_merged_drafts([merged], REPO_CONFIG)
+    event_kept, _ = filter_work_events([event], REPO_CONFIG)
+
+    assert candidate_kept == []
+    assert merged_kept == []
+    assert event_kept == []
+
+
 def test_merged_markdown_title_is_excluded_at_all_three_layers() -> None:
     title = "《2026-07-14-部门负责人-merged.md》日报质量分析"
     candidate = SourceBackedEventDraft(

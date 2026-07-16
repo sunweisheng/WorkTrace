@@ -85,6 +85,7 @@ class FactReviewAnalyzer:
     def __init__(self, result: PersonalFactReviewResult):
         self.result = result
         self.review_calls = 0
+        self.review_feedback: list[str] = []
 
     def build_batch_prompt(self, batch_input):
         return "batch prompt"
@@ -118,6 +119,7 @@ class FactReviewAnalyzer:
 
     def review_personal_event_facts(self, batch):
         self.review_calls += 1
+        self.review_feedback.append(batch.retry_feedback)
         return self.result
 
     def merge_day_candidates(self, target_date, candidates):
@@ -231,6 +233,8 @@ def test_runner_fails_without_writing_after_fact_review_protocol_retries(
     assert result.status == DailyRunStatus.FAILED.value
     assert result.output_path is None
     assert analyzer.review_calls == 2
+    assert analyzer.review_feedback[0] == ""
+    assert "must return every draft_id" in analyzer.review_feedback[1]
     assert not (tmp_path / "data" / "2026" / "07").exists()
     debug_payload = json.loads(
         (tmp_path / "debug" / "2026-07-15" / "personal_fact_review.json").read_text(

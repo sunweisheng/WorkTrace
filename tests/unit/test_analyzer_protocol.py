@@ -81,13 +81,31 @@ def test_personal_fact_review_protocol_and_schema_require_source_backed_fields()
                 "object_hint": "设备编号",
                 "retention_detail": "执行人确认重新修改设备编号。",
                 "workstream_key": "",
-                "fact_items": [
-                    {
-                        "field": "content",
-                        "text": "重新修改未生效的设备编号。",
+                "fact_items": {
+                    "topic": {
+                        "text": "设备编号修正",
                         "evidence_message_ids": ["m1"],
-                    }
-                ],
+                    },
+                    "content": [
+                        {
+                            "text": "重新修改未生效的设备编号。",
+                            "evidence_message_ids": ["m1"],
+                        }
+                    ],
+                    "action_label": {
+                        "text": "修改",
+                        "evidence_message_ids": ["m1"],
+                    },
+                    "object_hint": {
+                        "text": "设备编号",
+                        "evidence_message_ids": ["m1"],
+                    },
+                    "retention_detail": {
+                        "text": "执行人确认重新修改设备编号。",
+                        "evidence_message_ids": ["m1"],
+                    },
+                    "workstream_key": {"text": "", "evidence_message_ids": []},
+                },
                 "removed_claims": [],
             }
         ]
@@ -97,8 +115,11 @@ def test_personal_fact_review_protocol_and_schema_require_source_backed_fields()
     schema = personal_fact_review_output_schema(config)
     item_schema = schema["properties"]["results"]["items"]
 
-    assert parsed.to_dict() == payload
+    assert parsed.results[0].fact_items[2].field_name == "action_label"
+    assert parsed.results[0].fact_items[2].text == "修改"
     assert "fact_items" in item_schema["required"]
+    assert item_schema["properties"]["fact_items"]["type"] == "object"
+    assert "action_label" in item_schema["properties"]["fact_items"]["required"]
     assert item_schema["additionalProperties"] is False
 
 
@@ -125,7 +146,14 @@ def test_personal_fact_review_protocol_rejects_model_keep_drop_field() -> None:
                 "object_hint": "设备编号",
                 "retention_detail": "重新修改设备编号。",
                 "workstream_key": "",
-                "fact_items": [],
+                "fact_items": {
+                    "topic": {"text": "", "evidence_message_ids": []},
+                    "content": [],
+                    "action_label": {"text": "", "evidence_message_ids": []},
+                    "object_hint": {"text": "", "evidence_message_ids": []},
+                    "retention_detail": {"text": "", "evidence_message_ids": []},
+                    "workstream_key": {"text": "", "evidence_message_ids": []},
+                },
                 "removed_claims": [],
                 "keep": True,
             }

@@ -980,6 +980,7 @@ class PersonalFactReviewBatch:
     target_date: str
     batch_id: str
     candidates: list[PersonalFactReviewCandidate] = field(default_factory=list)
+    retry_feedback: str = ""
 
 
 @dataclass(frozen=True)

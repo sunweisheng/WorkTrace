@@ -27,8 +27,10 @@ def filter_candidate_drafts(
         text_fields=lambda draft: (
             draft.topic,
             draft.content,
+            draft.action_label,
             draft.object_hint,
             draft.retention_detail,
+            draft.workstream_key,
         ),
     )
 
@@ -43,8 +45,10 @@ def filter_merged_drafts(
         text_fields=lambda draft: (
             draft.topic,
             draft.content,
+            *draft.action_labels,
             draft.object_hint,
             draft.retention_detail,
+            draft.workstream_name,
         ),
     )
 
@@ -67,8 +71,10 @@ def filter_work_events_with_diagnostics(
         text_fields=lambda event: (
             event.title,
             event.content,
+            *event.action_labels,
             event.object_hint,
             event.retention_detail,
+            event.workstream_name,
             *(link.title for link in event.file_links),
             *(link.url for link in event.file_links),
         ),
