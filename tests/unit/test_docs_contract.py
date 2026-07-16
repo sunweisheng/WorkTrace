@@ -44,6 +44,26 @@ def test_readme_describes_current_segmented_personal_flow() -> None:
     assert "一个会话 = 一个 slice = 一次首轮 LLM" not in content
 
 
+def test_docs_define_retention_review_model_and_python_boundaries() -> None:
+    documents = [
+        Path("README.md").read_text(encoding="utf-8"),
+        Path("docs/detailed-design.md").read_text(encoding="utf-8"),
+        Path("docs/employee-guide.md").read_text(encoding="utf-8"),
+        Path("SKILL.md").read_text(encoding="utf-8"),
+    ]
+
+    for content in documents:
+        assert "config/retention_policy.json" in content
+        assert "临时协作" in content
+        assert "实质工作" in content
+        assert "Python" in content
+        assert "不" in content and "语义" in content
+        assert "旧" in content and "追溯" in content
+    for content in (documents[0], documents[1], documents[3]):
+        assert "retention_review_summary" in content
+        assert "6200" in content
+
+
 def test_docs_describe_event_metadata_and_markdown_compatibility() -> None:
     readme = Path("README.md").read_text(encoding="utf-8")
     detailed = Path("docs/detailed-design.md").read_text(encoding="utf-8")

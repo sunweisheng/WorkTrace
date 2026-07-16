@@ -20,6 +20,8 @@ from ..models import (
     SegmentAnalysisBatch,
     NormalizedMessage,
     ResponseSignal,
+    RetentionReviewBatch,
+    RetentionReviewResult,
 )
 
 
@@ -65,6 +67,15 @@ class Analyzer(ABC):
         self,
         batch: SegmentAnalysisBatch,
     ) -> BatchSegmentAnalysisResult:
+        raise NotImplementedError
+
+    def build_retention_review_prompt(self, batch: RetentionReviewBatch) -> str:
+        raise NotImplementedError
+
+    def review_retention_candidates(
+        self,
+        batch: RetentionReviewBatch,
+    ) -> RetentionReviewResult:
         raise NotImplementedError
 
     @abstractmethod

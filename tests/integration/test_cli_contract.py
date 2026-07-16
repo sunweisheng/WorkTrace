@@ -9,6 +9,7 @@ from src.worktrace.models import (
     CollectedMergeOutput,
     CollectedMergeRunResult,
     DailyRunResult,
+    RetentionReviewSummary,
 )
 
 
@@ -45,6 +46,13 @@ def test_cli_returns_runner_result(capsys, tmp_path) -> None:
             self_delivery_status="pending",
             self_delivery_target="",
             self_delivery_error="",
+            retention_review_summary=RetentionReviewSummary(
+                selected_candidate_count=2,
+                reviewed_candidate_count=2,
+                kept_candidate_count=1,
+                dropped_routine_count=1,
+                review_batch_count=1,
+            ),
         )
 
     exit_code = main(
@@ -61,6 +69,15 @@ def test_cli_returns_runner_result(capsys, tmp_path) -> None:
     assert payload["target_date"] == "2026-06-22"
     assert payload["status"] == DailyRunStatus.SUCCESS.value
     assert payload["event_count"] == 2
+    assert payload["retention_review_summary"] == {
+        "selected_candidate_count": 2,
+        "reviewed_candidate_count": 2,
+        "kept_candidate_count": 1,
+        "dropped_routine_count": 1,
+        "dropped_uncertain_count": 0,
+        "review_batch_count": 1,
+        "review_retry_count": 0,
+    }
 
 
 def test_cli_supports_preflight_only_output(capsys, tmp_path) -> None:

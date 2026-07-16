@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from src.worktrace.analyzers.output_schemas import retention_review_output_schema
 from src.worktrace.analyzers.online import (
     OnlineLLMAnalyzer,
     _apply_soft_no_think,
@@ -14,12 +15,23 @@ from src.worktrace.analyzers.online import (
     _extract_text_from_responses_stream_event,
     _close_global_client,
 )
-from src.worktrace.config import OnlineLLMSettings, RuntimeConfig
+from src.worktrace.config import (
+    OnlineLLMSettings,
+    RuntimeConfig,
+    load_runtime_config_overrides,
+)
 from src.worktrace.errors import (
     AnalyzerProtocolError,
     RetryableAnalyzerProtocolError,
 )
-from src.worktrace.models import AnalysisBatch, ConversationSlice, NormalizedMessage
+from src.worktrace.models import (
+    AnalysisBatch,
+    ConversationSlice,
+    NormalizedMessage,
+    RetentionReviewBatch,
+    RetentionReviewCandidate,
+    SourceBackedEventDraft,
+)
 
 
 def sample_batch() -> AnalysisBatch:
@@ -52,6 +64,77 @@ def sample_batch() -> AnalysisBatch:
             )
         ],
     )
+
+
+def sample_retention_review_batch() -> RetentionReviewBatch:
+    message = sample_batch().slices[0].messages[0]
+    candidate = SourceBackedEventDraft(
+        draft_id="draft-1",
+        date="2026-06-23",
+        topic="临时协作复核",
+        content="复核原聊天是否形成实质工作。",
+        source_message_ids=[message.message_id],
+        source_conversation_id=message.conversation_id,
+        source_slice_id="slice-1",
+        confidence=0.8,
+        action_label="确认",
+        object_hint="协作事项",
+        retention_reason="follow_up_assigned",
+        retention_detail="原聊天存在待复核的后续动作。",
+    )
+    return RetentionReviewBatch(
+        target_date="2026-06-23",
+        batch_id="retention-review-001",
+        candidates=[
+            RetentionReviewCandidate(
+                candidate=candidate,
+                messages=[message],
+                allowed_evidence_message_ids=[message.message_id],
+            )
+        ],
+    )
+
+
+def test_online_analyzer_uses_retention_review_protocol(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = load_runtime_config_overrides(
+        RuntimeConfig(data_root=tmp_path / "data"),
+        cwd=Path.cwd(),
+    )
+    analyzer = OnlineLLMAnalyzer(config=config, cwd=tmp_path)
+    captured: dict[str, object] = {}
+
+    def fake_invoke(prompt, *, output_schema, request_kind):
+        captured.update(
+            prompt=prompt,
+            output_schema=output_schema,
+            request_kind=request_kind,
+        )
+        return {
+            "results": [
+                {
+                    "draft_id": "draft-1",
+                    "routine_signals": [],
+                    "substantive_signals": [
+                        {
+                            "type": "explicit_business_follow_up",
+                            "evidence_message_ids": ["om_1"],
+                        }
+                    ],
+                }
+            ]
+        }
+
+    monkeypatch.setattr(analyzer, "_invoke_online", fake_invoke)
+
+    result = analyzer.review_retention_candidates(sample_retention_review_batch())
+
+    assert result.results[0].draft_id == "draft-1"
+    assert captured["request_kind"] == "retention_review"
+    assert "不要决定保留或删除" in str(captured["prompt"])
+    assert captured["output_schema"] == retention_review_output_schema(config)
 
 
 def build_settings(**overrides: object) -> OnlineLLMSettings:

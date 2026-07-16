@@ -9,7 +9,7 @@ from pathlib import Path
 from time import sleep
 from typing import Any, Sequence
 
-from .config import RuntimeConfig
+from .config import RetentionPolicyConfig, RuntimeConfig
 from .constants import DailyRunStatus
 from .delivery.feishu_cli import FeishuCliSelfDelivery
 from .errors import (
@@ -1587,6 +1587,7 @@ class CollectedMergeRunner:
         self._collected_merge_filter_diagnostics.extend(merged_filter_diagnostics)
         retained_events, retention_warnings = filter_retained_work_events(
             merged_events_after_sensitive,
+            self.config.retention_policy,
         )
         self._record_collected_merge_trace_final(
             repaired_result=merge_result,
@@ -2204,7 +2205,10 @@ class CollectedMergeRunner:
             )
             if (
                 not retention_detail
-                or retention_rejection_reason_for_event(draft_event)
+                or retention_rejection_reason_for_event(
+                    draft_event,
+                    self.config.retention_policy,
+                )
                 == "missing_or_generic_retention_detail"
             ):
                 derived_detail = derive_collected_merge_retention_detail(items)
@@ -2503,7 +2507,10 @@ class CollectedMergeRunner:
         source_events: list[CollectedSourceEvent],
     ) -> tuple[list[CollectedSourceEvent], list[str]]:
         events = [item.event for item in source_events]
-        kept_events, warnings = filter_retained_work_events(events)
+        kept_events, warnings = filter_retained_work_events(
+            events,
+            self.config.retention_policy,
+        )
         kept_ids = {id(event) for event in kept_events}
         return [
             source_event
@@ -2555,7 +2562,10 @@ class CollectedMergeRunner:
                 "source_person": item.person_name,
                 "event_id": item.event.event_id,
                 "event_title": item.event.title,
-                "rejection_reason": retention_rejection_reason_for_event(item.event),
+                "rejection_reason": retention_rejection_reason_for_event(
+                    item.event,
+                    self.config.retention_policy,
+                ),
             }
             for item in before_events
             if id(item.event) not in kept_ids
@@ -3001,11 +3011,16 @@ class CollectedMergeRunner:
                 "repaired_group_metrics": collected_merge_group_metrics(repaired_result),
                 "materialized_metrics": collected_merge_work_event_metrics(
                     merged_events_before_filters,
+                    self.config.retention_policy,
                 ),
                 "after_sensitive_metrics": collected_merge_work_event_metrics(
                     merged_events_after_sensitive,
+                    self.config.retention_policy,
                 ),
-                "retained_metrics": collected_merge_work_event_metrics(retained_events),
+                "retained_metrics": collected_merge_work_event_metrics(
+                    retained_events,
+                    self.config.retention_policy,
+                ),
                 "repair_warnings": repair_warnings,
                 "boundary_warnings": boundary_warnings,
                 "metadata_warnings": metadata_warnings,
@@ -3017,10 +3032,16 @@ class CollectedMergeRunner:
                         "source_event_ids": list(event.source_event_ids),
                         "retention_reason": event.retention_reason,
                         "retention_detail": event.retention_detail,
-                        "rejection_reason": retention_rejection_reason_for_event(event),
+                        "rejection_reason": retention_rejection_reason_for_event(
+                            event,
+                            self.config.retention_policy,
+                        ),
                     }
                     for event in merged_events_after_sensitive
-                    if retention_rejection_reason_for_event(event)
+                    if retention_rejection_reason_for_event(
+                        event,
+                        self.config.retention_policy,
+                    )
                 ],
                 "repaired_result": repaired_result.to_dict(),
                 "retained_events": [event.to_dict() for event in retained_events],
@@ -3369,11 +3390,14 @@ def collected_merge_group_metrics(
     }
 
 
-def collected_merge_work_event_metrics(events: list[WorkEvent]) -> dict[str, Any]:
+def collected_merge_work_event_metrics(
+    events: list[WorkEvent],
+    policy: RetentionPolicyConfig,
+) -> dict[str, Any]:
     rejection_reasons = Counter(
         reason
         for event in events
-        for reason in [retention_rejection_reason_for_event(event)]
+        for reason in [retention_rejection_reason_for_event(event, policy)]
         if reason
     )
     return {

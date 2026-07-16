@@ -1,0 +1,189 @@
+{
+  "review": {
+    "enabled": true,
+    "retention_reasons": [
+      "follow_up_assigned"
+    ],
+    "require_empty_workstream": true,
+    "require_no_referenced_files": true,
+    "uncertain_policy": "drop"
+  },
+  "prompt_rules": [
+    "本人参与、回复或被询问，只能证明事项与本人有关，不能单独证明该内容值得形成工作事件。",
+    "单纯询问人员当前状态、位置或是否可用，简单等待、确认收到，或只完成信息转告但没有关联业务结果时，不要提炼为事件。",
+    "咨询内容如果形成明确业务结论、问题风险、交付修改或后续业务动作，仍应正常提炼。",
+    "follow_up_assigned 必须包含明确业务对象、后续业务动作以及预期处理结果；临时查看、找人或转告不属于后续业务任务。",
+    "首次分析拿不准临时协作是否关联真实业务任务时，可以保留候选并提供原消息证据，交由后续局部复核。",
+    "私人饭局、约饭、离职告别聚餐、同事口碑评价、人际寒暄，不要提炼为事项。",
+    "个人请假、家庭原因、孩子学校证明、个人行程报备，不要提炼为工作事件。",
+    "加班、请假、补卡、考勤、调休、外出报备等行政流程审批，不要提炼为工作事项。",
+    "泛泛完成审核或审批但没有具体业务对象、审批结论、问题、风险、金额、客户、项目、文档或后续动作，不要提炼为事项。"
+  ],
+  "routine_signals": [
+    {
+      "key": "presence_or_availability",
+      "description": "只确认人员当前位置、是否到岗、是否在线或当前是否可用，没有关联业务结果。"
+    },
+    {
+      "key": "simple_acknowledgement_or_wait",
+      "description": "只表示收到、等待、稍后处理或当前不便，没有形成明确业务动作。"
+    },
+    {
+      "key": "information_relay_only",
+      "description": "只完成找人或信息转告，没有产生业务结论、交付变化、风险或后续业务任务。"
+    },
+    {
+      "key": "other_routine_coordination",
+      "description": "其他仅服务于当下沟通、没有长期工作记录价值的临时协作。"
+    }
+  ],
+  "substantive_signals": [
+    {
+      "key": "deliverable_change",
+      "description": "形成或修改了文档、数据、配置、代码、方案等可识别交付物。"
+    },
+    {
+      "key": "decision",
+      "description": "形成了明确业务结论、取舍或负责人安排。"
+    },
+    {
+      "key": "issue_or_risk",
+      "description": "发现、确认或处理了具体业务问题或风险。"
+    },
+    {
+      "key": "explicit_business_follow_up",
+      "description": "明确了业务对象、后续动作和预期处理结果。"
+    },
+    {
+      "key": "external_business_progress",
+      "description": "推动了客户、合同、付款、交付或其他外部业务进展。"
+    },
+    {
+      "key": "substantive_approval",
+      "description": "完成了带具体业务对象和结论的实质审批。"
+    }
+  ],
+  "generic_object_hints": [
+    "审核",
+    "审批",
+    "工作审核",
+    "审核任务",
+    "业务审批",
+    "审核结果",
+    "审批结果",
+    "会议",
+    "沟通",
+    "工作",
+    "事项",
+    "任务",
+    "安排",
+    "确认",
+    "同步",
+    "信息"
+  ],
+  "personal_social_keywords": [
+    "约饭",
+    "吃饭",
+    "聚餐",
+    "饭局",
+    "火锅",
+    "牛蛙",
+    "告别",
+    "离职前",
+    "口碑",
+    "评价不错",
+    "评价良好",
+    "人际",
+    "寒暄",
+    "回家",
+    "收拾东西"
+  ],
+  "personal_leave_or_travel_keywords": [
+    "请假",
+    "晚到",
+    "晚来",
+    "迟到",
+    "外出",
+    "行程报备",
+    "不在公司",
+    "个人事由",
+    "私事",
+    "家事"
+  ],
+  "personal_private_reason_keywords": [
+    "孩子",
+    "学校",
+    "证明",
+    "医院",
+    "家里",
+    "家庭",
+    "个人隐私"
+  ],
+  "personal_privacy_object_hints": [
+    "个人请假",
+    "个人外出事由",
+    "个人请假/外出事由"
+  ],
+  "generic_review_keywords": [
+    "完成审核",
+    "完成审批",
+    "完成了审核",
+    "完成了审批",
+    "工作审核",
+    "审核任务",
+    "业务审批",
+    "审核结果",
+    "审批结果",
+    "同步审核",
+    "同步审批",
+    "闭环"
+  ],
+  "approval_action_keywords": [
+    "审批",
+    "审核"
+  ],
+  "administrative_approval_keywords": [
+    "加班",
+    "考勤",
+    "补卡",
+    "请假",
+    "调休",
+    "外出报备",
+    "出勤"
+  ],
+  "substantive_work_keywords": [
+    "合同",
+    "付款",
+    "发票",
+    "客户",
+    "项目",
+    "文档",
+    "方案",
+    "需求",
+    "发布",
+    "上线",
+    "数据",
+    "金额",
+    "条款",
+    "风险",
+    "问题",
+    "缺少",
+    "缺失",
+    "驳回",
+    "拒绝",
+    "通过",
+    "批准",
+    "补充",
+    "修改",
+    "调整",
+    "结论",
+    "排期"
+  ],
+  "repeated_low_information_suffixes": [
+    "工作",
+    "事项",
+    "任务",
+    "相关工作",
+    "相关事项"
+  ]
+}

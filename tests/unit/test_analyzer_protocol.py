@@ -1,12 +1,22 @@
 from __future__ import annotations
 
+from pathlib import Path
+
+import pytest
+
+from src.worktrace.errors import AnalyzerProtocolError
 from src.worktrace.analyzers.protocol import (
     parse_anchor_analysis_payload,
     parse_batch_analysis_payload,
     parse_collected_grouping_payload,
     parse_merge_payload,
+    parse_retention_review_payload,
 )
-from src.worktrace.analyzers.output_schemas import collected_grouping_output_schema
+from src.worktrace.analyzers.output_schemas import (
+    collected_grouping_output_schema,
+    retention_review_output_schema,
+)
+from src.worktrace.config import RuntimeConfig, load_runtime_config_overrides
 
 
 def test_protocol_parsers_accept_valid_payloads() -> None:
@@ -24,6 +34,69 @@ def test_protocol_parsers_accept_valid_payloads() -> None:
     assert anchor.anchor_status == "completed"
     assert batch.candidate_events == []
     assert merged.groups == []
+
+
+def test_retention_review_protocol_and_schema_use_configured_signal_types() -> None:
+    config = load_runtime_config_overrides(RuntimeConfig(), cwd=Path.cwd())
+    payload = {
+        "results": [
+            {
+                "draft_id": "d1",
+                "routine_signals": [
+                    {
+                        "type": "presence_or_availability",
+                        "evidence_message_ids": ["m1"],
+                    }
+                ],
+                "substantive_signals": [],
+            }
+        ]
+    }
+
+    parsed = parse_retention_review_payload(payload)
+    schema = retention_review_output_schema(config)
+    item_schema = schema["properties"]["results"]["items"]
+    routine_enum = item_schema["properties"]["routine_signals"]["items"][
+        "properties"
+    ]["type"]["enum"]
+
+    assert parsed.to_dict() == payload
+    assert "presence_or_availability" in routine_enum
+    assert "explicit_business_follow_up" not in routine_enum
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"results": [{"draft_id": "d1", "routine_signals": []}]},
+        {
+            "results": [
+                {
+                    "draft_id": "d1",
+                    "routine_signals": {},
+                    "substantive_signals": [],
+                }
+            ]
+        },
+        {
+            "results": [
+                {
+                    "draft_id": "d1",
+                    "routine_signals": [
+                        {
+                            "type": "presence_or_availability",
+                            "evidence_message_ids": "m1",
+                        }
+                    ],
+                    "substantive_signals": [],
+                }
+            ]
+        },
+    ],
+)
+def test_retention_review_protocol_rejects_incomplete_shapes(payload: object) -> None:
+    with pytest.raises(AnalyzerProtocolError):
+        parse_retention_review_payload(payload)
 
 
 def test_collected_grouping_protocol_carries_candidate_summary() -> None:

@@ -21,6 +21,7 @@ from ..models import (
     LinkedFileTextBlock,
     NormalizedMessage,
     ResponseSignal,
+    RetentionReviewBatch,
     SegmentAnalysisBatch,
     SourceBackedEventDraft,
 )
@@ -41,17 +42,6 @@ _EMOJI_TOKEN_RE = re.compile(r":[A-Za-z0-9_+-]{3,}:")
 _WHITESPACE_RE = re.compile(r"[ \t]+")
 _BLANK_LINE_RE = re.compile(r"\n{3,}")
 
-
-LOW_RETENTION_EVENT_RULES = [
-    "私人饭局、约饭、离职告别聚餐、同事口碑评价、人际寒暄，不要提炼为事项。",
-    "个人请假、家庭原因、孩子学校证明、个人行程报备，不要提炼为工作事件。",
-    "加班、请假、补卡、考勤、调休、外出报备等行政流程审批，不要提炼为工作事项。",
-    "泛泛完成审核/审批/工作审核/审核任务但没有具体业务对象、审批结论、问题、风险、金额、客户、项目、文档或后续动作，不要提炼为事项。",
-    "反例：产品同事评价不错，今晚在公司旁边吃牛蛙火锅，饭后回去准备述职材料，不要输出 candidate_event。",
-    "反例：本人明天晚到，需去学校为孩子开证明，不要输出 candidate_event。",
-    "反例：完成了郭海提交的工作审核，并同步审核结果，不要输出 candidate_event。",
-    "正例：审核客户合同并反馈付款条款问题，可以输出 candidate_event。",
-]
 
 RETENTION_COMPLETENESS_RULE = (
     "只有同时具备具体对象、保留理由、保留依据的工作事件才输出；"
@@ -81,6 +71,15 @@ ATTACHMENT_FILE_NAME_RULE = (
     "填入 referenced_attachment_ids。附件发送后的明确转交、查看或审核指令属于后续任务，"
     "必须以 follow_up_assigned 输出；不得根据文件名推断文件正文事实。"
 )
+
+
+def _build_personal_retention_rules(config: RuntimeConfig) -> list[str]:
+    return [
+        *config.retention_policy.prompt_rules,
+        RETENTION_COMPLETENESS_RULE,
+        RETENTION_DETAIL_EVIDENCE_RULE,
+        PERSON_NAME_RETENTION_RULE,
+    ]
 
 
 def _build_self_relation_rule(config: RuntimeConfig) -> str:
@@ -115,10 +114,7 @@ def build_batch_analysis_prompt(
             "本人信息见 input.self；只有事项明确由本人发起、本人负责、本人审批、本人催办、本人汇报、本人跟进，或他人明确要求本人推进/处理时，才提炼。",
             "如果事项主体明显是他人的工作、他人的进展、他人的承诺，而本人只是参与了会话或说过别的话，不要提炼。",
             "如果只是同群讨论背景信息、但没有明确落到本人，也不要提炼。",
-            "咨询类事件、流程审核类事件、团建活动组织类事件、技能培训类事件，默认不要提炼；这类事项对后续公司级长期事件沉淀价值较低。",
-            *LOW_RETENTION_EVENT_RULES,
-            RETENTION_COMPLETENESS_RULE,
-            PERSON_NAME_RETENTION_RULE,
+            *_build_personal_retention_rules(runtime_config),
             _build_sensitive_rule(runtime_config),
             "一件事写一条；如果有多件事就拆开。",
             EVENT_TITLE_RULE,
@@ -129,8 +125,6 @@ def build_batch_analysis_prompt(
                 "retention_reason 必须从以下枚举选择：deliverable_updated、decision_made、"
                 "issue_or_risk_found、follow_up_assigned、external_business_progress、substantive_approval。"
             ),
-            RETENTION_DETAIL_EVIDENCE_RULE,
-            "普通约时间、确认开会、互通信息、泛泛完成审核/审批但没有具体对象和结论的内容，不要输出 candidate_event。",
             "每条事项附上最相关的消息 id。",
             "只能使用输入里出现过的真实 message id，不要自造占位符 id。",
             "如需给事项挂涉及文件，只能从对应 source_message_ids 的 links 里选择 referenced_link_ids；拿不准就返回空数组。",
@@ -356,9 +350,7 @@ def build_segment_batch_analysis_prompt(
             "本人提出的问题、风险和待确认事项本身可以提炼，不要求已有处理结果。",
             EVENT_TITLE_RULE,
             "表情是本人回复证据，但不能单凭表情描述事项已完成、已同意或已拒绝。",
-            "普通约时间、确认开会、互通信息、泛泛审核/审批且无具体对象和结论，不要输出 candidate_event。",
-            RETENTION_COMPLETENESS_RULE,
-            PERSON_NAME_RETENTION_RULE,
+            *_build_personal_retention_rules(runtime_config),
             "上下文消息只用于理解当前主消息，不得作为当前事件来源。",
         ],
         "input": {
@@ -404,6 +396,93 @@ def build_segment_batch_analysis_prompt(
                     },
                 }
             ]
+        },
+    }
+    return dump_json(protocol, pretty=True)
+
+
+def build_retention_review_prompt(
+    batch: RetentionReviewBatch,
+    *,
+    config: RuntimeConfig | None = None,
+) -> str:
+    runtime_config = config or RuntimeConfig()
+    policy = runtime_config.retention_policy
+    routine_signal_types = {
+        item.key: item.description for item in policy.routine_signals
+    }
+    substantive_signal_types = {
+        item.key: item.description for item in policy.substantive_signals
+    }
+    protocol = {
+        "instruction": (
+            "复核边界工作事件对应的原聊天，只判断聊天中存在的语义信号。"
+            "必须返回每个 draft_id 的 routine_signals 和 substantive_signals。"
+            "不要决定保留或删除，不要计算数量，不要添加解释。"
+        ),
+        "rules": [
+            "candidate_summary 仅用于定位候选，不能作为语义证据。",
+            "只能根据 messages 判断信号，context 消息仅用于理解，不能作为 evidence_message_ids。",
+            "每个信号必须引用 allowed_evidence_message_ids 中真实存在的消息。",
+            "没有对应信号时返回空数组，不要为了填满字段推断或编造。",
+            "临时协作和实质工作可能同时存在；存在时必须分别返回，不能互相覆盖。",
+            "每个输入 draft_id 必须且只能返回一次，不得遗漏、重复或增加。",
+        ],
+        "signal_definitions": {
+            "routine_signals": routine_signal_types,
+            "substantive_signals": substantive_signal_types,
+        },
+        "required_output_schema": {
+            "results": [
+                {
+                    "draft_id": "draft_id",
+                    "routine_signals": [
+                        {
+                            "type": "configured routine signal type",
+                            "evidence_message_ids": ["message_id"],
+                        }
+                    ],
+                    "substantive_signals": [
+                        {
+                            "type": "configured substantive signal type",
+                            "evidence_message_ids": ["message_id"],
+                        }
+                    ],
+                }
+            ]
+        },
+        "input": {
+            "target_date": batch.target_date,
+            "batch_id": batch.batch_id,
+            "candidates": [
+                {
+                    "draft_id": item.candidate.draft_id,
+                    "candidate_summary": {
+                        "topic": item.candidate.topic,
+                        "content": item.candidate.content,
+                        "action_label": item.candidate.action_label,
+                        "object_hint": item.candidate.object_hint,
+                        "retention_reason": item.candidate.retention_reason,
+                        "retention_detail": item.candidate.retention_detail,
+                    },
+                    "allowed_evidence_message_ids": list(
+                        item.allowed_evidence_message_ids
+                    ),
+                    "messages": [
+                        serialize_message_for_prompt(message, runtime_config)
+                        | {
+                            "role": (
+                                "evidence"
+                                if message.message_id
+                                in set(item.allowed_evidence_message_ids)
+                                else "context"
+                            )
+                        }
+                        for message in item.messages
+                    ],
+                }
+                for item in batch.candidates
+            ],
         },
     }
     return dump_json(protocol, pretty=True)
@@ -977,10 +1056,7 @@ def build_anchor_analysis_prompt(
                 f"{AnchorStatus.UNCERTAIN.value}。"
             ),
             "只抽取工作事件。",
-            "咨询类事件、流程审核类事件、团建活动组织类事件、技能培训类事件，默认不要提炼；这类事项对后续公司级长期事件沉淀价值较低。",
-            *LOW_RETENTION_EVENT_RULES,
-            RETENTION_COMPLETENESS_RULE,
-            PERSON_NAME_RETENTION_RULE,
+            *_build_personal_retention_rules(runtime_config),
             "每个 candidate_event 只能落在当前 anchor_unit 内。",
             "每个 candidate_event 只表示一个主要动作。",
             EVENT_TITLE_RULE,
@@ -990,8 +1066,6 @@ def build_anchor_analysis_prompt(
                 "retention_reason 必须从以下枚举选择：deliverable_updated、decision_made、"
                 "issue_or_risk_found、follow_up_assigned、external_business_progress、substantive_approval。"
             ),
-            RETENTION_DETAIL_EVIDENCE_RULE,
-            "普通约时间、确认开会、互通信息、泛泛完成审核/审批但没有具体对象和结论的内容，不要输出 candidate_event。",
             "如需给事项挂涉及文件，只能从对应 source_message_ids 的 links 里选择 referenced_link_ids；拿不准就返回空数组。",
             "self_evidence_message_ids 列出证明本人直接相关的本人消息；事实来源可以是他人的反馈。",
             _build_self_relation_rule(runtime_config),
@@ -1071,10 +1145,7 @@ def build_anchor_batch_analysis_prompt(
             "每个 anchor unit 独立判断，不要串信息。",
             "每个 result 必须包含 anchor_unit_id 和 analysis。",
             "只抽取工作事件。",
-            "咨询类事件、流程审核类事件、团建活动组织类事件、技能培训类事件，默认不要提炼；这类事项对后续公司级长期事件沉淀价值较低。",
-            *LOW_RETENTION_EVENT_RULES,
-            RETENTION_COMPLETENESS_RULE,
-            PERSON_NAME_RETENTION_RULE,
+            *_build_personal_retention_rules(runtime_config),
             "每个 candidate_event 只能留在自己的 anchor_unit 内。",
             "每个 candidate_event 只表示一个主要动作。",
             EVENT_TITLE_RULE,
@@ -1084,8 +1155,6 @@ def build_anchor_batch_analysis_prompt(
                 "retention_reason 必须从以下枚举选择：deliverable_updated、decision_made、"
                 "issue_or_risk_found、follow_up_assigned、external_business_progress、substantive_approval。"
             ),
-            RETENTION_DETAIL_EVIDENCE_RULE,
-            "普通约时间、确认开会、互通信息、泛泛完成审核/审批但没有具体对象和结论的内容，不要输出 candidate_event。",
             "如需给事项挂涉及文件，只能从对应 source_message_ids 的 links 里选择 referenced_link_ids；拿不准就返回空数组。",
             "self_evidence_message_ids 列出证明本人直接相关的本人消息；事实来源可以是他人的反馈。",
             _build_self_relation_rule(runtime_config),
@@ -1193,16 +1262,11 @@ def build_anchor_expansion_prompt(
             "每个 candidate_event 仍然只能表示一个主要动作或工作线索。",
             "每个 candidate_event 必须包含 object_hint、retention_reason 和 retention_detail。",
             EVENT_TITLE_RULE,
-            RETENTION_COMPLETENESS_RULE,
-            PERSON_NAME_RETENTION_RULE,
-            *LOW_RETENTION_EVENT_RULES,
-            "泛泛完成审核/审批但没有具体业务对象、审批结论、问题、风险、金额、客户、项目、文档或后续动作，不要输出 candidate_event。",
+            *_build_personal_retention_rules(runtime_config),
             (
                 "retention_reason 必须是 deliverable_updated、decision_made、issue_or_risk_found、"
                 "follow_up_assigned、external_business_progress 或 substantive_approval。"
             ),
-            RETENTION_DETAIL_EVIDENCE_RULE,
-            "普通日程安排、会议时间确认、互通信息、没有具体对象和结论的泛泛审核/审批完成，不要输出 candidate_event。",
             "如需给事项挂涉及文件，只能从对应 source_message_ids 的 links 里选择 referenced_link_ids；拿不准就返回空数组。",
             (
                 "如果新上下文显示某个先前 candidate_event 实际混合了多个动作，"

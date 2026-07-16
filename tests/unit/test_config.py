@@ -425,9 +425,48 @@ def test_repo_event_rules_use_rule_lists_only() -> None:
     assert "离职" in payload["sensitive_event_keywords"]
     assert "招聘" in payload["sensitive_event_keywords"]
     assert "offer" in payload["sensitive_event_keywords"]
+    assert "挽留谈判" in payload["sensitive_event_keywords"]
+    assert "挽留报价" in payload["sensitive_event_keywords"]
+    assert "人员留任" in payload["sensitive_event_keywords"]
     assert "git pull" in payload["excluded_event_keywords"]
     assert "麻烦" in payload["self_assignment_keywords"]
     assert "处理" in payload["self_assignment_keywords"]
+
+
+def test_repo_retention_policy_is_loaded_from_config() -> None:
+    config = load_runtime_config_overrides(RuntimeConfig(), cwd=Path.cwd())
+    policy = config.retention_policy
+
+    assert policy.review_enabled is True
+    assert policy.review_retention_reasons == ("follow_up_assigned",)
+    assert policy.require_empty_workstream is True
+    assert policy.require_no_referenced_files is True
+    assert policy.uncertain_policy == "drop"
+    assert "审核" in policy.generic_object_hints
+    assert "工作" in policy.repeated_low_information_suffixes
+    assert {item.key for item in policy.routine_signals} == {
+        "presence_or_availability",
+        "simple_acknowledgement_or_wait",
+        "information_relay_only",
+        "other_routine_coordination",
+    }
+    assert "explicit_business_follow_up" in {
+        item.key for item in policy.substantive_signals
+    }
+
+
+def test_load_runtime_config_overrides_rejects_invalid_retention_policy(
+    tmp_path: Path,
+) -> None:
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    (config_dir / "retention_policy.json").write_text(
+        json.dumps({"review": {"enabled": True}}),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="Invalid retention policy config"):
+        load_runtime_config_overrides(RuntimeConfig(), cwd=tmp_path)
 
 
 def test_load_runtime_config_overrides_rejects_legacy_rule_keys(tmp_path: Path) -> None:

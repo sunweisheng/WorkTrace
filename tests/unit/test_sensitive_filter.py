@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from src.worktrace.config import RuntimeConfig
+from pathlib import Path
+
+from src.worktrace.config import RuntimeConfig, load_runtime_config_overrides
 from src.worktrace.models import EventFileLink, MergedEventDraft, SourceBackedEventDraft, WorkEvent
 from src.worktrace.pipeline.sensitive_filter import (
     filter_candidate_drafts,
@@ -11,6 +13,17 @@ from src.worktrace.pipeline.sensitive_filter import (
 from src.worktrace.pipeline.retention_filter import (
     filter_retained_candidate_drafts,
     filter_retained_work_events,
+)
+
+
+RETENTION_POLICY = load_runtime_config_overrides(
+    RuntimeConfig(),
+    cwd=Path.cwd(),
+).retention_policy
+
+REPO_CONFIG = load_runtime_config_overrides(
+    RuntimeConfig(),
+    cwd=Path.cwd(),
 )
 
 
@@ -94,6 +107,54 @@ def test_work_event_filter_removes_personnel_exit_and_recruitment_event() -> Non
 
     assert [event.event_id for event in kept] == ["evt-keep"]
     assert warnings == ["Filtered sensitive event."]
+
+
+def test_personnel_retention_compensation_is_filtered_at_all_three_layers() -> None:
+    candidate = SourceBackedEventDraft(
+        draft_id="evt-personnel-retention",
+        date="2026-07-15",
+        topic="陈某挽留谈判及报价确认",
+        content="建议进行挽留流程，沟通后确认挽留报价。",
+        source_message_ids=["m1"],
+        source_conversation_id="c1",
+        source_slice_id="s1",
+        confidence=0.9,
+        object_hint="陈某挽留方案",
+        retention_reason="decision_made",
+        retention_detail="本人提出挽留建议并询问预算。",
+    )
+    merged = MergedEventDraft(
+        date=candidate.date,
+        topic=candidate.topic,
+        content=candidate.content,
+        source_message_ids=candidate.source_message_ids,
+        source_conversation_ids=[candidate.source_conversation_id],
+        object_hint=candidate.object_hint,
+        retention_reason=candidate.retention_reason,
+        retention_detail=candidate.retention_detail,
+    )
+    event = WorkEvent(
+        date=candidate.date,
+        event_id=candidate.draft_id,
+        title=candidate.topic,
+        content=candidate.content,
+        object_hint=candidate.object_hint,
+        retention_reason=candidate.retention_reason,
+        retention_detail=candidate.retention_detail,
+    )
+
+    candidate_kept, candidate_warnings = filter_candidate_drafts(
+        [candidate], REPO_CONFIG
+    )
+    merged_kept, merged_warnings = filter_merged_drafts([merged], REPO_CONFIG)
+    event_kept, event_warnings = filter_work_events([event], REPO_CONFIG)
+
+    assert candidate_kept == []
+    assert merged_kept == []
+    assert event_kept == []
+    assert candidate_warnings == ["Filtered sensitive event."]
+    assert merged_warnings == ["Filtered sensitive event."]
+    assert event_warnings == ["Filtered sensitive event."]
 
 
 def test_work_event_filter_removes_sensitive_file_link_without_leaking_title() -> None:
@@ -313,7 +374,7 @@ def test_retention_filter_removes_generic_review_completion() -> None:
         )
     ]
 
-    kept, warnings = filter_retained_candidate_drafts(drafts)
+    kept, warnings = filter_retained_candidate_drafts(drafts, RETENTION_POLICY)
 
     assert kept == []
     assert len(warnings) == 1
@@ -340,7 +401,7 @@ def test_retention_filter_removes_personal_social_reputation_event() -> None:
         )
     ]
 
-    kept, warnings = filter_retained_candidate_drafts(drafts)
+    kept, warnings = filter_retained_candidate_drafts(drafts, RETENTION_POLICY)
 
     assert kept == []
     assert len(warnings) == 1
@@ -365,7 +426,7 @@ def test_retention_filter_removes_personal_privacy_leave_event() -> None:
         )
     ]
 
-    kept, warnings = filter_retained_candidate_drafts(drafts)
+    kept, warnings = filter_retained_candidate_drafts(drafts, RETENTION_POLICY)
 
     assert kept == []
     assert len(warnings) == 1
@@ -386,7 +447,7 @@ def test_retention_filter_removes_personal_privacy_leave_work_event() -> None:
         )
     ]
 
-    kept, warnings = filter_retained_work_events(events)
+    kept, warnings = filter_retained_work_events(events, RETENTION_POLICY)
 
     assert kept == []
     assert len(warnings) == 1
@@ -411,7 +472,7 @@ def test_retention_filter_keeps_business_site_visit_event() -> None:
         )
     ]
 
-    kept, warnings = filter_retained_candidate_drafts(drafts)
+    kept, warnings = filter_retained_candidate_drafts(drafts, RETENTION_POLICY)
 
     assert [draft.topic for draft in kept] == ["客户现场设备验收"]
     assert warnings == []
@@ -438,7 +499,7 @@ def test_retention_filter_removes_generic_review_with_named_submitter() -> None:
         )
     ]
 
-    kept, warnings = filter_retained_candidate_drafts(drafts)
+    kept, warnings = filter_retained_candidate_drafts(drafts, RETENTION_POLICY)
 
     assert kept == []
     assert len(warnings) == 1
@@ -463,7 +524,7 @@ def test_retention_filter_removes_overtime_approval() -> None:
         )
     ]
 
-    kept, warnings = filter_retained_candidate_drafts(drafts)
+    kept, warnings = filter_retained_candidate_drafts(drafts, RETENTION_POLICY)
 
     assert kept == []
     assert len(warnings) == 1
@@ -516,7 +577,7 @@ def test_retention_filter_removes_leave_or_attendance_approvals() -> None:
         ),
     ]
 
-    kept, warnings = filter_retained_candidate_drafts(drafts)
+    kept, warnings = filter_retained_candidate_drafts(drafts, RETENTION_POLICY)
 
     assert kept == []
     assert len(warnings) == 3
@@ -541,7 +602,7 @@ def test_retention_filter_keeps_substantive_approval() -> None:
         )
     ]
 
-    kept, warnings = filter_retained_candidate_drafts(drafts)
+    kept, warnings = filter_retained_candidate_drafts(drafts, RETENTION_POLICY)
 
     assert [draft.topic for draft in kept] == ["合同审核"]
     assert warnings == []
@@ -565,7 +626,7 @@ def test_retention_filter_keeps_specific_payment_approval_rejection() -> None:
         )
     ]
 
-    kept, warnings = filter_retained_candidate_drafts(drafts)
+    kept, warnings = filter_retained_candidate_drafts(drafts, RETENTION_POLICY)
 
     assert [draft.topic for draft in kept] == ["项目付款审批"]
     assert warnings == []
@@ -590,7 +651,7 @@ def test_retention_filter_removes_event_missing_metadata_even_with_file_link() -
         )
     ]
 
-    kept, warnings = filter_retained_work_events(events)
+    kept, warnings = filter_retained_work_events(events, RETENTION_POLICY)
 
     assert kept == []
     assert len(warnings) == 1

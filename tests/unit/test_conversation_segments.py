@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 from src.worktrace.analyzers.prompts import (
     build_conversation_segmentation_prompt,
@@ -8,7 +9,7 @@ from src.worktrace.analyzers.prompts import (
     restore_conversation_segmentation_references,
 )
 from src.worktrace.analyzers.output_schemas import conversation_segmentation_output_schema
-from src.worktrace.config import RuntimeConfig
+from src.worktrace.config import RuntimeConfig, load_runtime_config_overrides
 from src.worktrace.models import (
     AttachmentMeta,
     AttachmentTextBlock,
@@ -23,11 +24,15 @@ from src.worktrace.models import (
     SegmentAnalysisBatch,
     SourceBackedEventDraft,
 )
+
 from src.worktrace.pipeline.conversation_segments import (
     pack_segment_units,
     validate_conversation_segmentation,
     validate_segment_batch_result,
 )
+
+
+CONFIG = load_runtime_config_overrides(RuntimeConfig(), cwd=Path.cwd())
 
 
 def _message(
@@ -374,7 +379,7 @@ def test_segment_prompt_recombines_context_and_primary_messages_in_time_order() 
         segments=[unit],
     )
 
-    payload = json.loads(build_segment_batch_analysis_prompt(batch))
+    payload = json.loads(build_segment_batch_analysis_prompt(batch, config=CONFIG))
     prompt_messages = payload["input"]["segments"][0]["messages"]
 
     assert any(
@@ -383,6 +388,14 @@ def test_segment_prompt_recombines_context_and_primary_messages_in_time_order() 
     )
     assert any(
         "具体对象 + 关键动作、进展、结果或风险" in rule
+        for rule in payload["rules"]
+    )
+    assert any(
+        "单纯询问人员当前状态、位置或是否可用" in rule
+        for rule in payload["rules"]
+    )
+    assert any(
+        "follow_up_assigned 必须包含明确业务对象" in rule
         for rule in payload["rules"]
     )
     assert any("图片和文件附件默认只提供元数据" in rule for rule in payload["rules"])

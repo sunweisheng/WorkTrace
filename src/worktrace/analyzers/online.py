@@ -35,6 +35,8 @@ from ..models import (
     SegmentAnalysisBatch,
     NormalizedMessage,
     ResponseSignal,
+    RetentionReviewBatch,
+    RetentionReviewResult,
 )
 from ..utils.json_io import parse_json_value_from_text
 from ..utils.token_estimation import estimate_text_tokens
@@ -46,6 +48,7 @@ from .output_schemas import (
     collected_merge_output_schema,
     conversation_segmentation_output_schema,
     merge_output_schema,
+    retention_review_output_schema,
     segment_batch_output_schema,
 )
 from .prompts import (
@@ -57,6 +60,7 @@ from .prompts import (
     build_collected_render_prompt,
     build_conversation_segmentation_prompt,
     build_merge_prompt,
+    build_retention_review_prompt,
     build_segment_batch_analysis_prompt,
     restore_conversation_segmentation_references,
 )
@@ -67,6 +71,7 @@ from .protocol import (
     parse_collected_merge_payload,
     parse_conversation_segmentation_payload,
     parse_merge_payload,
+    parse_retention_review_payload,
     parse_segment_batch_analysis_payload,
 )
 
@@ -423,6 +428,23 @@ class OnlineLLMAnalyzer(Analyzer):
             request_kind="segment_batch_analysis",
         )
         return parse_segment_batch_analysis_payload(payload)
+
+    def build_retention_review_prompt(self, batch: RetentionReviewBatch) -> str:
+        return build_retention_review_prompt(batch, config=self.config)
+
+    def review_retention_candidates(
+        self,
+        batch: RetentionReviewBatch,
+    ) -> RetentionReviewResult:
+        payload = self._invoke_online(
+            self.build_retention_review_prompt(batch),
+            output_schema=retention_review_output_schema(self.config),
+            request_kind="retention_review",
+        )
+        try:
+            return parse_retention_review_payload(payload)
+        except AnalyzerProtocolError as exc:
+            raise RetryableAnalyzerProtocolError(str(exc)) from exc
 
     def build_batch_prompt(self, batch_input: AnalysisBatch) -> str:
         return build_batch_analysis_prompt(batch_input, config=self.config)

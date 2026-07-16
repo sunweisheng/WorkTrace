@@ -206,7 +206,26 @@ sequenceDiagram
 
 保留理由必须是六个枚举之一；具体对象不能是空值或过度泛化；保留依据必须足够具体；个人隐私/请假、社交口碑、普通行政审批和泛化“完成审核”等低价值事件会被拒绝。
 
-### 5.11 跨会话初始分组与工作流权威分组
+### 5.11 临时协作局部复核
+
+`pipeline/retention_review.py` 在候选过滤之后、跨会话合并之前运行。只有 `config/retention_policy.json` 配置命中的候选才进入复核；当前默认条件为：`retention_reason=follow_up_assigned`、`workstream_key` 为空、没有链接和附件。没有候选时不调用模型。
+
+职责边界如下：
+
+- 首次事件提炼和既有参与检查确认本人是否真实参与，但“本人参与”不能单独证明事件值得保留
+- analyzer 读取候选对应的原聊天，只返回 `routine_signals`、`substantive_signals` 和真实 `evidence_message_ids`
+- analyzer 不返回最终保留/删除决定，也不参与任何数量或比例计算
+- Python 不读取聊天文字判断临时协作含义，只检查 draft 完整性、信号类型和消息证据归属，再执行固定规则
+
+固定规则为：任一合法实质工作信号优先保留；只有临时协作信号时删除；两类合法信号都没有时按 `uncertain_policy` 处理，当前为删除。两类信号同时存在时保留。这里不增加面向所有聊天的排除词，语义信号说明和既有业务词统一维护在 `config/retention_policy.json`，不硬编码进 Python。
+
+复核按提示 token 估算分批，每个请求不得超过 `max_model_input_tokens=6200`。模型漏回、重复返回、字段不完整、信号类型非法或证据消息不属于当前候选时，只重试当前批次；重试后仍错误或发生技术失败时，整次运行返回 `failed`，不写 Markdown。正常语义删除不产生 warning。
+
+`DailyRunResult.retention_review_summary` 由 Python 计算 `selected_candidate_count`、`reviewed_candidate_count`、`kept_candidate_count`、`dropped_routine_count`、`dropped_uncertain_count`、`review_batch_count` 和 `review_retry_count`，并随 CLI stdout JSON 输出。Markdown 不增加字段。
+
+旧个人 MD 和既有部门汇总不追溯处理。只有重新生成个人日报才会应用新复核规则；`merge-collected` 不读取原聊天，也不对来源 Markdown 补做该复核。
+
+### 5.12 跨会话初始分组与工作流权威分组
 
 候选只有一条时，Python 直接建立单例组。多条候选时：
 
@@ -222,7 +241,7 @@ sequenceDiagram
 
 因此 `merge_day_candidates(...)` 不是最终裁决；在默认 Online analyzer 中，独立工作流 assignment 才是后续物化使用的分组来源，初始模型组保留为失败回退依据。
 
-### 5.12 最终事件、文件证据和排序
+### 5.13 最终事件、文件证据和排序
 
 合并草稿再次经过配置关键词和保留门槛，然后由 `build_work_events(...)` 形成 `WorkEvent`。工作流名称、主要动作和参与方式沿链路保留；`event_id` 基于日期、归一化来源消息集合和内容稳定生成。
 
@@ -235,7 +254,7 @@ sequenceDiagram
 
 Python 对每个来源消息 ID 单独计算带命名空间的 SHA-256 证据指纹，并对“目标日期 + 来源会话 ID”计算同日会话指纹。会话指纹让不同员工引用同一讨论中的不同消息时仍能在多人合并阶段建立候选关系，但不会自动强制合并。文件链接去掉 query 和 fragment 后计算文件标识，附件使用附件 ID 计算；只有文件名而没有稳定标识时不生成。最终链接会隐藏敏感 query 参数；无 URL 附件使用 `《文件名》`。事件按其来源消息在当天时间线中的位置排序。
 
-### 5.13 存储、空日与投递
+### 5.14 存储、空日与投递
 
 `MarkdownEventStore.replace_day(...)` 覆盖写入：
 
@@ -252,7 +271,8 @@ data/YYYY/MM/YYYY-MM-DD-姓名.md
 ```mermaid
 flowchart LR
     A["SourceBackedEventDraft"] --> F1["配置关键词"] --> R1["保留门槛"]
-    R1 --> B["MergedEventDraft"] --> F2["配置关键词"] --> R2["保留门槛"]
+    R1 --> V["边界候选局部模型复核 + Python 固定规则"]
+    V --> B["MergedEventDraft"] --> F2["配置关键词"] --> R2["保留门槛"]
     R2 --> C["WorkEvent + 文件"] --> F3["配置关键词"] --> R3["保留门槛"]
     R3 --> D["Markdown"]
 ```
@@ -265,7 +285,7 @@ flowchart LR
 
 标题生成要求：脱离正文也能识别具体事项，优先采用“具体对象 + 关键动作、进展、结果或风险”的结构，避免只写通用类别。该要求用于个人候选提取、补充分析和多人正式汇总。
 
-`config/event_rules.json` 是可调整业务排除/指派关键词的配置入口。新增或调整这类业务关键词不得硬编码到 Python。`retention_filter.py` 当前还包含结构化保留门槛及其既有领域判定，属于现有代码规则，不应和用户可配置黑名单混为一谈。
+`config/event_rules.json` 是敏感、普通排除和本人指派关键词的配置入口；`config/retention_policy.json` 保存个人保留提示、既有业务词、复核条件和模型语义信号说明。新增或调整业务词不得硬编码到 Python。`retention_filter.py` 执行结构化保留门槛，`retention_review.py` 只验证模型信号和证据并执行固定规则，两者都不通过新增聊天关键词判断临时协作语义。
 
 ## 7. 多人汇总
 
@@ -397,6 +417,7 @@ OnlineLLMAnalyzer -> openai Python SDK -> Responses API provider
 - `config/conversation_blacklist.json`：整会话排除
 - `config/conversation_window.json`：初始窗口聚合和按需扩窗阈值
 - `config/llm_retry.json`：分段/提炼重试、流式首次返回超时和并发数
+- `config/retention_policy.json`：个人保留提示、既有业务词、临时协作复核条件和信号定义
 - `config/collected_merge.json`：多人汇总高风险复核开关、阈值和条件
 - `config/attachment_text.json`：文本附件限制
 - `config/image_summary.json`：图片摘要限制和 prompt
@@ -417,12 +438,13 @@ OnlineLLMAnalyzer -> openai Python SDK -> Responses API provider
 
 ## 11. 状态、warning 与错误
 
-个人日报结果包含会话数、消息数、slice 数、模型调用批次数、事件数、跳过数、warning 数、输出路径和自发送状态。
+个人日报结果包含会话数、消息数、slice 数、模型调用批次数、事件数、跳过数、warning 数、输出路径、自发送状态和 Python 计算的 `retention_review_summary`。
 
 规则：
 
 - 模型、聊天源或 store 的主错误返回 `failed`
 - 非关键窗口失败、图片摘要失败、模型分组修复、事件过滤和发送失败进入 warning
+- 临时协作复核的正常删除不进入 warning；技术失败或协议重试耗尽返回 `failed` 且不写文件
 - 有 warning 或跳过片段时返回 `success_with_warnings`
 - 空日是成功结果，不是失败
 
@@ -437,6 +459,7 @@ OnlineLLMAnalyzer -> openai Python SDK -> Responses API provider
 - day merge
 - workstream follow-up/resolution
 - resolved groups
+- `retention_review.json`：复核批次、模型信号、Python 统计和失败原因，不额外复制原聊天正文
 - `final_events.json`：过滤后的合并草稿、文件聚合和排序完成后的 `WorkEvent`、最终阶段 warning
 - `llm_usage.json`：每次模型调用的耗时、输入字符数和 Responses API 返回的输入/输出/总 token，以及汇总、缺失数量和按调用类型统计；缺失时不估算
 

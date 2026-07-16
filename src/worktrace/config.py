@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import os
 import json
+import os
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Mapping
@@ -38,6 +38,7 @@ DEFAULT_CONVERSATION_BLACKLIST_FILE_NAME = "config/conversation_blacklist.json"
 DEFAULT_CONVERSATION_WINDOW_FILE_NAME = "config/conversation_window.json"
 DEFAULT_LLM_RETRY_FILE_NAME = "config/llm_retry.json"
 DEFAULT_COLLECTED_MERGE_FILE_NAME = "config/collected_merge.json"
+DEFAULT_RETENTION_POLICY_FILE_NAME = "config/retention_policy.json"
 
 
 @dataclass(frozen=True)
@@ -59,6 +60,34 @@ class EventMetadataItem:
     key: str
     label: str
     order: int
+
+
+@dataclass(frozen=True)
+class RetentionSignalDefinition:
+    key: str
+    description: str
+
+
+@dataclass(frozen=True)
+class RetentionPolicyConfig:
+    review_enabled: bool = False
+    review_retention_reasons: tuple[str, ...] = ()
+    require_empty_workstream: bool = True
+    require_no_referenced_files: bool = True
+    uncertain_policy: str = "drop"
+    prompt_rules: tuple[str, ...] = ()
+    routine_signals: tuple[RetentionSignalDefinition, ...] = ()
+    substantive_signals: tuple[RetentionSignalDefinition, ...] = ()
+    generic_object_hints: tuple[str, ...] = ()
+    personal_social_keywords: tuple[str, ...] = ()
+    personal_leave_or_travel_keywords: tuple[str, ...] = ()
+    personal_private_reason_keywords: tuple[str, ...] = ()
+    personal_privacy_object_hints: tuple[str, ...] = ()
+    generic_review_keywords: tuple[str, ...] = ()
+    approval_action_keywords: tuple[str, ...] = ()
+    administrative_approval_keywords: tuple[str, ...] = ()
+    substantive_work_keywords: tuple[str, ...] = ()
+    repeated_low_information_suffixes: tuple[str, ...] = ()
 
 
 def parse_dotenv_lines(text: str) -> dict[str, str]:
@@ -102,6 +131,7 @@ def _read_local_env_values(
     merged: dict[str, str] = dict(file_values)
     merged.update(env)
     return merged
+
 
 def build_missing_llm_config_message(config: RuntimeConfig, missing_keys: list[str]) -> str:
     missing = ", ".join(missing_keys)
@@ -316,10 +346,216 @@ def _load_supporting_config_overrides(
     *,
     base_dir: Path,
 ) -> RuntimeConfig:
+    config = _load_retention_policy_overrides(config, base_dir=base_dir)
     config = _load_event_metadata_overrides(config, base_dir=base_dir)
     config = _load_conversation_window_overrides(config, base_dir=base_dir)
     config = _load_llm_retry_overrides(config, base_dir=base_dir)
     return _load_collected_merge_overrides(config, base_dir=base_dir)
+
+
+def _load_retention_policy_overrides(
+    config: RuntimeConfig,
+    *,
+    base_dir: Path,
+) -> RuntimeConfig:
+    config_path = base_dir / config.retention_policy_file_name
+    try:
+        payload = json.loads(config_path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return config
+    except json.JSONDecodeError as exc:
+        raise ValueError(
+            f"Invalid retention policy config: {config_path} is not valid JSON."
+        ) from exc
+    if not isinstance(payload, dict):
+        raise ValueError(
+            f"Invalid retention policy config: {config_path} must contain a JSON object."
+        )
+
+    expected_keys = {
+        "review",
+        "prompt_rules",
+        "routine_signals",
+        "substantive_signals",
+        "generic_object_hints",
+        "personal_social_keywords",
+        "personal_leave_or_travel_keywords",
+        "personal_private_reason_keywords",
+        "personal_privacy_object_hints",
+        "generic_review_keywords",
+        "approval_action_keywords",
+        "administrative_approval_keywords",
+        "substantive_work_keywords",
+        "repeated_low_information_suffixes",
+    }
+    unexpected = sorted(set(payload).difference(expected_keys))
+    missing = sorted(expected_keys.difference(payload))
+    if unexpected or missing:
+        details: list[str] = []
+        if unexpected:
+            details.append(f"unsupported keys {', '.join(unexpected)}")
+        if missing:
+            details.append(f"missing keys {', '.join(missing)}")
+        raise ValueError(
+            "Invalid retention policy config: " + "; ".join(details) + "."
+        )
+
+    review = payload["review"]
+    if not isinstance(review, dict):
+        raise ValueError(
+            "Invalid retention policy config: `review` must be an object."
+        )
+    review_keys = {
+        "enabled",
+        "retention_reasons",
+        "require_empty_workstream",
+        "require_no_referenced_files",
+        "uncertain_policy",
+    }
+    review_unexpected = sorted(set(review).difference(review_keys))
+    review_missing = sorted(review_keys.difference(review))
+    if review_unexpected or review_missing:
+        raise ValueError(
+            "Invalid retention policy config: `review` fields do not match the contract."
+        )
+    bool_keys = {
+        "enabled",
+        "require_empty_workstream",
+        "require_no_referenced_files",
+    }
+    if any(not isinstance(review[key], bool) for key in bool_keys):
+        raise ValueError(
+            "Invalid retention policy config: review switches must be booleans."
+        )
+    uncertain_policy = review["uncertain_policy"]
+    if uncertain_policy not in {"drop", "keep"}:
+        raise ValueError(
+            "Invalid retention policy config: uncertain_policy must be drop or keep."
+        )
+
+    policy = RetentionPolicyConfig(
+        review_enabled=review["enabled"],
+        review_retention_reasons=_read_string_list(
+            review,
+            key="retention_reasons",
+            fallback=(),
+            file_path=config_path,
+            error_prefix="Invalid retention policy config",
+        ),
+        require_empty_workstream=review["require_empty_workstream"],
+        require_no_referenced_files=review["require_no_referenced_files"],
+        uncertain_policy=uncertain_policy,
+        prompt_rules=_read_string_list(
+            payload,
+            key="prompt_rules",
+            fallback=(),
+            file_path=config_path,
+            error_prefix="Invalid retention policy config",
+        ),
+        routine_signals=_read_retention_signal_definitions(
+            payload["routine_signals"],
+            config_path=config_path,
+            field_name="routine_signals",
+        ),
+        substantive_signals=_read_retention_signal_definitions(
+            payload["substantive_signals"],
+            config_path=config_path,
+            field_name="substantive_signals",
+        ),
+        generic_object_hints=_read_retention_policy_list(
+            payload, "generic_object_hints", config_path
+        ),
+        personal_social_keywords=_read_retention_policy_list(
+            payload, "personal_social_keywords", config_path
+        ),
+        personal_leave_or_travel_keywords=_read_retention_policy_list(
+            payload, "personal_leave_or_travel_keywords", config_path
+        ),
+        personal_private_reason_keywords=_read_retention_policy_list(
+            payload, "personal_private_reason_keywords", config_path
+        ),
+        personal_privacy_object_hints=_read_retention_policy_list(
+            payload, "personal_privacy_object_hints", config_path
+        ),
+        generic_review_keywords=_read_retention_policy_list(
+            payload, "generic_review_keywords", config_path
+        ),
+        approval_action_keywords=_read_retention_policy_list(
+            payload, "approval_action_keywords", config_path
+        ),
+        administrative_approval_keywords=_read_retention_policy_list(
+            payload, "administrative_approval_keywords", config_path
+        ),
+        substantive_work_keywords=_read_retention_policy_list(
+            payload, "substantive_work_keywords", config_path
+        ),
+        repeated_low_information_suffixes=_read_retention_policy_list(
+            payload, "repeated_low_information_suffixes", config_path
+        ),
+    )
+    if not policy.review_retention_reasons:
+        raise ValueError(
+            "Invalid retention policy config: review retention_reasons cannot be empty."
+        )
+    routine_keys = {item.key for item in policy.routine_signals}
+    substantive_keys = {item.key for item in policy.substantive_signals}
+    if not routine_keys or not substantive_keys or routine_keys & substantive_keys:
+        raise ValueError(
+            "Invalid retention policy config: signal keys must be non-empty and distinct."
+        )
+    return replace(config, retention_policy=policy)
+
+
+def _read_retention_policy_list(
+    payload: dict[str, object],
+    key: str,
+    config_path: Path,
+) -> tuple[str, ...]:
+    return _read_string_list(
+        payload,
+        key=key,
+        fallback=(),
+        file_path=config_path,
+        error_prefix="Invalid retention policy config",
+    )
+
+
+def _read_retention_signal_definitions(
+    raw_value: object,
+    *,
+    config_path: Path,
+    field_name: str,
+) -> tuple[RetentionSignalDefinition, ...]:
+    if not isinstance(raw_value, list):
+        raise ValueError(
+            "Invalid retention policy config: "
+            f"{config_path} field `{field_name}` must be a list."
+        )
+    definitions: list[RetentionSignalDefinition] = []
+    seen: set[str] = set()
+    for item in raw_value:
+        if not isinstance(item, dict) or set(item) != {"key", "description"}:
+            raise ValueError(
+                "Invalid retention policy config: "
+                f"`{field_name}` items must contain key and description."
+            )
+        key = item["key"]
+        description = item["description"]
+        if not isinstance(key, str) or not isinstance(description, str):
+            raise ValueError(
+                "Invalid retention policy config: "
+                f"`{field_name}` values must be strings."
+            )
+        key = key.strip()
+        description = description.strip()
+        if not key or not description or key in seen:
+            raise ValueError(
+                "Invalid retention policy config: "
+                f"`{field_name}` contains an empty or duplicate key."
+            )
+        seen.add(key)
+        definitions.append(RetentionSignalDefinition(key=key, description=description))
+    return tuple(definitions)
 
 
 def _load_collected_merge_overrides(
@@ -722,6 +958,7 @@ class RuntimeConfig:
     excluded_event_keywords: tuple[str, ...] = ()
     self_assignment_keywords: tuple[str, ...] = ()
     self_relation_types: tuple[EventMetadataItem, ...] = ()
+    retention_policy: RetentionPolicyConfig = field(default_factory=RetentionPolicyConfig)
     reaction_catalogs_root: Path = DEFAULT_REACTION_CATALOGS_ROOT
     excluded_conversation_ids: tuple[str, ...] = ()
     data_root: Path = field(default_factory=lambda: Path("data"))
@@ -752,6 +989,7 @@ class RuntimeConfig:
     conversation_window_file_name: str = DEFAULT_CONVERSATION_WINDOW_FILE_NAME
     llm_retry_file_name: str = DEFAULT_LLM_RETRY_FILE_NAME
     collected_merge_file_name: str = DEFAULT_COLLECTED_MERGE_FILE_NAME
+    retention_policy_file_name: str = DEFAULT_RETENTION_POLICY_FILE_NAME
     llm_stream_enabled: bool = False
     llm_tls_verify: bool = False
     llm_sleep_min_seconds: float = 1.0

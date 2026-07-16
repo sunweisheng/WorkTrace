@@ -28,6 +28,7 @@ from .models import (
     WorkEvent,
     MergedEventDraft,
     NormalizedMessage,
+    RetentionReviewSummary,
     SegmentAnalysisBatch,
     SourceBackedEventDraft,
     ConversationSlice,
@@ -78,6 +79,13 @@ from .pipeline.retention_filter import (
     filter_retained_candidate_drafts,
     filter_retained_merged_drafts,
     filter_retained_work_events,
+)
+from .pipeline.retention_review import (
+    apply_retention_review_results,
+    build_retention_review_candidates,
+    pack_retention_review_batches,
+    select_retention_review_candidates,
+    validate_retention_review_result,
 )
 from .pipeline.sensitive_filter import (
     filter_candidate_drafts,
@@ -166,6 +174,7 @@ class DailyTraceRunner:
         self.checkpoint_store = LLMCheckpointStore(self.config, target_date)
         warning_messages: list[str] = []
         skipped_slice_count = 0
+        retention_review_summary = RetentionReviewSummary()
 
         try:
             stage_started_at = perf_counter()
@@ -309,9 +318,23 @@ class DailyTraceRunner:
                     )
                     warning_messages.extend(self_relation_candidate_warnings)
                 all_candidates, retention_candidate_warnings = (
-                    filter_retained_candidate_drafts(all_candidates)
+                    filter_retained_candidate_drafts(
+                        all_candidates,
+                        self.config.retention_policy,
+                    )
                 )
                 warning_messages.extend(retention_candidate_warnings)
+                (
+                    all_candidates,
+                    retention_review_summary,
+                    retention_review_call_count,
+                ) = self._review_retention_candidates(
+                    target_date=target_date,
+                    candidates=all_candidates,
+                    conversation_slices=conversation_slices,
+                    messages=filtered_messages,
+                )
+                analyzed_batch_count += retention_review_call_count
 
                 if not all_candidates:
                     return self._finish_run(
@@ -325,6 +348,7 @@ class DailyTraceRunner:
                             batch_count=analyzed_batch_count,
                             warning_messages=warning_messages,
                             skipped_slice_count=skipped_slice_count,
+                            retention_review_summary=retention_review_summary,
                         ),
                     )
 
@@ -435,6 +459,7 @@ class DailyTraceRunner:
             warning_messages.extend(merged_filter_warnings)
             merged_drafts, retention_merged_warnings = filter_retained_merged_drafts(
                 merged_drafts,
+                self.config.retention_policy,
             )
             warning_messages.extend(retention_merged_warnings)
             event_build_started_at = perf_counter()
@@ -446,7 +471,10 @@ class DailyTraceRunner:
             )
             events, final_event_filter_warnings = filter_work_events(events, self.config)
             warning_messages.extend(final_event_filter_warnings)
-            events, retention_event_warnings = filter_retained_work_events(events)
+            events, retention_event_warnings = filter_retained_work_events(
+                events,
+                self.config.retention_policy,
+            )
             warning_messages.extend(retention_event_warnings)
             events = _sort_events_for_output(events, messages=filtered_messages)
             self._dump_final_events_debug_artifacts(
@@ -517,7 +545,161 @@ class DailyTraceRunner:
                 self_delivery_status=delivery_status,
                 self_delivery_target=delivery_target,
                 self_delivery_error=delivery_error,
+                retention_review_summary=retention_review_summary,
             ),
+        )
+
+    def _review_retention_candidates(
+        self,
+        *,
+        target_date: str,
+        candidates: list[SourceBackedEventDraft],
+        conversation_slices: list[ConversationSlice],
+        messages: list[NormalizedMessage],
+    ) -> tuple[list[SourceBackedEventDraft], RetentionReviewSummary, int]:
+        policy = self.config.retention_policy
+        selected = select_retention_review_candidates(candidates, policy)
+        if not selected:
+            return candidates, RetentionReviewSummary(), 0
+
+        review_candidates = build_retention_review_candidates(
+            selected,
+            slices=conversation_slices,
+            messages=messages,
+        )
+        batches = pack_retention_review_batches(
+            target_date=target_date,
+            candidates=review_candidates,
+            config=self.config,
+        )
+        reviewed = {}
+        call_count = 0
+        retry_count = 0
+        debug_batches: list[dict[str, object]] = []
+        review_method = getattr(
+            self.dependencies.analyzer,
+            "review_retention_candidates",
+            None,
+        )
+        if not callable(review_method):
+            raise AnalyzerProtocolError(
+                "Retention review is enabled but the analyzer does not support it."
+            )
+
+        for batch in batches:
+            batch_started_at = perf_counter()
+            last_error = ""
+            for attempt in range(self.config.analysis_batch_retry_limit + 1):
+                try:
+                    call_count += 1
+                    result = review_method(batch)
+                    validated = validate_retention_review_result(
+                        batch,
+                        result,
+                        policy,
+                    )
+                    reviewed.update(validated)
+                    debug_batches.append(
+                        {
+                            "batch_id": batch.batch_id,
+                            "draft_ids": [
+                                item.candidate.draft_id
+                                for item in batch.candidates
+                            ],
+                            "attempt": attempt,
+                            "result": result.to_dict(),
+                        }
+                    )
+                    log_timing(
+                        logger,
+                        "runner.stage.completed",
+                        batch_started_at,
+                        stage="retention_review",
+                        batch_id=batch.batch_id,
+                        candidate_count=len(batch.candidates),
+                        retry_round=attempt,
+                    )
+                    break
+                except NotImplementedError as exc:
+                    last_error = "Retention review is not implemented by the analyzer."
+                    if attempt >= self.config.analysis_batch_retry_limit:
+                        self._dump_retention_review_debug_artifact(
+                            target_date=target_date,
+                            batches=debug_batches,
+                            summary=RetentionReviewSummary(
+                                selected_candidate_count=len(selected),
+                                review_batch_count=len(batches),
+                                review_retry_count=retry_count,
+                            ),
+                            error_summary=last_error,
+                        )
+                        raise AnalyzerProtocolError(last_error) from exc
+                    retry_count += 1
+                except AnalyzerProtocolError as exc:
+                    last_error = str(exc)
+                    if attempt >= self.config.analysis_batch_retry_limit:
+                        self._dump_retention_review_debug_artifact(
+                            target_date=target_date,
+                            batches=debug_batches,
+                            summary=RetentionReviewSummary(
+                                selected_candidate_count=len(selected),
+                                review_batch_count=len(batches),
+                                review_retry_count=retry_count,
+                            ),
+                            error_summary=last_error,
+                        )
+                        raise AnalyzerProtocolError(
+                            "Retention review failed after retries: " + last_error
+                        ) from exc
+                    retry_count += 1
+
+        (
+            kept,
+            kept_reviewed_count,
+            dropped_routine_count,
+            dropped_uncertain_count,
+        ) = apply_retention_review_results(candidates, reviewed, policy)
+        summary = RetentionReviewSummary(
+            selected_candidate_count=len(selected),
+            reviewed_candidate_count=len(reviewed),
+            kept_candidate_count=kept_reviewed_count,
+            dropped_routine_count=dropped_routine_count,
+            dropped_uncertain_count=dropped_uncertain_count,
+            review_batch_count=len(batches),
+            review_retry_count=retry_count,
+        )
+        self._dump_retention_review_debug_artifact(
+            target_date=target_date,
+            batches=debug_batches,
+            summary=summary,
+        )
+        return kept, summary, call_count
+
+    def _dump_retention_review_debug_artifact(
+        self,
+        *,
+        target_date: str,
+        batches: list[dict[str, object]],
+        summary: RetentionReviewSummary,
+        error_summary: str = "",
+    ) -> None:
+        debug_root = self.config.conversation_debug_root
+        if debug_root is None:
+            return
+        date_dir = debug_root / target_date
+        date_dir.mkdir(parents=True, exist_ok=True)
+        (date_dir / "retention_review.json").write_text(
+            dump_json(
+                {
+                    "target_date": target_date,
+                    "summary": summary.to_dict(),
+                    "batches": batches,
+                    "error_summary": error_summary,
+                },
+                pretty=True,
+            )
+            + "\n",
+            encoding="utf-8",
         )
 
     def _write_empty_day(
@@ -531,6 +713,7 @@ class DailyTraceRunner:
         batch_count: int,
         warning_messages: list[str] | None = None,
         skipped_slice_count: int = 0,
+        retention_review_summary: RetentionReviewSummary | None = None,
     ) -> DailyRunResult:
         warning_messages = warning_messages or []
         write_result = self.dependencies.event_store.replace_day(
@@ -567,6 +750,9 @@ class DailyTraceRunner:
             self_delivery_status=delivery_status,
             self_delivery_target=delivery_target,
             self_delivery_error=delivery_error,
+            retention_review_summary=(
+                retention_review_summary or RetentionReviewSummary()
+            ),
         )
 
     def _failed_result(self, target_date: str, error_summary: str) -> DailyRunResult:
@@ -585,6 +771,7 @@ class DailyTraceRunner:
             self_delivery_status="",
             self_delivery_target="",
             self_delivery_error="",
+            retention_review_summary=RetentionReviewSummary(),
         )
 
     def _finish_run(
@@ -606,6 +793,13 @@ class DailyTraceRunner:
             event_count=result.event_count,
             warning_count=result.warning_count,
             skipped_slice_count=result.skipped_slice_count,
+            retention_review_selected=(
+                result.retention_review_summary.selected_candidate_count
+            ),
+            retention_review_dropped=(
+                result.retention_review_summary.dropped_routine_count
+                + result.retention_review_summary.dropped_uncertain_count
+            ),
         )
         return result
 

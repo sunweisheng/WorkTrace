@@ -857,6 +857,86 @@ class SourceBackedEventDraft:
 
 
 @dataclass(frozen=True)
+class RetentionReviewCandidate:
+    candidate: SourceBackedEventDraft
+    messages: list[NormalizedMessage] = field(default_factory=list)
+    allowed_evidence_message_ids: list[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class RetentionReviewBatch:
+    target_date: str
+    batch_id: str
+    candidates: list[RetentionReviewCandidate] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class RetentionSignalEvidence:
+    signal_type: str
+    evidence_message_ids: list[str] = field(default_factory=list)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> RetentionSignalEvidence:
+        return cls(
+            signal_type=str(data.get("type", "")),
+            evidence_message_ids=_string_list(data.get("evidence_message_ids")),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "type": self.signal_type,
+            "evidence_message_ids": list(self.evidence_message_ids),
+        }
+
+
+@dataclass(frozen=True)
+class RetentionReviewItemResult:
+    draft_id: str
+    routine_signals: list[RetentionSignalEvidence] = field(default_factory=list)
+    substantive_signals: list[RetentionSignalEvidence] = field(default_factory=list)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> RetentionReviewItemResult:
+        return cls(
+            draft_id=str(data.get("draft_id", "")),
+            routine_signals=[
+                RetentionSignalEvidence.from_dict(item)
+                for item in _dict_list(data.get("routine_signals"))
+            ],
+            substantive_signals=[
+                RetentionSignalEvidence.from_dict(item)
+                for item in _dict_list(data.get("substantive_signals"))
+            ],
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "draft_id": self.draft_id,
+            "routine_signals": [item.to_dict() for item in self.routine_signals],
+            "substantive_signals": [
+                item.to_dict() for item in self.substantive_signals
+            ],
+        }
+
+
+@dataclass(frozen=True)
+class RetentionReviewResult:
+    results: list[RetentionReviewItemResult] = field(default_factory=list)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> RetentionReviewResult:
+        return cls(
+            results=[
+                RetentionReviewItemResult.from_dict(item)
+                for item in _dict_list(data.get("results"))
+            ]
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"results": [item.to_dict() for item in self.results]}
+
+
+@dataclass(frozen=True)
 class BatchAnalysisResult:
     candidate_events: list[SourceBackedEventDraft] = field(default_factory=list)
     context_requests: list[ContextRequest] = field(default_factory=list)
@@ -1369,6 +1449,40 @@ class AnchorCacheEntry:
 
 
 @dataclass(frozen=True)
+class RetentionReviewSummary:
+    selected_candidate_count: int = 0
+    reviewed_candidate_count: int = 0
+    kept_candidate_count: int = 0
+    dropped_routine_count: int = 0
+    dropped_uncertain_count: int = 0
+    review_batch_count: int = 0
+    review_retry_count: int = 0
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> RetentionReviewSummary:
+        return cls(
+            selected_candidate_count=int(data.get("selected_candidate_count", 0)),
+            reviewed_candidate_count=int(data.get("reviewed_candidate_count", 0)),
+            kept_candidate_count=int(data.get("kept_candidate_count", 0)),
+            dropped_routine_count=int(data.get("dropped_routine_count", 0)),
+            dropped_uncertain_count=int(data.get("dropped_uncertain_count", 0)),
+            review_batch_count=int(data.get("review_batch_count", 0)),
+            review_retry_count=int(data.get("review_retry_count", 0)),
+        )
+
+    def to_dict(self) -> dict[str, int]:
+        return {
+            "selected_candidate_count": self.selected_candidate_count,
+            "reviewed_candidate_count": self.reviewed_candidate_count,
+            "kept_candidate_count": self.kept_candidate_count,
+            "dropped_routine_count": self.dropped_routine_count,
+            "dropped_uncertain_count": self.dropped_uncertain_count,
+            "review_batch_count": self.review_batch_count,
+            "review_retry_count": self.review_retry_count,
+        }
+
+
+@dataclass(frozen=True)
 class DailyRunResult:
     target_date: str
     conversation_count: int
@@ -1384,6 +1498,9 @@ class DailyRunResult:
     self_delivery_status: str = ""
     self_delivery_target: str = ""
     self_delivery_error: str = ""
+    retention_review_summary: RetentionReviewSummary = field(
+        default_factory=RetentionReviewSummary
+    )
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> DailyRunResult:
@@ -1404,6 +1521,11 @@ class DailyRunResult:
             self_delivery_status=str(data.get("self_delivery_status", "")),
             self_delivery_target=str(data.get("self_delivery_target", "")),
             self_delivery_error=str(data.get("self_delivery_error", "")),
+            retention_review_summary=RetentionReviewSummary.from_dict(
+                data.get("retention_review_summary", {})
+                if isinstance(data.get("retention_review_summary", {}), dict)
+                else {}
+            ),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -1422,6 +1544,7 @@ class DailyRunResult:
             "self_delivery_status": self.self_delivery_status,
             "self_delivery_target": self.self_delivery_target,
             "self_delivery_error": self.self_delivery_error,
+            "retention_review_summary": self.retention_review_summary.to_dict(),
         }
 
 

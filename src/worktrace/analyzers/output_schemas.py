@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from ..config import RuntimeConfig
+
 
 def batch_output_schema() -> dict[str, object]:
     return {
@@ -133,6 +135,55 @@ def segment_batch_output_schema() -> dict[str, object]:
                     "additionalProperties": False,
                 },
             },
+        },
+        "required": ["results"],
+        "additionalProperties": False,
+    }
+
+
+def retention_review_output_schema(config: RuntimeConfig) -> dict[str, object]:
+    routine_types = [item.key for item in config.retention_policy.routine_signals]
+    substantive_types = [
+        item.key for item in config.retention_policy.substantive_signals
+    ]
+
+    def signal_schema(allowed_types: list[str]) -> dict[str, object]:
+        return {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "type": {"type": "string", "enum": allowed_types},
+                    "evidence_message_ids": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                    },
+                },
+                "required": ["type", "evidence_message_ids"],
+                "additionalProperties": False,
+            },
+        }
+
+    return {
+        "type": "object",
+        "properties": {
+            "results": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "draft_id": {"type": "string"},
+                        "routine_signals": signal_schema(routine_types),
+                        "substantive_signals": signal_schema(substantive_types),
+                    },
+                    "required": [
+                        "draft_id",
+                        "routine_signals",
+                        "substantive_signals",
+                    ],
+                    "additionalProperties": False,
+                },
+            }
         },
         "required": ["results"],
         "additionalProperties": False,

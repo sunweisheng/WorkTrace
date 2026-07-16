@@ -12,7 +12,7 @@ from src.worktrace.analyzers.prompts import (
     serialize_anchor_unit_for_prompt,
     serialize_batch_for_prompt,
 )
-from src.worktrace.config import RuntimeConfig
+from src.worktrace.config import RuntimeConfig, load_runtime_config_overrides
 from src.worktrace.constants import AnchorStatus, ContextRequestType
 from src.worktrace.models import (
     AnalysisBatch,
@@ -27,6 +27,12 @@ from src.worktrace.models import (
     NormalizedMessage,
     SourceBackedEventDraft,
 )
+
+
+REPO_RETENTION_POLICY = load_runtime_config_overrides(
+    RuntimeConfig(),
+    cwd=Path.cwd(),
+).retention_policy
 
 
 def test_prompt_serialization_is_compact(tmp_path: Path) -> None:
@@ -102,6 +108,7 @@ def test_batch_prompt_uses_original_message_ids_and_slim_rules(tmp_path: Path) -
         data_root=tmp_path / "data",
         prompt_slice_message_limit=3,
         prompt_message_char_limit=50,
+        retention_policy=REPO_RETENTION_POLICY,
     )
     messages = [
         NormalizedMessage(
@@ -163,20 +170,20 @@ def test_batch_prompt_uses_original_message_ids_and_slim_rules(tmp_path: Path) -
     assert "本人信息见 input.self；只有事项明确由本人发起、本人负责、本人审批、本人催办、本人汇报、本人跟进，或他人明确要求本人推进/处理时，才提炼。" in prompt
     assert "如果事项主体明显是他人的工作、他人的进展、他人的承诺，而本人只是参与了会话或说过别的话，不要提炼。" in prompt
     assert "如果只是同群讨论背景信息、但没有明确落到本人，也不要提炼。" in prompt
-    assert "咨询类事件、流程审核类事件、团建活动组织类事件、技能培训类事件，默认不要提炼；这类事项对后续公司级长期事件沉淀价值较低。" in prompt
+    assert "本人参与、回复或被询问，只能证明事项与本人有关" in prompt
+    assert "单纯询问人员当前状态、位置或是否可用" in prompt
+    assert "咨询内容如果形成明确业务结论、问题风险、交付修改或后续业务动作" in prompt
     assert "私人饭局、约饭、离职告别聚餐、同事口碑评价、人际寒暄，不要提炼为事项。" in prompt
     assert "个人请假、家庭原因、孩子学校证明、个人行程报备，不要提炼为工作事件。" in prompt
     assert "加班、请假、补卡、考勤、调休、外出报备等行政流程审批，不要提炼为工作事项。" in prompt
-    assert "泛泛完成审核/审批/工作审核/审核任务但没有具体业务对象、审批结论、问题、风险、金额、客户、项目、文档或后续动作，不要提炼为事项。" in prompt
+    assert "泛泛完成审核或审批但没有具体业务对象" in prompt
     assert "只有同时具备具体对象、保留理由、保留依据的工作事件才输出" in prompt
     assert "人名只在明确责任分工、任务指派或确认沟通对象时保留" in prompt
     assert "retention_detail 表示保留依据/来源证据" in prompt
     assert "不要写 message id、open_id、conversation_id 或 om_/ou_/oc_ 等内部标识。" in prompt
     assert "不要只写泛泛的价值判断" in prompt
-    assert "产品同事评价不错，今晚在公司旁边吃牛蛙火锅，饭后回去准备述职材料，不要输出 candidate_event。" in prompt
-    assert "本人明天晚到，需去学校为孩子开证明，不要输出 candidate_event。" in prompt
-    assert "完成了郭海提交的工作审核，并同步审核结果，不要输出 candidate_event。" in prompt
-    assert "审核客户合同并反馈付款条款问题，可以输出 candidate_event。" in prompt
+    assert "follow_up_assigned 必须包含明确业务对象" in prompt
+    assert "首次分析拿不准临时协作是否关联真实业务任务时" in prompt
     assert "正例：本人要求他人汇报、本人审批、本人同步、本人催办、本人推进，都算与本人直接相关。" in prompt
     assert "反例：他人之间讨论自己的工作、自己的承诺、自己的处理进度，即使本人在该会话里发过言，也不算与本人直接相关。" in prompt
     assert "如果当前消息是在纠正、澄清或替换前文对象" in prompt
@@ -249,6 +256,7 @@ def test_anchor_prompt_serialization_is_compact(tmp_path: Path) -> None:
         data_root=tmp_path / "data",
         prompt_slice_message_limit=1,
         prompt_message_char_limit=12,
+        retention_policy=REPO_RETENTION_POLICY,
     )
     message = NormalizedMessage(
         conversation_id="oc_1",
@@ -291,10 +299,11 @@ def test_anchor_prompt_serialization_is_compact(tmp_path: Path) -> None:
     assert "每个 candidate_event 只表示一个主要动作。" in prompt
     assert "具体对象 + 关键动作、进展、结果或风险" in prompt
     assert "例如：已同步给老板、老板未回复可视为已知悉" in prompt
-    assert "咨询类事件、流程审核类事件、团建活动组织类事件、技能培训类事件，默认不要提炼；这类事项对后续公司级长期事件沉淀价值较低。" in prompt
+    assert "本人参与、回复或被询问，只能证明事项与本人有关" in prompt
+    assert "单纯询问人员当前状态、位置或是否可用" in prompt
     assert "私人饭局、约饭、离职告别聚餐、同事口碑评价、人际寒暄，不要提炼为事项。" in prompt
     assert "个人请假、家庭原因、孩子学校证明、个人行程报备，不要提炼为工作事件。" in prompt
-    assert "泛泛完成审核/审批/工作审核/审核任务但没有具体业务对象、审批结论、问题、风险、金额、客户、项目、文档或后续动作，不要提炼为事项。" in prompt
+    assert "泛泛完成审核或审批但没有具体业务对象" in prompt
     assert "只有同时具备具体对象、保留理由、保留依据的工作事件才输出" in prompt
     assert "人名只在明确责任分工、任务指派或确认沟通对象时保留" in prompt
     assert "retention_detail 表示保留依据/来源证据" in prompt
@@ -311,6 +320,7 @@ def test_anchor_expansion_prompt_includes_previous_result_and_expansion(tmp_path
         data_root=tmp_path / "data",
         prompt_message_char_limit=20,
         prompt_attachment_char_limit=20,
+        retention_policy=REPO_RETENTION_POLICY,
     )
     base_message = NormalizedMessage(
         conversation_id="oc_1",
@@ -406,8 +416,8 @@ def test_anchor_expansion_prompt_includes_previous_result_and_expansion(tmp_path
     assert "该结果只能归属于同一个 candidate_event 的主要动作" in prompt
     assert "私人饭局、约饭、离职告别聚餐、同事口碑评价、人际寒暄，不要提炼为事项。" in prompt
     assert "个人请假、家庭原因、孩子学校证明、个人行程报备，不要提炼为工作事件。" in prompt
-    assert "本人明天晚到，需去学校为孩子开证明，不要输出 candidate_event。" in prompt
-    assert "泛泛完成审核/审批但没有具体业务对象、审批结论、问题、风险、金额、客户、项目、文档或后续动作，不要输出 candidate_event。" in prompt
+    assert "follow_up_assigned 必须包含明确业务对象" in prompt
+    assert "泛泛完成审核或审批但没有具体业务对象" in prompt
     assert "只有同时具备具体对象、保留理由、保留依据的工作事件才输出" in prompt
     assert "人名只在明确责任分工、任务指派或确认沟通对象时保留" in prompt
     assert "retention_detail 表示保留依据/来源证据" in prompt
@@ -417,7 +427,10 @@ def test_anchor_expansion_prompt_includes_previous_result_and_expansion(tmp_path
 
 
 def test_prompts_do_not_include_removed_reasoning_summary_rule(tmp_path: Path) -> None:
-    config = RuntimeConfig(data_root=tmp_path / "data")
+    config = RuntimeConfig(
+        data_root=tmp_path / "data",
+        retention_policy=REPO_RETENTION_POLICY,
+    )
     message = NormalizedMessage(
         conversation_id="oc_1",
         conversation_name="项目群",
@@ -478,7 +491,10 @@ def test_prompts_do_not_include_removed_reasoning_summary_rule(tmp_path: Path) -
 
 
 def test_anchor_batch_prompt_includes_low_retention_rules(tmp_path: Path) -> None:
-    config = RuntimeConfig(data_root=tmp_path / "data")
+    config = RuntimeConfig(
+        data_root=tmp_path / "data",
+        retention_policy=REPO_RETENTION_POLICY,
+    )
     message = NormalizedMessage(
         conversation_id="oc_1",
         conversation_name="项目群",
@@ -515,14 +531,15 @@ def test_anchor_batch_prompt_includes_low_retention_rules(tmp_path: Path) -> Non
 
     assert "私人饭局、约饭、离职告别聚餐、同事口碑评价、人际寒暄，不要提炼为事项。" in prompt
     assert "个人请假、家庭原因、孩子学校证明、个人行程报备，不要提炼为工作事件。" in prompt
-    assert "泛泛完成审核/审批/工作审核/审核任务但没有具体业务对象、审批结论、问题、风险、金额、客户、项目、文档或后续动作，不要提炼为事项。" in prompt
+    assert "泛泛完成审核或审批但没有具体业务对象" in prompt
+    assert "单纯询问人员当前状态、位置或是否可用" in prompt
     assert "只有同时具备具体对象、保留理由、保留依据的工作事件才输出" in prompt
     assert "具体对象 + 关键动作、进展、结果或风险" in prompt
     assert "人名只在明确责任分工、任务指派或确认沟通对象时保留" in prompt
     assert "retention_detail 表示保留依据/来源证据" in prompt
     assert "不要写 message id、open_id、conversation_id 或 om_/ou_/oc_ 等内部标识。" in prompt
-    assert "本人明天晚到，需去学校为孩子开证明，不要输出 candidate_event。" in prompt
-    assert "完成了郭海提交的工作审核，并同步审核结果，不要输出 candidate_event。" in prompt
+    assert "follow_up_assigned 必须包含明确业务对象" in prompt
+    assert "首次分析拿不准临时协作是否关联真实业务任务时" in prompt
 
 
 def test_media_messages_are_compressed_for_prompt(tmp_path: Path) -> None:
