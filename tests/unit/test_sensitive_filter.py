@@ -157,6 +157,46 @@ def test_personnel_retention_compensation_is_filtered_at_all_three_layers() -> N
     assert event_warnings == ["Filtered sensitive event."]
 
 
+def test_merged_markdown_title_is_excluded_at_all_three_layers() -> None:
+    title = "《2026-07-14-部门负责人-merged.md》日报质量分析"
+    candidate = SourceBackedEventDraft(
+        draft_id="evt-merged-markdown",
+        date="2026-07-15",
+        topic=title,
+        content="检查日报文件体积并提出整改建议。",
+        source_message_ids=["m1"],
+        source_conversation_id="c1",
+        source_slice_id="s1",
+        confidence=0.9,
+    )
+    merged = MergedEventDraft(
+        date=candidate.date,
+        topic=title,
+        content=candidate.content,
+        source_message_ids=candidate.source_message_ids,
+        source_conversation_ids=[candidate.source_conversation_id],
+    )
+    event = WorkEvent(
+        date=candidate.date,
+        event_id=candidate.draft_id,
+        title=title,
+        content=candidate.content,
+    )
+
+    candidate_kept, candidate_warnings = filter_candidate_drafts(
+        [candidate], REPO_CONFIG
+    )
+    merged_kept, merged_warnings = filter_merged_drafts([merged], REPO_CONFIG)
+    event_kept, event_warnings = filter_work_events([event], REPO_CONFIG)
+
+    assert candidate_kept == []
+    assert merged_kept == []
+    assert event_kept == []
+    assert candidate_warnings == ["Filtered excluded event."]
+    assert merged_warnings == ["Filtered excluded event."]
+    assert event_warnings == ["Filtered excluded event."]
+
+
 def test_work_event_filter_removes_sensitive_file_link_without_leaking_title() -> None:
     events = [
         WorkEvent(

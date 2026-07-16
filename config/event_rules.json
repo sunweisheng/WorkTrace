@@ -40,7 +40,8 @@
     "对骂"
   ],
   "excluded_event_keywords": [
-    "git pull"
+    "git pull",
+    "merged.md"
   ],
   "self_assignment_keywords": [
     "帮",
