@@ -64,6 +64,43 @@ def test_docs_define_retention_review_model_and_python_boundaries() -> None:
         assert "6200" in content
 
 
+def test_docs_define_personal_fact_review_evidence_boundary() -> None:
+    documents = [
+        Path("README.md").read_text(encoding="utf-8"),
+        Path("docs/detailed-design.md").read_text(encoding="utf-8"),
+        Path("docs/employee-guide.md").read_text(encoding="utf-8"),
+        Path("SKILL.md").read_text(encoding="utf-8"),
+    ]
+
+    for content in documents:
+        assert "fact_items" in content or "事实证据" in content
+        assert "原聊天" in content
+        assert "Python" in content
+        assert "不" in content and (
+            "事实含义" in content or "业务含义" in content
+        )
+        assert ("复杂" in content or "多步骤" in content) and "删除" in content
+        assert "config/retention_policy.json" in content
+    for content in (documents[0], documents[1], documents[3]):
+        assert "fact_risk_flags" in content
+        assert "personal_fact_review_summary" in content
+        assert "6200" in content
+
+
+def test_debug_docs_cover_both_review_artifacts_and_replay_summary() -> None:
+    readme = Path("README.md").read_text(encoding="utf-8")
+    detailed = Path("docs/detailed-design.md").read_text(encoding="utf-8")
+    employee = Path("docs/employee-guide.md").read_text(encoding="utf-8")
+    skill = Path("SKILL.md").read_text(encoding="utf-8")
+
+    for content in (readme, detailed, employee, skill):
+        assert "retention_review.json" in content
+        assert "personal_fact_review.json" in content
+        assert "失败" in content
+    for content in (readme, detailed, employee):
+        assert "review_artifact_summary" in content
+
+
 def test_docs_describe_event_metadata_and_markdown_compatibility() -> None:
     readme = Path("README.md").read_text(encoding="utf-8")
     detailed = Path("docs/detailed-design.md").read_text(encoding="utf-8")

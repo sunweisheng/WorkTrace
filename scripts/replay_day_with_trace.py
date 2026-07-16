@@ -151,6 +151,46 @@ def _collect_first_pass_summary(conversation_debug_root: Path) -> dict[str, obje
     }
 
 
+def _collect_review_artifact_summary(
+    conversation_debug_root: Path,
+    target_date: str,
+) -> dict[str, object]:
+    date_root = conversation_debug_root / target_date
+    artifacts: dict[str, object] = {}
+    for review_name in ("retention_review", "personal_fact_review"):
+        path = date_root / f"{review_name}.json"
+        if not path.exists():
+            artifacts[review_name] = {
+                "path": str(path.resolve()),
+                "exists": False,
+                "summary": {},
+                "attempt_count": 0,
+                "failed_attempt_count": 0,
+                "error_summary": "",
+            }
+            continue
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        batches = payload.get("batches", []) if isinstance(payload, dict) else []
+        batch_items = [item for item in batches if isinstance(item, dict)]
+        artifacts[review_name] = {
+            "path": str(path.resolve()),
+            "exists": True,
+            "summary": (
+                payload.get("summary", {}) if isinstance(payload, dict) else {}
+            ),
+            "attempt_count": len(batch_items),
+            "failed_attempt_count": sum(
+                1 for item in batch_items if item.get("status") == "failed"
+            ),
+            "error_summary": (
+                str(payload.get("error_summary", ""))
+                if isinstance(payload, dict)
+                else ""
+            ),
+        }
+    return artifacts
+
+
 def _collect_checkpoint_summary(checkpoint_root: Path) -> dict[str, object]:
     stages = ("segmentation", "analysis")
     return {
@@ -237,6 +277,10 @@ def main(argv: list[str] | None = None) -> int:
     timing_summary = _collect_timing(completed.stderr)
     llm_summary = _collect_llm_summary(trace_root)
     first_pass_summary = _collect_first_pass_summary(conversation_debug_root)
+    review_artifact_summary = _collect_review_artifact_summary(
+        conversation_debug_root,
+        args.date,
+    )
 
     result_payload: object | None = None
     if completed.stdout.strip():
@@ -253,6 +297,7 @@ def main(argv: list[str] | None = None) -> int:
         "returncode": completed.returncode,
         "result": result_payload,
         "first_pass_summary": first_pass_summary,
+        "review_artifact_summary": review_artifact_summary,
         "llm_summary": llm_summary,
         "timing_summary": timing_summary,
         "llm_checkpoint_summary": _collect_checkpoint_summary(checkpoint_root),

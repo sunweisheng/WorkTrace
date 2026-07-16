@@ -11,6 +11,7 @@ from ..models import (
     ContextRequest,
     ConversationSlice,
     MergedEventDraft,
+    PersonalFactItem,
     SelfRelationEvidence,
     SourceBackedEventDraft,
 )
@@ -93,6 +94,7 @@ def validate_batch_analysis_result(
     *,
     self_open_id: str = "",
     self_relation_keys: tuple[str, ...] = (),
+    fact_risk_keys: tuple[str, ...] = (),
     warning_sink: list[str] | None = None,
 ) -> BatchAnalysisResult:
     valid_candidates: list[SourceBackedEventDraft] = []
@@ -138,6 +140,16 @@ def validate_batch_analysis_result(
             candidate_id=candidate.draft_id,
             warning_sink=warning_sink,
         )
+        fact_items = normalize_personal_fact_items(
+            candidate.fact_items,
+            allowed_message_ids=normalized_ids,
+        )
+        allowed_fact_risk_keys = set(fact_risk_keys)
+        fact_risk_flags = [
+            value
+            for value in dict.fromkeys(candidate.fact_risk_flags)
+            if value in allowed_fact_risk_keys
+        ]
 
         draft_id = candidate.draft_id.strip()
         date = candidate.date.strip()
@@ -178,6 +190,8 @@ def validate_batch_analysis_result(
                 response_evidence_message_ids=list(
                     candidate.response_evidence_message_ids
                 ),
+                fact_items=fact_items,
+                fact_risk_flags=fact_risk_flags,
             )
         )
 
@@ -204,6 +218,46 @@ def validate_batch_analysis_result(
         candidate_events=valid_candidates,
         context_requests=valid_requests,
     )
+
+
+PERSONAL_FACT_FIELDS = {
+    "topic",
+    "content",
+    "action_label",
+    "object_hint",
+    "retention_detail",
+    "workstream_key",
+}
+
+
+def normalize_personal_fact_items(
+    fact_items: list[PersonalFactItem],
+    *,
+    allowed_message_ids: list[str],
+) -> list[PersonalFactItem]:
+    allowed = set(allowed_message_ids)
+    message_order = {message_id: index for index, message_id in enumerate(allowed_message_ids)}
+    normalized: list[PersonalFactItem] = []
+    for item in fact_items:
+        field_name = item.field_name.strip()
+        text = item.text.strip()
+        evidence_ids = list(dict.fromkeys(item.evidence_message_ids))
+        if (
+            field_name not in PERSONAL_FACT_FIELDS
+            or not text
+            or not evidence_ids
+            or not set(evidence_ids).issubset(allowed)
+        ):
+            continue
+        evidence_ids.sort(key=lambda value: message_order[value])
+        normalized.append(
+            PersonalFactItem(
+                field_name=field_name,
+                text=text,
+                evidence_message_ids=evidence_ids,
+            )
+        )
+    return normalized
 
 
 def validate_merged_event_drafts(

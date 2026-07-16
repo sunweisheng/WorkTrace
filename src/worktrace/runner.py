@@ -10,6 +10,7 @@ from time import perf_counter
 from urllib.parse import urlsplit
 
 from .config import RuntimeConfig
+from .analyzers.base import Analyzer
 from .constants import DailyRunStatus
 from .errors import AnalyzerProtocolError, ChatSourceError, DeliveryError, StoreWriteError
 from .factories import RuntimeDependencies, build_runtime_dependencies
@@ -28,6 +29,11 @@ from .models import (
     WorkEvent,
     MergedEventDraft,
     NormalizedMessage,
+    PersonalFactReviewBatch,
+    PersonalFactReviewResult,
+    PersonalFactReviewSummary,
+    RetentionReviewBatch,
+    RetentionReviewResult,
     RetentionReviewSummary,
     SegmentAnalysisBatch,
     SourceBackedEventDraft,
@@ -86,6 +92,12 @@ from .pipeline.retention_review import (
     pack_retention_review_batches,
     select_retention_review_candidates,
     validate_retention_review_result,
+)
+from .pipeline.personal_fact_review import (
+    apply_personal_fact_review_results,
+    build_personal_fact_review_candidates,
+    pack_personal_fact_review_batches,
+    validate_personal_fact_review_result,
 )
 from .pipeline.sensitive_filter import (
     filter_candidate_drafts,
@@ -175,6 +187,7 @@ class DailyTraceRunner:
         warning_messages: list[str] = []
         skipped_slice_count = 0
         retention_review_summary = RetentionReviewSummary()
+        personal_fact_review_summary = PersonalFactReviewSummary()
 
         try:
             stage_started_at = perf_counter()
@@ -335,6 +348,17 @@ class DailyTraceRunner:
                     messages=filtered_messages,
                 )
                 analyzed_batch_count += retention_review_call_count
+                (
+                    all_candidates,
+                    personal_fact_review_summary,
+                    personal_fact_review_call_count,
+                ) = self._review_personal_event_facts(
+                    target_date=target_date,
+                    candidates=all_candidates,
+                    conversation_slices=conversation_slices,
+                    messages=filtered_messages,
+                )
+                analyzed_batch_count += personal_fact_review_call_count
 
                 if not all_candidates:
                     return self._finish_run(
@@ -349,6 +373,7 @@ class DailyTraceRunner:
                             warning_messages=warning_messages,
                             skipped_slice_count=skipped_slice_count,
                             retention_review_summary=retention_review_summary,
+                            personal_fact_review_summary=personal_fact_review_summary,
                         ),
                     )
 
@@ -448,6 +473,8 @@ class DailyTraceRunner:
                     batch_count=analyzed_batch_count,
                     warning_messages=warning_messages,
                     skipped_slice_count=skipped_slice_count,
+                    retention_review_summary=retention_review_summary,
+                    personal_fact_review_summary=personal_fact_review_summary,
                 ),
             )
 
@@ -546,6 +573,7 @@ class DailyTraceRunner:
                 self_delivery_target=delivery_target,
                 self_delivery_error=delivery_error,
                 retention_review_summary=retention_review_summary,
+                personal_fact_review_summary=personal_fact_review_summary,
             ),
         )
 
@@ -590,6 +618,7 @@ class DailyTraceRunner:
             batch_started_at = perf_counter()
             last_error = ""
             for attempt in range(self.config.analysis_batch_retry_limit + 1):
+                result = None
                 try:
                     call_count += 1
                     result = review_method(batch)
@@ -600,15 +629,12 @@ class DailyTraceRunner:
                     )
                     reviewed.update(validated)
                     debug_batches.append(
-                        {
-                            "batch_id": batch.batch_id,
-                            "draft_ids": [
-                                item.candidate.draft_id
-                                for item in batch.candidates
-                            ],
-                            "attempt": attempt,
-                            "result": result.to_dict(),
-                        }
+                        _retention_review_debug_entry(
+                            batch,
+                            attempt=attempt,
+                            status="success",
+                            result=result,
+                        )
                     )
                     log_timing(
                         logger,
@@ -622,6 +648,15 @@ class DailyTraceRunner:
                     break
                 except NotImplementedError as exc:
                     last_error = "Retention review is not implemented by the analyzer."
+                    debug_batches.append(
+                        _retention_review_debug_entry(
+                            batch,
+                            attempt=attempt,
+                            status="failed",
+                            result=result,
+                            error_summary=last_error,
+                        )
+                    )
                     if attempt >= self.config.analysis_batch_retry_limit:
                         self._dump_retention_review_debug_artifact(
                             target_date=target_date,
@@ -637,6 +672,15 @@ class DailyTraceRunner:
                     retry_count += 1
                 except AnalyzerProtocolError as exc:
                     last_error = str(exc)
+                    debug_batches.append(
+                        _retention_review_debug_entry(
+                            batch,
+                            attempt=attempt,
+                            status="failed",
+                            result=result,
+                            error_summary=last_error,
+                        )
+                    )
                     if attempt >= self.config.analysis_batch_retry_limit:
                         self._dump_retention_review_debug_artifact(
                             target_date=target_date,
@@ -674,6 +718,177 @@ class DailyTraceRunner:
             summary=summary,
         )
         return kept, summary, call_count
+
+    def _review_personal_event_facts(
+        self,
+        *,
+        target_date: str,
+        candidates: list[SourceBackedEventDraft],
+        conversation_slices: list[ConversationSlice],
+        messages: list[NormalizedMessage],
+    ) -> tuple[list[SourceBackedEventDraft], PersonalFactReviewSummary, int]:
+        policy = self.config.retention_policy
+        if not policy.fact_review_enabled or not _supports_personal_fact_review(
+            self.dependencies.analyzer
+        ):
+            return candidates, PersonalFactReviewSummary(), 0
+
+        review_candidates = build_personal_fact_review_candidates(
+            candidates,
+            slices=conversation_slices,
+            messages=messages,
+            policy=policy,
+        )
+        if not review_candidates:
+            return candidates, PersonalFactReviewSummary(), 0
+        batches = pack_personal_fact_review_batches(
+            target_date=target_date,
+            candidates=review_candidates,
+            config=self.config,
+        )
+        reviewed = {}
+        call_count = 0
+        retry_count = 0
+        debug_batches: list[dict[str, object]] = []
+        review_method = getattr(
+            self.dependencies.analyzer,
+            "review_personal_event_facts",
+            None,
+        )
+        if not callable(review_method):
+            raise AnalyzerProtocolError(
+                "Personal fact review is enabled but the analyzer does not support it."
+            )
+
+        for batch in batches:
+            batch_started_at = perf_counter()
+            last_error = ""
+            for attempt in range(self.config.analysis_batch_retry_limit + 1):
+                result = None
+                try:
+                    call_count += 1
+                    result = review_method(batch)
+                    validated = validate_personal_fact_review_result(batch, result)
+                    reviewed.update(validated)
+                    debug_batches.append(
+                        _personal_fact_review_debug_entry(
+                            batch,
+                            attempt=attempt,
+                            status="success",
+                            result=result,
+                        )
+                    )
+                    log_timing(
+                        logger,
+                        "runner.stage.completed",
+                        batch_started_at,
+                        stage="personal_fact_review",
+                        batch_id=batch.batch_id,
+                        candidate_count=len(batch.candidates),
+                        retry_round=attempt,
+                    )
+                    break
+                except NotImplementedError as exc:
+                    last_error = "Personal fact review is not implemented by the analyzer."
+                    debug_batches.append(
+                        _personal_fact_review_debug_entry(
+                            batch,
+                            attempt=attempt,
+                            status="failed",
+                            result=result,
+                            error_summary=last_error,
+                        )
+                    )
+                    if attempt >= self.config.analysis_batch_retry_limit:
+                        self._dump_personal_fact_review_debug_artifact(
+                            target_date=target_date,
+                            batches=debug_batches,
+                            summary=PersonalFactReviewSummary(
+                                selected_candidate_count=len(review_candidates),
+                                review_batch_count=len(batches),
+                                review_retry_count=retry_count,
+                            ),
+                            error_summary=last_error,
+                        )
+                        raise AnalyzerProtocolError(last_error) from exc
+                    retry_count += 1
+                except AnalyzerProtocolError as exc:
+                    last_error = str(exc)
+                    debug_batches.append(
+                        _personal_fact_review_debug_entry(
+                            batch,
+                            attempt=attempt,
+                            status="failed",
+                            result=result,
+                            error_summary=last_error,
+                        )
+                    )
+                    if attempt >= self.config.analysis_batch_retry_limit:
+                        self._dump_personal_fact_review_debug_artifact(
+                            target_date=target_date,
+                            batches=debug_batches,
+                            summary=PersonalFactReviewSummary(
+                                selected_candidate_count=len(review_candidates),
+                                review_batch_count=len(batches),
+                                review_retry_count=retry_count,
+                            ),
+                            error_summary=last_error,
+                        )
+                        raise AnalyzerProtocolError(
+                            "Personal fact review failed after retries: " + last_error
+                        ) from exc
+                    retry_count += 1
+
+        kept, confirmed_count, revised_count, dropped_count = (
+            apply_personal_fact_review_results(
+                candidates,
+                review_candidates,
+                reviewed,
+                policy,
+            )
+        )
+        summary = PersonalFactReviewSummary(
+            selected_candidate_count=len(review_candidates),
+            reviewed_candidate_count=len(reviewed),
+            confirmed_candidate_count=confirmed_count,
+            revised_candidate_count=revised_count,
+            dropped_unsupported_count=dropped_count,
+            review_batch_count=len(batches),
+            review_retry_count=retry_count,
+        )
+        self._dump_personal_fact_review_debug_artifact(
+            target_date=target_date,
+            batches=debug_batches,
+            summary=summary,
+        )
+        return kept, summary, call_count
+
+    def _dump_personal_fact_review_debug_artifact(
+        self,
+        *,
+        target_date: str,
+        batches: list[dict[str, object]],
+        summary: PersonalFactReviewSummary,
+        error_summary: str = "",
+    ) -> None:
+        debug_root = self.config.conversation_debug_root
+        if debug_root is None:
+            return
+        date_dir = debug_root / target_date
+        date_dir.mkdir(parents=True, exist_ok=True)
+        (date_dir / "personal_fact_review.json").write_text(
+            dump_json(
+                {
+                    "target_date": target_date,
+                    "summary": summary.to_dict(),
+                    "batches": batches,
+                    "error_summary": error_summary,
+                },
+                pretty=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
 
     def _dump_retention_review_debug_artifact(
         self,
@@ -714,6 +929,7 @@ class DailyTraceRunner:
         warning_messages: list[str] | None = None,
         skipped_slice_count: int = 0,
         retention_review_summary: RetentionReviewSummary | None = None,
+        personal_fact_review_summary: PersonalFactReviewSummary | None = None,
     ) -> DailyRunResult:
         warning_messages = warning_messages or []
         write_result = self.dependencies.event_store.replace_day(
@@ -753,6 +969,9 @@ class DailyTraceRunner:
             retention_review_summary=(
                 retention_review_summary or RetentionReviewSummary()
             ),
+            personal_fact_review_summary=(
+                personal_fact_review_summary or PersonalFactReviewSummary()
+            ),
         )
 
     def _failed_result(self, target_date: str, error_summary: str) -> DailyRunResult:
@@ -772,6 +991,7 @@ class DailyTraceRunner:
             self_delivery_target="",
             self_delivery_error="",
             retention_review_summary=RetentionReviewSummary(),
+            personal_fact_review_summary=PersonalFactReviewSummary(),
         )
 
     def _finish_run(
@@ -799,6 +1019,12 @@ class DailyTraceRunner:
             retention_review_dropped=(
                 result.retention_review_summary.dropped_routine_count
                 + result.retention_review_summary.dropped_uncertain_count
+            ),
+            personal_fact_review_selected=(
+                result.personal_fact_review_summary.selected_candidate_count
+            ),
+            personal_fact_review_revised=(
+                result.personal_fact_review_summary.revised_candidate_count
             ),
         )
         return result
@@ -1328,6 +1554,10 @@ class DailyTraceRunner:
                     self_relation_keys=tuple(
                         item.key for item in self.config.self_relation_types
                     ),
+                    fact_risk_keys=tuple(
+                        item.key
+                        for item in self.config.retention_policy.fact_risk_signals
+                    ),
                     warning_sink=warnings,
                 )
                 if not validated.context_requests:
@@ -1722,6 +1952,10 @@ class DailyTraceRunner:
                 self_relation_keys=tuple(
                     item.key for item in self.config.self_relation_types
                 ),
+                fact_risk_keys=tuple(
+                    item.key
+                    for item in self.config.retention_policy.fact_risk_signals
+                ),
                 warning_sink=warnings,
             )
             if validated.context_requests:
@@ -1951,6 +2185,10 @@ class DailyTraceRunner:
                 self_open_id=self_identity.open_id,
                 self_relation_keys=tuple(
                     item.key for item in self.config.self_relation_types
+                ),
+                fact_risk_keys=tuple(
+                    item.key
+                    for item in self.config.retention_policy.fact_risk_signals
                 ),
                 warning_sink=warning_messages,
             )
@@ -2757,6 +2995,142 @@ def _supports_segment_batches(analyzer: object) -> bool:
     return all(
         callable(getattr(analyzer, method_name, None))
         for method_name in ("segment_conversation", "analyze_segment_batch")
+    )
+
+
+def _retention_review_debug_entry(
+    batch: RetentionReviewBatch,
+    *,
+    attempt: int,
+    status: str,
+    result: RetentionReviewResult | None,
+    error_summary: str = "",
+) -> dict[str, object]:
+    return {
+        "batch_id": batch.batch_id,
+        "attempt": attempt,
+        "status": status,
+        "candidates": [
+            {
+                "draft_id": item.candidate.draft_id,
+                "before": _source_backed_event_debug_summary(item.candidate),
+                "source_message_ids": list(item.candidate.source_message_ids),
+                "allowed_evidence_message_ids": list(
+                    item.allowed_evidence_message_ids
+                ),
+            }
+            for item in batch.candidates
+        ],
+        "result": result.to_dict() if result is not None else None,
+        "coverage": _retention_review_coverage(result),
+        "error_summary": error_summary,
+    }
+
+
+def _personal_fact_review_debug_entry(
+    batch: PersonalFactReviewBatch,
+    *,
+    attempt: int,
+    status: str,
+    result: PersonalFactReviewResult | None,
+    error_summary: str = "",
+) -> dict[str, object]:
+    return {
+        "batch_id": batch.batch_id,
+        "attempt": attempt,
+        "status": status,
+        "candidates": [
+            {
+                "draft_id": item.candidate.draft_id,
+                "review_reasons": list(item.review_reasons),
+                "before": _source_backed_event_debug_summary(item.candidate),
+                "source_message_ids": list(item.candidate.source_message_ids),
+                "allowed_evidence_message_ids": list(
+                    item.allowed_evidence_message_ids
+                ),
+            }
+            for item in batch.candidates
+        ],
+        "result": result.to_dict() if result is not None else None,
+        "coverage": _personal_fact_review_coverage(result),
+        "error_summary": error_summary,
+    }
+
+
+def _source_backed_event_debug_summary(
+    candidate: SourceBackedEventDraft,
+) -> dict[str, object]:
+    return {
+        "topic": candidate.topic,
+        "content": candidate.content,
+        "action_label": candidate.action_label,
+        "object_hint": candidate.object_hint,
+        "retention_reason": candidate.retention_reason,
+        "retention_detail": candidate.retention_detail,
+        "workstream_key": candidate.workstream_key,
+        "fact_items": [item.to_dict() for item in candidate.fact_items],
+        "fact_risk_flags": list(candidate.fact_risk_flags),
+    }
+
+
+def _retention_review_coverage(
+    result: RetentionReviewResult | None,
+) -> dict[str, object]:
+    if result is None:
+        return {}
+    coverage: dict[str, object] = {}
+    for item in result.results:
+        routine_evidence = [
+            message_id
+            for signal in item.routine_signals
+            for message_id in signal.evidence_message_ids
+        ]
+        substantive_evidence = [
+            message_id
+            for signal in item.substantive_signals
+            for message_id in signal.evidence_message_ids
+        ]
+        coverage[item.draft_id] = {
+            "routine_signal_count": len(item.routine_signals),
+            "substantive_signal_count": len(item.substantive_signals),
+            "routine_evidence_message_ids": list(dict.fromkeys(routine_evidence)),
+            "substantive_evidence_message_ids": list(
+                dict.fromkeys(substantive_evidence)
+            ),
+        }
+    return coverage
+
+
+def _personal_fact_review_coverage(
+    result: PersonalFactReviewResult | None,
+) -> dict[str, object]:
+    if result is None:
+        return {}
+    coverage: dict[str, object] = {}
+    for item in result.results:
+        evidence_ids = [
+            message_id
+            for fact in item.fact_items
+            for message_id in fact.evidence_message_ids
+        ]
+        coverage[item.draft_id] = {
+            "supported": item.supported,
+            "fact_item_count": len(item.fact_items),
+            "covered_fields": list(
+                dict.fromkeys(fact.field_name for fact in item.fact_items)
+            ),
+            "evidence_message_ids": list(dict.fromkeys(evidence_ids)),
+            "removed_claim_count": len(item.removed_claims),
+        }
+    return coverage
+
+
+def _supports_personal_fact_review(analyzer: object) -> bool:
+    method = getattr(analyzer, "review_personal_event_facts", None)
+    implementation = getattr(method, "__func__", method)
+    return bool(
+        callable(method)
+        and implementation is not Analyzer.review_personal_event_facts
     )
 
 

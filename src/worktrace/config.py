@@ -78,6 +78,12 @@ class RetentionPolicyConfig:
     prompt_rules: tuple[str, ...] = ()
     routine_signals: tuple[RetentionSignalDefinition, ...] = ()
     substantive_signals: tuple[RetentionSignalDefinition, ...] = ()
+    fact_review_enabled: bool = False
+    fact_review_source_message_count: int = 8
+    fact_review_source_participant_count: int = 3
+    fact_review_unsupported_policy: str = "drop"
+    fact_review_rules: tuple[str, ...] = ()
+    fact_risk_signals: tuple[RetentionSignalDefinition, ...] = ()
     generic_object_hints: tuple[str, ...] = ()
     personal_social_keywords: tuple[str, ...] = ()
     personal_leave_or_travel_keywords: tuple[str, ...] = ()
@@ -377,6 +383,9 @@ def _load_retention_policy_overrides(
         "prompt_rules",
         "routine_signals",
         "substantive_signals",
+        "fact_review",
+        "fact_review_rules",
+        "fact_risk_signals",
         "generic_object_hints",
         "personal_social_keywords",
         "personal_leave_or_travel_keywords",
@@ -433,6 +442,39 @@ def _load_retention_policy_overrides(
             "Invalid retention policy config: uncertain_policy must be drop or keep."
         )
 
+    fact_review = payload["fact_review"]
+    if not isinstance(fact_review, dict):
+        raise ValueError(
+            "Invalid retention policy config: `fact_review` must be an object."
+        )
+    fact_review_keys = {
+        "enabled",
+        "source_message_count",
+        "source_participant_count",
+        "unsupported_policy",
+    }
+    if set(fact_review) != fact_review_keys:
+        raise ValueError(
+            "Invalid retention policy config: `fact_review` fields do not match the contract."
+        )
+    if not isinstance(fact_review["enabled"], bool):
+        raise ValueError(
+            "Invalid retention policy config: fact_review.enabled must be a boolean."
+        )
+    for key in ("source_message_count", "source_participant_count"):
+        value = fact_review[key]
+        if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+            raise ValueError(
+                "Invalid retention policy config: "
+                f"fact_review.{key} must be a positive integer."
+            )
+    fact_review_unsupported_policy = fact_review["unsupported_policy"]
+    if fact_review_unsupported_policy not in {"drop", "fail"}:
+        raise ValueError(
+            "Invalid retention policy config: "
+            "fact_review.unsupported_policy must be drop or fail."
+        )
+
     policy = RetentionPolicyConfig(
         review_enabled=review["enabled"],
         review_retention_reasons=_read_string_list(
@@ -461,6 +503,24 @@ def _load_retention_policy_overrides(
             payload["substantive_signals"],
             config_path=config_path,
             field_name="substantive_signals",
+        ),
+        fact_review_enabled=fact_review["enabled"],
+        fact_review_source_message_count=fact_review["source_message_count"],
+        fact_review_source_participant_count=fact_review[
+            "source_participant_count"
+        ],
+        fact_review_unsupported_policy=fact_review_unsupported_policy,
+        fact_review_rules=_read_string_list(
+            payload,
+            key="fact_review_rules",
+            fallback=(),
+            file_path=config_path,
+            error_prefix="Invalid retention policy config",
+        ),
+        fact_risk_signals=_read_retention_signal_definitions(
+            payload["fact_risk_signals"],
+            config_path=config_path,
+            field_name="fact_risk_signals",
         ),
         generic_object_hints=_read_retention_policy_list(
             payload, "generic_object_hints", config_path
@@ -502,6 +562,12 @@ def _load_retention_policy_overrides(
     if not routine_keys or not substantive_keys or routine_keys & substantive_keys:
         raise ValueError(
             "Invalid retention policy config: signal keys must be non-empty and distinct."
+        )
+    if policy.fact_review_enabled and (
+        not policy.fact_review_rules or not policy.fact_risk_signals
+    ):
+        raise ValueError(
+            "Invalid retention policy config: enabled fact review requires rules and risk signals."
         )
     return replace(config, retention_policy=policy)
 

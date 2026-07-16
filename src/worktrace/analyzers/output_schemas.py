@@ -3,7 +3,8 @@ from __future__ import annotations
 from ..config import RuntimeConfig
 
 
-def batch_output_schema() -> dict[str, object]:
+def batch_output_schema(config: RuntimeConfig | None = None) -> dict[str, object]:
+    runtime_config = config or RuntimeConfig()
     return {
         "type": "object",
         "properties": {
@@ -46,6 +47,7 @@ def batch_output_schema() -> dict[str, object]:
                             "type": "array",
                             "items": {"type": "string"},
                         },
+                        **_personal_fact_properties(runtime_config),
                     },
                     "required": [
                         "topic",
@@ -60,6 +62,8 @@ def batch_output_schema() -> dict[str, object]:
                         "self_relations",
                         "workstream_key",
                         "source_message_ids",
+                        "fact_items",
+                        "fact_risk_flags",
                     ],
                     "additionalProperties": False,
                 },
@@ -108,7 +112,8 @@ def conversation_segmentation_output_schema() -> dict[str, object]:
     }
 
 
-def segment_batch_output_schema() -> dict[str, object]:
+def segment_batch_output_schema(config: RuntimeConfig | None = None) -> dict[str, object]:
+    runtime_config = config or RuntimeConfig()
     return {
         "type": "object",
         "properties": {
@@ -123,7 +128,7 @@ def segment_batch_output_schema() -> dict[str, object]:
                             "properties": {
                                 "candidate_events": {
                                     "type": "array",
-                                    "items": _segment_candidate_schema(),
+                                    "items": _segment_candidate_schema(runtime_config),
                                 },
                                 "context_requests": _context_request_schema(),
                             },
@@ -190,7 +195,51 @@ def retention_review_output_schema(config: RuntimeConfig) -> dict[str, object]:
     }
 
 
-def _segment_candidate_schema() -> dict[str, object]:
+def personal_fact_review_output_schema(config: RuntimeConfig) -> dict[str, object]:
+    return {
+        "type": "object",
+        "properties": {
+            "results": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "draft_id": {"type": "string"},
+                        "supported": {"type": "boolean"},
+                        "topic": {"type": "string"},
+                        "content": {"type": "string"},
+                        "action_label": {"type": "string"},
+                        "object_hint": {"type": "string"},
+                        "retention_detail": {"type": "string"},
+                        "workstream_key": {"type": "string"},
+                        "fact_items": _personal_fact_items_schema(),
+                        "removed_claims": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                        },
+                    },
+                    "required": [
+                        "draft_id",
+                        "supported",
+                        "topic",
+                        "content",
+                        "action_label",
+                        "object_hint",
+                        "retention_detail",
+                        "workstream_key",
+                        "fact_items",
+                        "removed_claims",
+                    ],
+                    "additionalProperties": False,
+                },
+            }
+        },
+        "required": ["results"],
+        "additionalProperties": False,
+    }
+
+
+def _segment_candidate_schema(config: RuntimeConfig) -> dict[str, object]:
     return {
         "type": "object",
         "properties": {
@@ -228,6 +277,7 @@ def _segment_candidate_schema() -> dict[str, object]:
                 "type": "array",
                 "items": {"type": "string"},
             },
+            **_personal_fact_properties(config),
         },
         "required": [
             "topic",
@@ -242,6 +292,8 @@ def _segment_candidate_schema() -> dict[str, object]:
             "self_relations",
             "workstream_key",
             "source_message_ids",
+            "fact_items",
+            "fact_risk_flags",
         ],
         "additionalProperties": False,
     }
@@ -278,7 +330,8 @@ def _context_request_schema() -> dict[str, object]:
     }
 
 
-def anchor_batch_output_schema() -> dict[str, object]:
+def anchor_batch_output_schema(config: RuntimeConfig | None = None) -> dict[str, object]:
+    runtime_config = config or RuntimeConfig()
     return {
         "type": "object",
         "properties": {
@@ -331,6 +384,7 @@ def anchor_batch_output_schema() -> dict[str, object]:
                                                 "type": "array",
                                                 "items": {"type": "string"},
                                             },
+                                            **_personal_fact_properties(runtime_config),
                                         },
                                         "required": [
                                             "topic",
@@ -345,6 +399,8 @@ def anchor_batch_output_schema() -> dict[str, object]:
                                             "self_relations",
                                             "workstream_key",
                                             "source_message_ids",
+                                            "fact_items",
+                                            "fact_risk_flags",
                                         ],
                                         "additionalProperties": False,
                                     },
@@ -406,6 +462,49 @@ def _self_relations_schema() -> dict[str, object]:
                 },
             },
             "required": ["relation", "evidence_message_ids"],
+            "additionalProperties": False,
+        },
+    }
+
+
+def _personal_fact_properties(config: RuntimeConfig) -> dict[str, object]:
+    risk_keys = [item.key for item in config.retention_policy.fact_risk_signals]
+    risk_item: dict[str, object] = {"type": "string"}
+    if risk_keys:
+        risk_item["enum"] = risk_keys
+    return {
+        "fact_items": _personal_fact_items_schema(),
+        "fact_risk_flags": {
+            "type": "array",
+            "items": risk_item,
+        },
+    }
+
+
+def _personal_fact_items_schema() -> dict[str, object]:
+    return {
+        "type": "array",
+        "items": {
+            "type": "object",
+            "properties": {
+                "field": {
+                    "type": "string",
+                    "enum": [
+                        "topic",
+                        "content",
+                        "action_label",
+                        "object_hint",
+                        "retention_detail",
+                        "workstream_key",
+                    ],
+                },
+                "text": {"type": "string"},
+                "evidence_message_ids": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                },
+            },
+            "required": ["field", "text", "evidence_message_ids"],
             "additionalProperties": False,
         },
     }

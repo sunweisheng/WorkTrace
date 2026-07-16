@@ -225,7 +225,30 @@ sequenceDiagram
 
 旧个人 MD 和既有部门汇总不追溯处理。只有重新生成个人日报才会应用新复核规则；`merge-collected` 不读取原聊天，也不对来源 Markdown 补做该复核。
 
-### 5.12 跨会话初始分组与工作流权威分组
+### 5.12 个人事件事实证据与局部复核
+
+首次候选提炼除现有字段外，还返回：
+
+- `fact_items`：`field`、`text`、`evidence_message_ids`，覆盖 `topic`、`content`、`action_label`、`object_hint`、`retention_detail` 和非空 `workstream_key`
+- `fact_risk_flags`：只能使用 `config/retention_policy.json` 中配置的风险信号
+
+正文可以拆成多项事实，但所有 `content` 事实按顺序直接连接后必须与最终正文完全一致。其他非空字段各有一项完全相同的事实文字。首次校验只做字符串覆盖、字段类型和消息 ID 归属检查，不判断消息是否在语义上支持某个地点、对象、责任人或结论。
+
+`pipeline/personal_fact_review.py` 在临时协作复核之后、跨会话合并之前运行。满足任一条件就复核当前事件：事实证据缺失或不完整、来源消息达到 8 条、来源参与人达到 3 人，或模型返回多个对象、对比案例、多个地点、责任归属、推断决策等配置风险信号。消息数和参与人数由 Python 确定性统计；风险含义由模型依据配置判断。没有候选时不增加模型调用。
+
+复核模型重新读取当前候选的原聊天，返回 `supported`、修订后的六个文字字段、`fact_items` 和 `removed_claims`。它可以确认原文，也可以删除或改写无依据内容；多人、多地点、多步骤本身不能作为删除理由。Python执行以下固定检查：
+
+- 每个输入 `draft_id` 必须按顺序返回一次
+- `fact_items.field` 只能使用协议字段
+- 每项证据消息必须属于当前候选可用的原聊天
+- 标题、正文、动作、对象、保留依据和非空工作流必须被事实项完整覆盖
+- `supported=false` 时文字字段和事实项必须为空，并提供被删除表述
+
+Python不阅读聊天文字判断对比案例、责任人或流程建议，只接收模型的结构化结果并执行 `unsupported_policy`。默认无任何受支持事实时删除；复核技术失败、漏回、重复、字段不完整、非法消息 ID 或覆盖不完整时只重试当前批次，重试后仍错误则整次个人日报 `failed` 且不写文件。每个请求仍受 `max_model_input_tokens=6200` 限制。
+
+`DailyRunResult.personal_fact_review_summary` 由 Python 计算选择数、复核数、确认数、修订数、无依据删除数、批次数和重试数。统计进入 CLI stdout JSON 和调试文件 `personal_fact_review.json`，不增加 Markdown 可见字段。
+
+### 5.13 跨会话初始分组与工作流权威分组
 
 候选只有一条时，Python 直接建立单例组。多条候选时：
 
@@ -241,7 +264,7 @@ sequenceDiagram
 
 因此 `merge_day_candidates(...)` 不是最终裁决；在默认 Online analyzer 中，独立工作流 assignment 才是后续物化使用的分组来源，初始模型组保留为失败回退依据。
 
-### 5.13 最终事件、文件证据和排序
+### 5.14 最终事件、文件证据和排序
 
 合并草稿再次经过配置关键词和保留门槛，然后由 `build_work_events(...)` 形成 `WorkEvent`。工作流名称、主要动作和参与方式沿链路保留；`event_id` 基于日期、归一化来源消息集合和内容稳定生成。
 
@@ -254,7 +277,7 @@ sequenceDiagram
 
 Python 对每个来源消息 ID 单独计算带命名空间的 SHA-256 证据指纹，并对“目标日期 + 来源会话 ID”计算同日会话指纹。会话指纹让不同员工引用同一讨论中的不同消息时仍能在多人合并阶段建立候选关系，但不会自动强制合并。文件链接去掉 query 和 fragment 后计算文件标识，附件使用附件 ID 计算；只有文件名而没有稳定标识时不生成。最终链接会隐藏敏感 query 参数；无 URL 附件使用 `《文件名》`。事件按其来源消息在当天时间线中的位置排序。
 
-### 5.14 存储、空日与投递
+### 5.15 存储、空日与投递
 
 `MarkdownEventStore.replace_day(...)` 覆盖写入：
 
@@ -272,7 +295,8 @@ data/YYYY/MM/YYYY-MM-DD-姓名.md
 flowchart LR
     A["SourceBackedEventDraft"] --> F1["配置关键词"] --> R1["保留门槛"]
     R1 --> V["边界候选局部模型复核 + Python 固定规则"]
-    V --> B["MergedEventDraft"] --> F2["配置关键词"] --> R2["保留门槛"]
+    V --> Q["个人事实局部模型复核 + Python 证据校验"]
+    Q --> B["MergedEventDraft"] --> F2["配置关键词"] --> R2["保留门槛"]
     R2 --> C["WorkEvent + 文件"] --> F3["配置关键词"] --> R3["保留门槛"]
     R3 --> D["Markdown"]
 ```
@@ -285,7 +309,7 @@ flowchart LR
 
 标题生成要求：脱离正文也能识别具体事项，优先采用“具体对象 + 关键动作、进展、结果或风险”的结构，避免只写通用类别。该要求用于个人候选提取、补充分析和多人正式汇总。
 
-`config/event_rules.json` 是敏感、普通排除和本人指派关键词的配置入口；`config/retention_policy.json` 保存个人保留提示、既有业务词、复核条件和模型语义信号说明。新增或调整业务词不得硬编码到 Python。`retention_filter.py` 执行结构化保留门槛，`retention_review.py` 只验证模型信号和证据并执行固定规则，两者都不通过新增聊天关键词判断临时协作语义。
+`config/event_rules.json` 是敏感、普通排除和本人指派关键词的配置入口；`config/retention_policy.json` 保存个人保留提示、既有业务词、临时协作复核、事实复核条件和模型语义信号说明。新增或调整业务词不得硬编码到 Python。`retention_filter.py` 执行结构化保留门槛，`retention_review.py` 和 `personal_fact_review.py` 只验证模型信号、字段覆盖和证据归属并执行固定规则，Python 不通过新增聊天关键词判断临时协作或事实含义。
 
 ## 7. 多人汇总
 
@@ -438,13 +462,14 @@ OnlineLLMAnalyzer -> openai Python SDK -> Responses API provider
 
 ## 11. 状态、warning 与错误
 
-个人日报结果包含会话数、消息数、slice 数、模型调用批次数、事件数、跳过数、warning 数、输出路径、自发送状态和 Python 计算的 `retention_review_summary`。
+个人日报结果包含会话数、消息数、slice 数、模型调用批次数、事件数、跳过数、warning 数、输出路径、自发送状态，以及 Python 计算的 `retention_review_summary` 和 `personal_fact_review_summary`。
 
 规则：
 
 - 模型、聊天源或 store 的主错误返回 `failed`
 - 非关键窗口失败、图片摘要失败、模型分组修复、事件过滤和发送失败进入 warning
 - 临时协作复核的正常删除不进入 warning；技术失败或协议重试耗尽返回 `failed` 且不写文件
+- 个人事实复核的正常确认、修订或无依据删除不进入 warning；技术失败或协议重试耗尽返回 `failed` 且不写文件
 - 有 warning 或跳过片段时返回 `success_with_warnings`
 - 空日是成功结果，不是失败
 
@@ -459,11 +484,14 @@ OnlineLLMAnalyzer -> openai Python SDK -> Responses API provider
 - day merge
 - workstream follow-up/resolution
 - resolved groups
-- `retention_review.json`：复核批次、模型信号、Python 统计和失败原因，不额外复制原聊天正文
+- `retention_review.json`：临时协作复核每次尝试的候选摘要、证据范围、模型信号、覆盖统计和协议错误，不额外复制原聊天正文
+- `personal_fact_review.json`：个人事实复核的触发原因、修订前后字段、事实证据覆盖、Python 统计及每次失败返回，不额外复制原聊天正文
 - `final_events.json`：过滤后的合并草稿、文件聚合和排序完成后的 `WorkEvent`、最终阶段 warning
 - `llm_usage.json`：每次模型调用的耗时、输入字符数和 Responses API 返回的输入/输出/总 token，以及汇总、缺失数量和按调用类型统计；缺失时不估算
 
 segmentation 和 segment batch 的模型失败轮次保存输入、prompt 与 `failure.json`。批次拆分后的单片段回退保存在片段目录的 `fallback-01/`；分段耗尽后的直接提炼保存在 `_anchor_fallback/<conversation>/<anchor-key>/attempt-XX/`。成功轮次继续保存输出和校验结果，异常轮次不伪造模型输出。
+
+`scripts/replay_day_with_trace.py` 生成的 `summary.json` 通过 `review_artifact_summary` 汇总两类复核文件是否存在、统计结果、尝试次数、失败次数和最终错误。`scripts/report_replay_call_inputs.py` 会把两类复核的每次尝试（包括失败重试）作为独立模型调用写入 `call-input-report.md`；完整原聊天仍从已有分段调试输入查看。
 
 多人汇总 trace 写 `source-audit.json`、step JSON、`step-NNN-prompt.txt`、`summary.json` 和 `summary.md`。每个模型请求前先保存输入和 prompt；成功、失败、重试耗尽和自送达失败都会留下 summary。step 包含候选发现、高风险复核或正式内容阶段、复核原因和前后分组、批次、尝试次数、重试原因、估算 token、`max_model_input_tokens` 上限、辅助字符数、`input_events`、`deterministic_groups`、正文覆盖、`boundary_warnings`、过滤和最终事件。两个 summary 文件还保存 Python 计算的 `quality_summary`，因此可以从来源增强信息追到最终部门事件并核对各级数量和覆盖率。
 

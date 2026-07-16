@@ -101,8 +101,13 @@ def _candidate_summary(
     for candidate in candidates:
         if not isinstance(candidate, dict):
             continue
-        topic = _truncate(candidate.get("topic") or candidate.get("title"), 40)
-        content = _truncate(candidate.get("content") or candidate.get("retention_detail"), max_chars)
+        before = candidate.get("before", candidate)
+        source = before if isinstance(before, dict) else candidate
+        topic = _truncate(source.get("topic") or source.get("title"), 40)
+        content = _truncate(
+            source.get("content") or source.get("retention_detail"),
+            max_chars,
+        )
         excerpts.append(f"{topic}: {content}" if topic else content)
         if len(excerpts) >= max_excerpts:
             break
@@ -162,6 +167,67 @@ def _analysis_records(
                 content_summary=content_summary,
             )
         )
+    return records
+
+
+def _review_records(
+    debug_root: Path,
+    *,
+    max_excerpts: int,
+    max_chars: int,
+) -> list[CallInputRecord]:
+    definitions = [
+        (
+            "retention_review.json",
+            "临时协作复核",
+            "判断边界候选的原聊天包含临时协作信号还是实质工作信号。",
+        ),
+        (
+            "personal_fact_review.json",
+            "个人事实复核",
+            "核对候选事件各字段是否得到原聊天消息支持。",
+        ),
+    ]
+    records: list[CallInputRecord] = []
+    for filename, category, purpose in definitions:
+        path = debug_root / filename
+        if not path.exists():
+            continue
+        payload = _load_json(path)
+        batches = payload.get("batches", [])
+        if not isinstance(batches, list):
+            continue
+        for batch in batches:
+            if not isinstance(batch, dict):
+                continue
+            raw_candidates = batch.get("candidates", [])
+            candidates = (
+                [item for item in raw_candidates if isinstance(item, dict)]
+                if isinstance(raw_candidates, list)
+                else []
+            )
+            count, content_summary = _candidate_summary(
+                {"candidates": candidates},
+                max_excerpts=max_excerpts,
+                max_chars=max_chars,
+            )
+            if not candidates:
+                draft_ids = batch.get("draft_ids", [])
+                if isinstance(draft_ids, list):
+                    count = len(draft_ids)
+                    content_summary = f"候选 ID：{', '.join(str(item) for item in draft_ids)}"
+            attempt = int(batch.get("attempt", 0)) + 1
+            status = str(batch.get("status", "unknown"))
+            records.append(
+                CallInputRecord(
+                    category=f"{category}（第 {attempt} 次，{status}）",
+                    purpose=purpose,
+                    source_path=path,
+                    item_count=count,
+                    time_range="候选对应原聊天",
+                    content_summary=content_summary,
+                )
+            )
     return records
 
 
@@ -262,6 +328,11 @@ def main(argv: list[str] | None = None) -> int:
             max_chars=args.max_excerpt_chars,
         ),
         *_analysis_records(
+            debug_root,
+            max_excerpts=args.max_message_excerpts,
+            max_chars=args.max_excerpt_chars,
+        ),
+        *_review_records(
             debug_root,
             max_excerpts=args.max_message_excerpts,
             max_chars=args.max_excerpt_chars,

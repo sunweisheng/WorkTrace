@@ -31,6 +31,8 @@ from ..models import (
     CollectedSourceEvent,
     ConversationSegmentationResult,
     CrossConversationGroupResult,
+    PersonalFactReviewBatch,
+    PersonalFactReviewResult,
     SourceBackedEventDraft,
     SegmentAnalysisBatch,
     NormalizedMessage,
@@ -48,6 +50,7 @@ from .output_schemas import (
     collected_merge_output_schema,
     conversation_segmentation_output_schema,
     merge_output_schema,
+    personal_fact_review_output_schema,
     retention_review_output_schema,
     segment_batch_output_schema,
 )
@@ -60,6 +63,7 @@ from .prompts import (
     build_collected_render_prompt,
     build_conversation_segmentation_prompt,
     build_merge_prompt,
+    build_personal_fact_review_prompt,
     build_retention_review_prompt,
     build_segment_batch_analysis_prompt,
     restore_conversation_segmentation_references,
@@ -71,6 +75,7 @@ from .protocol import (
     parse_collected_merge_payload,
     parse_conversation_segmentation_payload,
     parse_merge_payload,
+    parse_personal_fact_review_payload,
     parse_retention_review_payload,
     parse_segment_batch_analysis_payload,
 )
@@ -337,7 +342,7 @@ class OnlineLLMAnalyzer(Analyzer):
     ) -> BatchAnalysisResult:
         payload = self._invoke_online(
             self.build_batch_prompt(batch_input),
-            output_schema=batch_output_schema(),
+            output_schema=batch_output_schema(self.config),
             request_kind="batch_analysis",
         )
         return parse_batch_analysis_payload(payload)
@@ -424,7 +429,7 @@ class OnlineLLMAnalyzer(Analyzer):
     ) -> BatchSegmentAnalysisResult:
         payload = self._invoke_online(
             self.build_segment_batch_prompt(batch),
-            output_schema=segment_batch_output_schema(),
+            output_schema=segment_batch_output_schema(self.config),
             request_kind="segment_batch_analysis",
         )
         return parse_segment_batch_analysis_payload(payload)
@@ -446,6 +451,26 @@ class OnlineLLMAnalyzer(Analyzer):
         except AnalyzerProtocolError as exc:
             raise RetryableAnalyzerProtocolError(str(exc)) from exc
 
+    def build_personal_fact_review_prompt(
+        self,
+        batch: PersonalFactReviewBatch,
+    ) -> str:
+        return build_personal_fact_review_prompt(batch, config=self.config)
+
+    def review_personal_event_facts(
+        self,
+        batch: PersonalFactReviewBatch,
+    ) -> PersonalFactReviewResult:
+        payload = self._invoke_online(
+            self.build_personal_fact_review_prompt(batch),
+            output_schema=personal_fact_review_output_schema(self.config),
+            request_kind="personal_fact_review",
+        )
+        try:
+            return parse_personal_fact_review_payload(payload)
+        except AnalyzerProtocolError as exc:
+            raise RetryableAnalyzerProtocolError(str(exc)) from exc
+
     def build_batch_prompt(self, batch_input: AnalysisBatch) -> str:
         return build_batch_analysis_prompt(batch_input, config=self.config)
 
@@ -463,7 +488,7 @@ class OnlineLLMAnalyzer(Analyzer):
     ) -> BatchAnchorAnalysisResult:
         payload = self._invoke_online(
             build_anchor_batch_analysis_prompt(target_date, anchor_units, config=self.config),
-            output_schema=anchor_batch_output_schema(),
+            output_schema=anchor_batch_output_schema(self.config),
             request_kind="anchor_batch_analysis",
         )
         return parse_anchor_batch_analysis_payload(payload)

@@ -78,6 +78,15 @@ def test_cli_returns_runner_result(capsys, tmp_path) -> None:
         "review_batch_count": 1,
         "review_retry_count": 0,
     }
+    assert payload["personal_fact_review_summary"] == {
+        "selected_candidate_count": 0,
+        "reviewed_candidate_count": 0,
+        "confirmed_candidate_count": 0,
+        "revised_candidate_count": 0,
+        "dropped_unsupported_count": 0,
+        "review_batch_count": 0,
+        "review_retry_count": 0,
+    }
 
 
 def test_cli_supports_preflight_only_output(capsys, tmp_path) -> None:

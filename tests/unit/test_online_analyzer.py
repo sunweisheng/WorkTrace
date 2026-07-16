@@ -5,7 +5,10 @@ from pathlib import Path
 
 import pytest
 
-from src.worktrace.analyzers.output_schemas import retention_review_output_schema
+from src.worktrace.analyzers.output_schemas import (
+    personal_fact_review_output_schema,
+    retention_review_output_schema,
+)
 from src.worktrace.analyzers.online import (
     OnlineLLMAnalyzer,
     _apply_soft_no_think,
@@ -28,6 +31,8 @@ from src.worktrace.models import (
     AnalysisBatch,
     ConversationSlice,
     NormalizedMessage,
+    PersonalFactReviewBatch,
+    PersonalFactReviewCandidate,
     RetentionReviewBatch,
     RetentionReviewCandidate,
     SourceBackedEventDraft,
@@ -95,6 +100,23 @@ def sample_retention_review_batch() -> RetentionReviewBatch:
     )
 
 
+def sample_personal_fact_review_batch() -> PersonalFactReviewBatch:
+    retention_batch = sample_retention_review_batch()
+    item = retention_batch.candidates[0]
+    return PersonalFactReviewBatch(
+        target_date=retention_batch.target_date,
+        batch_id="personal-fact-review-001",
+        candidates=[
+            PersonalFactReviewCandidate(
+                candidate=item.candidate,
+                messages=item.messages,
+                allowed_evidence_message_ids=item.allowed_evidence_message_ids,
+                review_reasons=["missing_or_incomplete_fact_evidence"],
+            )
+        ],
+    )
+
+
 def test_online_analyzer_uses_retention_review_protocol(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -135,6 +157,50 @@ def test_online_analyzer_uses_retention_review_protocol(
     assert captured["request_kind"] == "retention_review"
     assert "不要决定保留或删除" in str(captured["prompt"])
     assert captured["output_schema"] == retention_review_output_schema(config)
+
+
+def test_online_analyzer_uses_personal_fact_review_protocol(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = load_runtime_config_overrides(
+        RuntimeConfig(data_root=tmp_path / "data"),
+        cwd=Path.cwd(),
+    )
+    analyzer = OnlineLLMAnalyzer(config=config, cwd=tmp_path)
+    captured: dict[str, object] = {}
+
+    def fake_invoke(prompt, *, output_schema, request_kind):
+        captured.update(
+            prompt=prompt,
+            output_schema=output_schema,
+            request_kind=request_kind,
+        )
+        return {
+            "results": [
+                {
+                    "draft_id": "draft-1",
+                    "supported": False,
+                    "topic": "",
+                    "content": "",
+                    "action_label": "",
+                    "object_hint": "",
+                    "retention_detail": "",
+                    "workstream_key": "",
+                    "fact_items": [],
+                    "removed_claims": ["原候选没有消息证据"],
+                }
+            ]
+        }
+
+    monkeypatch.setattr(analyzer, "_invoke_online", fake_invoke)
+
+    result = analyzer.review_personal_event_facts(sample_personal_fact_review_batch())
+
+    assert result.results[0].supported is False
+    assert captured["request_kind"] == "personal_fact_review"
+    assert "messages 才是事实来源" in str(captured["prompt"])
+    assert captured["output_schema"] == personal_fact_review_output_schema(config)
 
 
 def build_settings(**overrides: object) -> OnlineLLMSettings:

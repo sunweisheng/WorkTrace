@@ -269,6 +269,8 @@ def test_event_models_default_referenced_link_ids_are_empty() -> None:
     assert merged.referenced_link_ids == []
     assert event.referenced_link_ids == []
     assert draft.self_relations == []
+    assert draft.fact_items == []
+    assert draft.fact_risk_flags == []
     assert merged.workstream_name == ""
     assert merged.action_labels == []
     assert merged.self_relations == []
@@ -279,6 +281,34 @@ def test_event_models_default_referenced_link_ids_are_empty() -> None:
     assert event.conversation_fingerprints == []
     assert event.file_keys == []
     assert event.source_report_owners == []
+
+
+def test_daily_run_result_reads_old_payload_without_personal_fact_summary() -> None:
+    payload = {
+        "target_date": "2026-06-22",
+        "conversation_count": 1,
+        "message_count": 1,
+        "slice_count": 1,
+        "batch_count": 1,
+        "event_count": 1,
+        "skipped_slice_count": 0,
+        "warning_count": 0,
+        "status": "success",
+        "output_path": "/tmp/day.md",
+        "error_summary": "",
+    }
+
+    result = DailyRunResult.from_dict(payload)
+
+    assert result.personal_fact_review_summary.to_dict() == {
+        "selected_candidate_count": 0,
+        "reviewed_candidate_count": 0,
+        "confirmed_candidate_count": 0,
+        "revised_candidate_count": 0,
+        "dropped_unsupported_count": 0,
+        "review_batch_count": 0,
+        "review_retry_count": 0,
+    }
 
 
 def test_collected_merge_models_roundtrip_new_quality_and_coverage_fields() -> None:

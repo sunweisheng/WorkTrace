@@ -10,10 +10,13 @@ from src.worktrace.analyzers.protocol import (
     parse_batch_analysis_payload,
     parse_collected_grouping_payload,
     parse_merge_payload,
+    parse_personal_fact_review_payload,
     parse_retention_review_payload,
 )
 from src.worktrace.analyzers.output_schemas import (
+    batch_output_schema,
     collected_grouping_output_schema,
+    personal_fact_review_output_schema,
     retention_review_output_schema,
 )
 from src.worktrace.config import RuntimeConfig, load_runtime_config_overrides
@@ -63,6 +66,74 @@ def test_retention_review_protocol_and_schema_use_configured_signal_types() -> N
     assert parsed.to_dict() == payload
     assert "presence_or_availability" in routine_enum
     assert "explicit_business_follow_up" not in routine_enum
+
+
+def test_personal_fact_review_protocol_and_schema_require_source_backed_fields() -> None:
+    config = load_runtime_config_overrides(RuntimeConfig(), cwd=Path.cwd())
+    payload = {
+        "results": [
+            {
+                "draft_id": "d1",
+                "supported": True,
+                "topic": "设备编号修正",
+                "content": "重新修改未生效的设备编号。",
+                "action_label": "修改",
+                "object_hint": "设备编号",
+                "retention_detail": "执行人确认重新修改设备编号。",
+                "workstream_key": "",
+                "fact_items": [
+                    {
+                        "field": "content",
+                        "text": "重新修改未生效的设备编号。",
+                        "evidence_message_ids": ["m1"],
+                    }
+                ],
+                "removed_claims": [],
+            }
+        ]
+    }
+
+    parsed = parse_personal_fact_review_payload(payload)
+    schema = personal_fact_review_output_schema(config)
+    item_schema = schema["properties"]["results"]["items"]
+
+    assert parsed.to_dict() == payload
+    assert "fact_items" in item_schema["required"]
+    assert item_schema["additionalProperties"] is False
+
+
+def test_personal_extraction_schema_requires_fact_evidence_and_configured_risks() -> None:
+    config = load_runtime_config_overrides(RuntimeConfig(), cwd=Path.cwd())
+    schema = batch_output_schema(config)
+    item_schema = schema["properties"]["candidate_events"]["items"]
+    risk_enum = item_schema["properties"]["fact_risk_flags"]["items"]["enum"]
+
+    assert "fact_items" in item_schema["required"]
+    assert "fact_risk_flags" in item_schema["required"]
+    assert "comparison_or_example" in risk_enum
+
+
+def test_personal_fact_review_protocol_rejects_model_keep_drop_field() -> None:
+    payload = {
+        "results": [
+            {
+                "draft_id": "d1",
+                "supported": True,
+                "topic": "设备编号修正",
+                "content": "重新修改设备编号。",
+                "action_label": "修改",
+                "object_hint": "设备编号",
+                "retention_detail": "重新修改设备编号。",
+                "workstream_key": "",
+                "fact_items": [],
+                "removed_claims": [],
+                "keep": True,
+            }
+        ]
+    }
+
+    with pytest.raises(AnalyzerProtocolError):
+        parse_personal_fact_review_payload(payload)
 
 
 @pytest.mark.parametrize(

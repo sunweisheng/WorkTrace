@@ -781,6 +781,28 @@ class SelfRelationEvidence:
 
 
 @dataclass(frozen=True)
+class PersonalFactItem:
+    field_name: str
+    text: str
+    evidence_message_ids: list[str] = field(default_factory=list)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> PersonalFactItem:
+        return cls(
+            field_name=str(data.get("field", "")),
+            text=str(data.get("text", "")),
+            evidence_message_ids=_string_list(data.get("evidence_message_ids")),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "field": self.field_name,
+            "text": self.text,
+            "evidence_message_ids": list(self.evidence_message_ids),
+        }
+
+
+@dataclass(frozen=True)
 class SourceBackedEventDraft:
     draft_id: str
     date: str
@@ -802,6 +824,8 @@ class SourceBackedEventDraft:
     response_outcome: str = "unknown"
     response_signal_ids: list[str] = field(default_factory=list)
     response_evidence_message_ids: list[str] = field(default_factory=list)
+    fact_items: list[PersonalFactItem] = field(default_factory=list)
+    fact_risk_flags: list[str] = field(default_factory=list)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> SourceBackedEventDraft:
@@ -829,6 +853,11 @@ class SourceBackedEventDraft:
             response_outcome=str(data.get("response_outcome", "unknown")),
             response_signal_ids=_string_list(data.get("response_signal_ids")),
             response_evidence_message_ids=_string_list(data.get("response_evidence_message_ids")),
+            fact_items=[
+                PersonalFactItem.from_dict(item)
+                for item in _dict_list(data.get("fact_items"))
+            ],
+            fact_risk_flags=_string_list(data.get("fact_risk_flags")),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -853,6 +882,8 @@ class SourceBackedEventDraft:
             "response_outcome": self.response_outcome,
             "response_signal_ids": list(self.response_signal_ids),
             "response_evidence_message_ids": list(self.response_evidence_message_ids),
+            "fact_items": [item.to_dict() for item in self.fact_items],
+            "fact_risk_flags": list(self.fact_risk_flags),
         }
 
 
@@ -928,6 +959,84 @@ class RetentionReviewResult:
         return cls(
             results=[
                 RetentionReviewItemResult.from_dict(item)
+                for item in _dict_list(data.get("results"))
+            ]
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"results": [item.to_dict() for item in self.results]}
+
+
+@dataclass(frozen=True)
+class PersonalFactReviewCandidate:
+    candidate: SourceBackedEventDraft
+    messages: list[NormalizedMessage] = field(default_factory=list)
+    allowed_evidence_message_ids: list[str] = field(default_factory=list)
+    review_reasons: list[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class PersonalFactReviewBatch:
+    target_date: str
+    batch_id: str
+    candidates: list[PersonalFactReviewCandidate] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class PersonalFactReviewItemResult:
+    draft_id: str
+    supported: bool
+    topic: str = ""
+    content: str = ""
+    action_label: str = ""
+    object_hint: str = ""
+    retention_detail: str = ""
+    workstream_key: str = ""
+    fact_items: list[PersonalFactItem] = field(default_factory=list)
+    removed_claims: list[str] = field(default_factory=list)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> PersonalFactReviewItemResult:
+        return cls(
+            draft_id=str(data.get("draft_id", "")),
+            supported=bool(data.get("supported", False)),
+            topic=str(data.get("topic", "")),
+            content=str(data.get("content", "")),
+            action_label=str(data.get("action_label", "")),
+            object_hint=str(data.get("object_hint", "")),
+            retention_detail=str(data.get("retention_detail", "")),
+            workstream_key=str(data.get("workstream_key", "")),
+            fact_items=[
+                PersonalFactItem.from_dict(item)
+                for item in _dict_list(data.get("fact_items"))
+            ],
+            removed_claims=_string_list(data.get("removed_claims")),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "draft_id": self.draft_id,
+            "supported": self.supported,
+            "topic": self.topic,
+            "content": self.content,
+            "action_label": self.action_label,
+            "object_hint": self.object_hint,
+            "retention_detail": self.retention_detail,
+            "workstream_key": self.workstream_key,
+            "fact_items": [item.to_dict() for item in self.fact_items],
+            "removed_claims": list(self.removed_claims),
+        }
+
+
+@dataclass(frozen=True)
+class PersonalFactReviewResult:
+    results: list[PersonalFactReviewItemResult] = field(default_factory=list)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> PersonalFactReviewResult:
+        return cls(
+            results=[
+                PersonalFactReviewItemResult.from_dict(item)
                 for item in _dict_list(data.get("results"))
             ]
         )
@@ -1483,6 +1592,40 @@ class RetentionReviewSummary:
 
 
 @dataclass(frozen=True)
+class PersonalFactReviewSummary:
+    selected_candidate_count: int = 0
+    reviewed_candidate_count: int = 0
+    confirmed_candidate_count: int = 0
+    revised_candidate_count: int = 0
+    dropped_unsupported_count: int = 0
+    review_batch_count: int = 0
+    review_retry_count: int = 0
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> PersonalFactReviewSummary:
+        return cls(
+            selected_candidate_count=int(data.get("selected_candidate_count", 0)),
+            reviewed_candidate_count=int(data.get("reviewed_candidate_count", 0)),
+            confirmed_candidate_count=int(data.get("confirmed_candidate_count", 0)),
+            revised_candidate_count=int(data.get("revised_candidate_count", 0)),
+            dropped_unsupported_count=int(data.get("dropped_unsupported_count", 0)),
+            review_batch_count=int(data.get("review_batch_count", 0)),
+            review_retry_count=int(data.get("review_retry_count", 0)),
+        )
+
+    def to_dict(self) -> dict[str, int]:
+        return {
+            "selected_candidate_count": self.selected_candidate_count,
+            "reviewed_candidate_count": self.reviewed_candidate_count,
+            "confirmed_candidate_count": self.confirmed_candidate_count,
+            "revised_candidate_count": self.revised_candidate_count,
+            "dropped_unsupported_count": self.dropped_unsupported_count,
+            "review_batch_count": self.review_batch_count,
+            "review_retry_count": self.review_retry_count,
+        }
+
+
+@dataclass(frozen=True)
 class DailyRunResult:
     target_date: str
     conversation_count: int
@@ -1500,6 +1643,9 @@ class DailyRunResult:
     self_delivery_error: str = ""
     retention_review_summary: RetentionReviewSummary = field(
         default_factory=RetentionReviewSummary
+    )
+    personal_fact_review_summary: PersonalFactReviewSummary = field(
+        default_factory=PersonalFactReviewSummary
     )
 
     @classmethod
@@ -1526,6 +1672,11 @@ class DailyRunResult:
                 if isinstance(data.get("retention_review_summary", {}), dict)
                 else {}
             ),
+            personal_fact_review_summary=PersonalFactReviewSummary.from_dict(
+                data.get("personal_fact_review_summary", {})
+                if isinstance(data.get("personal_fact_review_summary", {}), dict)
+                else {}
+            ),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -1545,6 +1696,7 @@ class DailyRunResult:
             "self_delivery_target": self.self_delivery_target,
             "self_delivery_error": self.self_delivery_error,
             "retention_review_summary": self.retention_review_summary.to_dict(),
+            "personal_fact_review_summary": self.personal_fact_review_summary.to_dict(),
         }
 
 

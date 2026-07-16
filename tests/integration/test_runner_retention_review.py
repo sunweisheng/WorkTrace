@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import json
 from pathlib import Path
 
 import pytest
@@ -128,6 +129,7 @@ def _runner(tmp_path: Path, analyzer: ReviewAnalyzer, *, retry_limit: int = 1):
     config = replace(
         BASE_CONFIG,
         data_root=tmp_path / "data",
+        conversation_debug_root=tmp_path / "debug",
         analysis_batch_retry_limit=retry_limit,
     )
     return DailyTraceRunner(
@@ -173,6 +175,18 @@ def test_runner_drops_source_backed_routine_coordination(tmp_path: Path) -> None
         "review_retry_count": 0,
     }
     assert analyzer.review_calls == 1
+    debug_payload = json.loads(
+        (tmp_path / "debug" / "2026-07-15" / "retention_review.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    attempt = debug_payload["batches"][0]
+    assert attempt["status"] == "success"
+    assert attempt["candidates"][0]["before"]["topic"] == "协助确认同事工作状态"
+    assert attempt["coverage"]["d1"]["routine_evidence_message_ids"] == [
+        "m1",
+        "m2",
+    ]
 
 
 def test_runner_drops_semantically_uncertain_boundary_candidate(

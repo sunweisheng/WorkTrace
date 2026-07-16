@@ -196,6 +196,10 @@ def test_batch_prompt_uses_original_message_ids_and_slim_rules(tmp_path: Path) -
     assert "只能从对应 source_message_ids 的 links 里选择 referenced_link_ids" in prompt
     assert "具体对象 + 关键动作、进展、结果或风险" in prompt
     assert "不得只写无法区分实际事项的通用类别" in prompt
+    assert "fact_items 必须覆盖 topic、content、action_label" in prompt
+    assert "comparison_or_example" in prompt
+    assert "对比案例、举例和历史背景不能写成当前实际处理对象" in prompt
+    assert '"fact_risk_flags"' in prompt
     assert "如果有明确结果，直接融入 content，不要单独返回 result。" in prompt
     assert "请给我简洁的答案，不要推理，跳过思考步骤。" in prompt
     assert "直接作答，不要展示你的推理过程。" in prompt

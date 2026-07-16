@@ -8,6 +8,48 @@
     "require_no_referenced_files": true,
     "uncertain_policy": "drop"
   },
+  "fact_review": {
+    "enabled": true,
+    "source_message_count": 8,
+    "source_participant_count": 3,
+    "unsupported_policy": "drop"
+  },
+  "fact_review_rules": [
+    "标题、正文、主要动作、具体对象、保留依据和非空工作流中的每项事实都必须由原聊天中的真实消息直接支持。",
+    "正文中可以分别核对的动作、对象、原因和结果应拆成不同 fact_items，再按正文顺序直接连接，不能用一个笼统证据项代替多项事实。",
+    "对比案例、举例和历史背景不能写成当前实际处理对象，除非原聊天明确说明本次也对其进行了处理。",
+    "地点、设备、人员、数量和处理结果必须保持原聊天中的对应关系，不能把不同消息里的信息互换或拼接。",
+    "责任归属必须以原聊天中明确执行动作的人为准，不能因为某人发起沟通就写成其完成了其他人的操作。",
+    "原聊天没有明确提出的建议、决策、流程变化、结果或原因不能补充到事件中。",
+    "后出现的纠正、重试和最终验证优先于较早的失败状态或临时判断。",
+    "复核目标是删除或改写无证据事实，不因为事项包含多人、多地点或多步骤就删除真实工作事件。"
+  ],
+  "fact_risk_signals": [
+    {
+      "key": "multiple_named_objects",
+      "description": "候选涉及多个有名称的设备、项目、单据、客户或其他业务对象，存在对象混写风险。"
+    },
+    {
+      "key": "comparison_or_example",
+      "description": "原聊天使用其他案例、地点或事项作比较，存在把背景案例写成当前对象的风险。"
+    },
+    {
+      "key": "multiple_locations",
+      "description": "候选涉及多个地点，存在把不同地点的动作或结果互换的风险。"
+    },
+    {
+      "key": "role_or_responsibility_attribution",
+      "description": "候选包含多人分工、执行人或责任归属，需要再次确认动作由谁完成。"
+    },
+    {
+      "key": "inferred_decision_or_recommendation",
+      "description": "候选包含决策、建议或流程变化，但原聊天中的明确程度可能不足。"
+    },
+    {
+      "key": "uncertain_fact_support",
+      "description": "模型无法确认候选中的全部事实都能从原聊天直接找到依据。"
+    }
+  ],
   "prompt_rules": [
     "本人参与、回复或被询问，只能证明事项与本人有关，不能单独证明该内容值得形成工作事件。",
     "单纯询问人员当前状态、位置或是否可用，简单等待、确认收到，或只完成信息转告但没有关联业务结果时，不要提炼为事件。",

@@ -19,6 +19,8 @@ from ..models import (
     SourceBackedEventDraft,
     SegmentAnalysisBatch,
     NormalizedMessage,
+    PersonalFactReviewBatch,
+    PersonalFactReviewResult,
     ResponseSignal,
     RetentionReviewBatch,
     RetentionReviewResult,
@@ -76,6 +78,18 @@ class Analyzer(ABC):
         self,
         batch: RetentionReviewBatch,
     ) -> RetentionReviewResult:
+        raise NotImplementedError
+
+    def build_personal_fact_review_prompt(
+        self,
+        batch: PersonalFactReviewBatch,
+    ) -> str:
+        raise NotImplementedError
+
+    def review_personal_event_facts(
+        self,
+        batch: PersonalFactReviewBatch,
+    ) -> PersonalFactReviewResult:
         raise NotImplementedError
 
     @abstractmethod

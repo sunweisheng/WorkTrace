@@ -20,6 +20,7 @@ from ..models import (
     ContextRequest,
     LinkedFileTextBlock,
     NormalizedMessage,
+    PersonalFactReviewBatch,
     ResponseSignal,
     RetentionReviewBatch,
     SegmentAnalysisBatch,
@@ -79,7 +80,41 @@ def _build_personal_retention_rules(config: RuntimeConfig) -> list[str]:
         RETENTION_COMPLETENESS_RULE,
         RETENTION_DETAIL_EVIDENCE_RULE,
         PERSON_NAME_RETENTION_RULE,
+        *_build_personal_fact_rules(config),
     ]
+
+
+def _build_personal_fact_rules(config: RuntimeConfig) -> list[str]:
+    risk_definitions = "、".join(
+        f"{item.key}={item.description}"
+        for item in config.retention_policy.fact_risk_signals
+    )
+    risk_rule = (
+        "fact_risk_flags 只能使用以下配置：" + risk_definitions
+        if risk_definitions
+        else "fact_risk_flags 没有可用配置时返回空数组。"
+    )
+    return [
+        "fact_items 必须覆盖 topic、content、action_label、object_hint、retention_detail 和非空 workstream_key；每项使用 field、text、evidence_message_ids。",
+        "除 content 可拆成多个按顺序连接的事实外，其他非空字段各返回一项，text 必须与对应字段完全一致。",
+        "content 必须与全部 content fact_items 的 text 按返回顺序直接连接后完全一致。",
+        "每个 fact_item 必须引用 source_message_ids 中直接支持该项文字的真实消息；不能用无关消息为推断或补充内容背书。",
+        risk_rule,
+        *config.retention_policy.fact_review_rules,
+    ]
+
+
+def _personal_fact_output_shape() -> dict[str, object]:
+    return {
+        "fact_items": [
+            {
+                "field": "topic | content | action_label | object_hint | retention_detail | workstream_key",
+                "text": "field text",
+                "evidence_message_ids": ["message_id"],
+            }
+        ],
+        "fact_risk_flags": ["configured fact risk key"],
+    }
 
 
 def _build_self_relation_rule(config: RuntimeConfig) -> str:
@@ -159,6 +194,7 @@ def build_batch_analysis_prompt(
                     ],
                     "workstream_key": "string or empty string",
                     "source_message_ids": ["message_id"],
+                    **_personal_fact_output_shape(),
                 }
             ],
             "context_requests": [
@@ -390,6 +426,7 @@ def build_segment_batch_analysis_prompt(
                                 ],
                                 "workstream_key": "string or empty string",
                                 "source_message_ids": ["primary_message_id"],
+                                **_personal_fact_output_shape(),
                             }
                         ],
                         "context_requests": [],
@@ -464,6 +501,95 @@ def build_retention_review_prompt(
                         "object_hint": item.candidate.object_hint,
                         "retention_reason": item.candidate.retention_reason,
                         "retention_detail": item.candidate.retention_detail,
+                    },
+                    "allowed_evidence_message_ids": list(
+                        item.allowed_evidence_message_ids
+                    ),
+                    "messages": [
+                        serialize_message_for_prompt(message, runtime_config)
+                        | {
+                            "role": (
+                                "evidence"
+                                if message.message_id
+                                in set(item.allowed_evidence_message_ids)
+                                else "context"
+                            )
+                        }
+                        for message in item.messages
+                    ],
+                }
+                for item in batch.candidates
+            ],
+        },
+    }
+    return dump_json(protocol, pretty=True)
+
+
+def build_personal_fact_review_prompt(
+    batch: PersonalFactReviewBatch,
+    *,
+    config: RuntimeConfig | None = None,
+) -> str:
+    runtime_config = config or RuntimeConfig()
+    policy = runtime_config.retention_policy
+    fact_risk_types = {
+        item.key: item.description for item in policy.fact_risk_signals
+    }
+    protocol = {
+        "instruction": (
+            "复核个人工作事件的每项事实是否得到原聊天支持。"
+            "候选摘要只用于定位问题，messages 才是事实来源。"
+            "确认后可以保持原文，也可以删除或改写无证据内容。"
+            "不要计算数量，不要添加解释。"
+        ),
+        "rules": [
+            "每个输入 draft_id 必须且只能返回一次，并保持输入顺序。",
+            "只能使用 role=evidence 且属于 allowed_evidence_message_ids 的消息作为事实证据；context 只能帮助理解。",
+            "supported=true 时，只保留原聊天直接支持的事实，并完整返回 topic、content、action_label、object_hint、retention_detail、workstream_key 和 fact_items。",
+            "supported=false 只表示原聊天没有任何可形成该事件的事实；此时六个文字字段和 fact_items 必须为空，removed_claims 至少写一项。",
+            "不要因为事件包含多人、多地点、多步骤或较长聊天就返回 supported=false。",
+            "fact_items 的字段覆盖、文字一致性和消息证据要求与首次提炼相同。",
+            "removed_claims 只写被删除或改写的原候选表述，不要写内部消息 ID。",
+            *policy.fact_review_rules,
+        ],
+        "risk_signal_definitions": fact_risk_types,
+        "required_output_schema": {
+            "results": [
+                {
+                    "draft_id": "draft_id",
+                    "supported": "boolean",
+                    "topic": "string",
+                    "content": "string",
+                    "action_label": "string",
+                    "object_hint": "string",
+                    "retention_detail": "string",
+                    "workstream_key": "string or empty string",
+                    "fact_items": _personal_fact_output_shape()["fact_items"],
+                    "removed_claims": ["removed or revised claim"],
+                }
+            ]
+        },
+        "input": {
+            "target_date": batch.target_date,
+            "batch_id": batch.batch_id,
+            "candidates": [
+                {
+                    "draft_id": item.candidate.draft_id,
+                    "review_reasons": list(item.review_reasons),
+                    "candidate_summary": {
+                        "topic": item.candidate.topic,
+                        "content": item.candidate.content,
+                        "action_label": item.candidate.action_label,
+                        "object_hint": item.candidate.object_hint,
+                        "retention_reason": item.candidate.retention_reason,
+                        "retention_detail": item.candidate.retention_detail,
+                        "workstream_key": item.candidate.workstream_key,
+                        "fact_items": [
+                            fact.to_dict() for fact in item.candidate.fact_items
+                        ],
+                        "fact_risk_flags": list(
+                            item.candidate.fact_risk_flags
+                        ),
                     },
                     "allowed_evidence_message_ids": list(
                         item.allowed_evidence_message_ids
@@ -1109,6 +1235,7 @@ def build_anchor_analysis_prompt(
                 ],
                 "workstream_key": "string or empty string",
                 "source_message_ids": ["message_id"],
+                **_personal_fact_output_shape(),
             },
             "context_requests_item": {
                 "request_type": "earlier_messages | later_messages | attachment_text | linked_file_text",
@@ -1201,6 +1328,7 @@ def build_anchor_batch_analysis_prompt(
                             ],
                             "workstream_key": "string or empty string",
                             "source_message_ids": ["message_id"],
+                            **_personal_fact_output_shape(),
                         },
                         "context_requests_item": {
                             "request_type": "earlier_messages | later_messages | attachment_text | linked_file_text",
@@ -1322,6 +1450,7 @@ def build_anchor_expansion_prompt(
                     ],
                     "workstream_key": "string or empty string",
                     "source_message_ids": ["message_id"],
+                    **_personal_fact_output_shape(),
                 }
             ],
             "context_requests": [

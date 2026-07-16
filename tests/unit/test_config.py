@@ -443,6 +443,14 @@ def test_repo_retention_policy_is_loaded_from_config() -> None:
     assert policy.require_empty_workstream is True
     assert policy.require_no_referenced_files is True
     assert policy.uncertain_policy == "drop"
+    assert policy.fact_review_enabled is True
+    assert policy.fact_review_source_message_count == 8
+    assert policy.fact_review_source_participant_count == 3
+    assert policy.fact_review_unsupported_policy == "drop"
+    assert "comparison_or_example" in {
+        item.key for item in policy.fact_risk_signals
+    }
+    assert policy.fact_review_rules
     assert "审核" in policy.generic_object_hints
     assert "工作" in policy.repeated_low_information_suffixes
     assert {item.key for item in policy.routine_signals} == {
