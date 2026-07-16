@@ -34,8 +34,9 @@
 flowchart LR
     A["采集消息"] --> B["本地过滤"] --> C["确定性初始窗口"] --> D["LLM 分段并保存中间结果"]
     D --> E["片段组批并提炼动作/参与方式"] --> F["上下文重试"] --> G["候选与证据校验"]
-    G --> H["跨会话初始分组"] --> I["工作流权威分组"] --> J["增强事件物化"]
-    J --> K["消息指纹 + 文件标识"] --> L["Markdown + 自发送"]
+    G --> H["临时协作局部复核"] --> I["个人事实局部复核"] --> J["跨会话初始分组"]
+    J --> K["工作流权威分组"] --> L["增强事件物化"]
+    L --> M["消息/会话指纹 + 文件标识"] --> N["Markdown + 自发送"]
 ```
 
 关键方法：
@@ -45,6 +46,8 @@ flowchart LR
 - `_analyze_segment_batch_with_retry(...)`：片段批量分析与协议重试
 - `_retry_segment_context(...)`：按片段补消息、附件和链接正文
 - `_analyze_anchor_fallback(...)`：分段失败后，直接从本人参与的聊天窗口提炼
+- `_review_retention_candidates(...)`：复核配置命中的临时协作边界候选，并由 Python 应用固定保留规则
+- `_review_personal_event_facts(...)`：复核高风险个人事件的事实证据，接收有原聊天依据的确认或修订
 - `_resolve_workstream_groups(...)`：通过独立 assignment 生成工作流权威分组；失败时回退到初始模型组整合
 - `_attach_event_file_links(...)`：按显式引用或精确附件文件名证据附加文件
 
@@ -63,6 +66,8 @@ flowchart LR
 | `pipeline/direct_relation_filter.py` | 旧 analyzer 和分段失败后直接提炼路径的本人关联检查 |
 | `pipeline/sensitive_filter.py` | 三阶段配置关键词过滤 |
 | `pipeline/retention_filter.py` | 具体对象、保留理由、保留依据和低价值类型门槛 |
+| `pipeline/retention_review.py` | 临时协作边界候选选择、组批、模型结果校验和固定保留规则 |
+| `pipeline/personal_fact_review.py` | 个人事实风险选择、组批、事实证据校验和修订应用 |
 | `pipeline/cross_conversation_merge.py` | 分组归并、主草稿选择，以及工作流、动作、参与方式的 `MergedEventDraft` 物化 |
 | `pipeline/workstream_resolution.py` | 根据结构化工作流分配结果生成校正分组 |
 | `pipeline/event_merge.py` | 最终 `WorkEvent` 构建、稳定 ID 和消息证据指纹 |
@@ -73,14 +78,14 @@ flowchart LR
 
 | 文件 | 当前职责 |
 | --- | --- |
-| `analyzers/base.py` | 分段、片段批处理、旧批处理、分段失败后直接提炼、日级合并和多人合并接口 |
+| `analyzers/base.py` | 分段、片段批处理、临时协作复核、个人事实复核、旧批处理、分段失败后直接提炼、日级合并和多人合并接口 |
 | `analyzers/online.py` | OpenAI Python SDK + Responses API 默认实现，支持流式接收 |
 | `analyzers/codex.py` | 非默认 Codex CLI 实现 |
 | `analyzers/prompts.py` | 所有语义任务 prompt |
 | `analyzers/output_schemas.py` | Responses API JSON schema |
 | `analyzers/protocol.py` | 模型 JSON 到领域对象的解析与引用恢复 |
 
-当前默认 `OnlineLLMAnalyzer` 实现 `segment_conversation(...)` 和 `analyze_segment_batch(...)`，因此 `runner` 走分段主链。是否支持分段由能力检查决定，不通过配置字符串猜测。
+当前默认 `OnlineLLMAnalyzer` 实现 `segment_conversation(...)`、`analyze_segment_batch(...)`、`review_retention_candidates(...)` 和 `review_personal_event_facts(...)`，因此 `runner` 走分段及两类局部复核主链。是否支持分段和事实复核由能力检查决定，不通过配置字符串猜测。
 
 ## 7. 输出与投递
 
@@ -118,16 +123,17 @@ flowchart LR
 | `config/conversation_blacklist.json` | 整会话排除 |
 | `config/conversation_window.json` | 群聊锚点聚合、初始上下文和按需扩窗阈值 |
 | `config/llm_retry.json` | 分段/提炼重试、流式首次返回超时和并发数 |
+| `config/retention_policy.json` | 个人事件保留提示、结构化业务词、临时协作复核、事实复核条件和模型信号定义 |
 | `config/collected_merge.json` | 多人汇总高风险复核开关、事件数/文件数阈值和复核条件 |
 | `config/attachment_text.json` | 文本附件提取限制 |
 | `config/image_summary.json` | 图片摘要限制和提示词 |
 | `config/reaction_catalogs/*.json` | reaction 本地语义目录 |
 
-可调整的敏感、普通排除和本人指派关键词新增或调整必须进入配置文件，不应继续写在代码中。结构化保留门槛及现有领域判定仍位于 `retention_filter.py`。
+可调整的敏感、普通排除、本人指派、个人保留业务词和复核信号说明必须进入配置文件，不应继续写在代码中。`retention_filter.py` 负责结构化保留门槛；两类复核模块负责模型信号、事实证据的校验和固定处理规则，Python 不根据新增聊天关键词判断语义。
 
 ## 10. 调试入口
 
-- 个人日报：`--debug-output`，目录 `data/debug/conversations/<date>/`；失败轮次保存 `failure.json`，单片段回退使用 `fallback-01/`，直接提炼回退使用 `_anchor_fallback/`；`final_events.json` 保存最终草稿、事件和过滤 warning
+- 个人日报：`--debug-output`，目录 `data/debug/conversations/<date>/`；失败轮次保存 `failure.json`，单片段回退使用 `fallback-01/`，直接提炼回退使用 `_anchor_fallback/`；`retention_review.json` 和 `personal_fact_review.json` 保存两类局部复核尝试及 Python 校验结果，`final_events.json` 保存最终草稿、事件和过滤 warning
 - 多人汇总：`WORKTRACE_COLLECTED_MERGE_TRACE=true`，目录默认 `data/debug/collected_merge/<date>/`；`source-audit.json` 保存来源格式、v2 会话证据校验和过滤明细，step JSON/prompt 在请求前写入候选、复核、正文阶段与批次，`summary.json` 和 `summary.md` 保存 Python 质量统计，失败也生成 summary
 - 锚点独立实验：`python3 -m src.worktrace.anchor_experiment ...`
 

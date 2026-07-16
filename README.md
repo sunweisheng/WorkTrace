@@ -277,8 +277,9 @@ merge_inbox/2026/07/06/
 
 - 来源人员
 - 来源事件 ID
+- 存在上游汇总时的来源负责人
 
-`event_id`、内部 `retention_reason` 枚举和 `merge_meta` 保存在 HTML 注释中。v2 `merge_meta` 只保存消息证据、同日会话证据和稳定文件标识的 SHA-256 结果，不保存原始 `om_`、`oc_`、`ou_` 标识。原始指纹继续保留在 Markdown 和调试 trace 的 `input_events` 中用于追溯，但不会直接发送给模型。旧 Markdown 仍可普通读取，但不能参与多人汇总，必须重新生成。
+`event_id`、内部 `retention_reason` 枚举和 `merge_meta` 保存在 HTML 注释中。v2 `merge_meta` 保存参与方式英文键、消息证据/同日会话证据/稳定文件标识的 SHA-256 结果，以及可选的上游来源负责人；不保存原始 `om_`、`oc_`、`ou_` 标识。原始指纹继续保留在 Markdown 和调试 trace 的 `input_events` 中用于追溯，但不会直接发送给模型。旧 Markdown 仍可普通读取，但不能参与多人汇总，必须重新生成。
 
 允许的保留理由枚举：
 

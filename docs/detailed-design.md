@@ -441,7 +441,7 @@ OnlineLLMAnalyzer -> openai Python SDK -> Responses API provider
 - `config/conversation_blacklist.json`：整会话排除
 - `config/conversation_window.json`：初始窗口聚合和按需扩窗阈值
 - `config/llm_retry.json`：分段/提炼重试、流式首次返回超时和并发数
-- `config/retention_policy.json`：个人保留提示、既有业务词、临时协作复核条件和信号定义
+- `config/retention_policy.json`：个人保留提示、既有业务词、临时协作复核、个人事实复核条件和模型信号定义
 - `config/collected_merge.json`：多人汇总高风险复核开关、阈值和条件
 - `config/attachment_text.json`：文本附件限制
 - `config/image_summary.json`：图片摘要限制和 prompt

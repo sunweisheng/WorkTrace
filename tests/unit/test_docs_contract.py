@@ -87,6 +87,38 @@ def test_docs_define_personal_fact_review_evidence_boundary() -> None:
         assert "6200" in content
 
 
+def test_privacy_docs_describe_current_discovery_and_hidden_metadata() -> None:
+    readme = Path("README.md").read_text(encoding="utf-8")
+    skill = Path("SKILL.md").read_text(encoding="utf-8")
+    employee = Path("docs/employee-guide.md").read_text(encoding="utf-8")
+    privacy = Path("docs/privacy-note.md").read_text(encoding="utf-8")
+
+    for content in (skill, employee, privacy):
+        assert "发过消息或做过 reaction" in content
+    for content in (readme, employee, privacy):
+        assert "消息证据" in content
+        assert "同日会话" in content
+        assert "文件标识" in content
+        assert "不保存原始消息 ID" in content or "不保存原始 `om_`" in content
+    assert "参与方式英文键" in readme
+    assert "参与方式英文键" in employee
+    assert "参与方式英文键" in privacy
+
+
+def test_implementation_index_covers_personal_review_modules() -> None:
+    content = Path("docs/implementation-breakdown.md").read_text(encoding="utf-8")
+    detailed = Path("docs/detailed-design.md").read_text(encoding="utf-8")
+
+    assert "_review_retention_candidates" in content
+    assert "_review_personal_event_facts" in content
+    assert "pipeline/retention_review.py" in content
+    assert "pipeline/personal_fact_review.py" in content
+    assert "config/retention_policy.json" in content
+    assert "retention_review.json" in content
+    assert "personal_fact_review.json" in content
+    assert "个人事实复核条件" in detailed
+
+
 def test_debug_docs_cover_both_review_artifacts_and_replay_summary() -> None:
     readme = Path("README.md").read_text(encoding="utf-8")
     detailed = Path("docs/detailed-design.md").read_text(encoding="utf-8")

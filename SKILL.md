@@ -124,7 +124,7 @@ python -m src.worktrace.cli merge-collected --date YYYY-MM-DD
 
 使用这个 skill 时，应当明确向用户说明以下事实：
 
-- WorkTrace 只处理目标日期内本人发过消息的会话
+- WorkTrace 只处理目标日期内本人发过消息或做过 reaction 的会话
 - WorkTrace 只尝试提取与本人直接相关的工作事项
 - WorkTrace 不输出群名、内部 ID 或参与人名单，只在责任分工等确有必要时保留姓名
 - WorkTrace 默认不长期保存原始聊天记录
