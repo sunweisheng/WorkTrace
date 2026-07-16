@@ -1196,6 +1196,7 @@ class WorkEvent:
     action_labels: list[str] = field(default_factory=list)
     self_relations: list[str] = field(default_factory=list)
     evidence_fingerprints: list[str] = field(default_factory=list)
+    conversation_fingerprints: list[str] = field(default_factory=list)
     file_keys: list[str] = field(default_factory=list)
 
     @classmethod
@@ -1221,6 +1222,9 @@ class WorkEvent:
             action_labels=_string_list(data.get("action_labels")),
             self_relations=_string_list(data.get("self_relations")),
             evidence_fingerprints=_string_list(data.get("evidence_fingerprints")),
+            conversation_fingerprints=_string_list(
+                data.get("conversation_fingerprints")
+            ),
             file_keys=_string_list(data.get("file_keys")),
         )
 
@@ -1244,6 +1248,7 @@ class WorkEvent:
             "action_labels": list(self.action_labels),
             "self_relations": list(self.self_relations),
             "evidence_fingerprints": list(self.evidence_fingerprints),
+            "conversation_fingerprints": list(self.conversation_fingerprints),
             "file_keys": list(self.file_keys),
         }
 
@@ -1433,6 +1438,42 @@ class CollectedSourceEvent:
             "event": self.event.to_dict(),
             "is_merge_owner_source": self.is_merge_owner_source,
         }
+
+
+@dataclass(frozen=True)
+class CollectedGroupingGroup:
+    group_id: str
+    draft_ids: list[str]
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "CollectedGroupingGroup":
+        return cls(
+            group_id=str(data.get("group_id", "")),
+            draft_ids=_string_list(data.get("draft_ids")),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "group_id": self.group_id,
+            "draft_ids": list(self.draft_ids),
+        }
+
+
+@dataclass(frozen=True)
+class CollectedGroupingResult:
+    groups: list[CollectedGroupingGroup] = field(default_factory=list)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "CollectedGroupingResult":
+        return cls(
+            groups=[
+                CollectedGroupingGroup.from_dict(item)
+                for item in _dict_list(data.get("groups"))
+            ]
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"groups": [item.to_dict() for item in self.groups]}
 
 
 @dataclass(frozen=True)

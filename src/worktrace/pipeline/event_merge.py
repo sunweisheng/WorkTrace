@@ -6,7 +6,7 @@ from ..models import (
     WorkEvent,
 )
 from ..utils.link_refs import sort_referenced_link_ids
-from ..utils.hashing import evidence_fingerprint, stable_event_id
+from ..utils.hashing import conversation_fingerprint, evidence_fingerprint, stable_event_id
 from ..utils.text import choose_preferred_text, merge_content_texts
 
 
@@ -110,6 +110,16 @@ def build_work_events(
                 evidence_fingerprints=[
                     evidence_fingerprint(message_id)
                     for message_id in draft.source_message_ids
+                ],
+                conversation_fingerprints=[
+                    fingerprint
+                    for conversation_id in draft.source_conversation_ids
+                    if (
+                        fingerprint := conversation_fingerprint(
+                            target_date,
+                            conversation_id,
+                        )
+                    )
                 ],
             )
         )

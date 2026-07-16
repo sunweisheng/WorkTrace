@@ -6,6 +6,7 @@ from pathlib import Path
 from src.worktrace.config import RuntimeConfig
 from src.worktrace.constants import DailyRunStatus
 from src.worktrace.factories import RuntimeDependencies
+from src.worktrace.llm_usage import LLMUsageRecorder
 from src.worktrace.models import (
     BatchAnalysisResult,
     CrossConversationGroup,
@@ -151,6 +152,11 @@ def test_runner_dumps_first_pass_conversation_debug_artifacts(tmp_path: Path) ->
         data_root=tmp_path / "data",
         conversation_debug_root=tmp_path / "debug",
     )
+    usage_recorder = LLMUsageRecorder()
+    usage_recorder.record(
+        "segment_batch_analysis",
+        {"usage": {"output_tokens": 23}},
+    )
     runner = DailyTraceRunner(
         config=config,
         dependencies=RuntimeDependencies(
@@ -159,6 +165,7 @@ def test_runner_dumps_first_pass_conversation_debug_artifacts(tmp_path: Path) ->
             analyzer=FakeAnalyzer(),
             delivery_channel=FakeDelivery(),
             event_store=MarkdownEventStore(config=config),
+            llm_usage_recorder=usage_recorder,
         ),
     )
 
@@ -192,6 +199,13 @@ def test_runner_dumps_first_pass_conversation_debug_artifacts(tmp_path: Path) ->
         "final_filter": [],
         "retention": [],
     }
+    usage_payload = json.loads(
+        (tmp_path / "debug" / "2026-06-22" / "llm_usage.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert usage_payload["usage"]["output_tokens"] == 23
+    assert usage_payload["usage"]["missing_output_tokens_request_count"] == 0
 
 
 def test_runner_groups_multiple_self_messages_in_same_conversation_into_one_llm_call(

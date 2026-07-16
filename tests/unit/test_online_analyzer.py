@@ -217,7 +217,10 @@ def test_online_analyzer_parses_non_stream_response(tmp_path: Path, monkeypatch:
 
     class FakeResponse:
         def model_dump(self):
-            return {"output_text": '{"candidate_events":[],"context_requests":[]}'}
+            return {
+                "output_text": '{"candidate_events":[],"context_requests":[]}',
+                "usage": {"input_tokens": 12, "output_tokens": 7, "total_tokens": 19},
+            }
 
     class FakeResponses:
         def create(self, **kwargs):
@@ -248,6 +251,8 @@ def test_online_analyzer_parses_non_stream_response(tmp_path: Path, monkeypatch:
 
     assert result.candidate_events == []
     assert result.context_requests == []
+    assert analyzer.usage_recorder is not None
+    assert analyzer.usage_recorder.summary()["output_tokens"] == 7
 
 
 def test_online_analyzer_parses_stream_response(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -255,18 +260,22 @@ def test_online_analyzer_parses_stream_response(tmp_path: Path, monkeypatch: pyt
     settings = build_settings(stream_enabled=True)
 
     class FakeEvent:
-        def __init__(self, content: str):
+        def __init__(self, content: str, usage: dict[str, int] | None = None):
             self._content = content
+            self._usage = usage
 
         def model_dump(self):
-            return {"type": "response.output_text.delta", "delta": self._content}
+            payload = {"type": "response.output_text.delta", "delta": self._content}
+            if self._usage is not None:
+                payload["response"] = {"usage": self._usage}
+            return payload
 
     class FakeStream:
         def __enter__(self):
             return iter(
                 [
                     FakeEvent('{"candidate_events":[],'),
-                    FakeEvent('"context_requests":[]}'),
+                    FakeEvent('"context_requests":[]}', {"output_tokens": 5}),
                 ]
             )
 
@@ -281,7 +290,7 @@ def test_online_analyzer_parses_stream_response(tmp_path: Path, monkeypatch: pyt
             return iter(
                 [
                     FakeEvent('{"candidate_events":[],'),
-                    FakeEvent('"context_requests":[]}'),
+                    FakeEvent('"context_requests":[]}', {"output_tokens": 5}),
                 ]
             )
 
@@ -310,6 +319,8 @@ def test_online_analyzer_parses_stream_response(tmp_path: Path, monkeypatch: pyt
 
     assert result.candidate_events == []
     assert result.context_requests == []
+    assert analyzer.usage_recorder is not None
+    assert analyzer.usage_recorder.summary()["output_tokens"] == 5
 
 
 def test_online_analyzer_wraps_invalid_stream_json(

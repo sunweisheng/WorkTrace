@@ -592,6 +592,7 @@ class DailyTraceRunner:
         run_started_at: float,
         result: DailyRunResult,
     ) -> DailyRunResult:
+        self._dump_llm_usage_debug_artifact(target_date=result.target_date, status=result.status)
         log_timing(
             logger,
             "runner.run.completed",
@@ -607,6 +608,25 @@ class DailyTraceRunner:
             skipped_slice_count=result.skipped_slice_count,
         )
         return result
+
+    def _dump_llm_usage_debug_artifact(self, *, target_date: str, status: str) -> None:
+        debug_root = self.config.conversation_debug_root
+        if debug_root is None:
+            return
+        date_dir = debug_root / target_date
+        date_dir.mkdir(parents=True, exist_ok=True)
+        (date_dir / "llm_usage.json").write_text(
+            dump_json(
+                {
+                    "target_date": target_date,
+                    "status": status,
+                    "usage": self.dependencies.llm_usage_recorder.summary(),
+                },
+                pretty=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
 
     def _analyze_segmented_conversations(
         self,
@@ -2981,6 +3001,7 @@ def _attach_event_file_links(
                 action_labels=list(event.action_labels),
                 self_relations=list(event.self_relations),
                 evidence_fingerprints=list(event.evidence_fingerprints),
+                conversation_fingerprints=list(event.conversation_fingerprints),
                 file_keys=file_keys,
             )
         )

@@ -250,10 +250,18 @@ class MarkdownEventStore(EventStore):
             for relation in dict.fromkeys(event.self_relations)
             if not INTERNAL_FEISHU_ID_RE.search(relation)
         ]
+        conversation_fingerprints = list(
+            dict.fromkeys(
+                value
+                for value in event.conversation_fingerprints
+                if is_sha256_fingerprint(value)
+            )
+        )
         payload = {
-            "version": 1,
+            "version": 2,
             "self_relations": self_relations,
             "evidence_fingerprints": evidence_fingerprints,
+            "conversation_fingerprints": conversation_fingerprints,
             "file_keys": file_keys,
         }
         return f"{MERGE_META_PREFIX}{json.dumps(payload, ensure_ascii=False, separators=(',', ':'))} -->"
@@ -465,6 +473,10 @@ class MarkdownEventStore(EventStore):
                     action_labels=action_labels,
                     self_relations=self_relations,
                     evidence_fingerprints=merge_meta.get("evidence_fingerprints", []),
+                    conversation_fingerprints=merge_meta.get(
+                        "conversation_fingerprints",
+                        [],
+                    ),
                     file_keys=merge_meta.get("file_keys", []),
                 )
             )
@@ -590,11 +602,14 @@ class MarkdownEventStore(EventStore):
             except json.JSONDecodeError:
                 self._record_merge_meta_warning(event_id)
                 return {}
-            if not isinstance(payload, dict) or payload.get("version") != 1:
+            if not isinstance(payload, dict) or payload.get("version") not in {1, 2}:
                 self._record_merge_meta_warning(event_id)
                 return {}
             parsed: dict[str, list[str]] = {}
-            for key in ("self_relations", "evidence_fingerprints", "file_keys"):
+            keys = ["self_relations", "evidence_fingerprints", "file_keys"]
+            if payload.get("version") == 2:
+                keys.append("conversation_fingerprints")
+            for key in keys:
                 value = payload.get(key, [])
                 if not isinstance(value, list) or not all(
                     isinstance(item, str) for item in value

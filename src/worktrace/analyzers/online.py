@@ -17,6 +17,7 @@ from openai import AuthenticationError, BadRequestError, PermissionDeniedError, 
 from ..config import OnlineLLMSettings, RuntimeConfig, load_online_llm_settings
 from ..errors import AnalyzerProtocolError, RetryableAnalyzerProtocolError
 from ..logging_utils import log_timing
+from ..llm_usage import LLMUsageRecorder
 from ..models import (
     AnalysisBatch,
     AnchorUnit,
@@ -24,6 +25,7 @@ from ..models import (
     BatchAnalysisResult,
     BatchAnchorAnalysisResult,
     BatchSegmentAnalysisResult,
+    CollectedGroupingResult,
     CollectedMergeResult,
     CollectedSourceEvent,
     ConversationSegmentationResult,
@@ -38,6 +40,7 @@ from .base import Analyzer
 from .output_schemas import (
     anchor_batch_output_schema,
     batch_output_schema,
+    collected_grouping_output_schema,
     collected_merge_output_schema,
     conversation_segmentation_output_schema,
     merge_output_schema,
@@ -46,7 +49,9 @@ from .output_schemas import (
 from .prompts import (
     build_anchor_batch_analysis_prompt,
     build_batch_analysis_prompt,
+    build_collected_grouping_prompt,
     build_collected_merge_prompt,
+    build_collected_render_prompt,
     build_conversation_segmentation_prompt,
     build_merge_prompt,
     build_segment_batch_analysis_prompt,
@@ -55,6 +60,7 @@ from .prompts import (
 from .protocol import (
     parse_anchor_batch_analysis_payload,
     parse_batch_analysis_payload,
+    parse_collected_grouping_payload,
     parse_collected_merge_payload,
     parse_conversation_segmentation_payload,
     parse_merge_payload,
@@ -171,6 +177,13 @@ def _extract_text_from_responses_stream_event(event: object) -> str:
         if isinstance(text, str):
             return text
     return ""
+
+
+def _has_usage(payload: dict[str, object]) -> bool:
+    if isinstance(payload.get("usage"), dict):
+        return True
+    response = payload.get("response")
+    return isinstance(response, dict) and isinstance(response.get("usage"), dict)
 
 
 def _build_responses_request_body(
@@ -299,12 +312,15 @@ class OnlineLLMAnalyzer(Analyzer):
     settings_loader: Callable[..., OnlineLLMSettings] = load_online_llm_settings
     random_uniform: Callable[[float, float], float] = random.uniform
     sleep_func: Callable[[float], None] = sleep
+    usage_recorder: LLMUsageRecorder | None = None
 
     def __post_init__(self) -> None:
         if self.cwd is None:
             self.cwd = Path.cwd()
         self._request_count = 0
         self._request_count_lock = threading.Lock()
+        if self.usage_recorder is None:
+            self.usage_recorder = LLMUsageRecorder()
 
     def analyze_batch(
         self,
@@ -314,6 +330,7 @@ class OnlineLLMAnalyzer(Analyzer):
         payload = self._invoke_online(
             self.build_batch_prompt(batch_input),
             output_schema=batch_output_schema(),
+            request_kind="batch_analysis",
         )
         return parse_batch_analysis_payload(payload)
 
@@ -324,7 +341,11 @@ class OnlineLLMAnalyzer(Analyzer):
         output_schema: dict[str, object] | None = None,
     ) -> object:
         """Run an explicit JSON request for auxiliary, non-daily workflows."""
-        return self._invoke_online(prompt, output_schema=output_schema)
+        return self._invoke_online(
+            prompt,
+            output_schema=output_schema,
+            request_kind="auxiliary_json",
+        )
 
     def build_segmentation_prompt(
         self,
@@ -378,6 +399,7 @@ class OnlineLLMAnalyzer(Analyzer):
                 attachment_texts=attachment_texts,
             ),
             output_schema=conversation_segmentation_output_schema(),
+            request_kind="conversation_segmentation",
         )
         return restore_conversation_segmentation_references(
             parse_conversation_segmentation_payload(payload),
@@ -395,6 +417,7 @@ class OnlineLLMAnalyzer(Analyzer):
         payload = self._invoke_online(
             self.build_segment_batch_prompt(batch),
             output_schema=segment_batch_output_schema(),
+            request_kind="segment_batch_analysis",
         )
         return parse_segment_batch_analysis_payload(payload)
 
@@ -416,6 +439,7 @@ class OnlineLLMAnalyzer(Analyzer):
         payload = self._invoke_online(
             build_anchor_batch_analysis_prompt(target_date, anchor_units, config=self.config),
             output_schema=anchor_batch_output_schema(),
+            request_kind="anchor_batch_analysis",
         )
         return parse_anchor_batch_analysis_payload(payload)
 
@@ -427,6 +451,7 @@ class OnlineLLMAnalyzer(Analyzer):
         payload = self._invoke_online(
             build_merge_prompt(target_date, candidates),
             output_schema=merge_output_schema(),
+            request_kind="day_candidate_merge",
         )
         self.last_merge_payload = payload
         return parse_merge_payload(payload)
@@ -438,17 +463,39 @@ class OnlineLLMAnalyzer(Analyzer):
         deterministic_groups: list[list[str]],
     ) -> CollectedMergeResult:
         payload = self._invoke_online(
-            build_collected_merge_prompt(
+            build_collected_render_prompt(
                 target_date,
                 events,
                 deterministic_groups,
                 config=self.config,
             ),
             output_schema=collected_merge_output_schema(),
+            request_kind="collected_event_merge",
         )
         self.last_collected_merge_payload = payload
         try:
             return parse_collected_merge_payload(payload)
+        except AnalyzerProtocolError as exc:
+            raise RetryableAnalyzerProtocolError(str(exc)) from exc
+
+    def group_collected_events(
+        self,
+        target_date: str,
+        events: list[CollectedSourceEvent],
+        deterministic_groups: list[list[str]],
+    ) -> CollectedGroupingResult:
+        payload = self._invoke_online(
+            build_collected_grouping_prompt(
+                target_date,
+                events,
+                deterministic_groups,
+                config=self.config,
+            ),
+            output_schema=collected_grouping_output_schema(),
+            request_kind="collected_candidate_grouping",
+        )
+        try:
+            return parse_collected_grouping_payload(payload)
         except AnalyzerProtocolError as exc:
             raise RetryableAnalyzerProtocolError(str(exc)) from exc
 
@@ -457,6 +504,7 @@ class OnlineLLMAnalyzer(Analyzer):
         prompt: str,
         *,
         output_schema: dict[str, object] | None = None,
+        request_kind: str,
     ) -> object:
         started_at = perf_counter()
         settings = self.settings_loader(self.config, cwd=self.cwd, environ=None)
@@ -464,7 +512,7 @@ class OnlineLLMAnalyzer(Analyzer):
         body = _build_responses_request_body(prompt, settings=settings, schema=output_schema)
 
         try:
-            text = self._invoke_via_sdk(settings, body)
+            text, usage_payload = self._invoke_via_sdk(settings, body)
         except AuthenticationError as exc:
             raise AnalyzerProtocolError("HTTP 401: invalid API key or authentication failed.") from exc
         except PermissionDeniedError as exc:
@@ -496,6 +544,7 @@ class OnlineLLMAnalyzer(Analyzer):
 
         with self._request_count_lock:
             self._request_count += 1
+        usage = self.usage_recorder.record(request_kind, usage_payload)
         log_timing(
             logger,
             "online_llm.request.completed",
@@ -503,6 +552,7 @@ class OnlineLLMAnalyzer(Analyzer):
             prompt_chars=len(prompt),
             stream_enabled=settings.stream_enabled,
             tls_verify=settings.tls_verify,
+            output_tokens=usage["output_tokens"],
         )
         if not text.strip():
             raise RetryableAnalyzerProtocolError(
@@ -515,18 +565,27 @@ class OnlineLLMAnalyzer(Analyzer):
                 "Online LLM response did not contain valid JSON output."
             ) from exc
 
-    def _invoke_via_sdk(self, settings: OnlineLLMSettings, body: dict[str, object]) -> str:
+    def _invoke_via_sdk(
+        self,
+        settings: OnlineLLMSettings,
+        body: dict[str, object],
+    ) -> tuple[str, dict[str, object]]:
         client = _get_or_create_global_client(settings)
         if settings.stream_enabled:
             response_stream = client.responses.create(**body)
             chunks: list[str] = []
+            usage_payload: dict[str, object] = {}
             for event in response_stream:
-                chunk_text = _extract_text_from_responses_stream_event(event.model_dump())
+                event_payload = event.model_dump()
+                chunk_text = _extract_text_from_responses_stream_event(event_payload)
                 if chunk_text:
                     chunks.append(chunk_text)
-            return "".join(chunks)
+                if _has_usage(event_payload):
+                    usage_payload = event_payload
+            return "".join(chunks), usage_payload
         response = client.responses.create(**body)
-        return _extract_text_from_responses_payload(response.model_dump())
+        payload = response.model_dump()
+        return _extract_text_from_responses_payload(payload), payload
 
     def _maybe_sleep_between_requests(self, settings: OnlineLLMSettings) -> None:
         with self._request_count_lock:

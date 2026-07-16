@@ -133,12 +133,12 @@
 隐藏信息格式：
 
 ```html
-<!-- worktrace:merge_meta {"version":1,"self_relations":["initiated"],"evidence_fingerprints":["sha256:..."],"file_keys":["sha256:..."]} -->
+<!-- worktrace:merge_meta {"version":2,"self_relations":["initiated"],"evidence_fingerprints":["sha256:..."],"conversation_fingerprints":["sha256:..."],"file_keys":["sha256:..."]} -->
 ```
 
-`evidence_fingerprints` 由 Python 对每个来源消息 ID 分别计算 SHA-256，`file_keys` 由去参数后的链接或附件 ID 计算 SHA-256。注释不得包含原始消息、会话、用户 ID。只有文件名而没有稳定链接或附件 ID 时不生成文件标识。
+`evidence_fingerprints` 由 Python 对每个来源消息 ID 分别计算 SHA-256，`conversation_fingerprints` 由目标日期和来源会话 ID 计算，`file_keys` 由去参数后的链接或附件 ID 计算 SHA-256。注释不得包含原始消息、会话、用户 ID。只有文件名而没有稳定链接或附件 ID 时不生成文件标识。
 
-旧 Markdown 没有这些字段或注释时仍按空值读取；不批量改写历史文件。损坏的 `merge_meta` 只记录 warning 并忽略，不影响正文事件回读。
+读取器仍能把 v1 Markdown 按空会话证据读回，但 `merge-collected` 不允许 v1 与 v2 混合：任一事件缺少会话指纹时整次停止，并要求重新生成来源文件。不批量改写历史文件。损坏的 `merge_meta` 仍记录 warning 并忽略，不影响普通正文回读。
 
 底部生成说明包含：
 

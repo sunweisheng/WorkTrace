@@ -17,6 +17,17 @@ def evidence_fingerprint(message_id: str) -> str:
     return _namespaced_sha256("worktrace:evidence:v1", message_id)
 
 
+def conversation_fingerprint(target_date: str, conversation_id: str) -> str:
+    cleaned_date = target_date.strip()
+    cleaned_conversation_id = conversation_id.strip()
+    if not cleaned_date or not cleaned_conversation_id:
+        return ""
+    return _namespaced_sha256(
+        "worktrace:conversation:v1",
+        f"{cleaned_date}:{cleaned_conversation_id}",
+    )
+
+
 def file_key_from_url(url: str) -> str:
     normalized = normalize_file_url(url)
     if not normalized:

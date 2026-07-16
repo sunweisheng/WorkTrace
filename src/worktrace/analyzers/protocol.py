@@ -6,6 +6,7 @@ from ..models import (
     BatchAnalysisResult,
     BatchAnchorAnalysisResult,
     BatchSegmentAnalysisResult,
+    CollectedGroupingResult,
     CollectedMergeResult,
     ConversationSegmentationResult,
     CrossConversationGroupResult,
@@ -59,6 +60,14 @@ def parse_merge_payload(payload: object) -> CrossConversationGroupResult:
         return CrossConversationGroupResult.from_dict(data)
     except (KeyError, TypeError, ValueError) as exc:
         raise AnalyzerProtocolError("Invalid cross-conversation merge payload.") from exc
+
+
+def parse_collected_grouping_payload(payload: object) -> CollectedGroupingResult:
+    data = expect_json_object(payload, "Collected grouping result")
+    try:
+        return CollectedGroupingResult.from_dict(data)
+    except (KeyError, TypeError, ValueError) as exc:
+        raise AnalyzerProtocolError("Invalid collected grouping payload.") from exc
 
 
 def parse_collected_merge_payload(payload: object) -> CollectedMergeResult:

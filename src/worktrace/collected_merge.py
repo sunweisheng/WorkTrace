@@ -18,8 +18,14 @@ from .errors import (
     StoreWriteError,
 )
 from .factories import AnalyzerFactory
-from .analyzers.prompts import build_collected_merge_prompt
+from .analyzers.prompts import (
+    build_collected_grouping_prompt,
+    build_collected_merge_prompt,
+    build_collected_render_prompt,
+)
 from .models import (
+    CollectedGroupingGroup,
+    CollectedGroupingResult,
     CollectedMergeGroup,
     CollectedMergeOutput,
     CollectedMergeResult,
@@ -113,6 +119,15 @@ class CollectedMergeRunner:
             if input_dir.exists()
             else []
         )
+        preflight_failure = self._preflight_conversation_evidence(
+            target_date,
+            self_identity=self_identity,
+            input_dir=input_dir,
+            child_dirs=child_dirs,
+        )
+        if preflight_failure is not None:
+            return preflight_failure
+
         outputs = [
             self._run_one_directory(
                 target_date,
@@ -162,6 +177,114 @@ class CollectedMergeRunner:
             self_delivery_status=summarize_self_delivery_status(outputs),
             self_delivery_target=first_output.self_delivery_target,
             self_delivery_error="; ".join(delivery_errors),
+            outputs=outputs,
+        )
+
+    def _preflight_conversation_evidence(
+        self,
+        target_date: str,
+        *,
+        self_identity: SelfIdentity,
+        input_dir: Path,
+        child_dirs: list[Path],
+    ) -> CollectedMergeRunResult | None:
+        scope_specs = [
+            (
+                input_dir,
+                {child.name for child in child_dirs},
+            ),
+            *((child, set()) for child in child_dirs),
+        ]
+        inspected: list[tuple[Path, int, int, int, int, list[str]]] = []
+        missing_warnings: list[str] = []
+
+        for scope_dir, ignored_subdirectories in scope_specs:
+            output_path = scope_dir / build_merged_markdown_filename(
+                target_date,
+                self_identity.display_name or self_identity.open_id,
+            )
+            (
+                source_events,
+                source_file_count,
+                skipped_file_count,
+                partial_file_count,
+                _,
+                _,
+            ) = self._read_source_events(
+                target_date,
+                scope_dir,
+                output_path=output_path,
+                ignored_subdirectories=ignored_subdirectories,
+            )
+            missing_by_file = Counter(
+                item.source_file
+                for item in source_events
+                if not item.event.conversation_fingerprints
+            )
+            scope_warnings = [
+                (
+                    "Missing version 2 conversation evidence: "
+                    f"{source_file} ({count} events). Regenerate this markdown "
+                    "before running merge-collected."
+                )
+                for source_file, count in sorted(missing_by_file.items())
+            ]
+            missing_warnings.extend(scope_warnings)
+            inspected.append(
+                (
+                    scope_dir,
+                    source_file_count,
+                    len(source_events),
+                    skipped_file_count,
+                    partial_file_count,
+                    scope_warnings,
+                )
+            )
+
+        if not missing_warnings:
+            return None
+
+        outputs = [
+            CollectedMergeOutput(
+                input_dir=str(scope_dir.resolve()),
+                output_path=None,
+                source_file_count=source_file_count,
+                source_event_count=source_event_count,
+                merged_event_count=0,
+                skipped_file_count=skipped_file_count,
+                partial_file_count=partial_file_count,
+                warning_messages=(
+                    scope_warnings
+                    or [
+                        "Collected merge stopped before this scope because another "
+                        "scope has missing version 2 conversation evidence."
+                    ]
+                ),
+            )
+            for (
+                scope_dir,
+                source_file_count,
+                source_event_count,
+                skipped_file_count,
+                partial_file_count,
+                scope_warnings,
+            ) in inspected
+        ]
+        first_output = outputs[0]
+        return CollectedMergeRunResult(
+            status=DailyRunStatus.FAILED.value,
+            target_date=target_date,
+            input_dir=str(input_dir.resolve()),
+            output_path=None,
+            source_file_count=sum(item.source_file_count for item in outputs),
+            source_event_count=sum(item.source_event_count for item in outputs),
+            merged_event_count=0,
+            skipped_file_count=sum(item.skipped_file_count for item in outputs),
+            partial_file_count=sum(item.partial_file_count for item in outputs),
+            warning_messages=missing_warnings,
+            self_delivery_status="",
+            self_delivery_target=first_output.self_delivery_target,
+            self_delivery_error="",
             outputs=outputs,
         )
 
@@ -358,6 +481,249 @@ class CollectedMergeRunner:
         *,
         merge_owner_person: str,
     ) -> tuple[list[WorkEvent], list[str]]:
+        if hasattr(self.analyzer, "group_collected_events"):
+            return self._merge_source_events_two_stage(
+                target_date,
+                source_events,
+            )
+        return self._merge_source_events_single_stage(
+            target_date,
+            source_events,
+            merge_owner_person=merge_owner_person,
+        )
+
+    def _merge_source_events_two_stage(
+        self,
+        target_date: str,
+        source_events: list[CollectedSourceEvent],
+    ) -> tuple[list[WorkEvent], list[str]]:
+        deterministic_groups, deterministic_warnings = self._build_deterministic_groups(
+            source_events,
+        )
+        grouping_result, grouping_warnings = self._invoke_collected_grouping_with_retry(
+            target_date,
+            source_events,
+            deterministic_groups,
+        )
+        grouping_result, repair_warnings = repair_collected_grouping_result(
+            grouping_result,
+            source_events,
+            deterministic_groups,
+        )
+        source_by_id = {item.draft_id: item for item in source_events}
+        multi_groups = [
+            group for group in grouping_result.groups if len(group.draft_ids) > 1
+        ]
+        singleton_groups = [
+            group for group in grouping_result.groups if len(group.draft_ids) == 1
+        ]
+        retry_warnings: list[str] = []
+        rendered_groups: list[CollectedMergeGroup] = []
+        if multi_groups:
+            rendered_groups, retry_warnings = self._render_collected_multi_groups(
+                target_date,
+                source_events,
+                multi_groups,
+            )
+
+        rendered_groups.extend(
+            _build_singleton_collected_group(source_by_id[group.draft_ids[0]], index)
+            for index, group in enumerate(singleton_groups, start=1)
+        )
+        merged_events, final_warnings = self._finalize_collected_merge_result(
+            target_date,
+            source_events,
+            CollectedMergeResult(groups=rendered_groups),
+        )
+        return merged_events, [
+            *deterministic_warnings,
+            *grouping_warnings,
+            *repair_warnings,
+            *retry_warnings,
+            *final_warnings,
+        ]
+
+    def _render_collected_multi_groups(
+        self,
+        target_date: str,
+        source_events: list[CollectedSourceEvent],
+        groups: list[CollectedGroupingGroup],
+    ) -> tuple[list[CollectedMergeGroup], list[str]]:
+        threshold = self.config.collected_merge_prompt_char_threshold
+        batches: list[list[CollectedGroupingGroup]] = []
+        current: list[CollectedGroupingGroup] = []
+
+        for group in groups:
+            candidate_groups = [*current, group]
+            candidate_ids = {
+                draft_id
+                for candidate_group in candidate_groups
+                for draft_id in candidate_group.draft_ids
+            }
+            candidate_events = [
+                item for item in source_events if item.draft_id in candidate_ids
+            ]
+            candidate_chars = self._count_collected_render_prompt_chars(
+                target_date,
+                candidate_events,
+                [list(item.draft_ids) for item in candidate_groups],
+            )
+            if current and candidate_chars > threshold:
+                batches.append(current)
+                current = []
+            current.append(group)
+        if current:
+            batches.append(current)
+
+        rendered_groups: list[CollectedMergeGroup] = []
+        warnings: list[str] = []
+        for batch_index, batch_groups in enumerate(batches, start=1):
+            batch_ids = {
+                draft_id
+                for group in batch_groups
+                for draft_id in group.draft_ids
+            }
+            batch_events = [
+                item for item in source_events if item.draft_id in batch_ids
+            ]
+            batch_locked = [list(group.draft_ids) for group in batch_groups]
+            batch_chars = self._count_collected_render_prompt_chars(
+                target_date,
+                batch_events,
+                batch_locked,
+            )
+            if len(batch_groups) == 1 and batch_chars > threshold:
+                rendered_group, group_warnings = self._render_oversized_locked_group(
+                    target_date,
+                    batch_events,
+                    batch_groups[0],
+                    depth=0,
+                )
+                rendered_groups.append(rendered_group)
+                warnings.extend(group_warnings)
+                continue
+            result, retry_warnings = self._invoke_collected_merge_with_retry(
+                target_date,
+                batch_events,
+                batch_locked,
+                rolling_step_index=batch_index,
+            )
+            result, repair_warnings = repair_collected_merge_result(
+                result,
+                batch_events,
+                batch_locked,
+            )
+            rendered_groups.extend(result.groups)
+            warnings.extend([*retry_warnings, *repair_warnings])
+        if len(batches) > 1:
+            warnings.insert(
+                0,
+                "Using locked-group collected content batches: "
+                f"batches={len(batches)} threshold={threshold}.",
+            )
+        return rendered_groups, warnings
+
+    def _render_oversized_locked_group(
+        self,
+        target_date: str,
+        source_events: list[CollectedSourceEvent],
+        group: CollectedGroupingGroup,
+        *,
+        depth: int,
+    ) -> tuple[CollectedMergeGroup, list[str]]:
+        threshold = self.config.collected_merge_prompt_char_threshold
+        locked_group = [item.draft_id for item in source_events]
+        prompt_chars = self._count_collected_render_prompt_chars(
+            target_date,
+            source_events,
+            [locked_group],
+        )
+        if prompt_chars <= threshold or len(source_events) <= 1 or depth >= 3:
+            result, retry_warnings = self._invoke_collected_merge_with_retry(
+                target_date,
+                source_events,
+                [locked_group],
+                rolling_step_index=depth + 1,
+            )
+            result, repair_warnings = repair_collected_merge_result(
+                result,
+                source_events,
+                [locked_group],
+            )
+            rendered = result.groups[0]
+            return (
+                replace(rendered, draft_ids=list(group.draft_ids)),
+                [*retry_warnings, *repair_warnings],
+            )
+
+        chunks: list[list[CollectedSourceEvent]] = []
+        current: list[CollectedSourceEvent] = []
+        for item in source_events:
+            candidate = [*current, item]
+            candidate_chars = self._count_collected_render_prompt_chars(
+                target_date,
+                candidate,
+                [[event.draft_id for event in candidate]],
+            )
+            if current and candidate_chars > threshold:
+                chunks.append(current)
+                current = []
+            current.append(item)
+        if current:
+            chunks.append(current)
+
+        summary_events: list[CollectedSourceEvent] = []
+        warnings = [
+            "Using hierarchical collected content rendering: "
+            f"group={group.group_id} depth={depth + 1} chunks={len(chunks)}."
+        ]
+        for chunk_index, chunk in enumerate(chunks, start=1):
+            chunk_ids = [item.draft_id for item in chunk]
+            result, retry_warnings = self._invoke_collected_merge_with_retry(
+                target_date,
+                chunk,
+                [chunk_ids],
+                rolling_step_index=depth + 1,
+            )
+            result, repair_warnings = repair_collected_merge_result(
+                result,
+                chunk,
+                [chunk_ids],
+            )
+            event = self._materialize_events(target_date, chunk, result)[0]
+            summary_id = f"__content_summary_{depth}_{chunk_index}"
+            summary_events.append(
+                CollectedSourceEvent(
+                    draft_id=summary_id,
+                    person_name="content-summary",
+                    source_file=f"__content_summary_{depth}.md",
+                    event=event,
+                    is_merge_owner_source=any(
+                        item.is_merge_owner_source for item in chunk
+                    ),
+                )
+            )
+            warnings.extend([*retry_warnings, *repair_warnings])
+
+        rendered, recursive_warnings = self._render_oversized_locked_group(
+            target_date,
+            summary_events,
+            CollectedGroupingGroup(
+                group_id=group.group_id,
+                draft_ids=[item.draft_id for item in summary_events],
+            ),
+            depth=depth + 1,
+        )
+        warnings.extend(recursive_warnings)
+        return replace(rendered, draft_ids=list(group.draft_ids)), warnings
+
+    def _merge_source_events_single_stage(
+        self,
+        target_date: str,
+        source_events: list[CollectedSourceEvent],
+        *,
+        merge_owner_person: str,
+    ) -> tuple[list[WorkEvent], list[str]]:
         deterministic_groups, deterministic_warnings = self._build_deterministic_groups(
             source_events,
         )
@@ -449,6 +815,23 @@ class CollectedMergeRunner:
             source_events,
             deterministic_groups,
         )
+        merged_events, final_warnings = self._finalize_collected_merge_result(
+            target_date,
+            source_events,
+            merge_result,
+            repair_warnings=repair_warnings,
+        )
+        return merged_events, [*retry_warnings, *final_warnings]
+
+    def _finalize_collected_merge_result(
+        self,
+        target_date: str,
+        source_events: list[CollectedSourceEvent],
+        merge_result: CollectedMergeResult,
+        *,
+        repair_warnings: list[str] | None = None,
+    ) -> tuple[list[WorkEvent], list[str]]:
+        repair_warnings = list(repair_warnings or [])
         merge_result, boundary_warnings = enforce_collected_workstream_boundaries(
             merge_result,
             source_events,
@@ -486,13 +869,292 @@ class CollectedMergeRunner:
             retention_warnings=retention_warnings,
         )
         return retained_events, [
-            *retry_warnings,
             *repair_warnings,
             *boundary_warnings,
             *metadata_warnings,
             *sensitive_warnings,
             *retention_warnings,
         ]
+
+    def _invoke_collected_grouping_with_retry(
+        self,
+        target_date: str,
+        source_events: list[CollectedSourceEvent],
+        deterministic_groups: list[list[str]],
+    ) -> tuple[CollectedGroupingResult, list[str]]:
+        return self._group_collected_events_with_batching(
+            target_date,
+            source_events,
+            deterministic_groups,
+            depth=0,
+        )
+
+    def _group_collected_events_with_batching(
+        self,
+        target_date: str,
+        source_events: list[CollectedSourceEvent],
+        deterministic_groups: list[list[str]],
+        *,
+        depth: int,
+    ) -> tuple[CollectedGroupingResult, list[str]]:
+        prompt_chars = len(
+            build_collected_grouping_prompt(
+                target_date,
+                source_events,
+                deterministic_groups,
+                config=self.config,
+            )
+        )
+        threshold = self.config.collected_merge_prompt_char_threshold
+        if prompt_chars <= threshold or len(source_events) <= 1:
+            return self._invoke_collected_grouping_once(
+                target_date,
+                source_events,
+                deterministic_groups,
+                stage=(
+                    "candidate_grouping"
+                    if depth == 0
+                    else "candidate_reconciliation"
+                ),
+            )
+
+        batches = self._pack_collected_grouping_batches(
+            target_date,
+            source_events,
+            deterministic_groups,
+        )
+        warnings = [
+            "Using relation-priority collected candidate grouping: "
+            f"prompt_chars={prompt_chars} threshold={threshold} batches={len(batches)}."
+        ]
+        partial_groups: list[CollectedGroupingGroup] = []
+        deterministic_sets = {tuple(group) for group in deterministic_groups}
+        for batch_index, batch_events in enumerate(batches, start=1):
+            batch_ids = {item.draft_id for item in batch_events}
+            batch_deterministic = [
+                list(group)
+                for group in deterministic_groups
+                if set(group).issubset(batch_ids)
+            ]
+            batch_result, batch_warnings = self._invoke_collected_grouping_once(
+                target_date,
+                batch_events,
+                batch_deterministic,
+                stage=(
+                    f"candidate_grouping_batch_{batch_index}"
+                    if depth == 0
+                    else f"candidate_reconciliation_batch_{batch_index}"
+                ),
+            )
+            batch_result, batch_repair_warnings = repair_collected_grouping_result(
+                batch_result,
+                batch_events,
+                batch_deterministic,
+            )
+            partial_groups.extend(batch_result.groups)
+            warnings.extend([*batch_warnings, *batch_repair_warnings])
+
+        if len(batches) <= 1:
+            return CollectedGroupingResult(groups=partial_groups), warnings
+        if depth >= 3:
+            warnings.append(
+                "Stopped collected candidate reconciliation after 3 levels; "
+                "all batch groups were preserved without cross-batch merging."
+            )
+            return CollectedGroupingResult(groups=partial_groups), warnings
+
+        synthetic_events, source_ids_by_synthetic = build_grouping_summary_events(
+            target_date,
+            source_events,
+            partial_groups,
+            depth=depth + 1,
+        )
+        synthetic_deterministic = [
+            [synthetic_id]
+            for synthetic_id, original_ids in source_ids_by_synthetic.items()
+            if tuple(original_ids) in deterministic_sets
+        ]
+        reconciled, reconciliation_warnings = self._group_collected_events_with_batching(
+            target_date,
+            synthetic_events,
+            synthetic_deterministic,
+            depth=depth + 1,
+        )
+        warnings.extend(reconciliation_warnings)
+        expanded_groups = [
+            CollectedGroupingGroup(
+                group_id=f"reconciled-{index}",
+                draft_ids=_dedupe(
+                    [
+                        original_id
+                        for synthetic_id in group.draft_ids
+                        for original_id in source_ids_by_synthetic.get(
+                            synthetic_id,
+                            [],
+                        )
+                    ]
+                ),
+            )
+            for index, group in enumerate(reconciled.groups, start=1)
+        ]
+        return CollectedGroupingResult(groups=expanded_groups), warnings
+
+    def _pack_collected_grouping_batches(
+        self,
+        target_date: str,
+        source_events: list[CollectedSourceEvent],
+        deterministic_groups: list[list[str]],
+    ) -> list[list[CollectedSourceEvent]]:
+        threshold = self.config.collected_merge_prompt_char_threshold
+        components = build_collected_relation_components(
+            source_events,
+            deterministic_groups,
+        )
+        source_by_id = {item.draft_id: item for item in source_events}
+        locked_by_member = {
+            draft_id: list(group)
+            for group in deterministic_groups
+            for draft_id in group
+        }
+        batches: list[list[CollectedSourceEvent]] = []
+        current: list[CollectedSourceEvent] = []
+
+        for component in components:
+            candidate = [*current, *component]
+            candidate_ids = {item.draft_id for item in candidate}
+            candidate_deterministic = [
+                list(group)
+                for group in deterministic_groups
+                if set(group).issubset(candidate_ids)
+            ]
+            candidate_chars = len(
+                build_collected_grouping_prompt(
+                    target_date,
+                    candidate,
+                    candidate_deterministic,
+                    config=self.config,
+                )
+            )
+            if current and candidate_chars > threshold:
+                batches.append(current)
+                current = []
+
+            component_chars = len(
+                build_collected_grouping_prompt(
+                    target_date,
+                    component,
+                    [
+                        list(group)
+                        for group in deterministic_groups
+                        if set(group).issubset(
+                            {item.draft_id for item in component}
+                        )
+                    ],
+                    config=self.config,
+                )
+            )
+            if component_chars <= threshold:
+                current.extend(component)
+                continue
+
+            atomic_units: list[list[CollectedSourceEvent]] = []
+            consumed_locked_ids: set[str] = set()
+            component_ids = {item.draft_id for item in component}
+            for item in component:
+                locked_group = locked_by_member.get(item.draft_id)
+                if locked_group:
+                    locked_key = locked_group[0]
+                    if locked_key in consumed_locked_ids:
+                        continue
+                    consumed_locked_ids.add(locked_key)
+                    atomic_units.append(
+                        [
+                            source_by_id[draft_id]
+                            for draft_id in locked_group
+                            if draft_id in component_ids
+                        ]
+                    )
+                    continue
+                atomic_units.append([item])
+
+            for unit in atomic_units:
+                candidate = [*current, *unit]
+                candidate_chars = len(
+                    build_collected_grouping_prompt(
+                        target_date,
+                        candidate,
+                        [],
+                        config=self.config,
+                    )
+                )
+                if current and candidate_chars > threshold:
+                    batches.append(current)
+                    current = []
+                current.extend(unit)
+
+        if current:
+            batches.append(current)
+        return batches or [list(source_events)]
+
+    def _invoke_collected_grouping_once(
+        self,
+        target_date: str,
+        source_events: list[CollectedSourceEvent],
+        deterministic_groups: list[list[str]],
+        *,
+        stage: str,
+    ) -> tuple[CollectedGroupingResult, list[str]]:
+        warnings: list[str] = []
+        retryable_error_count = 0
+        attempt_index = 0
+        retry_reason = "initial"
+        while True:
+            attempt_index += 1
+            trace_step_index = self._start_collected_merge_trace_attempt(
+                target_date=target_date,
+                source_events=source_events,
+                deterministic_groups=deterministic_groups,
+                rolling_step_index=0,
+                attempt_index=attempt_index,
+                retry_reason=retry_reason,
+                stage=stage,
+            )
+            try:
+                grouping_result = self.analyzer.group_collected_events(
+                    target_date,
+                    source_events,
+                    deterministic_groups,
+                )
+            except RetryableAnalyzerProtocolError as exc:
+                self._record_collected_merge_trace_failure(
+                    step_index=trace_step_index,
+                    error=exc,
+                    retryable=True,
+                )
+                if retryable_error_count >= self.config.collected_merge_retryable_error_limit:
+                    raise
+                retryable_error_count += 1
+                warning = (
+                    "Retrying collected candidate grouping after retryable analyzer error: "
+                    f"attempt={attempt_index} error={exc}"
+                )
+                warnings.append(warning)
+                self._collected_merge_failure_warnings.append(warning)
+                self.sleep_func(self.config.collected_merge_retry_delay_seconds)
+                retry_reason = "retryable_error"
+                continue
+            except (AnalyzerProtocolError, ValueError) as exc:
+                self._record_collected_merge_trace_failure(
+                    step_index=trace_step_index,
+                    error=exc,
+                    retryable=False,
+                )
+                raise
+            self._record_collected_grouping_trace_success(
+                step_index=trace_step_index,
+                grouping_result=grouping_result,
+            )
+            return grouping_result, warnings
 
     def _invoke_collected_merge_with_retry(
         self,
@@ -694,6 +1356,21 @@ class CollectedMergeRunner:
     ) -> int:
         return len(
             build_collected_merge_prompt(
+                target_date,
+                source_events,
+                deterministic_groups,
+                config=self.config,
+            )
+        )
+
+    def _count_collected_render_prompt_chars(
+        self,
+        target_date: str,
+        source_events: list[CollectedSourceEvent],
+        deterministic_groups: list[list[str]],
+    ) -> int:
+        return len(
+            build_collected_render_prompt(
                 target_date,
                 source_events,
                 deterministic_groups,
@@ -1078,6 +1755,14 @@ class CollectedMergeRunner:
             workstream_names = _dedupe(
                 [item.event.workstream_name for item in items]
             )
+            normalized_workstream_names = {
+                "".join(name.casefold().split()) for name in workstream_names
+            }
+            output_workstream_name = (
+                workstream_names[0]
+                if len(normalized_workstream_names) <= 1 and workstream_names
+                else ""
+            )
             action_labels = _dedupe(
                 [
                     label
@@ -1098,6 +1783,13 @@ class CollectedMergeRunner:
                     value
                     for item in items
                     for value in item.event.evidence_fingerprints
+                ]
+            )
+            conversation_fingerprints = _dedupe(
+                [
+                    value
+                    for item in items
+                    for value in item.event.conversation_fingerprints
                 ]
             )
             file_keys = _dedupe(
@@ -1130,10 +1822,11 @@ class CollectedMergeRunner:
                     object_hint=group.object_hint,
                     retention_reason=group.retention_reason,
                     retention_detail=group.retention_detail,
-                    workstream_name=workstream_names[0] if workstream_names else "",
+                    workstream_name=output_workstream_name,
                     action_labels=action_labels,
                     self_relations=self_relations,
                     evidence_fingerprints=evidence_fingerprints,
+                    conversation_fingerprints=conversation_fingerprints,
                     file_keys=file_keys,
                 )
             )
@@ -1213,19 +1906,30 @@ class CollectedMergeRunner:
         rolling_step_index: int,
         attempt_index: int,
         retry_reason: str,
+        stage: str = "content_merge",
     ) -> int:
         if self._collected_merge_trace_dir is None:
             return 0
         self._collected_merge_trace_call_index += 1
-        prompt = build_collected_merge_prompt(
-            target_date,
-            source_events,
-            deterministic_groups,
-            config=self.config,
+        prompt = (
+            build_collected_grouping_prompt(
+                target_date,
+                source_events,
+                deterministic_groups,
+                config=self.config,
+            )
+            if stage.startswith("candidate_")
+            else build_collected_render_prompt(
+                target_date,
+                source_events,
+                deterministic_groups,
+                config=self.config,
+            )
         )
         step = {
             "step_index": self._collected_merge_trace_call_index,
             "status": "started",
+            "stage": stage,
             "rolling_step_index": rolling_step_index,
             "attempt_index": attempt_index,
             "retry_reason": retry_reason,
@@ -1242,6 +1946,24 @@ class CollectedMergeRunner:
             encoding="utf-8",
         )
         return self._collected_merge_trace_call_index
+
+    def _record_collected_grouping_trace_success(
+        self,
+        *,
+        step_index: int,
+        grouping_result: CollectedGroupingResult,
+    ) -> None:
+        step = self._collected_merge_trace_step(step_index)
+        if step is None:
+            return
+        step.update(
+            {
+                "status": "success",
+                "raw_group_count": len(grouping_result.groups),
+                "raw_result": grouping_result.to_dict(),
+            }
+        )
+        self._write_collected_merge_trace_step(step)
 
     def _record_collected_merge_trace_success(
         self,
@@ -1683,17 +2405,18 @@ def render_collected_merge_trace_summary(summary: dict[str, Any]) -> str:
         "",
         "## Step Metrics",
         "",
-        "| Step | Status | Rolling | Attempt | Retry reason | Prompt chars | Input events | Raw groups | Retained events | Error |",
-        "|---:|---|---:|---:|---|---:|---:|---:|---:|---|",
+        "| Step | Stage | Status | Batch/Rolling step | Attempt | Retry reason | Prompt chars | Input events | Raw groups | Retained events | Error |",
+        "|---:|---|---|---:|---:|---|---:|---:|---:|---:|---|",
     ]
     for step in summary["steps"]:
         retained_events = step.get("retained_metrics", {}).get("event_count", "")
         error_summary = str(step.get("error", {}).get("summary", "")).replace("|", "\\|")
         lines.append(
-            "| {step} | {status} | {rolling} | {attempt} | {retry_reason} | "
+            "| {step} | {stage} | {status} | {rolling} | {attempt} | {retry_reason} | "
             "{prompt} | {input_events} | {raw_groups} | {retained_events} | "
             "{error} |".format(
                 step=step.get("step_index", ""),
+                stage=step.get("stage", ""),
                 status=step.get("status", ""),
                 rolling=step.get("rolling_step_index", ""),
                 attempt=step.get("attempt_index", ""),
@@ -1802,6 +2525,175 @@ def build_synthetic_collected_source_events(
         )
         for index, event in enumerate(events, start=1)
     ]
+
+
+def build_collected_relation_components(
+    source_events: list[CollectedSourceEvent],
+    deterministic_groups: list[list[str]],
+) -> list[list[CollectedSourceEvent]]:
+    event_by_id = {item.draft_id: item for item in source_events}
+    order = {item.draft_id: index for index, item in enumerate(source_events)}
+    parent = {item.draft_id: item.draft_id for item in source_events}
+
+    def find(value: str) -> str:
+        while parent[value] != value:
+            parent[value] = parent[parent[value]]
+            value = parent[value]
+        return value
+
+    def union(left: str, right: str) -> None:
+        left_root = find(left)
+        right_root = find(right)
+        if left_root == right_root:
+            return
+        if order[left_root] <= order[right_root]:
+            parent[right_root] = left_root
+        else:
+            parent[left_root] = right_root
+
+    for group in deterministic_groups:
+        known = [draft_id for draft_id in group if draft_id in event_by_id]
+        for draft_id in known[1:]:
+            union(known[0], draft_id)
+
+    for field_name in (
+        "evidence_fingerprints",
+        "file_keys",
+        "conversation_fingerprints",
+    ):
+        members_by_value: dict[str, list[str]] = defaultdict(list)
+        for item in source_events:
+            for value in getattr(item.event, field_name):
+                if value:
+                    members_by_value[value].append(item.draft_id)
+        for members in members_by_value.values():
+            for draft_id in members[1:]:
+                union(members[0], draft_id)
+
+    grouped: dict[str, list[CollectedSourceEvent]] = defaultdict(list)
+    for item in source_events:
+        grouped[find(item.draft_id)].append(item)
+    return sorted(
+        grouped.values(),
+        key=lambda items: min(order[item.draft_id] for item in items),
+    )
+
+
+def build_grouping_summary_events(
+    target_date: str,
+    source_events: list[CollectedSourceEvent],
+    groups: list[CollectedGroupingGroup],
+    *,
+    depth: int,
+) -> tuple[list[CollectedSourceEvent], dict[str, list[str]]]:
+    source_by_id = {item.draft_id: item for item in source_events}
+    summaries: list[CollectedSourceEvent] = []
+    source_ids_by_synthetic: dict[str, list[str]] = {}
+    for index, group in enumerate(groups, start=1):
+        items = [
+            source_by_id[draft_id]
+            for draft_id in group.draft_ids
+            if draft_id in source_by_id
+        ]
+        if not items:
+            continue
+        workstream_names = _dedupe([item.event.workstream_name for item in items])
+        normalized_workstreams = {
+            "".join(name.casefold().split()) for name in workstream_names
+        }
+        synthetic_id = f"__grouping_summary_{depth}_{index}"
+        source_ids_by_synthetic[synthetic_id] = list(group.draft_ids)
+        summaries.append(
+            CollectedSourceEvent(
+                draft_id=synthetic_id,
+                person_name="grouping-summary",
+                source_file=f"__grouping_summary_{depth}.md",
+                is_merge_owner_source=any(
+                    item.is_merge_owner_source for item in items
+                ),
+                event=WorkEvent(
+                    date=target_date,
+                    event_id=stable_event_id(
+                        target_date,
+                        list(group.draft_ids),
+                        "grouping-summary",
+                    ),
+                    title=choose_preferred_text(
+                        [item.event.title for item in items]
+                    ),
+                    content=merge_content_texts(
+                        [item.event.content for item in items]
+                    ),
+                    source_people=_dedupe(
+                        [
+                            person
+                            for item in items
+                            for person in (
+                                item.event.source_people or [item.person_name]
+                            )
+                        ]
+                    ),
+                    source_event_ids=_dedupe(
+                        [
+                            source_id
+                            for item in items
+                            for source_id in (
+                                item.event.source_event_ids
+                                or [item.event.event_id]
+                            )
+                        ]
+                    ),
+                    object_hint=choose_preferred_text(
+                        [item.event.object_hint for item in items]
+                    ),
+                    retention_reason=choose_preferred_text(
+                        [item.event.retention_reason for item in items]
+                    ),
+                    retention_detail=derive_collected_merge_retention_detail(items),
+                    workstream_name=(
+                        workstream_names[0]
+                        if len(normalized_workstreams) <= 1 and workstream_names
+                        else ""
+                    ),
+                    action_labels=_dedupe(
+                        [
+                            label
+                            for item in items
+                            for label in item.event.action_labels
+                        ]
+                    ),
+                    self_relations=_dedupe(
+                        [
+                            relation
+                            for item in items
+                            for relation in item.event.self_relations
+                        ]
+                    ),
+                    evidence_fingerprints=_dedupe(
+                        [
+                            value
+                            for item in items
+                            for value in item.event.evidence_fingerprints
+                        ]
+                    ),
+                    conversation_fingerprints=_dedupe(
+                        [
+                            value
+                            for item in items
+                            for value in item.event.conversation_fingerprints
+                        ]
+                    ),
+                    file_keys=_dedupe(
+                        [
+                            value
+                            for item in items
+                            for value in item.event.file_keys
+                        ]
+                    ),
+                ),
+            )
+        )
+    return summaries, source_ids_by_synthetic
 
 
 def collected_events_are_similar(source_events: list[CollectedSourceEvent]) -> bool:
@@ -1924,6 +2816,57 @@ def repair_collected_merge_result(
     return CollectedMergeResult(groups=groups), warnings
 
 
+def repair_collected_grouping_result(
+    grouping_result: CollectedGroupingResult,
+    source_events: list[CollectedSourceEvent],
+    deterministic_groups: list[list[str]],
+) -> tuple[CollectedGroupingResult, list[str]]:
+    placeholder = CollectedMergeResult(
+        groups=[
+            CollectedMergeGroup(
+                group_id=group.group_id,
+                draft_ids=list(group.draft_ids),
+                title="",
+                content="",
+            )
+            for group in grouping_result.groups
+        ]
+    )
+    repaired, warnings = repair_collected_merge_result(
+        placeholder,
+        source_events,
+        deterministic_groups,
+    )
+    return (
+        CollectedGroupingResult(
+            groups=[
+                CollectedGroupingGroup(
+                    group_id=group.group_id,
+                    draft_ids=list(group.draft_ids),
+                )
+                for group in repaired.groups
+            ]
+        ),
+        warnings,
+    )
+
+
+def _build_singleton_collected_group(
+    source_event: CollectedSourceEvent,
+    index: int,
+) -> CollectedMergeGroup:
+    event = source_event.event
+    return CollectedMergeGroup(
+        group_id=f"singleton-{index}",
+        draft_ids=[source_event.draft_id],
+        title=event.title,
+        content=event.content,
+        object_hint=event.object_hint,
+        retention_reason=event.retention_reason,
+        retention_detail=event.retention_detail,
+    )
+
+
 def enforce_collected_workstream_boundaries(
     merge_result: CollectedMergeResult,
     source_events: list[CollectedSourceEvent],
@@ -1952,6 +2895,14 @@ def enforce_collected_workstream_boundaries(
             groups.append(group)
             continue
 
+        if _named_workstream_groups_share_thread_evidence(named_groups):
+            groups.append(group)
+            warnings.append(
+                "Allowed collected merge across different named workstreams because "
+                f"shared conversation or message evidence connects the group: {group.group_id}."
+            )
+            continue
+
         partitions = [*named_groups.values(), *([item] for item in unnamed_items)]
         for index, partition in enumerate(partitions, start=1):
             groups.append(
@@ -1967,6 +2918,44 @@ def enforce_collected_workstream_boundaries(
         )
 
     return CollectedMergeResult(groups=groups), warnings
+
+
+def _named_workstream_groups_share_thread_evidence(
+    named_groups: dict[str, list[CollectedSourceEvent]],
+) -> bool:
+    names = list(named_groups)
+    connected: dict[str, set[str]] = {name: set() for name in names}
+    for left_index, left_name in enumerate(names):
+        for right_name in names[left_index + 1 :]:
+            if any(
+                _events_share_thread_evidence(left.event, right.event)
+                for left in named_groups[left_name]
+                for right in named_groups[right_name]
+            ):
+                connected[left_name].add(right_name)
+                connected[right_name].add(left_name)
+
+    seen = {names[0]}
+    pending = [names[0]]
+    while pending:
+        current = pending.pop()
+        for neighbor in connected[current]:
+            if neighbor in seen:
+                continue
+            seen.add(neighbor)
+            pending.append(neighbor)
+    return len(seen) == len(names)
+
+
+def _events_share_thread_evidence(left: WorkEvent, right: WorkEvent) -> bool:
+    left_messages = set(left.evidence_fingerprints)
+    right_messages = set(right.evidence_fingerprints)
+    left_conversations = set(left.conversation_fingerprints)
+    right_conversations = set(right.conversation_fingerprints)
+    return bool(
+        left_messages.intersection(right_messages)
+        or left_conversations.intersection(right_conversations)
+    )
 
 
 def _build_boundary_fallback_group(

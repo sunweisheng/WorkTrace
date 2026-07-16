@@ -69,6 +69,33 @@ def test_merged_filter_removes_sensitive_keyword_from_retention_detail() -> None
     assert warnings == ["Filtered sensitive event."]
 
 
+def test_work_event_filter_removes_personnel_exit_and_recruitment_event() -> None:
+    events = [
+        WorkEvent(
+            date="2026-07-15",
+            event_id="evt-personnel",
+            title="人员离职与招聘决策",
+            content="员工已有外部 offer，请示是挽留还是启动招聘。",
+            object_hint="员工去留",
+            retention_detail="员工提出离职意向。",
+        ),
+        WorkEvent(
+            date="2026-07-15",
+            event_id="evt-keep",
+            title="项目发布推进",
+            content="确认上线节奏。",
+        ),
+    ]
+
+    kept, warnings = filter_work_events(
+        events,
+        RuntimeConfig(sensitive_event_keywords=("离职", "招聘", "offer")),
+    )
+
+    assert [event.event_id for event in kept] == ["evt-keep"]
+    assert warnings == ["Filtered sensitive event."]
+
+
 def test_work_event_filter_removes_sensitive_file_link_without_leaking_title() -> None:
     events = [
         WorkEvent(

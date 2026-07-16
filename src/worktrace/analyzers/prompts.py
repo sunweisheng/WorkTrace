@@ -653,6 +653,141 @@ def build_collected_merge_prompt(
     return dump_json(protocol, pretty=True)
 
 
+def build_collected_grouping_prompt(
+    target_date: str,
+    events: list[CollectedSourceEvent],
+    deterministic_groups: list[list[str]],
+    *,
+    config: RuntimeConfig | None = None,
+) -> str:
+    runtime_config = config or RuntimeConfig()
+    deterministic_ids = {
+        draft_id for group in deterministic_groups for draft_id in group
+    }
+    protocol = {
+        "instruction": (
+            "先判断多人 WorkTrace 事件中哪些属于同一真实事项。"
+            "只返回 groups 和 draft_ids，不生成正式汇总正文。"
+            "请直接返回 JSON，不要展示推理过程。"
+        ),
+        "rules": [
+            "每个输入 draft_id 必须且只能出现在一个 group。",
+            "deterministic_groups 必须原样保留，不能拆分或加入其他组。",
+            "conversation_groups 表示事件来自同一天同一飞书会话，只是候选关系，不代表必须合并。",
+            "同一大群中的不同真实事项必须分开。",
+            "共同消息、共同文件、相同具体对象、连续动作或内容明确一致可支持合并。",
+            "不同员工或部门从不同视角描述同一真实事项时可以合并。",
+            "拿不准是否同一事项时必须分开。",
+            "不同非空工作流名称通常应分开；只有共享会话或共同消息且内容明确一致时才可合并。",
+        ],
+        "required_output_schema": {
+            "groups": [
+                {
+                    "group_id": "string",
+                    "draft_ids": ["draft_id"],
+                }
+            ]
+        },
+        "target_date": target_date,
+        "deterministic_groups": deterministic_groups,
+        "conversation_groups": _build_collected_conversation_groups(
+            events,
+            excluded_draft_ids=deterministic_ids,
+        ),
+        "evidence_relations": _build_collected_evidence_relations(
+            events,
+            excluded_draft_ids=deterministic_ids,
+        ),
+        "events": [
+            {
+                "draft_id": item.draft_id,
+                "person": item.person_name,
+                "source_people": list(item.event.source_people),
+                "title": item.event.title,
+                "content": _trim_text(
+                    clean_text(item.event.content),
+                    runtime_config.prompt_message_char_limit,
+                ),
+                "object_hint": item.event.object_hint,
+                "workstream_name": item.event.workstream_name,
+                "action_labels": list(item.event.action_labels),
+            }
+            for item in events
+        ],
+    }
+    return dump_json(protocol, pretty=True)
+
+
+def build_collected_render_prompt(
+    target_date: str,
+    events: list[CollectedSourceEvent],
+    locked_groups: list[list[str]],
+    *,
+    config: RuntimeConfig | None = None,
+) -> str:
+    runtime_config = config or RuntimeConfig()
+    events_by_id = {item.draft_id: item for item in events}
+    protocol = {
+        "instruction": (
+            "为已经确认属于同一真实事项的多人事件组生成正式汇总内容。"
+            "组成员已经锁定，不要重新分组。只返回 JSON groups。"
+        ),
+        "rules": [
+            "每个 locked_group 必须原样返回为一个 group，draft_ids 不得增删或移动。",
+            "title 要简短，content 要整合全部来源中不冲突的事实、动作、结果、风险和待办。",
+            "不得按人员逐条罗列，不得编造来源中没有的信息。",
+            (
+                "只有版本号、结论、状态、结果或待办方向明确冲突时，"
+                "才采用 is_merge_owner_source=true 的来源，并标记 merge_owner_conflict。"
+            ),
+            "必须返回具体 object_hint、合法 retention_reason 和非空 retention_detail。",
+            _build_sensitive_rule(runtime_config),
+        ],
+        "required_output_schema": {
+            "groups": [
+                {
+                    "group_id": "string",
+                    "draft_ids": ["draft_id"],
+                    "title": "string",
+                    "content": "string",
+                    "object_hint": "string",
+                    "retention_reason": "deliverable_updated | decision_made | issue_or_risk_found | follow_up_assigned | external_business_progress | substantive_approval",
+                    "retention_detail": "string",
+                    "merge_owner_conflict": "boolean",
+                    "conflict_detail": "string or empty string",
+                }
+            ]
+        },
+        "target_date": target_date,
+        "locked_groups": [
+            {
+                "group_id": f"locked-{index:03d}",
+                "draft_ids": list(group),
+                "events": [
+                    _serialize_collected_render_event_for_prompt(
+                        events_by_id[draft_id],
+                        runtime_config,
+                    )
+                    for draft_id in group
+                    if draft_id in events_by_id
+                ],
+            }
+            for index, group in enumerate(locked_groups, start=1)
+        ],
+    }
+    return dump_json(protocol, pretty=True)
+
+
+def _serialize_collected_render_event_for_prompt(
+    source_event: CollectedSourceEvent,
+    config: RuntimeConfig,
+) -> dict[str, object]:
+    serialized = _serialize_collected_source_event_for_prompt(source_event, config)
+    for key in ("source_file", "event_id", "source_event_ids"):
+        serialized.pop(key, None)
+    return serialized
+
+
 def build_anchor_analysis_prompt(
     target_date: str,
     anchor_unit: AnchorUnit,
@@ -1228,6 +1363,36 @@ def _build_collected_evidence_relations(
                 }
             )
     return relations
+
+
+def _build_collected_conversation_groups(
+    events: list[CollectedSourceEvent],
+    *,
+    excluded_draft_ids: set[str],
+) -> list[dict[str, object]]:
+    grouped: dict[str, set[str]] = {}
+    for item in events:
+        if item.draft_id in excluded_draft_ids:
+            continue
+        for value in item.event.conversation_fingerprints:
+            if not is_sha256_fingerprint(value):
+                continue
+            grouped.setdefault(value, set()).add(item.draft_id)
+
+    member_groups = sorted(
+        {
+            tuple(sorted(draft_ids))
+            for draft_ids in grouped.values()
+            if len(draft_ids) > 1
+        }
+    )
+    return [
+        {
+            "group_id": f"conversation-{index:03d}",
+            "draft_ids": list(draft_ids),
+        }
+        for index, draft_ids in enumerate(member_groups, start=1)
+    ]
 
 
 def serialize_context_request_for_prompt(request: ContextRequest) -> dict[str, object]:

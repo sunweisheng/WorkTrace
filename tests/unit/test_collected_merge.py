@@ -9,7 +9,10 @@ from src.worktrace.collected_merge import (
     enforce_collected_workstream_boundaries,
     extract_person_name_from_filename,
 )
-from src.worktrace.analyzers.prompts import build_collected_merge_prompt
+from src.worktrace.analyzers.prompts import (
+    build_collected_grouping_prompt,
+    build_collected_merge_prompt,
+)
 from src.worktrace.config import EventMetadataItem, RuntimeConfig
 from src.worktrace.errors import (
     AnalyzerProtocolError,
@@ -17,6 +20,8 @@ from src.worktrace.errors import (
     RetryableAnalyzerProtocolError,
 )
 from src.worktrace.models import (
+    CollectedGroupingGroup,
+    CollectedGroupingResult,
     CollectedMergeGroup,
     CollectedMergeOutput,
     CollectedMergeResult,
@@ -58,6 +63,62 @@ class FakeAnalyzer:
         )
 
 
+class TwoStageAnalyzer:
+    def __init__(self, groups: list[list[str]] | str | None = None) -> None:
+        self.requested_groups = groups
+        self.grouping_calls = []
+        self.merge_calls = []
+
+    def group_collected_events(self, target_date, events, deterministic_groups):
+        self.grouping_calls.append(
+            {
+                "target_date": target_date,
+                "events": events,
+                "deterministic_groups": deterministic_groups,
+            }
+        )
+        groups = self.requested_groups
+        if groups == "all":
+            groups = [[item.draft_id for item in events]]
+        if groups is None:
+            groups = [[item.draft_id] for item in events]
+        return CollectedGroupingResult(
+            groups=[
+                CollectedGroupingGroup(
+                    group_id=f"candidate-{index}",
+                    draft_ids=list(group),
+                )
+                for index, group in enumerate(groups, start=1)
+            ]
+        )
+
+    def merge_collected_events(self, target_date, events, deterministic_groups):
+        self.merge_calls.append(
+            {
+                "target_date": target_date,
+                "events": events,
+                "deterministic_groups": deterministic_groups,
+            }
+        )
+        event_by_id = {item.draft_id: item for item in events}
+        return CollectedMergeResult(
+            groups=[
+                CollectedMergeGroup(
+                    group_id=f"rendered-{index}",
+                    draft_ids=list(group),
+                    title="汇总事项",
+                    content="；".join(
+                        event_by_id[draft_id].event.content for draft_id in group
+                    ),
+                    object_hint="汇总事项",
+                    retention_reason="decision_made",
+                    retention_detail="多人围绕同一事项形成了可追溯的沟通结论。",
+                )
+                for index, group in enumerate(deterministic_groups, start=1)
+            ]
+        )
+
+
 def _event(
     *,
     event_id: str,
@@ -70,6 +131,7 @@ def _event(
     action_labels: list[str] | None = None,
     self_relations: list[str] | None = None,
     evidence_fingerprints: list[str] | None = None,
+    conversation_fingerprints: list[str] | None = None,
     file_keys: list[str] | None = None,
 ) -> WorkEvent:
     return WorkEvent(
@@ -84,6 +146,11 @@ def _event(
         action_labels=action_labels or [],
         self_relations=self_relations or [],
         evidence_fingerprints=evidence_fingerprints or [],
+        conversation_fingerprints=(
+            conversation_fingerprints
+            if conversation_fingerprints is not None
+            else ["sha256:" + event_id.encode().hex().ljust(64, "0")[:64]]
+        ),
         file_keys=file_keys or [],
     )
 
@@ -155,6 +222,7 @@ def test_collected_merge_accepts_upstream_merged_markdown_and_preserves_sources(
                 retention_detail="张三和李四分别确认项目排期，部门A完成汇总并形成一致结论。",
                 source_people=["张三", "李四"],
                 source_event_ids=["evt-a", "evt-b"],
+                conversation_fingerprints=["sha256:" + "1" * 64],
             )
         ],
         tmp_path,
@@ -408,6 +476,9 @@ def test_collected_merge_over_threshold_rolls_sources_and_keeps_provenance(
                     evidence_fingerprints=[
                         shared_message_fingerprint,
                         "sha256:" + person.encode().hex().ljust(64, "0")[:64],
+                    ],
+                    conversation_fingerprints=[
+                        "sha256:" + person.encode().hex().ljust(64, "0")[:64]
                     ],
                     file_keys=[
                         shared_file_key,
@@ -1314,6 +1385,7 @@ def test_collected_merge_filters_low_retention_source_events_before_prompt(
                         object_hint="会议",
                         retention_reason="decision_made",
                         retention_detail="确认下午2点开会互通信息。",
+                        conversation_fingerprints=["sha256:" + "2" * 64],
                     ),
                     _event(
                         event_id="evt-keep",
@@ -2108,3 +2180,407 @@ def test_collected_merge_run_result_round_trips_outputs(tmp_path: Path) -> None:
     assert payload["partial_file_count"] == 1
     assert restored.outputs[0].partial_file_count == 1
     assert restored.outputs[0].warning_messages == ["warning"]
+
+
+def test_collected_grouping_prompt_uses_same_day_conversation_candidates() -> None:
+    conversation = "sha256:" + "c" * 64
+    message_a = "sha256:" + "a" * 64
+    message_b = "sha256:" + "b" * 64
+    events = [
+        CollectedSourceEvent(
+            draft_id="d1",
+            person_name="张三",
+            source_file="a.md",
+            event=_event(
+                event_id="e1",
+                title="方案确认",
+                content="张三提出方案。",
+                evidence_fingerprints=[message_a],
+                conversation_fingerprints=[conversation],
+            ),
+        ),
+        CollectedSourceEvent(
+            draft_id="d2",
+            person_name="李四",
+            source_file="b.md",
+            event=_event(
+                event_id="e2",
+                title="方案反馈",
+                content="李四反馈方案。",
+                evidence_fingerprints=[message_b],
+                conversation_fingerprints=[conversation],
+            ),
+        ),
+    ]
+
+    prompt = build_collected_grouping_prompt("2026-06-29", events, [])
+    payload = json.loads(prompt)
+
+    assert payload["conversation_groups"] == [
+        {"group_id": "conversation-001", "draft_ids": ["d1", "d2"]}
+    ]
+    assert payload["evidence_relations"] == []
+    assert conversation not in prompt
+    assert message_a not in prompt
+    assert message_b not in prompt
+
+
+def test_two_stage_merge_combines_same_conversation_across_workstreams(
+    tmp_path: Path,
+) -> None:
+    inbox = tmp_path / "merge_inbox" / "2026" / "06" / "29"
+    conversation = "sha256:" + "c" * 64
+    _write_day_doc(
+        inbox / "2026-06-29-张三.md",
+        [
+            _event(
+                event_id="e1",
+                title="价格方案确认",
+                content="张三确认价格调整方案。",
+                workstream_name="经营策略",
+                evidence_fingerprints=["sha256:" + "a" * 64],
+                conversation_fingerprints=[conversation],
+            )
+        ],
+        tmp_path,
+    )
+    _write_day_doc(
+        inbox / "2026-06-29-李四.md",
+        [
+            _event(
+                event_id="e2",
+                title="客服执行反馈",
+                content="李四确认客服执行口径。",
+                workstream_name="客服运营",
+                evidence_fingerprints=["sha256:" + "b" * 64],
+                conversation_fingerprints=[conversation],
+            )
+        ],
+        tmp_path,
+    )
+    analyzer = TwoStageAnalyzer("all")
+
+    result = _build_runner(tmp_path, analyzer=analyzer).run("2026-06-29")
+
+    assert result.merged_event_count == 1
+    assert len(analyzer.grouping_calls) == 1
+    assert len(analyzer.merge_calls) == 1
+    output = MarkdownEventStore(config=RuntimeConfig()).parse_day_document(
+        Path(result.output_path or "").read_text(encoding="utf-8")
+    )
+    assert set(output.events[0].source_people) == {"张三", "李四"}
+    assert output.events[0].conversation_fingerprints == [conversation]
+    assert output.events[0].workstream_name == ""
+    assert any(
+        "Allowed collected merge across different named workstreams" in warning
+        for warning in result.warning_messages
+    )
+
+
+def test_same_conversation_is_not_automatically_merged(tmp_path: Path) -> None:
+    inbox = tmp_path / "merge_inbox" / "2026" / "06" / "29"
+    conversation = "sha256:" + "c" * 64
+    for person, event_id, title in (
+        ("张三", "e1", "价格方案"),
+        ("李四", "e2", "设备维修"),
+    ):
+        _write_day_doc(
+            inbox / f"2026-06-29-{person}.md",
+            [
+                _event(
+                    event_id=event_id,
+                    title=title,
+                    content=f"{person}处理{title}。",
+                    conversation_fingerprints=[conversation],
+                )
+            ],
+            tmp_path,
+        )
+    analyzer = TwoStageAnalyzer()
+
+    result = _build_runner(tmp_path, analyzer=analyzer).run("2026-06-29")
+
+    assert result.merged_event_count == 2
+    assert len(analyzer.grouping_calls) == 1
+    assert analyzer.merge_calls == []
+
+
+def test_workstream_conflict_without_thread_evidence_is_still_split(
+    tmp_path: Path,
+) -> None:
+    inbox = tmp_path / "merge_inbox" / "2026" / "06" / "29"
+    for index, (person, workstream) in enumerate(
+        (("张三", "项目甲"), ("李四", "项目乙")),
+        start=1,
+    ):
+        _write_day_doc(
+            inbox / f"2026-06-29-{person}.md",
+            [
+                _event(
+                    event_id=f"e{index}",
+                    title="共同标题",
+                    content=f"{person}处理事项。",
+                    workstream_name=workstream,
+                )
+            ],
+            tmp_path,
+        )
+    analyzer = TwoStageAnalyzer("all")
+
+    result = _build_runner(tmp_path, analyzer=analyzer).run("2026-06-29")
+
+    assert result.merged_event_count == 2
+    assert any(
+        "different named workstreams cannot merge" in warning
+        for warning in result.warning_messages
+    )
+
+
+def test_merge_collected_stops_before_analyzer_for_missing_conversation_evidence(
+    tmp_path: Path,
+) -> None:
+    inbox = tmp_path / "merge_inbox" / "2026" / "06" / "29"
+    _write_day_doc(
+        inbox / "2026-06-29-旧文件.md",
+        [
+            _event(
+                event_id="legacy",
+                title="旧事件",
+                content="旧事件没有会话证据。",
+                conversation_fingerprints=[],
+            )
+        ],
+        tmp_path,
+    )
+    analyzer = TwoStageAnalyzer("all")
+
+    result = _build_runner(tmp_path, analyzer=analyzer).run("2026-06-29")
+
+    assert result.status == "failed"
+    assert result.output_path is None
+    assert analyzer.grouping_calls == []
+    assert analyzer.merge_calls == []
+    assert any(
+        "2026-06-29-旧文件.md (1 events)" in warning
+        for warning in result.warning_messages
+    )
+
+
+def test_cross_department_upstream_events_keep_conversation_evidence(
+    tmp_path: Path,
+) -> None:
+    inbox = tmp_path / "merge_inbox" / "2026" / "06" / "29"
+    conversation = "sha256:" + "d" * 64
+    for department, person, event_id in (
+        ("部门甲", "张三", "e1"),
+        ("部门乙", "李四", "e2"),
+    ):
+        event = replace(
+            _event(
+                event_id=event_id,
+                title="跨部门上线事项",
+                content=f"{department}确认上线事项。",
+                conversation_fingerprints=[conversation],
+            ),
+            source_people=[person],
+            source_event_ids=[event_id],
+        )
+        _write_day_doc(
+            inbox / f"2026-06-29-{department}-merged.md",
+            [event],
+            tmp_path,
+        )
+    analyzer = TwoStageAnalyzer("all")
+
+    result = _build_runner(tmp_path, analyzer=analyzer).run("2026-06-29")
+
+    assert result.merged_event_count == 1
+    output = MarkdownEventStore(config=RuntimeConfig()).parse_day_document(
+        Path(result.output_path or "").read_text(encoding="utf-8")
+    )
+    assert set(output.events[0].source_people) == {"张三", "李四"}
+    assert output.events[0].conversation_fingerprints == [conversation]
+
+
+def test_relation_priority_batches_preserve_same_conversation_candidates(
+    tmp_path: Path,
+) -> None:
+    class ConciseAnalyzer(TwoStageAnalyzer):
+        def merge_collected_events(self, target_date, events, deterministic_groups):
+            self.merge_calls.append(
+                {
+                    "target_date": target_date,
+                    "events": events,
+                    "deterministic_groups": deterministic_groups,
+                }
+            )
+            return CollectedMergeResult(
+                groups=[
+                    CollectedMergeGroup(
+                        group_id=f"rendered-{index}",
+                        draft_ids=list(group),
+                        title="批量汇总事项",
+                        content="多人确认同一会话中的批量汇总事项。",
+                        object_hint="批量汇总事项",
+                        retention_reason="decision_made",
+                        retention_detail="多人提供了同一事项的不同执行视角和确认结论。",
+                    )
+                    for index, group in enumerate(deterministic_groups, start=1)
+                ]
+            )
+
+    inbox = tmp_path / "merge_inbox" / "2026" / "06" / "29"
+    conversation = "sha256:" + "e" * 64
+    for index in range(12):
+        _write_day_doc(
+            inbox / f"2026-06-29-人员{index:02d}.md",
+            [
+                _event(
+                    event_id=f"e{index}",
+                    title=f"批量事项{index}",
+                    content=(f"人员{index}补充批量事项。" * 80),
+                    object_hint="批量事项",
+                    conversation_fingerprints=[conversation],
+                )
+            ],
+            tmp_path,
+        )
+    analyzer = ConciseAnalyzer("all")
+    trace_root = tmp_path / "trace"
+
+    result = _build_runner(
+        tmp_path,
+        analyzer=analyzer,
+        config=RuntimeConfig(
+            data_root=tmp_path / "data",
+            collected_merge_prompt_char_threshold=6000,
+            collected_merge_trace_enabled=True,
+            collected_merge_trace_root=trace_root,
+        ),
+    ).run("2026-06-29")
+
+    assert result.merged_event_count == 1
+    assert len(analyzer.grouping_calls) > 1
+    assert len(analyzer.merge_calls) > 1
+    summary = json.loads(
+        (trace_root / "2026-06-29" / "summary.json").read_text(encoding="utf-8")
+    )
+    assert max(step["prompt_chars"] for step in summary["steps"]) <= 6000
+    output = MarkdownEventStore(config=RuntimeConfig()).parse_day_document(
+        Path(result.output_path or "").read_text(encoding="utf-8")
+    )
+    assert output.events[0].conversation_fingerprints == [conversation]
+
+
+def test_relation_priority_batches_match_july_14_event_scale(tmp_path: Path) -> None:
+    class ConversationGroupingAnalyzer(TwoStageAnalyzer):
+        def group_collected_events(self, target_date, events, deterministic_groups):
+            self.grouping_calls.append(
+                {
+                    "target_date": target_date,
+                    "events": events,
+                    "deterministic_groups": deterministic_groups,
+                }
+            )
+            grouped: dict[str, list[str]] = {}
+            for item in events:
+                conversation = item.event.conversation_fingerprints[0]
+                grouped.setdefault(conversation, []).append(item.draft_id)
+            return CollectedGroupingResult(
+                groups=[
+                    CollectedGroupingGroup(
+                        group_id=f"candidate-{index}",
+                        draft_ids=draft_ids,
+                    )
+                    for index, draft_ids in enumerate(grouped.values(), start=1)
+                ]
+            )
+
+        def merge_collected_events(self, target_date, events, deterministic_groups):
+            self.merge_calls.append(
+                {
+                    "target_date": target_date,
+                    "events": events,
+                    "deterministic_groups": deterministic_groups,
+                }
+            )
+            event_by_id = {item.draft_id: item for item in events}
+            return CollectedMergeResult(
+                groups=[
+                    CollectedMergeGroup(
+                        group_id=f"rendered-{index}",
+                        draft_ids=list(group),
+                        title=event_by_id[group[0]].event.title,
+                        content="多人确认同一事项的执行信息。",
+                        object_hint=event_by_id[group[0]].event.object_hint,
+                        retention_reason="decision_made",
+                        retention_detail="多人围绕同一事项形成了明确、可追溯的执行结论。",
+                    )
+                    for index, group in enumerate(deterministic_groups, start=1)
+                ]
+            )
+
+    inbox = tmp_path / "merge_inbox" / "2026" / "06" / "29"
+    source_events: list[list[WorkEvent]] = [[] for _ in range(6)]
+    for index in range(195):
+        conversation_index = index // 5
+        source_events[index % len(source_events)].append(
+            _event(
+                event_id=f"event-{index:03d}",
+                title=f"事项-{conversation_index:02d}",
+                content=f"来源记录 {index:03d} 补充事项执行信息。",
+                object_hint=f"事项-{conversation_index:02d}",
+                conversation_fingerprints=[
+                    "sha256:" + f"{conversation_index:064x}"
+                ],
+            )
+        )
+    for person_index, events in enumerate(source_events, start=1):
+        _write_day_doc(
+            inbox / f"2026-06-29-人员{person_index}.md",
+            events,
+            tmp_path,
+        )
+
+    analyzer = ConversationGroupingAnalyzer()
+    trace_root = tmp_path / "trace"
+    threshold = 7000
+    result = _build_runner(
+        tmp_path,
+        analyzer=analyzer,
+        config=RuntimeConfig(
+            data_root=tmp_path / "data",
+            collected_merge_prompt_char_threshold=threshold,
+            collected_merge_trace_enabled=True,
+            collected_merge_trace_root=trace_root,
+        ),
+    ).run("2026-06-29")
+
+    assert result.source_file_count == 6
+    assert result.source_event_count == 195
+    assert result.merged_event_count == 39
+    summary = json.loads(
+        (trace_root / "2026-06-29" / "summary.json").read_text(encoding="utf-8")
+    )
+    assert max(step["prompt_chars"] for step in summary["steps"]) <= threshold
+    stages = {step["stage"] for step in summary["steps"]}
+    assert any(stage.startswith("candidate_grouping_batch_") for stage in stages)
+    assert any(stage.startswith("candidate_reconciliation") for stage in stages)
+    assert "content_merge" in stages
+    output = MarkdownEventStore(config=RuntimeConfig()).parse_day_document(
+        Path(result.output_path or "").read_text(encoding="utf-8")
+    )
+    assert len(
+        {
+            source_event_id
+            for event in output.events
+            for source_event_id in event.source_event_ids
+        }
+    ) == 195
+    assert len(
+        {
+            fingerprint
+            for event in output.events
+            for fingerprint in event.conversation_fingerprints
+        }
+    ) == 39

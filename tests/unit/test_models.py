@@ -272,6 +272,7 @@ def test_event_models_default_referenced_link_ids_are_empty() -> None:
     assert event.action_labels == []
     assert event.self_relations == []
     assert event.evidence_fingerprints == []
+    assert event.conversation_fingerprints == []
     assert event.file_keys == []
 
 

@@ -418,6 +418,31 @@ def workstream_assignment_output_schema() -> dict[str, object]:
     }
 
 
+def collected_grouping_output_schema() -> dict[str, object]:
+    return {
+        "type": "object",
+        "properties": {
+            "groups": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "group_id": {"type": "string"},
+                        "draft_ids": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                        },
+                    },
+                    "required": ["group_id", "draft_ids"],
+                    "additionalProperties": False,
+                },
+            },
+        },
+        "required": ["groups"],
+        "additionalProperties": False,
+    }
+
+
 def collected_merge_output_schema() -> dict[str, object]:
     return {
         "type": "object",

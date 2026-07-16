@@ -19,6 +19,7 @@ from ..models import (
     BatchAnalysisResult,
     BatchAnchorAnalysisResult,
     BatchSegmentAnalysisResult,
+    CollectedGroupingResult,
     CollectedMergeResult,
     CollectedSourceEvent,
     ConversationSegmentationResult,
@@ -33,6 +34,7 @@ from .base import Analyzer
 from .output_schemas import (
     anchor_batch_output_schema,
     batch_output_schema,
+    collected_grouping_output_schema,
     collected_merge_output_schema,
     conversation_segmentation_output_schema,
     merge_output_schema,
@@ -41,7 +43,9 @@ from .output_schemas import (
 from .prompts import (
     build_anchor_batch_analysis_prompt,
     build_batch_analysis_prompt,
+    build_collected_grouping_prompt,
     build_collected_merge_prompt,
+    build_collected_render_prompt,
     build_conversation_segmentation_prompt,
     build_merge_prompt,
     build_segment_batch_analysis_prompt,
@@ -50,6 +54,7 @@ from .prompts import (
 from .protocol import (
     parse_anchor_batch_analysis_payload,
     parse_batch_analysis_payload,
+    parse_collected_grouping_payload,
     parse_collected_merge_payload,
     parse_conversation_segmentation_payload,
     parse_merge_payload,
@@ -203,7 +208,7 @@ class CodexAnalyzer(Analyzer):
         deterministic_groups: list[list[str]],
     ) -> CollectedMergeResult:
         payload = self._invoke_codex(
-            build_collected_merge_prompt(
+            build_collected_render_prompt(
                 target_date,
                 events,
                 deterministic_groups,
@@ -212,6 +217,23 @@ class CodexAnalyzer(Analyzer):
             output_schema=collected_merge_output_schema(),
         )
         return parse_collected_merge_payload(payload)
+
+    def group_collected_events(
+        self,
+        target_date: str,
+        events: list[CollectedSourceEvent],
+        deterministic_groups: list[list[str]],
+    ) -> CollectedGroupingResult:
+        payload = self._invoke_codex(
+            build_collected_grouping_prompt(
+                target_date,
+                events,
+                deterministic_groups,
+                config=self.config,
+            ),
+            output_schema=collected_grouping_output_schema(),
+        )
+        return parse_collected_grouping_payload(payload)
 
     def _run_command(
         self,

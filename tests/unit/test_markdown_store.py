@@ -118,6 +118,7 @@ def test_markdown_store_roundtrip_keeps_event_metadata_and_hidden_merge_keys(
                 workstream_name="项目甲",
                 action_labels=["方案确认", "配置修改"],
                 self_relations=["initiated", "primary_execution"],
+                conversation_fingerprints=["sha256:" + "c" * 64],
                 object_hint="项目甲方案",
                 retention_reason="decision_made",
                 retention_detail="确认项目甲方案并完成配置。",
@@ -142,6 +143,7 @@ def test_markdown_store_roundtrip_keeps_event_metadata_and_hidden_merge_keys(
     assert event.action_labels == ["方案确认", "配置修改"]
     assert event.self_relations == ["initiated", "primary_execution"]
     assert len(event.evidence_fingerprints) == 1
+    assert event.conversation_fingerprints == ["sha256:" + "c" * 64]
     assert len(event.file_keys) == 2
     assert "- **工作流**: 项目甲" in content
     assert "- **主要动作**: 方案确认、配置修改" in content
@@ -150,6 +152,8 @@ def test_markdown_store_roundtrip_keeps_event_metadata_and_hidden_merge_keys(
     assert content.index("- **主要动作**:") < content.index("- **内容**:")
     assert content.index("- **具体对象**:") < content.index("- **本人参与方式**:")
     assert "sha256:" in content
+    assert '"version":2' in content
+    assert '"conversation_fingerprints"' in content
     assert "om_secret_1" not in content
     assert "attachment-secret-1" not in content
 
@@ -206,6 +210,39 @@ generator: worktrace
     assert store.last_warning_messages == [
         "Ignored damaged merge metadata for event evt-a."
     ]
+
+
+def test_markdown_store_reads_version_1_merge_meta_without_conversation_evidence() -> None:
+    store = MarkdownEventStore(config=RuntimeConfig())
+    fingerprint = "sha256:" + "a" * 64
+    markdown = f"""---
+date: 2026-07-06
+event_count: 1
+generated_at: 2026-07-06T10:00:00+08:00
+generator: worktrace
+---
+
+<!-- worktrace:event:start event_id="evt-a" -->
+<!-- worktrace:retention_reason: decision_made -->
+<!-- worktrace:merge_meta {{"version":1,"self_relations":[],"evidence_fingerprints":["{fingerprint}"],"file_keys":[]}} -->
+### 1. 旧事件
+
+- **日期**: 2026-07-06
+- **事件标题**: 旧事件
+- **内容**: 旧内容
+- **具体对象**: 旧对象
+- **保留理由**: 形成明确决策
+- **保留依据**: 已形成结论。
+- **涉及文件**:
+  - 无
+<!-- worktrace:event:end -->
+"""
+
+    loaded = store.parse_day_document(markdown)
+
+    assert loaded.events[0].evidence_fingerprints == [fingerprint]
+    assert loaded.events[0].conversation_fingerprints == []
+    assert store.last_warning_messages == []
 
 
 def test_markdown_store_redacts_sensitive_link_query_params(tmp_path: Path) -> None:

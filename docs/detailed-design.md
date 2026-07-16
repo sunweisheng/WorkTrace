@@ -233,7 +233,7 @@ sequenceDiagram
 - 事件标题、内容、对象、保留依据是否有足够文件证据
 - 事件文本是否精确写出了同来源会话中的附件文件名
 
-Python 对每个来源消息 ID 单独计算带命名空间的 SHA-256 证据指纹。文件链接去掉 query 和 fragment 后计算文件标识，附件使用附件 ID 计算；只有文件名而没有稳定标识时不生成。最终链接会隐藏敏感 query 参数；无 URL 附件使用 `《文件名》`。事件按其来源消息在当天时间线中的位置排序。
+Python 对每个来源消息 ID 单独计算带命名空间的 SHA-256 证据指纹，并对“目标日期 + 来源会话 ID”计算同日会话指纹。会话指纹让不同员工引用同一讨论中的不同消息时仍能在多人合并阶段建立候选关系，但不会自动强制合并。文件链接去掉 query 和 fragment 后计算文件标识，附件使用附件 ID 计算；只有文件名而没有稳定标识时不生成。最终链接会隐藏敏感 query 参数；无 URL 附件使用 `《文件名》`。事件按其来源消息在当天时间线中的位置排序。
 
 ### 5.13 存储、空日与投递
 
@@ -290,13 +290,13 @@ flowchart LR
 flowchart TD
     A["来源事件"] --> B["关键词过滤 + 保留门槛"]
     B --> C["相同 event_id 且内容相似的确定性组"]
-    C --> D["Python 计算 evidence_relations 并送入业务字段"]
-    D --> E{"prompt 字符数 > 阈值"}
-    E -->|"否"| F["一次 LLM merge"]
-    E -->|"是"| G["按来源文件大小排序"]
-    G --> H["滚动合并中间事件"]
-    F --> I["字段完整性检查"]
-    H --> I
+    C --> D["Python 计算 evidence_relations 和 conversation_groups"]
+    D --> E["轻量 LLM 发现候选组"]
+    E --> F{"候选或内容 prompt 超阈值?"}
+    F -->|"是"| G["关系优先分批并汇合组摘要"]
+    F -->|"否"| H["按锁定候选组生成正式内容"]
+    G --> H
+    H --> I["字段完整性检查"]
     I --> J{"缺失比例达到阈值?"}
     J -->|"是且未到上限"| F
     J -->|"否"| K["覆盖修复 + 工作流边界检查"]
@@ -304,9 +304,9 @@ flowchart TD
     L --> M["最终过滤、写入、自发送"]
 ```
 
-滚动合并中间结果只存在内存，不写进输入目录；中间 `WorkEvent` 持续携带工作流、动作、协作方式、消息指纹、文件标识、来源人员和来源事件 ID。每轮调用前，Python 对待判断事件的消息指纹和文件指纹去重并两两计算共同数量、非空集合是否完全相同，只有存在共同项的事件对才形成 `evidence_relations`。模型输入不包含原始长指纹数组；Markdown 和调试 trace 的 `input_events` 仍保留原始指纹用于追溯。最终只生成规范化 `YYYY-MM-DD-登录人姓名-merged.md`。
+多人合并先用受限长度事件卡执行候选发现：Python 根据共同消息、共同文件形成 `evidence_relations`，并根据同日会话形成 `conversation_groups`；会话哈希本身不进入模型输入。即使消息或文件集合完全相同也不能自动合并，候选组确认后才分批生成正式内容。关系集合超过阈值时优先保持在同一批，并用压缩后的组摘要做跨批汇合；中间 `WorkEvent` 持续携带会话指纹、消息指纹、文件标识、来源人员和来源事件 ID。最终只生成规范化 `YYYY-MM-DD-登录人姓名-merged.md`。
 
-合并边界：两个不同的非空工作流禁止同组，Python 会拆开模型误合并；同名工作流不能单独证明是同一事件。`evidence_relations`、相同具体对象或连续动作是强证据，即使指纹集合完全相同也不能自动合并，仍需模型结合内容确认。标题相似、时间接近或部门相同不能单独作为依据。
+合并边界：不同非空工作流默认拆开；只有共享同日会话或共同消息、且候选发现确认属于同一事项时才允许跨工作流合并。允许合并时冲突工作流字段留空并记录 warning。同名工作流、标题相似或部门相同都不能单独证明是同一事件。
 
 ### 7.4 可追溯性
 
@@ -315,7 +315,7 @@ flowchart TD
 - `source_people`
 - `source_event_ids`
 - `workstream_name`、`action_labels`、`self_relations`
-- `evidence_fingerprints`、`file_keys`
+- `evidence_fingerprints`、`conversation_fingerprints`、`file_keys`
 
 若模型遗漏 draft，Python 会补 singleton group；若合并字段缺失或过度泛化，会从来源事件派生 `object_hint`、`retention_reason`、`retention_detail` 并记录 warning。
 
@@ -396,9 +396,9 @@ OnlineLLMAnalyzer -> openai Python SDK -> Responses API provider
 - front matter：`date`、`event_count`、`generated_at`、`generator`
 - event HTML 注释：稳定 `event_id`
 - retention HTML 注释：内部枚举
-- `merge_meta` HTML 注释：版本、参与方式英文键、消息证据 SHA-256 和文件标识 SHA-256
+- `merge_meta` HTML 注释：v2 版本、参与方式英文键、消息证据 SHA-256、按“目标日期 + 来源会话 ID”生成的同日会话 SHA-256，以及文件标识 SHA-256
 
-团队汇总把“本人参与方式”显示为“协作方式”，并保留来源人员和来源事件 ID。旧 Markdown 缺少新字段时按空值读取并继续合并；新输出显示“未明确”。损坏的 `merge_meta` 被忽略并写 warning，不影响正文解析。多人汇总遇到尾部残缺事件时保留此前完整事件并增加 `partial_file_count`，但不修改来源文件；没有完整事件或其他结构无效时整份跳过。Markdown store 同时负责回读，因此字段名或注释结构变化必须同步解析器和多人汇总测试。
+团队汇总把“本人参与方式”显示为“协作方式”，并保留来源人员和来源事件 ID。旧 Markdown 缺少新字段时按空值普通读取，但不能继续参与多人合并，必须重新生成；新输出仍用“未明确”表示缺少可见业务字段。损坏的 `merge_meta` 被忽略并写 warning，不影响正文解析。多人汇总遇到尾部残缺事件时保留此前完整事件并增加 `partial_file_count`，但不修改来源文件；没有完整事件或其他结构无效时整份跳过。Markdown store 同时负责回读，因此字段名或注释结构变化必须同步解析器和多人汇总测试。
 
 ## 11. 状态、warning 与错误
 
@@ -423,10 +423,11 @@ OnlineLLMAnalyzer -> openai Python SDK -> Responses API provider
 - workstream follow-up/resolution
 - resolved groups
 - `final_events.json`：过滤后的合并草稿、文件聚合和排序完成后的 `WorkEvent`、最终阶段 warning
+- `llm_usage.json`：每次模型调用从 Responses API 返回值读取的 token 汇总，包含输出 token 总数、已返回数量、缺失数量和按调用类型统计；缺失时不估算
 
 segmentation 和 segment batch 的模型失败轮次保存输入、prompt 与 `failure.json`。批次拆分后的单片段回退保存在片段目录的 `fallback-01/`；分段耗尽后的直接提炼保存在 `_anchor_fallback/<conversation>/<anchor-key>/attempt-XX/`。成功轮次继续保存输出和校验结果，异常轮次不伪造模型输出。
 
-多人汇总 trace 写 `source-audit.json`、step JSON、`step-NNN-prompt.txt`、`summary.json` 和 `summary.md`。每个模型请求前先保存输入和 prompt；成功、失败、重试耗尽和自送达失败都会留下 summary。step 包含状态、滚动批次、尝试次数、重试原因、prompt 字符数、`input_events`、`deterministic_groups`、错误或模型结果、覆盖修复、`boundary_warnings`、过滤和最终事件，因此可以从来源增强信息追到最终部门事件。
+多人汇总 trace 写 `source-audit.json`、step JSON、`step-NNN-prompt.txt`、`summary.json` 和 `summary.md`。每个模型请求前先保存输入和 prompt；成功、失败、重试耗尽和自送达失败都会留下 summary。step 包含候选发现或正式内容阶段、批次、尝试次数、重试原因、prompt 字符数、`input_events`、`deterministic_groups`、错误或模型结果、覆盖修复、`boundary_warnings`、过滤和最终事件，因此可以从来源增强信息追到最终部门事件。
 
 所有主阶段同时通过 `logging_utils.log_timing(...)` 输出耗时和数量字段。
 
@@ -435,7 +436,7 @@ segmentation 和 segment batch 的模型失败轮次保存输入、prompt 与 `f
 - 图片摘要依赖当前模型支持图片输入；失败只跳过摘要
 - 文本附件只支持配置中的小型文本扩展名
 - 飞书链接正文当前只处理可识别的 Docx/Wiki
-- 多人汇总的大输入采用滚动合并，仍受单次 provider 能力限制
+- 多人汇总的大输入采用关系优先分批和组摘要汇合，单次请求仍受 provider 能力限制
 - 正式日报只临时持久化分段与提炼中间结果，成功写入 Markdown 后即清理；独立实验的锚点缓存是另一套机制
 - 正式流程不做跨日归并和自动调度
 

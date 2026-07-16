@@ -74,9 +74,10 @@ def test_docs_define_collected_merge_boundaries_and_conflict_priority() -> None:
         assert "不能单独" in content or "不能直接" in content
         assert "共同消息" in content
         assert "共同文件" in content
+        assert "同日会话" in content
         assert "明确冲突" in content
         assert "合并人" in content
-        assert "滚动合并" in content
+        assert "关系优先" in content
         assert "来源事件 ID" in content
 
 
@@ -89,6 +90,7 @@ def test_docs_describe_python_collected_evidence_relations() -> None:
 
     for content in documents:
         assert "evidence_relations" in content
+        assert "conversation_groups" in content
         assert "Python" in content
         assert "原始" in content and "指纹" in content
         assert "完全相同" in content and "不能自动合并" in content
@@ -142,7 +144,7 @@ def test_detailed_design_is_the_current_code_source_of_truth() -> None:
     assert "ConversationSegmentUnit" in content
     assert "_analyze_anchor_fallback" in content
     assert "工作流 assignment" in content
-    assert "滚动合并" in content
+    assert "关系优先分批" in content
 
 
 def test_anchor_docs_separate_main_flow_from_experiment() -> None:

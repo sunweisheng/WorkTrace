@@ -338,6 +338,9 @@ def test_repo_event_rules_use_rule_lists_only() -> None:
 
     assert "劳动仲裁" in payload["sensitive_event_keywords"]
     assert "绩效" in payload["sensitive_event_keywords"]
+    assert "离职" in payload["sensitive_event_keywords"]
+    assert "招聘" in payload["sensitive_event_keywords"]
+    assert "offer" in payload["sensitive_event_keywords"]
     assert "git pull" in payload["excluded_event_keywords"]
     assert "麻烦" in payload["self_assignment_keywords"]
     assert "处理" in payload["self_assignment_keywords"]

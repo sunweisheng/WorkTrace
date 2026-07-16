@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from .config import RuntimeConfig
@@ -9,6 +9,7 @@ from .resolvers.base import ContentResolver
 from .sources.base import ChatSource
 from .delivery.base import DeliveryChannel
 from .stores.base import EventStore
+from .llm_usage import LLMUsageRecorder
 
 
 @dataclass(frozen=True)
@@ -18,6 +19,7 @@ class RuntimeDependencies:
     analyzer: Analyzer
     delivery_channel: DeliveryChannel
     event_store: EventStore
+    llm_usage_recorder: LLMUsageRecorder = field(default_factory=LLMUsageRecorder)
 
 
 class ChatSourceFactory:
@@ -40,25 +42,36 @@ class ReactionCatalogProviderFactory:
 
 class ContentResolverFactory:
     @staticmethod
-    def create_default(config: RuntimeConfig) -> ContentResolver:
+    def create_default(
+        config: RuntimeConfig,
+        *,
+        usage_recorder: LLMUsageRecorder | None = None,
+    ) -> ContentResolver:
         from .attachments import TextAttachmentExtractor
         from .resolvers.feishu_message import FeishuMessageContentResolver
         from .vision import OnlineImageSummarizer
 
         return FeishuMessageContentResolver(
             config=config,
-            image_summarizer=OnlineImageSummarizer(config=config),
+            image_summarizer=OnlineImageSummarizer(
+                config=config,
+                usage_recorder=usage_recorder,
+            ),
             text_attachment_extractor=TextAttachmentExtractor(config=config),
         )
 
 
 class AnalyzerFactory:
     @staticmethod
-    def create_default(config: RuntimeConfig) -> Analyzer:
+    def create_default(
+        config: RuntimeConfig,
+        *,
+        usage_recorder: LLMUsageRecorder | None = None,
+    ) -> Analyzer:
         if config.analyzer_backend == "online":
             from .analyzers.online import OnlineLLMAnalyzer
 
-            return OnlineLLMAnalyzer(config=config)
+            return OnlineLLMAnalyzer(config=config, usage_recorder=usage_recorder)
 
         from .analyzers.codex import CodexAnalyzer
 
@@ -82,10 +95,15 @@ class DeliveryFactory:
 
 
 def build_runtime_dependencies(config: RuntimeConfig) -> RuntimeDependencies:
+    usage_recorder = LLMUsageRecorder()
     return RuntimeDependencies(
         chat_source=ChatSourceFactory.create_default(config),
-        content_resolver=ContentResolverFactory.create_default(config),
-        analyzer=AnalyzerFactory.create_default(config),
+        content_resolver=ContentResolverFactory.create_default(
+            config,
+            usage_recorder=usage_recorder,
+        ),
+        analyzer=AnalyzerFactory.create_default(config, usage_recorder=usage_recorder),
         delivery_channel=DeliveryFactory.create_default(config),
         event_store=StorageFactory.create_default(config),
+        llm_usage_recorder=usage_recorder,
     )
