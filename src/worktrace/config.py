@@ -81,6 +81,7 @@ class RetentionPolicyConfig:
     fact_review_enabled: bool = False
     fact_review_source_message_count: int = 8
     fact_review_source_participant_count: int = 3
+    fact_review_max_batch_candidates: int = 4
     fact_review_unsupported_policy: str = "drop"
     fact_review_rules: tuple[str, ...] = ()
     fact_risk_signals: tuple[RetentionSignalDefinition, ...] = ()
@@ -451,6 +452,7 @@ def _load_retention_policy_overrides(
         "enabled",
         "source_message_count",
         "source_participant_count",
+        "max_batch_candidates",
         "unsupported_policy",
     }
     if set(fact_review) != fact_review_keys:
@@ -461,7 +463,11 @@ def _load_retention_policy_overrides(
         raise ValueError(
             "Invalid retention policy config: fact_review.enabled must be a boolean."
         )
-    for key in ("source_message_count", "source_participant_count"):
+    for key in (
+        "source_message_count",
+        "source_participant_count",
+        "max_batch_candidates",
+    ):
         value = fact_review[key]
         if not isinstance(value, int) or isinstance(value, bool) or value < 1:
             raise ValueError(
@@ -509,6 +515,7 @@ def _load_retention_policy_overrides(
         fact_review_source_participant_count=fact_review[
             "source_participant_count"
         ],
+        fact_review_max_batch_candidates=fact_review["max_batch_candidates"],
         fact_review_unsupported_policy=fact_review_unsupported_policy,
         fact_review_rules=_read_string_list(
             payload,

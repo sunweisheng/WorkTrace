@@ -565,6 +565,7 @@ def build_personal_fact_review_prompt(
         "rules": [
             "每个输入 draft_id 必须且只能返回一次，并保持输入顺序。",
             "只能使用 role=evidence 且属于 allowed_evidence_message_ids 的消息作为事实证据；context 只能帮助理解。",
+            "allowed_evidence_message_ids 按候选独立生效；即使同批其他候选中出现了某个消息 ID，也不能把它用于当前候选。",
             "supported=true 时，只保留原聊天直接支持的事实，并完整返回 topic、content、action_label、object_hint、retention_detail、workstream_key 和 fact_items。",
             "supported=true 时，topic、action_label、object_hint、retention_detail 以及非空 workstream_key 各返回且只返回一个同名 fact_item；fact_item.text 必须与对应输出字段逐字完全一致，workstream_key 为空时不得返回它的 fact_item。",
             "content 可以拆成一个或多个 content fact_items，但必须按正文顺序返回；所有 content fact_item.text 不加任何分隔符直接拼接后，必须与 content 逐字完全一致，包括标点，不能把 topic、action_label、object_hint 或 retention_detail 的文字放入 content fact_items。",

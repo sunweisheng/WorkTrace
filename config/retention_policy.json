@@ -12,6 +12,7 @@
     "enabled": true,
     "source_message_count": 8,
     "source_participant_count": 3,
+    "max_batch_candidates": 1,
     "unsupported_policy": "drop"
   },
   "fact_review_rules": [

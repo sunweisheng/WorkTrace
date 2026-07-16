@@ -247,7 +247,10 @@ def test_review_rejects_fact_evidence_outside_current_chat() -> None:
         ],
     )
 
-    with pytest.raises(AnalyzerProtocolError, match="evidence"):
+    with pytest.raises(
+        AnalyzerProtocolError,
+        match="outside this candidate's allowed_evidence_message_ids: unknown",
+    ):
         validate_personal_fact_review_result(batch, invalid_result)
 
 
@@ -267,6 +270,33 @@ def test_review_batches_obey_model_token_limit() -> None:
         )
 
 
+def test_review_batches_obey_candidate_limit() -> None:
+    review_candidate = build_personal_fact_review_candidates(
+        [_candidate()],
+        slices=[_slice()],
+        messages=_messages(),
+        policy=POLICY,
+    )[0]
+    second_candidate = replace(
+        review_candidate,
+        candidate=replace(review_candidate.candidate, draft_id="draft-2"),
+    )
+
+    batches = pack_personal_fact_review_batches(
+        target_date="2026-07-15",
+        candidates=[review_candidate, second_candidate],
+        config=replace(
+            CONFIG,
+            retention_policy=replace(
+                POLICY,
+                fact_review_max_batch_candidates=1,
+            ),
+        ),
+    )
+
+    assert [len(batch.candidates) for batch in batches] == [1, 1]
+
+
 def test_fact_review_prompt_states_exact_fact_item_coverage_contract() -> None:
     review_candidate = build_personal_fact_review_candidates(
         [_candidate()],
@@ -284,3 +314,4 @@ def test_fact_review_prompt_states_exact_fact_item_coverage_contract() -> None:
 
     assert "action_label、object_hint、retention_detail" in prompt
     assert "不加任何分隔符直接拼接后" in prompt
+    assert "同批其他候选中出现了某个消息 ID" in prompt

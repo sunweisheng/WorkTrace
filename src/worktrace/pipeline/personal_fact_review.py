@@ -140,8 +140,12 @@ def pack_personal_fact_review_batches(
         )
         if (
             current
-            and _estimate_personal_fact_review_tokens(probe, config)
-            > config.max_model_input_tokens
+            and (
+                len(proposal)
+                > config.retention_policy.fact_review_max_batch_candidates
+                or _estimate_personal_fact_review_tokens(probe, config)
+                > config.max_model_input_tokens
+            )
         ):
             batches.append(
                 PersonalFactReviewBatch(
@@ -318,14 +322,27 @@ def validate_personal_fact_items(
         field_name = item.field_name.strip()
         text = clean_text(item.text)
         evidence_ids = list(dict.fromkeys(item.evidence_message_ids))
-        if (
-            field_name not in PERSONAL_FACT_FIELDS
-            or not text
-            or not evidence_ids
-            or not set(evidence_ids).issubset(allowed)
-        ):
+        if field_name not in PERSONAL_FACT_FIELDS:
             raise AnalyzerProtocolError(
-                "Personal fact item has an invalid field, text, or evidence reference."
+                f"Personal fact item has an invalid field: {field_name}."
+            )
+        if not text:
+            raise AnalyzerProtocolError(
+                f"Personal fact item has empty text for field {field_name}."
+            )
+        if not evidence_ids:
+            raise AnalyzerProtocolError(
+                f"Personal fact item has no evidence for field {field_name}."
+            )
+        invalid_evidence_ids = [
+            message_id for message_id in evidence_ids if message_id not in allowed
+        ]
+        if invalid_evidence_ids:
+            raise AnalyzerProtocolError(
+                "Personal fact item references evidence outside this candidate's "
+                "allowed_evidence_message_ids: "
+                + ", ".join(invalid_evidence_ids)
+                + "."
             )
         evidence_ids.sort(key=lambda value: message_order[value])
         normalized_item = PersonalFactItem(

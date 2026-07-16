@@ -446,6 +446,7 @@ def test_repo_retention_policy_is_loaded_from_config() -> None:
     assert policy.fact_review_enabled is True
     assert policy.fact_review_source_message_count == 8
     assert policy.fact_review_source_participant_count == 3
+    assert policy.fact_review_max_batch_candidates == 1
     assert policy.fact_review_unsupported_policy == "drop"
     assert "comparison_or_example" in {
         item.key for item in policy.fact_risk_signals
