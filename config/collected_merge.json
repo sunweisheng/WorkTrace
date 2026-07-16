@@ -1,0 +1,8 @@
+{
+  "high_risk_review_enabled": true,
+  "high_risk_source_event_count": 10,
+  "high_risk_source_file_count": 4,
+  "review_cross_batch_groups": true,
+  "review_repaired_groups": true,
+  "review_workstream_conflicts": true
+}

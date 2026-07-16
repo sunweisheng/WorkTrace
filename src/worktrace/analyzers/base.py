@@ -9,6 +9,7 @@ from ..models import (
     BatchAnalysisResult,
     BatchAnchorAnalysisResult,
     BatchSegmentAnalysisResult,
+    CollectedGroupingGroup,
     CollectedGroupingResult,
     CollectedMergeResult,
     CollectedSourceEvent,
@@ -117,5 +118,15 @@ class Analyzer(ABC):
         target_date: str,
         events: list[CollectedSourceEvent],
         deterministic_groups: list[list[str]],
+    ) -> CollectedGroupingResult:
+        raise NotImplementedError
+
+    def review_collected_group(
+        self,
+        target_date: str,
+        events: list[CollectedSourceEvent],
+        candidate_group: CollectedGroupingGroup,
+        *,
+        review_reasons: list[str] | None = None,
     ) -> CollectedGroupingResult:
         raise NotImplementedError

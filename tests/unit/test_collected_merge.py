@@ -4,8 +4,12 @@ import json
 from dataclasses import replace
 from pathlib import Path
 
+import pytest
+
 from src.worktrace.collected_merge import (
     CollectedMergeRunner,
+    aggregate_collected_quality_summaries,
+    build_collected_quality_summary,
     build_grouping_summary_events,
     enforce_collected_workstream_boundaries,
     extract_person_name_from_filename,
@@ -14,6 +18,7 @@ from src.worktrace.collected_merge import (
 from src.worktrace.analyzers.prompts import (
     build_collected_grouping_prompt,
     build_collected_merge_prompt,
+    build_collected_review_prompt,
 )
 from src.worktrace.config import EventMetadataItem, RuntimeConfig
 from src.worktrace.errors import (
@@ -22,6 +27,7 @@ from src.worktrace.errors import (
     RetryableAnalyzerProtocolError,
 )
 from src.worktrace.models import (
+    CollectedFactItem,
     CollectedGroupingGroup,
     CollectedGroupingResult,
     CollectedMergeGroup,
@@ -252,6 +258,9 @@ def test_collected_merge_accepts_upstream_merged_markdown_and_preserves_sources(
     content = Path(result.output_path or "").read_text(encoding="utf-8")
     assert "- 来源人员: 张三、李四" in content
     assert "- 来源事件 ID: evt-a、evt-b" in content
+    assert "- 来源负责人: 部门A" in content
+    loaded = MarkdownEventStore(config=RuntimeConfig()).parse_day_document(content)
+    assert loaded.events[0].source_report_owners == ["部门A"]
 
 
 def test_collected_merge_reads_sources_and_renders_source_fields(tmp_path: Path) -> None:
@@ -319,6 +328,7 @@ def test_collected_merge_reads_sources_and_renders_source_fields(tmp_path: Path)
     content = Path(result.output_path).read_text(encoding="utf-8")
     assert "- 来源人员: 张三、李四" in content
     assert "- 来源事件 ID: evt-shared" in content
+    assert "- 来源负责人:" not in content
     assert "项目排期确认" in content
 
 
@@ -832,7 +842,9 @@ def test_collected_merge_does_not_lock_equal_fingerprint_sets(tmp_path: Path) ->
     assert prompt["evidence_relations"][0]["file_sets_equal"] is True
 
 
-def test_collected_merge_warns_when_merge_owner_source_is_missing(tmp_path: Path) -> None:
+def test_collected_merge_silently_uses_standard_merge_without_owner_source(
+    tmp_path: Path,
+) -> None:
     inbox = tmp_path / "merge_inbox" / "2026" / "06" / "29"
     _write_day_doc(
         inbox / "2026-06-29-张三.md",
@@ -850,10 +862,8 @@ def test_collected_merge_warns_when_merge_owner_source_is_missing(tmp_path: Path
 
     result = _build_runner(tmp_path).run("2026-06-29")
 
-    assert any(
-        "No merge-owner personal event markdown matched current user '管理者'" in warning
-        for warning in result.warning_messages
-    )
+    assert result.output_path is not None
+    assert not any("merge-owner" in warning for warning in result.warning_messages)
 
 
 def test_collected_merge_keeps_owner_flag_on_divergent_same_event_id(tmp_path: Path) -> None:
@@ -1230,7 +1240,9 @@ def test_collected_merge_splits_different_named_workstreams() -> None:
     assert len(warnings) == 1
 
 
-def test_collected_merge_keeps_non_conflicting_source_details(tmp_path: Path) -> None:
+def test_collected_merge_does_not_append_source_bodies_to_model_content(
+    tmp_path: Path,
+) -> None:
     source_events = [
         CollectedSourceEvent(
             "d1",
@@ -1268,7 +1280,7 @@ def test_collected_merge_keeps_non_conflicting_source_details(tmp_path: Path) ->
     )
 
     assert "管理者确认了方案范围" in result.groups[0].content
-    assert "李四完成了执行验证" in result.groups[0].content
+    assert "李四完成了执行验证" not in result.groups[0].content
     assert warnings == []
 
 
@@ -1899,7 +1911,7 @@ def test_collected_merge_rolling_retries_only_current_batch(tmp_path: Path) -> N
         analyzer=analyzer,
         config=RuntimeConfig(
             data_root=tmp_path / "data",
-            max_model_input_tokens=500,
+            max_model_input_tokens=550,
             collected_merge_retryable_error_limit=1,
             collected_merge_trace_enabled=True,
             collected_merge_trace_root=trace_root,
@@ -2838,3 +2850,633 @@ def test_relation_priority_batching_fits_138_and_195_event_scales(
                 fitted,
                 [],
             ) <= 6200
+
+
+class ReviewAnalyzer(TwoStageAnalyzer):
+    def __init__(self, *, split: bool = False, invalid: bool = False) -> None:
+        super().__init__(groups="all")
+        self.split = split
+        self.invalid = invalid
+        self.review_calls: list[dict[str, object]] = []
+
+    def review_collected_group(
+        self,
+        target_date,
+        events,
+        candidate_group,
+        *,
+        review_reasons=None,
+    ):
+        self.review_calls.append(
+            {
+                "target_date": target_date,
+                "events": list(events),
+                "candidate_group": candidate_group,
+                "review_reasons": list(review_reasons or []),
+            }
+        )
+        draft_ids = [item.draft_id for item in events]
+        if self.invalid:
+            draft_ids = draft_ids[:1]
+        groups = [[draft_id] for draft_id in draft_ids] if self.split else [draft_ids]
+        return CollectedGroupingResult(
+            groups=[
+                CollectedGroupingGroup(
+                    group_id=f"review-{index}",
+                    draft_ids=list(group),
+                    summary_title="复核事项" if len(group) > 1 else "",
+                    summary_content="复核后确认属于同一事项。" if len(group) > 1 else "",
+                    summary_object_hint="复核事项" if len(group) > 1 else "",
+                    group_reason=["same_object"] if len(group) > 1 else [],
+                    risk_flags=[],
+                )
+                for index, group in enumerate(groups, start=1)
+            ]
+        )
+
+
+def test_collected_merge_allows_personal_and_upstream_markdown_together(
+    tmp_path: Path,
+) -> None:
+    inbox = tmp_path / "merge_inbox" / "2026" / "06" / "29"
+    personal = _event(
+        event_id="evt-shared",
+        title="单人部门事项",
+        content="张三确认单人部门事项。",
+    )
+    upstream = replace(
+        personal,
+        source_people=["张三"],
+        source_event_ids=["evt-shared"],
+    )
+    _write_day_doc(inbox / "2026-06-29-张三.md", [personal], tmp_path)
+    _write_day_doc(inbox / "2026-06-29-张三-merged.md", [upstream], tmp_path)
+    analyzer = FakeAnalyzer()
+
+    result = _build_runner(tmp_path, analyzer=analyzer).run("2026-06-29")
+
+    assert result.output_path is not None
+    assert result.source_file_count == 2
+    assert result.source_event_count == 2
+    assert len(analyzer.calls[0]["events"]) == 2
+    assert not any("duplicate" in warning.casefold() for warning in result.warning_messages)
+
+
+def test_one_person_department_can_keep_same_event_count(tmp_path: Path) -> None:
+    inbox = tmp_path / "merge_inbox" / "2026" / "06" / "29"
+    _write_day_doc(
+        inbox / "2026-06-29-张三.md",
+        [_event(event_id="evt-one", title="单人事项", content="张三完成单人事项。")],
+        tmp_path,
+    )
+    analyzer = TwoStageAnalyzer()
+
+    result = _build_runner(tmp_path, analyzer=analyzer).run("2026-06-29")
+
+    assert result.source_event_count == 1
+    assert result.merged_event_count == 1
+    assert result.quality_summary.event_count_output_input_ratio == 1.0
+    assert analyzer.merge_calls == []
+
+
+def test_source_report_owner_accumulates_across_merge_levels(tmp_path: Path) -> None:
+    inbox = tmp_path / "merge_inbox" / "2026" / "06" / "29"
+    upstream = replace(
+        _event(
+            event_id="evt-upstream",
+            title="跨级事项",
+            content="上一级已经汇总跨级事项。",
+        ),
+        source_people=["张三"],
+        source_event_ids=["evt-personal"],
+        source_report_owners=["更早负责人"],
+    )
+    _write_day_doc(
+        inbox / "2026-06-29-部门负责人-merged.md",
+        [upstream],
+        tmp_path,
+    )
+
+    result = _build_runner(tmp_path).run("2026-06-29")
+    loaded = MarkdownEventStore(config=RuntimeConfig()).parse_day_document(
+        Path(result.output_path or "").read_text(encoding="utf-8")
+    )
+
+    assert loaded.events[0].source_people == ["张三"]
+    assert loaded.events[0].source_event_ids == ["evt-personal"]
+    assert loaded.events[0].source_report_owners == ["更早负责人", "部门负责人"]
+
+
+def test_high_risk_review_event_threshold_is_inclusive(tmp_path: Path) -> None:
+    inbox = tmp_path / "merge_inbox" / "2026" / "06" / "29"
+    config = RuntimeConfig(
+        data_root=tmp_path / "data",
+        high_risk_source_event_count=10,
+        high_risk_source_file_count=99,
+    )
+    nine_analyzer = ReviewAnalyzer()
+    _write_day_doc(
+        inbox / "2026-06-29-张三.md",
+        [
+            _event(event_id=f"evt-{index}", title="共同事项", content=f"事实 {index}")
+            for index in range(9)
+        ],
+        tmp_path,
+    )
+
+    _build_runner(tmp_path, analyzer=nine_analyzer, config=config).run("2026-06-29")
+
+    assert nine_analyzer.review_calls == []
+
+    ten_analyzer = ReviewAnalyzer()
+    _write_day_doc(
+        inbox / "2026-06-29-张三.md",
+        [
+            _event(event_id=f"evt-{index}", title="共同事项", content=f"事实 {index}")
+            for index in range(10)
+        ],
+        tmp_path,
+    )
+
+    result = _build_runner(tmp_path, analyzer=ten_analyzer, config=config).run(
+        "2026-06-29"
+    )
+
+    assert len(ten_analyzer.review_calls) == 1
+    assert result.quality_summary.high_risk_group_count == 1
+    assert result.quality_summary.reviewed_group_count == 1
+
+
+def test_high_risk_review_triggers_at_four_source_files(tmp_path: Path) -> None:
+    inbox = tmp_path / "merge_inbox" / "2026" / "06" / "29"
+    for index in range(4):
+        _write_day_doc(
+            inbox / f"2026-06-29-人员{index}.md",
+            [_event(event_id=f"evt-{index}", title="共同事项", content=f"事实 {index}")],
+            tmp_path,
+        )
+    analyzer = ReviewAnalyzer()
+
+    result = _build_runner(
+        tmp_path,
+        analyzer=analyzer,
+        config=RuntimeConfig(
+            data_root=tmp_path / "data",
+            high_risk_source_event_count=99,
+            high_risk_source_file_count=4,
+        ),
+    ).run("2026-06-29")
+
+    assert len(analyzer.review_calls) == 1
+    assert result.quality_summary.review_required is True
+    review_payload = json.loads(
+        build_collected_review_prompt(
+            "2026-06-29",
+            analyzer.review_calls[0]["events"],
+            analyzer.review_calls[0]["candidate_group"],
+            config=RuntimeConfig(
+                high_risk_source_event_count=99,
+                high_risk_source_file_count=4,
+            ),
+        )
+    )
+    assert review_payload["review_reasons"] == ["source_file_count"]
+
+
+def test_high_risk_review_reasons_follow_configured_conditions(tmp_path: Path) -> None:
+    runner = _build_runner(tmp_path, analyzer=ReviewAnalyzer())
+    same_workstream = [
+        CollectedSourceEvent("d1", "张三", "a.md", _event(
+            event_id="e1", title="事项", content="事实", workstream_name="项目A"
+        )),
+        CollectedSourceEvent("d2", "李四", "b.md", _event(
+            event_id="e2", title="事项", content="事实", workstream_name="项目A"
+        )),
+    ]
+    conflict_workstream = [
+        same_workstream[0],
+        replace(
+            same_workstream[1],
+            event=replace(same_workstream[1].event, workstream_name="项目B"),
+        ),
+    ]
+
+    assert runner._collected_group_review_reasons(
+        CollectedGroupingGroup("g1", ["d1", "d2"], risk_flags=["cross_batch"]),
+        same_workstream,
+    ) == ["cross_batch"]
+    assert runner._collected_group_review_reasons(
+        CollectedGroupingGroup("g2", ["d1", "d2"], was_repaired=True),
+        same_workstream,
+    ) == ["repaired_group"]
+    assert runner._collected_group_review_reasons(
+        CollectedGroupingGroup("g3", ["d1", "d2"]),
+        conflict_workstream,
+    ) == ["workstream_conflict"]
+    assert runner._collected_group_review_reasons(
+        CollectedGroupingGroup(
+            "g4",
+            ["d1", "d2"],
+            risk_flags=["broad_object", "large_group"],
+        ),
+        same_workstream,
+    ) == []
+    cross_batch_disabled = _build_runner(
+        tmp_path,
+        analyzer=ReviewAnalyzer(),
+        config=RuntimeConfig(
+            data_root=tmp_path / "data",
+            review_cross_batch_groups=False,
+            review_repaired_groups=True,
+        ),
+    )
+    assert cross_batch_disabled._collected_group_review_reasons(
+        CollectedGroupingGroup(
+            "g5",
+            ["d1", "d2"],
+            summary_title="跨批事项",
+            summary_content="跨批摘要完整。",
+            summary_object_hint="跨批事项",
+            risk_flags=["cross_batch"],
+            was_repaired=False,
+        ),
+        same_workstream,
+    ) == []
+
+
+def test_high_risk_review_can_split_group_without_losing_sources(
+    tmp_path: Path,
+) -> None:
+    events = [
+        CollectedSourceEvent(
+            f"d{index}",
+            f"人员{index}",
+            f"人员{index}.md",
+            _event(event_id=f"e{index}", title=f"事项{index}", content=f"事实{index}"),
+        )
+        for index in range(2)
+    ]
+    analyzer = ReviewAnalyzer(split=True)
+    runner = _build_runner(tmp_path, analyzer=analyzer)
+
+    reviewed, _ = runner._review_high_risk_groups(
+        "2026-06-29",
+        events,
+        CollectedGroupingResult(
+            groups=[
+                CollectedGroupingGroup(
+                    "g1",
+                    ["d0", "d1"],
+                    risk_flags=["cross_batch"],
+                )
+            ]
+        ),
+    )
+
+    assert [group.draft_ids for group in reviewed.groups] == [["d0"], ["d1"]]
+    assert runner._collected_quality_counters["review_split_group_count"] == 1
+
+
+def test_high_risk_review_invalid_partition_retries_then_fails(
+    tmp_path: Path,
+) -> None:
+    events = [
+        CollectedSourceEvent(
+            f"d{index}",
+            f"人员{index}",
+            f"人员{index}.md",
+            _event(event_id=f"e{index}", title="事项", content=f"事实{index}"),
+        )
+        for index in range(2)
+    ]
+    analyzer = ReviewAnalyzer(invalid=True)
+    runner = _build_runner(
+        tmp_path,
+        analyzer=analyzer,
+        config=RuntimeConfig(
+            data_root=tmp_path / "data",
+            collected_merge_missing_field_retry_limit=1,
+        ),
+    )
+
+    with pytest.raises(AnalyzerProtocolError, match="did not preserve source coverage"):
+        runner._invoke_collected_review_with_retry(
+            "2026-06-29",
+            events,
+            CollectedGroupingGroup("g1", ["d0", "d1"]),
+            reasons=["cross_batch"],
+        )
+
+    assert len(analyzer.review_calls) == 2
+
+
+def test_high_risk_review_batches_large_group_within_token_limit(
+    tmp_path: Path,
+) -> None:
+    events = [
+        CollectedSourceEvent(
+            f"d{index}",
+            f"人员{index % 6}",
+            f"人员{index % 6}.md",
+            _event(
+                event_id=f"e{index}",
+                title="大型复核事项",
+                content=f"来源 {index}：" + "补充执行过程和结果。" * 60,
+                conversation_fingerprints=["sha256:" + "a" * 64],
+            ),
+        )
+        for index in range(40)
+    ]
+    trace_root = tmp_path / "trace"
+    analyzer = ReviewAnalyzer()
+    runner = _build_runner(
+        tmp_path,
+        analyzer=analyzer,
+        config=RuntimeConfig(
+            data_root=tmp_path / "data",
+            max_model_input_tokens=6200,
+            collected_merge_trace_enabled=True,
+            collected_merge_trace_root=trace_root,
+        ),
+    )
+    runner._start_collected_merge_trace("2026-06-29", tmp_path)
+
+    reviewed, warnings = runner._review_collected_group_with_batching(
+        "2026-06-29",
+        events,
+        CollectedGroupingGroup("large", [item.draft_id for item in events]),
+        reasons=["source_event_count"],
+        depth=0,
+    )
+
+    assert set(reviewed.groups[0].draft_ids) == {item.draft_id for item in events}
+    assert len(analyzer.review_calls) > 1
+    assert any("review batches" in item for item in warnings)
+    assert max(
+        step["prompt_estimated_tokens"]
+        for step in runner._collected_merge_trace_steps
+    ) <= 6200
+
+
+def test_high_risk_review_summarizes_single_oversized_content_before_review(
+    tmp_path: Path,
+) -> None:
+    class OversizedReviewAnalyzer(ReviewAnalyzer):
+        def merge_collected_events(self, target_date, events, deterministic_groups):
+            self.merge_calls.append(list(deterministic_groups))
+            return CollectedMergeResult(
+                groups=[
+                    CollectedMergeGroup(
+                        group_id=f"summary-{index}",
+                        draft_ids=list(group),
+                        title="超长事项摘要",
+                        content="已完整归纳超长事项的过程、结果、风险和待办。",
+                        object_hint="超长事项",
+                        retention_reason="decision_made",
+                        retention_detail="超长事项形成了完整、可追溯的归纳结果。",
+                        covered_draft_ids=list(group),
+                        fact_items=[
+                            CollectedFactItem(
+                                text="已保留本组全部来源的关键事实。",
+                                source_draft_ids=list(group),
+                            )
+                        ],
+                    )
+                    for index, group in enumerate(deterministic_groups, start=1)
+                ]
+            )
+
+    event = CollectedSourceEvent(
+        "d1",
+        "张三",
+        "张三.md",
+        _event(
+            event_id="e1",
+            title="超长事项",
+            content="执行过程、结果、风险和待办。" * 5000,
+        ),
+    )
+    trace_root = tmp_path / "trace"
+    analyzer = OversizedReviewAnalyzer()
+    runner = _build_runner(
+        tmp_path,
+        analyzer=analyzer,
+        config=RuntimeConfig(
+            data_root=tmp_path / "data",
+            max_model_input_tokens=6200,
+            collected_merge_trace_enabled=True,
+            collected_merge_trace_root=trace_root,
+        ),
+    )
+    runner._start_collected_merge_trace("2026-06-29", tmp_path)
+
+    reviewed, warnings = runner._review_collected_group_with_batching(
+        "2026-06-29",
+        [event],
+        CollectedGroupingGroup("oversized", ["d1"], risk_flags=["cross_batch"]),
+        reasons=["cross_batch"],
+        depth=0,
+    )
+
+    assert reviewed.groups[0].draft_ids == ["d1"]
+    assert analyzer.merge_calls
+    assert len(analyzer.review_calls) == 1
+    assert any("hierarchical content summary" in item for item in warnings)
+    assert max(
+        step["prompt_estimated_tokens"]
+        for step in runner._collected_merge_trace_steps
+    ) <= 6200
+
+
+def test_collected_content_coverage_retries_only_current_group(tmp_path: Path) -> None:
+    class CoverageAnalyzer(ReviewAnalyzer):
+        def __init__(self, *, always_invalid: bool = False) -> None:
+            super().__init__()
+            self.always_invalid = always_invalid
+
+        def merge_collected_events(self, target_date, events, deterministic_groups):
+            self.merge_calls.append(list(deterministic_groups))
+            group = list(deterministic_groups[0])
+            valid = len(self.merge_calls) > 1 and not self.always_invalid
+            return CollectedMergeResult(
+                groups=[
+                    CollectedMergeGroup(
+                        group_id="rendered",
+                        draft_ids=group,
+                        title="覆盖事项",
+                        content="完整归纳两个来源的事实。",
+                        object_hint="覆盖事项",
+                        retention_reason="decision_made",
+                        retention_detail="两个来源共同形成覆盖事项结论。",
+                        covered_draft_ids=(group if valid else []),
+                        fact_items=(
+                            [
+                                CollectedFactItem(
+                                    text=f"保留 {draft_id} 的事实。",
+                                    source_draft_ids=[draft_id],
+                                )
+                                for draft_id in group
+                            ]
+                            if valid
+                            else []
+                        ),
+                    )
+                ]
+            )
+
+    inbox = tmp_path / "merge_inbox" / "2026" / "06" / "29"
+    for index, person in enumerate(("张三", "李四"), start=1):
+        _write_day_doc(
+            inbox / f"2026-06-29-{person}.md",
+            [_event(event_id=f"evt-{index}", title="覆盖事项", content=f"事实 {index}")],
+            tmp_path,
+        )
+    analyzer = CoverageAnalyzer()
+
+    result = _build_runner(
+        tmp_path,
+        analyzer=analyzer,
+        config=RuntimeConfig(
+            data_root=tmp_path / "data",
+            collected_merge_missing_field_retry_limit=1,
+        ),
+    ).run("2026-06-29")
+
+    assert result.output_path is not None
+    assert len(analyzer.merge_calls) == 2
+    assert result.quality_summary.content_retry_count == 1
+    assert any("source coverage was invalid" in item for item in result.warning_messages)
+
+
+def test_collected_content_coverage_terminal_failure_does_not_write_output(
+    tmp_path: Path,
+) -> None:
+    class InvalidCoverageAnalyzer(ReviewAnalyzer):
+        def merge_collected_events(self, target_date, events, deterministic_groups):
+            group = list(deterministic_groups[0])
+            return CollectedMergeResult(
+                groups=[
+                    CollectedMergeGroup(
+                        group_id="invalid",
+                        draft_ids=group,
+                        title="覆盖事项",
+                        content="遗漏了来源。",
+                        object_hint="覆盖事项",
+                        retention_reason="decision_made",
+                        retention_detail="内容覆盖不完整。",
+                        covered_draft_ids=[],
+                        fact_items=[],
+                    )
+                ]
+            )
+
+    inbox = tmp_path / "merge_inbox" / "2026" / "06" / "29"
+    for index, person in enumerate(("张三", "李四"), start=1):
+        _write_day_doc(
+            inbox / f"2026-06-29-{person}.md",
+            [_event(event_id=f"evt-{index}", title="覆盖事项", content=f"事实 {index}")],
+            tmp_path,
+        )
+
+    result = _build_runner(
+        tmp_path,
+        analyzer=InvalidCoverageAnalyzer(),
+        config=RuntimeConfig(
+            data_root=tmp_path / "data",
+            collected_merge_missing_field_retry_limit=1,
+        ),
+    ).run("2026-06-29")
+
+    expected_output = inbox / "2026-06-29-管理者-merged.md"
+    assert result.output_path is None
+    assert not expected_output.exists()
+    assert any("did not preserve source coverage" in item for item in result.warning_messages)
+
+
+def test_collected_quality_summary_is_deterministic_and_trace_matches(
+    tmp_path: Path,
+) -> None:
+    parsed = [
+        CollectedSourceEvent(
+            "d1",
+            "张三",
+            "张三.md",
+            replace(_event(event_id="e1", title="事项", content="甲乙"), source_report_owners=["负责人甲"]),
+        ),
+        CollectedSourceEvent(
+            "d2",
+            "李四",
+            "李四.md",
+            _event(event_id="e2", title="事项", content="丙丁戊"),
+            source_report_owner="负责人乙",
+        ),
+        CollectedSourceEvent(
+            "d3",
+            "王五",
+            "王五.md",
+            _event(event_id="e3", title="已过滤", content="己"),
+        ),
+    ]
+    output_events = [
+        replace(
+            _event(event_id="out", title="事项", content="汇总内容"),
+            source_event_ids=["e1", "e2"],
+        )
+    ]
+    quality = build_collected_quality_summary(
+        parsed,
+        parsed[:2],
+        output_events,
+        counters={
+            "high_risk_group_count": 1,
+            "reviewed_group_count": 1,
+            "review_split_group_count": 0,
+            "content_retry_count": 1,
+            "shortened_prompt_count": 2,
+            "review_required": 1,
+        },
+    )
+
+    assert quality.input_event_count == 3
+    assert quality.filtered_event_count == 2
+    assert quality.output_event_count == 1
+    assert quality.multi_source_group_count == 1
+    assert quality.singleton_group_count == 0
+    assert quality.max_source_events_per_group == 2
+    assert quality.input_content_chars == sum(len(item.event.content) for item in parsed)
+    assert quality.output_content_chars == len(output_events[0].content)
+    assert quality.event_count_output_input_ratio == round(1 / 3, 4)
+    assert quality.content_chars_output_input_ratio == round(
+        len(output_events[0].content) / sum(len(item.event.content) for item in parsed),
+        4,
+    )
+    assert quality.source_event_coverage_ratio == 1.0
+    assert quality.source_report_owner_count == 2
+    assert aggregate_collected_quality_summaries([quality, quality]).output_event_count == 2
+
+    inbox = tmp_path / "merge_inbox" / "2026" / "06" / "29"
+    _write_day_doc(
+        inbox / "2026-06-29-张三.md",
+        [_event(event_id="evt-trace", title="追踪事项", content="追踪内容")],
+        tmp_path,
+    )
+    trace_root = tmp_path / "trace"
+    result = _build_runner(
+        tmp_path,
+        analyzer=TwoStageAnalyzer(),
+        config=RuntimeConfig(
+            data_root=tmp_path / "data",
+            collected_merge_trace_enabled=True,
+            collected_merge_trace_root=trace_root,
+        ),
+    ).run("2026-06-29")
+    trace_summary = json.loads(
+        (trace_root / "2026-06-29" / "summary.json").read_text(encoding="utf-8")
+    )
+    trace_markdown = (trace_root / "2026-06-29" / "summary.md").read_text(
+        encoding="utf-8"
+    )
+
+    assert trace_summary["quality_summary"] == result.quality_summary.to_dict()
+    assert result.to_dict()["quality_summary"] == trace_summary["quality_summary"]
+    assert "## Quality Summary" in trace_markdown

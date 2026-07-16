@@ -19,6 +19,7 @@ from ..models import (
     BatchAnalysisResult,
     BatchAnchorAnalysisResult,
     BatchSegmentAnalysisResult,
+    CollectedGroupingGroup,
     CollectedGroupingResult,
     CollectedMergeResult,
     CollectedSourceEvent,
@@ -46,6 +47,7 @@ from .prompts import (
     build_batch_analysis_prompt,
     build_collected_grouping_prompt,
     build_collected_merge_prompt,
+    build_collected_review_prompt,
     build_collected_render_prompt,
     build_conversation_segmentation_prompt,
     build_merge_prompt,
@@ -231,6 +233,26 @@ class CodexAnalyzer(Analyzer):
                 events,
                 deterministic_groups,
                 config=self.config,
+            ),
+            output_schema=collected_grouping_output_schema(),
+        )
+        return parse_collected_grouping_payload(payload)
+
+    def review_collected_group(
+        self,
+        target_date: str,
+        events: list[CollectedSourceEvent],
+        candidate_group: CollectedGroupingGroup,
+        *,
+        review_reasons: list[str] | None = None,
+    ) -> CollectedGroupingResult:
+        payload = self._invoke_codex(
+            build_collected_review_prompt(
+                target_date,
+                events,
+                candidate_group,
+                config=self.config,
+                review_reasons=review_reasons,
             ),
             output_schema=collected_grouping_output_schema(),
         )

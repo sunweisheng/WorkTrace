@@ -12,6 +12,7 @@ from ..models import (
     AnchorAnalysisResult,
     AnchorUnit,
     AttachmentTextBlock,
+    CollectedGroupingGroup,
     CollectedSourceEvent,
     ConversationSegmentUnit,
     ConversationSegmentationResult,
@@ -685,6 +686,9 @@ def build_collected_grouping_prompt(
                 "待办和明确冲突，不得按人员逐条罗列或补充来源中没有的事实。"
             ),
             "只有一条记录的组将三个 summary 字段返回空字符串，由 Python 保留原事件。",
+            "group_reason 只返回实际成立的共同消息、共同文件、同日会话、相同对象或连续动作依据。",
+            "risk_flags 标记跨批、工作流冲突、对象过宽或来源很多等需要复核的风险。",
+            "来源负责人相同不能单独作为合并依据。",
         ],
         "required_output_schema": {
             "groups": [
@@ -694,6 +698,12 @@ def build_collected_grouping_prompt(
                     "summary_title": "string or empty for singleton",
                     "summary_content": "string or empty for singleton",
                     "summary_object_hint": "string or empty for singleton",
+                    "group_reason": [
+                        "shared_message | shared_file | same_conversation | same_object | continuous_action"
+                    ],
+                    "risk_flags": [
+                        "cross_batch | workstream_conflict | broad_object | large_group"
+                    ],
                 }
             ]
         },
@@ -712,6 +722,14 @@ def build_collected_grouping_prompt(
                 "draft_id": item.draft_id,
                 "person": item.person_name,
                 "source_people": list(item.event.source_people),
+                "source_report_owners": list(
+                    dict.fromkeys(
+                        [
+                            *item.event.source_report_owners,
+                            *([item.source_report_owner] if item.source_report_owner else []),
+                        ]
+                    )
+                ),
                 "title": item.event.title,
                 "content": clean_text(item.event.content),
                 "object_hint": item.event.object_hint,
@@ -720,6 +738,126 @@ def build_collected_grouping_prompt(
             }
             for item in events
         ],
+    }
+    return dump_json(protocol, pretty=True)
+
+
+def build_collected_review_prompt(
+    target_date: str,
+    events: list[CollectedSourceEvent],
+    candidate_group: CollectedGroupingGroup,
+    *,
+    config: RuntimeConfig | None = None,
+    review_reasons: list[str] | None = None,
+) -> str:
+    runtime_config = config or RuntimeConfig()
+    computed_review_reasons: list[str] = []
+    if len(candidate_group.draft_ids) >= runtime_config.high_risk_source_event_count:
+        computed_review_reasons.append("source_event_count")
+    if (
+        len({item.source_file for item in events})
+        >= runtime_config.high_risk_source_file_count
+    ):
+        computed_review_reasons.append("source_file_count")
+    if (
+        runtime_config.review_cross_batch_groups
+        and "cross_batch" in candidate_group.risk_flags
+    ):
+        computed_review_reasons.append("cross_batch")
+    if runtime_config.review_repaired_groups and candidate_group.was_repaired:
+        computed_review_reasons.append("repaired_group")
+    workstreams = {
+        "".join(item.event.workstream_name.casefold().split())
+        for item in events
+        if item.event.workstream_name.strip()
+    }
+    if runtime_config.review_workstream_conflicts and len(workstreams) > 1:
+        computed_review_reasons.append("workstream_conflict")
+    protocol = {
+        "instruction": (
+            "复核一个高风险多人事件候选组是否混入了不同真实事项。"
+            "可以保留原组，也可以拆成多个子组。返回 groups，不生成正式汇总正文。"
+            "请直接返回 JSON，不要展示推理过程。"
+        ),
+        "rules": [
+            "所有输入 draft_id 必须且只能出现在一个输出 group。",
+            "确认属于同一真实事项时保留在同一组；拿不准时拆开。",
+            "同一会话、同一负责人、标题相似或部门相同都不能单独证明是同一事项。",
+            "不同业务对象、不同主要动作或不同结果方向应拆开。",
+            "不同非空工作流通常拆开，除非共享消息证据且内容明确一致。",
+            "多成员组返回非空候选摘要；单成员组三个摘要字段返回空字符串。",
+            "group_reason 和 risk_flags 按实际情况返回。",
+        ],
+        "required_output_schema": {
+            "groups": [
+                {
+                    "group_id": "string",
+                    "draft_ids": ["draft_id"],
+                    "summary_title": "string or empty for singleton",
+                    "summary_content": "string or empty for singleton",
+                    "summary_object_hint": "string or empty for singleton",
+                    "group_reason": [
+                        "shared_message | shared_file | same_conversation | same_object | continuous_action"
+                    ],
+                    "risk_flags": [
+                        "cross_batch | workstream_conflict | broad_object | large_group"
+                    ],
+                }
+            ]
+        },
+        "target_date": target_date,
+        "review_reasons": list(
+            dict.fromkeys(
+                computed_review_reasons
+                if review_reasons is None
+                else review_reasons
+            )
+        ),
+        "candidate_group": {
+            "group_id": candidate_group.group_id,
+            "draft_ids": list(candidate_group.draft_ids),
+            "summary_title": candidate_group.summary_title,
+            "summary_object_hint": candidate_group.summary_object_hint,
+            "group_reason": list(candidate_group.group_reason),
+            "risk_flags": list(candidate_group.risk_flags),
+            "was_repaired": candidate_group.was_repaired,
+        },
+        "conversation_groups": _build_collected_conversation_groups(
+            events,
+            excluded_draft_ids=set(),
+        ),
+        "evidence_relations": _build_collected_evidence_relations(
+            events,
+            excluded_draft_ids=set(),
+        ),
+        "events": [
+            {
+                "draft_id": item.draft_id,
+                "person": item.person_name,
+                "source_people": list(item.event.source_people),
+                "source_report_owners": list(
+                    dict.fromkeys(
+                        [
+                            *item.event.source_report_owners,
+                            *(
+                                [item.source_report_owner]
+                                if item.source_report_owner
+                                else []
+                            ),
+                        ]
+                    )
+                ),
+                "title": item.event.title,
+                "content": clean_text(item.event.content),
+                "object_hint": item.event.object_hint,
+                "workstream_name": item.event.workstream_name,
+                "action_labels": list(item.event.action_labels),
+            }
+            for item in events
+        ],
+        "config_context": {
+            "max_model_input_tokens": runtime_config.max_model_input_tokens,
+        },
     }
     return dump_json(protocol, pretty=True)
 
@@ -747,6 +885,11 @@ def build_collected_render_prompt(
                 "才采用 is_merge_owner_source=true 的来源，并标记 merge_owner_conflict。"
             ),
             "必须返回具体 object_hint、合法 retention_reason 和非空 retention_detail。",
+            "covered_draft_ids 必须完整列出本组全部 draft_id，不得遗漏或增加。",
+            (
+                "fact_items 列出正文保留的关键事实；每项 text 必须具体，"
+                "source_draft_ids 只能引用支持该事实的本组 draft_id。"
+            ),
             _build_sensitive_rule(runtime_config),
         ],
         "required_output_schema": {
@@ -761,6 +904,13 @@ def build_collected_render_prompt(
                     "retention_detail": "string",
                     "merge_owner_conflict": "boolean",
                     "conflict_detail": "string or empty string",
+                    "covered_draft_ids": ["draft_id"],
+                    "fact_items": [
+                        {
+                            "text": "string",
+                            "source_draft_ids": ["draft_id"],
+                        }
+                    ],
                 }
             ]
         },
@@ -1293,6 +1443,18 @@ def _serialize_collected_source_event_for_prompt(
         "event_id": source_event.event.event_id,
         "source_people": list(source_event.event.source_people),
         "source_event_ids": list(source_event.event.source_event_ids),
+        "source_report_owners": list(
+            dict.fromkeys(
+                [
+                    *source_event.event.source_report_owners,
+                    *(
+                        [source_event.source_report_owner]
+                        if source_event.source_report_owner
+                        else []
+                    ),
+                ]
+            )
+        ),
         "title": source_event.event.title,
         "content": source_event.event.content,
         "object_hint": source_event.event.object_hint,

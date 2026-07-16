@@ -98,12 +98,12 @@ flowchart LR
 2. 当前层 Markdown 解析、来源姓名识别、尾部残缺事件部分恢复和坏文件跳过
 3. 来源事件配置关键词过滤与保留门槛
 4. 全 scope 校验 v2 同日会话指纹，相同 `event_id` 建立确定性组
-5. Python 按共同消息、文件和同日会话建立关系集合，模型使用完整事件正文发现候选组并在同一次调用中返回多成员组摘要
-6. 大 prompt 按关系集合优先分批，极端输入按来源平均保留内容，跨批用组摘要汇合，正式内容按锁定候选组分批生成
-7. 可恢复模型错误只重试当前阶段批次，缺失字段按独立次数重试
-8. 分组覆盖修复、工作流边界检查和非冲突内容补全
-9. 聚合工作流、动作、协作方式、消息指纹、会话指纹、文件标识和来源追溯信息
-10. 团队 `WorkEvent` 最终过滤、写入和自发送
+5. Python 按共同消息、文件和同日会话建立关系集合，模型使用完整事件正文发现候选组、候选摘要、`group_reason` 和 `risk_flags`
+6. 大 prompt 按关系集合优先分批，跨批用组摘要汇合；达到配置阈值、跨批、分组修复或工作流冲突时增加高风险复核
+7. 正式内容按锁定候选组分批生成，并返回完整 `covered_draft_ids` 和带来源的 `fact_items`
+8. 可恢复模型错误、复核覆盖和正文覆盖只重试当前批次或当前组，重试耗尽时不写不完整文件
+9. 聚合工作流、动作、协作方式、消息指纹、会话指纹、文件标识、来源人员、事件 ID 和上一级负责人
+10. Python 计算 scope 和整次运行的 `quality_summary`，团队 `WorkEvent` 最终过滤、写入和自发送
 
 相关专题见 [collected-people-merge-plan.md](collected-people-merge-plan.md)。
 
@@ -118,6 +118,7 @@ flowchart LR
 | `config/conversation_blacklist.json` | 整会话排除 |
 | `config/conversation_window.json` | 群聊锚点聚合、初始上下文和按需扩窗阈值 |
 | `config/llm_retry.json` | 分段/提炼重试、流式首次返回超时和并发数 |
+| `config/collected_merge.json` | 多人汇总高风险复核开关、事件数/文件数阈值和复核条件 |
 | `config/attachment_text.json` | 文本附件提取限制 |
 | `config/image_summary.json` | 图片摘要限制和提示词 |
 | `config/reaction_catalogs/*.json` | reaction 本地语义目录 |
@@ -127,7 +128,7 @@ flowchart LR
 ## 10. 调试入口
 
 - 个人日报：`--debug-output`，目录 `data/debug/conversations/<date>/`；失败轮次保存 `failure.json`，单片段回退使用 `fallback-01/`，直接提炼回退使用 `_anchor_fallback/`；`final_events.json` 保存最终草稿、事件和过滤 warning
-- 多人汇总：`WORKTRACE_COLLECTED_MERGE_TRACE=true`，目录默认 `data/debug/collected_merge/<date>/`；`source-audit.json` 保存来源格式、v2 会话证据校验和过滤明细，step JSON/prompt 在请求前写入阶段与批次，失败也生成 summary
+- 多人汇总：`WORKTRACE_COLLECTED_MERGE_TRACE=true`，目录默认 `data/debug/collected_merge/<date>/`；`source-audit.json` 保存来源格式、v2 会话证据校验和过滤明细，step JSON/prompt 在请求前写入候选、复核、正文阶段与批次，`summary.json` 和 `summary.md` 保存 Python 质量统计，失败也生成 summary
 - 锚点独立实验：`python3 -m src.worktrace.anchor_experiment ...`
 
 独立锚点实验用于对比协议和缓存行为，不等同于正式日报；正式日报虽然已经使用本人参与的聊天窗口，并在分段失败后直接从这些窗口提炼，但不使用实验入口生成最终 Markdown。正式 `--resume` 只读取 `pipeline/llm_checkpoints.py` 保存的临时分段/提炼结果，不读取实验锚点缓存。

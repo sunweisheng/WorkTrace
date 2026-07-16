@@ -110,7 +110,7 @@
 
 - HTML 注释包裹的 `event_id`
 - 隐藏注释保存内部 `retention_reason` 枚举
-- 隐藏 `merge_meta` 保存参与方式英文键、消息证据指纹和文件标识
+- 隐藏 `merge_meta` 保存参与方式英文键、消息证据指纹、同日会话指纹、文件标识和可选来源负责人
 - `### 序号. 事件标题`
 - `日期`
 - `事件标题`
@@ -127,18 +127,19 @@
 
 - `来源人员`
 - `来源事件 ID`
+- 存在上游汇总时的 `来源负责人`
 
 个人事件字段顺序固定为：日期、事件标题、工作流、主要动作、内容、具体对象、本人参与方式、保留理由、保留依据、涉及文件。工作流、主要动作或参与方式为空时显示“未明确”。
 
 隐藏信息格式：
 
 ```html
-<!-- worktrace:merge_meta {"version":2,"self_relations":["initiated"],"evidence_fingerprints":["sha256:..."],"conversation_fingerprints":["sha256:..."],"file_keys":["sha256:..."]} -->
+<!-- worktrace:merge_meta {"version":2,"self_relations":["initiated"],"evidence_fingerprints":["sha256:..."],"conversation_fingerprints":["sha256:..."],"file_keys":["sha256:..."],"source_report_owners":["部门负责人"]} -->
 ```
 
 `evidence_fingerprints` 由 Python 对每个来源消息 ID 分别计算 SHA-256，`conversation_fingerprints` 由目标日期和来源会话 ID 计算，`file_keys` 由去参数后的链接或附件 ID 计算 SHA-256。注释不得包含原始消息、会话、用户 ID。只有文件名而没有稳定链接或附件 ID 时不生成文件标识。
 
-读取器仍能把 v1 Markdown 按空会话证据读回，但 `merge-collected` 不允许 v1 与 v2 混合：任一事件缺少会话指纹时整次停止，并要求重新生成来源文件。不批量改写历史文件。损坏的 `merge_meta` 仍记录 warning 并忽略，不影响普通正文回读。
+读取器仍能把 v1 Markdown 按空会话证据读回，也能把缺少 `source_report_owners` 的旧 V2 文件按空列表读回；但 `merge-collected` 不允许 v1 与 v2 混合：任一事件缺少会话指纹时整次停止，并要求重新生成来源文件。不批量改写历史文件。损坏的 `merge_meta` 仍记录 warning 并忽略，不影响普通正文回读。
 
 底部生成说明包含：
 

@@ -435,6 +435,31 @@ def collected_grouping_output_schema() -> dict[str, object]:
                         "summary_title": {"type": "string"},
                         "summary_content": {"type": "string"},
                         "summary_object_hint": {"type": "string"},
+                        "group_reason": {
+                            "type": "array",
+                            "items": {
+                                "type": "string",
+                                "enum": [
+                                    "shared_message",
+                                    "shared_file",
+                                    "same_conversation",
+                                    "same_object",
+                                    "continuous_action",
+                                ],
+                            },
+                        },
+                        "risk_flags": {
+                            "type": "array",
+                            "items": {
+                                "type": "string",
+                                "enum": [
+                                    "cross_batch",
+                                    "workstream_conflict",
+                                    "broad_object",
+                                    "large_group",
+                                ],
+                            },
+                        },
                     },
                     "required": [
                         "group_id",
@@ -442,6 +467,8 @@ def collected_grouping_output_schema() -> dict[str, object]:
                         "summary_title",
                         "summary_content",
                         "summary_object_hint",
+                        "group_reason",
+                        "risk_flags",
                     ],
                     "additionalProperties": False,
                 },
@@ -483,6 +510,25 @@ def collected_merge_output_schema() -> dict[str, object]:
                         "retention_detail": {"type": "string"},
                         "merge_owner_conflict": {"type": "boolean"},
                         "conflict_detail": {"type": "string"},
+                        "covered_draft_ids": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                        },
+                        "fact_items": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "text": {"type": "string"},
+                                    "source_draft_ids": {
+                                        "type": "array",
+                                        "items": {"type": "string"},
+                                    },
+                                },
+                                "required": ["text", "source_draft_ids"],
+                                "additionalProperties": False,
+                            },
+                        },
                     },
                     "required": [
                         "group_id",
@@ -494,6 +540,8 @@ def collected_merge_output_schema() -> dict[str, object]:
                         "retention_detail",
                         "merge_owner_conflict",
                         "conflict_detail",
+                        "covered_draft_ids",
+                        "fact_items",
                     ],
                     "additionalProperties": False,
                 },

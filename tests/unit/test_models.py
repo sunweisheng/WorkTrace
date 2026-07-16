@@ -10,6 +10,10 @@ from src.worktrace.models import (
     AttachmentMeta,
     AttachmentTextBlock,
     BatchAnalysisResult,
+    CollectedFactItem,
+    CollectedMergeGroup,
+    CollectedMergeQualitySummary,
+    CollectedMergeRunResult,
     CrossConversationGroup,
     CrossConversationGroupResult,
     ContextRequest,
@@ -274,6 +278,63 @@ def test_event_models_default_referenced_link_ids_are_empty() -> None:
     assert event.evidence_fingerprints == []
     assert event.conversation_fingerprints == []
     assert event.file_keys == []
+    assert event.source_report_owners == []
+
+
+def test_collected_merge_models_roundtrip_new_quality_and_coverage_fields() -> None:
+    group = CollectedMergeGroup(
+        group_id="g1",
+        draft_ids=["d1", "d2"],
+        title="中心事项",
+        content="两个部门共同确认中心事项。",
+        covered_draft_ids=["d1", "d2"],
+        fact_items=[
+            CollectedFactItem(text="部门一确认方案。", source_draft_ids=["d1"]),
+            CollectedFactItem(text="部门二完成验证。", source_draft_ids=["d2"]),
+        ],
+    )
+    quality = CollectedMergeQualitySummary(
+        input_event_count=2,
+        filtered_event_count=2,
+        output_event_count=1,
+        source_event_coverage_ratio=1.0,
+        review_required=True,
+    )
+    result = CollectedMergeRunResult(
+        status="success",
+        target_date="2026-06-22",
+        input_dir="/tmp/input",
+        output_path="/tmp/output.md",
+        source_file_count=2,
+        source_event_count=2,
+        merged_event_count=1,
+        skipped_file_count=0,
+        quality_summary=quality,
+    )
+
+    assert CollectedMergeGroup.from_dict(group.to_dict()) == group
+    assert CollectedMergeRunResult.from_dict(result.to_dict()) == result
+
+
+def test_parsed_collected_content_missing_coverage_is_invalid_empty_list() -> None:
+    group = CollectedMergeGroup.from_dict(
+        {
+            "group_id": "g1",
+            "draft_ids": ["d1"],
+            "title": "事项",
+            "content": "内容",
+        }
+    )
+
+    assert group.covered_draft_ids == []
+
+    internal = CollectedMergeGroup(
+        group_id="internal",
+        draft_ids=["d1"],
+        title="事项",
+        content="内容",
+    )
+    assert CollectedMergeGroup.from_dict(internal.to_dict()) == internal
 
 
 def test_constants_are_string_enums() -> None:

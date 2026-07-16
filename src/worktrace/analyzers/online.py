@@ -25,6 +25,7 @@ from ..models import (
     BatchAnalysisResult,
     BatchAnchorAnalysisResult,
     BatchSegmentAnalysisResult,
+    CollectedGroupingGroup,
     CollectedGroupingResult,
     CollectedMergeResult,
     CollectedSourceEvent,
@@ -52,6 +53,7 @@ from .prompts import (
     build_batch_analysis_prompt,
     build_collected_grouping_prompt,
     build_collected_merge_prompt,
+    build_collected_review_prompt,
     build_collected_render_prompt,
     build_conversation_segmentation_prompt,
     build_merge_prompt,
@@ -494,6 +496,30 @@ class OnlineLLMAnalyzer(Analyzer):
             ),
             output_schema=collected_grouping_output_schema(),
             request_kind="collected_candidate_grouping",
+        )
+        try:
+            return parse_collected_grouping_payload(payload)
+        except AnalyzerProtocolError as exc:
+            raise RetryableAnalyzerProtocolError(str(exc)) from exc
+
+    def review_collected_group(
+        self,
+        target_date: str,
+        events: list[CollectedSourceEvent],
+        candidate_group: CollectedGroupingGroup,
+        *,
+        review_reasons: list[str] | None = None,
+    ) -> CollectedGroupingResult:
+        payload = self._invoke_online(
+            build_collected_review_prompt(
+                target_date,
+                events,
+                candidate_group,
+                config=self.config,
+                review_reasons=review_reasons,
+            ),
+            output_schema=collected_grouping_output_schema(),
+            request_kind="collected_group_review",
         )
         try:
             return parse_collected_grouping_payload(payload)

@@ -50,6 +50,8 @@ def test_collected_grouping_protocol_carries_candidate_summary() -> None:
         "summary_title",
         "summary_content",
         "summary_object_hint",
+        "group_reason",
+        "risk_flags",
     ]
 
 

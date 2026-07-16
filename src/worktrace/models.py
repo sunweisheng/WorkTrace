@@ -1187,6 +1187,7 @@ class WorkEvent:
     file_links: list[EventFileLink] = field(default_factory=list)
     source_people: list[str] = field(default_factory=list)
     source_event_ids: list[str] = field(default_factory=list)
+    source_report_owners: list[str] = field(default_factory=list)
     object_hint: str = ""
     retention_reason: str = ""
     retention_detail: str = ""
@@ -1213,6 +1214,7 @@ class WorkEvent:
             ],
             source_people=_string_list(data.get("source_people")),
             source_event_ids=_string_list(data.get("source_event_ids")),
+            source_report_owners=_string_list(data.get("source_report_owners")),
             object_hint=str(data.get("object_hint", "")),
             retention_reason=str(data.get("retention_reason", "")),
             retention_detail=str(data.get("retention_detail", "")),
@@ -1239,6 +1241,7 @@ class WorkEvent:
             "file_links": [item.to_dict() for item in self.file_links],
             "source_people": list(self.source_people),
             "source_event_ids": list(self.source_event_ids),
+            "source_report_owners": list(self.source_report_owners),
             "object_hint": self.object_hint,
             "retention_reason": self.retention_reason,
             "retention_detail": self.retention_detail,
@@ -1428,6 +1431,7 @@ class CollectedSourceEvent:
     person_name: str
     source_file: str
     event: WorkEvent
+    source_report_owner: str = ""
     is_merge_owner_source: bool = False
     candidate_summary_source: str = ""
     prompt_original_content_chars: int | None = None
@@ -1438,6 +1442,7 @@ class CollectedSourceEvent:
             "person_name": self.person_name,
             "source_file": self.source_file,
             "event": self.event.to_dict(),
+            "source_report_owner": self.source_report_owner,
             "is_merge_owner_source": self.is_merge_owner_source,
             "candidate_summary_source": self.candidate_summary_source,
             "prompt_original_content_chars": self.prompt_original_content_chars,
@@ -1452,6 +1457,9 @@ class CollectedGroupingGroup:
     summary_content: str = ""
     summary_object_hint: str = ""
     summary_source: str = ""
+    group_reason: list[str] = field(default_factory=list)
+    risk_flags: list[str] = field(default_factory=list)
+    was_repaired: bool = False
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "CollectedGroupingGroup":
@@ -1462,6 +1470,9 @@ class CollectedGroupingGroup:
             summary_content=str(data.get("summary_content", "")),
             summary_object_hint=str(data.get("summary_object_hint", "")),
             summary_source=str(data.get("summary_source", "")),
+            group_reason=_string_list(data.get("group_reason")),
+            risk_flags=_string_list(data.get("risk_flags")),
+            was_repaired=bool(data.get("was_repaired", False)),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -1472,6 +1483,9 @@ class CollectedGroupingGroup:
             "summary_content": self.summary_content,
             "summary_object_hint": self.summary_object_hint,
             "summary_source": self.summary_source,
+            "group_reason": list(self.group_reason),
+            "risk_flags": list(self.risk_flags),
+            "was_repaired": self.was_repaired,
         }
 
 
@@ -1493,6 +1507,25 @@ class CollectedGroupingResult:
 
 
 @dataclass(frozen=True)
+class CollectedFactItem:
+    text: str
+    source_draft_ids: list[str] = field(default_factory=list)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> CollectedFactItem:
+        return cls(
+            text=str(data.get("text", "")),
+            source_draft_ids=_string_list(data.get("source_draft_ids")),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "text": self.text,
+            "source_draft_ids": list(self.source_draft_ids),
+        }
+
+
+@dataclass(frozen=True)
 class CollectedMergeGroup:
     group_id: str
     draft_ids: list[str]
@@ -1503,6 +1536,8 @@ class CollectedMergeGroup:
     retention_detail: str = ""
     merge_owner_conflict: bool = False
     conflict_detail: str = ""
+    covered_draft_ids: list[str] | None = None
+    fact_items: list[CollectedFactItem] = field(default_factory=list)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> CollectedMergeGroup:
@@ -1516,6 +1551,16 @@ class CollectedMergeGroup:
             retention_detail=str(data.get("retention_detail", "")),
             merge_owner_conflict=bool(data.get("merge_owner_conflict", False)),
             conflict_detail=str(data.get("conflict_detail", "")),
+            covered_draft_ids=(
+                None
+                if "covered_draft_ids" in data
+                and data.get("covered_draft_ids") is None
+                else _string_list(data.get("covered_draft_ids"))
+            ),
+            fact_items=[
+                CollectedFactItem.from_dict(item)
+                for item in _dict_list(data.get("fact_items"))
+            ],
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -1529,6 +1574,12 @@ class CollectedMergeGroup:
             "retention_detail": self.retention_detail,
             "merge_owner_conflict": self.merge_owner_conflict,
             "conflict_detail": self.conflict_detail,
+            "covered_draft_ids": (
+                None
+                if self.covered_draft_ids is None
+                else list(self.covered_draft_ids)
+            ),
+            "fact_items": [item.to_dict() for item in self.fact_items],
         }
 
 
@@ -1552,6 +1603,65 @@ class CollectedMergeResult:
 
 
 @dataclass(frozen=True)
+class CollectedMergeQualitySummary:
+    input_event_count: int = 0
+    filtered_event_count: int = 0
+    output_event_count: int = 0
+    multi_source_group_count: int = 0
+    singleton_group_count: int = 0
+    max_source_events_per_group: int = 0
+    input_content_chars: int = 0
+    output_content_chars: int = 0
+    event_count_output_input_ratio: float = 0.0
+    content_chars_output_input_ratio: float = 0.0
+    source_event_coverage_ratio: float = 0.0
+    source_report_owner_count: int = 0
+    high_risk_group_count: int = 0
+    reviewed_group_count: int = 0
+    review_split_group_count: int = 0
+    content_retry_count: int = 0
+    shortened_prompt_count: int = 0
+    review_required: bool = False
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> CollectedMergeQualitySummary:
+        return cls(
+            input_event_count=int(data.get("input_event_count", 0)),
+            filtered_event_count=int(data.get("filtered_event_count", 0)),
+            output_event_count=int(data.get("output_event_count", 0)),
+            multi_source_group_count=int(data.get("multi_source_group_count", 0)),
+            singleton_group_count=int(data.get("singleton_group_count", 0)),
+            max_source_events_per_group=int(
+                data.get("max_source_events_per_group", 0)
+            ),
+            input_content_chars=int(data.get("input_content_chars", 0)),
+            output_content_chars=int(data.get("output_content_chars", 0)),
+            event_count_output_input_ratio=float(
+                data.get("event_count_output_input_ratio", 0.0)
+            ),
+            content_chars_output_input_ratio=float(
+                data.get("content_chars_output_input_ratio", 0.0)
+            ),
+            source_event_coverage_ratio=float(
+                data.get("source_event_coverage_ratio", 0.0)
+            ),
+            source_report_owner_count=int(data.get("source_report_owner_count", 0)),
+            high_risk_group_count=int(data.get("high_risk_group_count", 0)),
+            reviewed_group_count=int(data.get("reviewed_group_count", 0)),
+            review_split_group_count=int(data.get("review_split_group_count", 0)),
+            content_retry_count=int(data.get("content_retry_count", 0)),
+            shortened_prompt_count=int(data.get("shortened_prompt_count", 0)),
+            review_required=bool(data.get("review_required", False)),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            name: getattr(self, name)
+            for name in self.__dataclass_fields__
+        }
+
+
+@dataclass(frozen=True)
 class CollectedMergeOutput:
     input_dir: str
     output_path: str | None
@@ -1560,6 +1670,9 @@ class CollectedMergeOutput:
     merged_event_count: int
     skipped_file_count: int
     partial_file_count: int = 0
+    quality_summary: CollectedMergeQualitySummary = field(
+        default_factory=CollectedMergeQualitySummary
+    )
     warning_messages: list[str] = field(default_factory=list)
     self_delivery_status: str = ""
     self_delivery_target: str = ""
@@ -1577,6 +1690,11 @@ class CollectedMergeOutput:
             merged_event_count=int(data.get("merged_event_count", 0)),
             skipped_file_count=int(data.get("skipped_file_count", 0)),
             partial_file_count=int(data.get("partial_file_count", 0)),
+            quality_summary=CollectedMergeQualitySummary.from_dict(
+                data.get("quality_summary", {})
+                if isinstance(data.get("quality_summary", {}), dict)
+                else {}
+            ),
             warning_messages=_string_list(data.get("warning_messages")),
             self_delivery_status=str(
                 data.get("self_delivery_status", data.get("upload_status", ""))
@@ -1598,6 +1716,7 @@ class CollectedMergeOutput:
             "merged_event_count": self.merged_event_count,
             "skipped_file_count": self.skipped_file_count,
             "partial_file_count": self.partial_file_count,
+            "quality_summary": self.quality_summary.to_dict(),
             "warning_messages": list(self.warning_messages),
             "self_delivery_status": self.self_delivery_status,
             "self_delivery_target": self.self_delivery_target,
@@ -1616,6 +1735,9 @@ class CollectedMergeRunResult:
     merged_event_count: int
     skipped_file_count: int
     partial_file_count: int = 0
+    quality_summary: CollectedMergeQualitySummary = field(
+        default_factory=CollectedMergeQualitySummary
+    )
     warning_messages: list[str] = field(default_factory=list)
     self_delivery_status: str = ""
     self_delivery_target: str = ""
@@ -1636,6 +1758,11 @@ class CollectedMergeRunResult:
             merged_event_count=int(data.get("merged_event_count", 0)),
             skipped_file_count=int(data.get("skipped_file_count", 0)),
             partial_file_count=int(data.get("partial_file_count", 0)),
+            quality_summary=CollectedMergeQualitySummary.from_dict(
+                data.get("quality_summary", {})
+                if isinstance(data.get("quality_summary", {}), dict)
+                else {}
+            ),
             warning_messages=_string_list(data.get("warning_messages")),
             self_delivery_status=str(
                 data.get("self_delivery_status", data.get("upload_status", ""))
@@ -1663,6 +1790,7 @@ class CollectedMergeRunResult:
             "merged_event_count": self.merged_event_count,
             "skipped_file_count": self.skipped_file_count,
             "partial_file_count": self.partial_file_count,
+            "quality_summary": self.quality_summary.to_dict(),
             "warning_messages": list(self.warning_messages),
             "self_delivery_status": self.self_delivery_status,
             "self_delivery_target": self.self_delivery_target,

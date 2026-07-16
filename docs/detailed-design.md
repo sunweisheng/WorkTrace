@@ -282,7 +282,7 @@ flowchart LR
 
 文件名必须能解析目标日期和姓名。Markdown 必须符合 `MarkdownEventStore` 格式。无效文件跳过并写 warning，不阻断其他文件。
 
-来源姓名与当前登录用户名精确匹配时标记 `is_merge_owner_source=true`。只有不同来源存在明确事实冲突，模型才标记 `merge_owner_conflict=true`，Python 才采用合并人版本并写 warning；没有冲突时必须整合所有来源的有效补充。未匹配到合并人来源时写 warning 并继续普通合并。
+来源姓名与当前登录用户名精确匹配时标记 `is_merge_owner_source=true`。只有不同来源存在明确事实冲突，模型才标记 `merge_owner_conflict=true`，Python 才采用合并人版本并写 warning；没有冲突时必须整合所有来源的有效补充。未匹配到合并人来源时直接执行普通合并，不写 warning。
 
 ### 7.3 合并策略
 
@@ -291,20 +291,27 @@ flowchart TD
     A["来源事件"] --> B["关键词过滤 + 保留门槛"]
     B --> C["相同 event_id 且内容相似的确定性组"]
     C --> D["Python 计算 evidence_relations 和 conversation_groups"]
-    D --> E["轻量 LLM 发现候选组"]
-    E --> F{"候选或内容 prompt 超阈值?"}
+    D --> E["LLM 使用事件正文发现候选组"]
+    E --> F{"候选、复核或内容 prompt 超阈值?"}
     F -->|"是"| G["关系优先分批并汇合组摘要"]
-    F -->|"否"| H["按锁定候选组生成正式内容"]
-    G --> H
-    H --> I["字段完整性检查"]
+    F -->|"否"| R{"命中高风险条件?"}
+    G --> R
+    R -->|"是"| V["复核并在不确定时拆组"]
+    R -->|"否"| H["按锁定候选组生成正式内容"]
+    V --> H
+    H --> I["字段与来源覆盖检查"]
     I --> J{"缺失比例达到阈值?"}
-    J -->|"是且未到上限"| F
-    J -->|"否"| K["覆盖修复 + 工作流边界检查"]
+    J -->|"是且未到上限"| H
+    J -->|"否"| K["元数据补齐 + 工作流边界检查"]
     K --> L["团队 WorkEvent + 新字段合集"]
     L --> M["最终过滤、写入、自发送"]
 ```
 
-多人合并候选发现默认发送来源 MD 中的完整事件正文：Python 根据共同消息、共同文件形成 `evidence_relations`，并根据同日会话形成 `conversation_groups`；会话哈希本身不进入模型输入。即使消息或文件集合完全相同也不能自动合并。输入超过 `max_model_input_tokens` 时按关系优先分批，局部分组模型在同一次调用中为多成员组返回候选摘要，单成员组由 Python 直接保留原事件；摘要缺失或组成员被修复时使用按来源平均分配的内容卡。跨批确认后展开回原始事件，再生成正式内容。中间 `WorkEvent` 持续携带会话指纹、消息指纹、文件标识、来源人员和来源事件 ID，最终只生成规范化 `YYYY-MM-DD-登录人姓名-merged.md`。
+多人合并候选发现默认发送来源 MD 中的完整事件正文：Python 根据共同消息、共同文件形成 `evidence_relations`，并根据同日会话形成 `conversation_groups`；会话哈希本身不进入模型输入。即使消息或文件集合完全相同也不能自动合并。候选模型返回 `group_reason` 和 `risk_flags`。来源事件达到 10 条、来源文件达到 4 个、跨批、Python 修复或不同非空工作流任一条件命中时，根据 `config/collected_merge.json` 增加高风险复核，拿不准时拆组。
+
+候选、复核和正式正文统一受 `max_model_input_tokens=6200` 限制。复核超限时按关系分批，单条正文仍过长时复用正文切片和分层摘要。正式内容必须返回完整 `covered_draft_ids` 和 `fact_items`；Python 检查整批 draft 分配、锁定组和事实来源，只重试当前组，仍不完整则当前 scope 失败且不写文件。正文不再机械追加全部来源原文。中间 `WorkEvent` 持续携带会话指纹、消息指纹、文件标识、来源人员、来源事件 ID 和来源负责人，最终只生成规范化 `YYYY-MM-DD-登录人姓名-merged.md`。
+
+部门负责人和中心负责人复用同一个 `merge-collected` 命令，当前代码没有自动的层级编排。第一级由部门负责人收集本部门 v2 个人 MD 后运行；第二级由中心负责人收集各部门 `*-merged.md` 后再次运行。个人 MD 和部门 MD 可以同时作为输入，程序不比较两者的 `source_event_ids`，不拦截，也不提示重复来源。输出名始终取当前飞书登录人姓名。一级子目录是并列 scope，不会自动把子目录输出再送入根目录。上游汇总继续保留原始来源人员和事件 ID，并从 `*-merged.md` 文件名提取上一级负责人；中心公开输出显示 `来源负责人`。
 
 合并边界：不同非空工作流默认拆开；只有共享同日会话或共同消息、且候选发现确认属于同一事项时才允许跨工作流合并。允许合并时冲突工作流字段留空并记录 warning。同名工作流、标题相似或部门相同都不能单独证明是同一事件。
 
@@ -314,10 +321,13 @@ flowchart TD
 
 - `source_people`
 - `source_event_ids`
+- `source_report_owners`
 - `workstream_name`、`action_labels`、`self_relations`
 - `evidence_fingerprints`、`conversation_fingerprints`、`file_keys`
 
-若模型遗漏 draft，Python 会补 singleton group；若合并字段缺失或过度泛化，会从来源事件派生 `object_hint`、`retention_reason`、`retention_detail` 并记录 warning。
+候选阶段若模型遗漏 draft，Python 会补 singleton group，并把修复组送入高风险复核；正式正文阶段不修补覆盖缺口。若非正文字段缺失或过度泛化，可从来源事件派生 `object_hint`、`retention_reason`、`retention_detail` 并记录 warning。
+
+每个 scope 和整次运行都生成 Python 计算的 `quality_summary`，同时进入 CLI JSON、trace `summary.json` 和 `summary.md`。事件数和字符数比例只用于人工查看；一个人部门或没有重复事项时允许输出数等于输入数。
 
 ## 8. Analyzer 与模型协议
 
@@ -357,6 +367,9 @@ OnlineLLMAnalyzer -> openai Python SDK -> Responses API provider
 - `context_expansion_round_limit = 2`
 - `collected_merge_retryable_error_limit = 1`
 - `collected_merge_retry_delay_seconds = 2.0`
+- `high_risk_review_enabled = True`
+- `high_risk_source_event_count = 10`
+- `high_risk_source_file_count = 4`
 - `slice_retry_limit = 3`
 - `anchor_batch_size = 3`
 - `llm_stream_enabled = False`
@@ -382,6 +395,7 @@ OnlineLLMAnalyzer -> openai Python SDK -> Responses API provider
 - `config/conversation_blacklist.json`：整会话排除
 - `config/conversation_window.json`：初始窗口聚合和按需扩窗阈值
 - `config/llm_retry.json`：分段/提炼重试、流式首次返回超时和并发数
+- `config/collected_merge.json`：多人汇总高风险复核开关、阈值和条件
 - `config/attachment_text.json`：文本附件限制
 - `config/image_summary.json`：图片摘要限制和 prompt
 - `config/reaction_catalogs/*.json`：reaction 语义目录
@@ -397,7 +411,7 @@ OnlineLLMAnalyzer -> openai Python SDK -> Responses API provider
 - retention HTML 注释：内部枚举
 - `merge_meta` HTML 注释：v2 版本、参与方式英文键、消息证据 SHA-256、按“目标日期 + 来源会话 ID”生成的同日会话 SHA-256，以及文件标识 SHA-256
 
-团队汇总把“本人参与方式”显示为“协作方式”，并保留来源人员和来源事件 ID。旧 Markdown 缺少新字段时按空值普通读取，但不能继续参与多人合并，必须重新生成；新输出仍用“未明确”表示缺少可见业务字段。损坏的 `merge_meta` 被忽略并写 warning，不影响正文解析。多人汇总遇到尾部残缺事件时保留此前完整事件并增加 `partial_file_count`，但不修改来源文件；没有完整事件或其他结构无效时整份跳过。Markdown store 同时负责回读，因此字段名或注释结构变化必须同步解析器和多人汇总测试。
+团队汇总把“本人参与方式”显示为“协作方式”，并保留来源人员和来源事件 ID。存在上游负责人时额外显示“来源负责人”，并在 `merge_meta` 保存 `source_report_owners`；旧 Markdown 中的 V2 文件缺少该字段时按空列表读取。缺少会话证据的 V1 文件仍不能参与多人合并，必须重新生成；新输出仍用“未明确”表示缺少可见业务字段。损坏的 `merge_meta` 被忽略并写 warning，不影响正文解析。多人汇总遇到尾部残缺事件时保留此前完整事件并增加 `partial_file_count`，但不修改来源文件；没有完整事件或其他结构无效时整份跳过。Markdown store 同时负责回读，因此字段名或注释结构变化必须同步解析器和多人汇总测试。
 
 ## 11. 状态、warning 与错误
 
@@ -426,7 +440,7 @@ OnlineLLMAnalyzer -> openai Python SDK -> Responses API provider
 
 segmentation 和 segment batch 的模型失败轮次保存输入、prompt 与 `failure.json`。批次拆分后的单片段回退保存在片段目录的 `fallback-01/`；分段耗尽后的直接提炼保存在 `_anchor_fallback/<conversation>/<anchor-key>/attempt-XX/`。成功轮次继续保存输出和校验结果，异常轮次不伪造模型输出。
 
-多人汇总 trace 写 `source-audit.json`、step JSON、`step-NNN-prompt.txt`、`summary.json` 和 `summary.md`。每个模型请求前先保存输入和 prompt；成功、失败、重试耗尽和自送达失败都会留下 summary。step 包含候选发现或正式内容阶段、批次、尝试次数、重试原因、估算 token、`max_model_input_tokens` 上限、辅助字符数、`input_events`、`deterministic_groups`、错误或模型结果、覆盖修复、`boundary_warnings`、过滤和最终事件，因此可以从来源增强信息追到最终部门事件。
+多人汇总 trace 写 `source-audit.json`、step JSON、`step-NNN-prompt.txt`、`summary.json` 和 `summary.md`。每个模型请求前先保存输入和 prompt；成功、失败、重试耗尽和自送达失败都会留下 summary。step 包含候选发现、高风险复核或正式内容阶段、复核原因和前后分组、批次、尝试次数、重试原因、估算 token、`max_model_input_tokens` 上限、辅助字符数、`input_events`、`deterministic_groups`、正文覆盖、`boundary_warnings`、过滤和最终事件。两个 summary 文件还保存 Python 计算的 `quality_summary`，因此可以从来源增强信息追到最终部门事件并核对各级数量和覆盖率。
 
 所有主阶段同时通过 `logging_utils.log_timing(...)` 输出耗时和数量字段。
 

@@ -263,6 +263,13 @@ class MarkdownEventStore(EventStore):
             "evidence_fingerprints": evidence_fingerprints,
             "conversation_fingerprints": conversation_fingerprints,
             "file_keys": file_keys,
+            "source_report_owners": list(
+                dict.fromkeys(
+                    owner.strip()
+                    for owner in event.source_report_owners
+                    if owner.strip() and not INTERNAL_FEISHU_ID_RE.search(owner)
+                )
+            ),
         }
         return f"{MERGE_META_PREFIX}{json.dumps(payload, ensure_ascii=False, separators=(',', ':'))} -->"
 
@@ -439,6 +446,9 @@ class MarkdownEventStore(EventStore):
             source_event_ids = self._parse_source_values(
                 self._extract_value(block, "- 来源事件 ID: ")
             )
+            source_report_owners = self._parse_source_values(
+                self._extract_value(block, "- 来源负责人: ")
+            )
             workstream_name = self._parse_optional_metadata_value(
                 self._extract_value(block, "- **工作流**: ")
             )
@@ -453,6 +463,8 @@ class MarkdownEventStore(EventStore):
                 )
             )
             merge_meta = self._extract_merge_meta(block, event_id=event_id)
+            if not source_report_owners:
+                source_report_owners = merge_meta.get("source_report_owners", [])
             self_relations = merge_meta.get("self_relations", [])
             if not self_relations:
                 self_relations = self._relation_keys_from_labels(visible_relations)
@@ -466,6 +478,7 @@ class MarkdownEventStore(EventStore):
                     file_links=file_links,
                     source_people=source_people,
                     source_event_ids=source_event_ids,
+                    source_report_owners=source_report_owners,
                     object_hint=object_hint,
                     retention_reason=retention_reason,
                     retention_detail=retention_detail,
@@ -556,12 +569,22 @@ class MarkdownEventStore(EventStore):
         return "、".join(cleaned)
 
     def _render_source_lines(self, event: WorkEvent) -> str:
-        if not event.source_people and not event.source_event_ids:
+        if (
+            not event.source_people
+            and not event.source_event_ids
+            and not event.source_report_owners
+        ):
             return ""
-        return (
-            f"- 来源人员: {self._render_source_values(event.source_people)}\n"
-            f"- 来源事件 ID: {self._render_source_values(event.source_event_ids)}\n"
-        )
+        lines = [
+            f"- 来源人员: {self._render_source_values(event.source_people)}",
+            f"- 来源事件 ID: {self._render_source_values(event.source_event_ids)}",
+        ]
+        if event.source_report_owners:
+            lines.append(
+                "- 来源负责人: "
+                f"{self._render_source_values(event.source_report_owners)}"
+            )
+        return "\n".join(lines) + "\n"
 
     def _parse_source_values(self, value: str) -> list[str]:
         stripped = value.strip()
@@ -606,7 +629,12 @@ class MarkdownEventStore(EventStore):
                 self._record_merge_meta_warning(event_id)
                 return {}
             parsed: dict[str, list[str]] = {}
-            keys = ["self_relations", "evidence_fingerprints", "file_keys"]
+            keys = [
+                "self_relations",
+                "evidence_fingerprints",
+                "file_keys",
+                "source_report_owners",
+            ]
             if payload.get("version") == 2:
                 keys.append("conversation_fingerprints")
             for key in keys:
@@ -616,12 +644,12 @@ class MarkdownEventStore(EventStore):
                 ):
                     self._record_merge_meta_warning(event_id)
                     return {}
-                if key == "self_relations" and any(
+                if key in {"self_relations", "source_report_owners"} and any(
                     INTERNAL_FEISHU_ID_RE.search(item) for item in value
                 ):
                     self._record_merge_meta_warning(event_id)
                     return {}
-                if key != "self_relations":
+                if key not in {"self_relations", "source_report_owners"}:
                     if not all(is_sha256_fingerprint(item) for item in value):
                         self._record_merge_meta_warning(event_id)
                         return {}

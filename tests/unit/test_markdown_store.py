@@ -546,6 +546,60 @@ def test_markdown_store_roundtrip_keeps_collected_source_fields(tmp_path: Path) 
     assert "- **本人参与方式**:" not in content
 
 
+def test_markdown_store_roundtrip_keeps_source_report_owners(tmp_path: Path) -> None:
+    store = MarkdownEventStore(config=RuntimeConfig(data_root=tmp_path / "data"))
+    original = WorkEvent(
+        date="2026-06-22",
+        event_id="evt1",
+        title="中心事项",
+        content="两个部门共同确认中心事项。",
+        source_people=["张三", "李四"],
+        source_event_ids=["evt-a", "evt-b"],
+        source_report_owners=["丁金龙", "栗栋"],
+    )
+
+    first = store.render_day_document(
+        DayDocument(
+            date="2026-06-22",
+            events=[original],
+            generated_at="2026-06-22T20:00:00+08:00",
+        )
+    )
+    first_loaded = store.parse_day_document(first)
+    second = store.render_day_document(first_loaded)
+    second_loaded = store.parse_day_document(second)
+
+    assert "- 来源负责人: 丁金龙、栗栋" in first
+    assert first_loaded.events[0].source_report_owners == ["丁金龙", "栗栋"]
+    assert second_loaded.events[0].source_report_owners == ["丁金龙", "栗栋"]
+
+
+def test_markdown_store_reads_old_v2_without_source_report_owners() -> None:
+    store = MarkdownEventStore(config=RuntimeConfig())
+    markdown = store.render_day_document(
+        DayDocument(
+            date="2026-06-22",
+            events=[
+                WorkEvent(
+                    date="2026-06-22",
+                    event_id="evt1",
+                    title="旧 V2 事项",
+                    content="旧文件没有来源负责人字段。",
+                    conversation_fingerprints=["sha256:" + "a" * 64],
+                )
+            ],
+            generated_at="2026-06-22T20:00:00+08:00",
+        )
+    )
+    assert ',"source_report_owners":[]' in markdown
+    markdown = markdown.replace(',"source_report_owners":[]', "")
+    assert "source_report_owners" not in markdown
+
+    loaded = store.parse_day_document(markdown)
+
+    assert loaded.events[0].source_report_owners == []
+
+
 def test_markdown_store_auto_repairs_unclosed_last_event_block() -> None:
     store = MarkdownEventStore(config=RuntimeConfig())
     markdown = """---

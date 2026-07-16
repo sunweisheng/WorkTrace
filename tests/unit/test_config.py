@@ -304,6 +304,87 @@ def test_load_runtime_config_overrides_reads_collected_merge_env_overrides(
     assert config.collected_merge_retry_delay_seconds == 4.5
 
 
+def test_load_runtime_config_overrides_reads_collected_merge_review_config(
+    tmp_path: Path,
+) -> None:
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    (config_dir / "collected_merge.json").write_text(
+        json.dumps(
+            {
+                "high_risk_review_enabled": False,
+                "high_risk_source_event_count": 12,
+                "high_risk_source_file_count": 5,
+                "review_cross_batch_groups": False,
+                "review_repaired_groups": True,
+                "review_workstream_conflicts": False,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    config = load_runtime_config_overrides(RuntimeConfig(), cwd=tmp_path)
+
+    assert config.high_risk_review_enabled is False
+    assert config.high_risk_source_event_count == 12
+    assert config.high_risk_source_file_count == 5
+    assert config.review_cross_batch_groups is False
+    assert config.review_repaired_groups is True
+    assert config.review_workstream_conflicts is False
+
+
+def test_repo_collected_merge_config_matches_review_defaults() -> None:
+    payload = json.loads(
+        Path("config/collected_merge.json").read_text(encoding="utf-8")
+    )
+
+    assert payload == {
+        "high_risk_review_enabled": True,
+        "high_risk_source_event_count": 10,
+        "high_risk_source_file_count": 4,
+        "review_cross_batch_groups": True,
+        "review_repaired_groups": True,
+        "review_workstream_conflicts": True,
+    }
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"high_risk_review_enabled": True},
+        {
+            "high_risk_review_enabled": True,
+            "high_risk_source_event_count": 0,
+            "high_risk_source_file_count": 4,
+            "review_cross_batch_groups": True,
+            "review_repaired_groups": True,
+            "review_workstream_conflicts": True,
+        },
+        {
+            "high_risk_review_enabled": "yes",
+            "high_risk_source_event_count": 10,
+            "high_risk_source_file_count": 4,
+            "review_cross_batch_groups": True,
+            "review_repaired_groups": True,
+            "review_workstream_conflicts": True,
+        },
+    ],
+)
+def test_load_runtime_config_overrides_rejects_invalid_collected_merge_config(
+    tmp_path: Path,
+    payload: dict[str, object],
+) -> None:
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    (config_dir / "collected_merge.json").write_text(
+        json.dumps(payload),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="Invalid collected merge config"):
+        load_runtime_config_overrides(RuntimeConfig(), cwd=tmp_path)
+
+
 @pytest.mark.parametrize(
     ("env_name", "env_value"),
     [

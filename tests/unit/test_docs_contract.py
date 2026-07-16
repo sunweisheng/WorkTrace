@@ -61,6 +61,8 @@ def test_docs_describe_event_metadata_and_markdown_compatibility() -> None:
     assert "config/event_metadata.json" in readme
     assert "旧 Markdown" in detailed
     assert "不批量改写历史文件" in markdown_contract
+    assert "来源负责人" in markdown_contract
+    assert "source_report_owners" in markdown_contract
 
 
 def test_docs_define_collected_merge_boundaries_and_conflict_priority() -> None:
@@ -81,6 +83,67 @@ def test_docs_define_collected_merge_boundaries_and_conflict_priority() -> None:
         assert "来源事件 ID" in content
         assert "max_model_input_tokens" in content
         assert "collected_merge_prompt_char_threshold" not in content
+
+
+def test_docs_describe_two_level_collected_merge_and_full_content_grouping() -> None:
+    documents = [
+        Path("README.md").read_text(encoding="utf-8"),
+        Path("docs/detailed-design.md").read_text(encoding="utf-8"),
+        Path("docs/collected-people-merge-plan.md").read_text(encoding="utf-8"),
+    ]
+    improvement_plan = Path(
+        "docs/two-level-collected-merge-improvement-plan.md"
+    ).read_text(encoding="utf-8")
+
+    for content in documents:
+        assert "LLM 使用事件正文发现候选组" in content
+        assert "轻量 LLM 发现候选组" not in content
+        assert "部门负责人" in content
+        assert "中心负责人" in content
+        assert "来源负责人" in content
+        assert "quality_summary" in content
+        assert "config/collected_merge.json" in content
+    assert "生产代码和文档已按本方案实现" in improvement_plan
+    assert "真实多人 V2 语义效果仍需后续运行验收" in improvement_plan
+
+
+def test_docs_allow_manual_personal_and_upstream_input_combination() -> None:
+    documents = [
+        Path("README.md").read_text(encoding="utf-8"),
+        Path("docs/detailed-design.md").read_text(encoding="utf-8"),
+        Path("docs/collected-people-merge-plan.md").read_text(encoding="utf-8"),
+        Path("docs/two-level-collected-merge-improvement-plan.md").read_text(
+            encoding="utf-8"
+        ),
+        Path("merge_inbox/README.md").read_text(encoding="utf-8"),
+        Path("SKILL.md").read_text(encoding="utf-8"),
+    ]
+
+    for content in documents:
+        assert "不拦截" in content
+        assert "不提示重复来源" in content or "不写重复来源 warning" in content
+    combined = "\n".join(documents)
+    assert "中心目录不得同时放" not in combined
+    assert "中心目录不要保留" not in combined
+    assert "重复输入在模型调用前被拦截" not in combined
+
+
+def test_docs_describe_coverage_review_and_python_quality_calculation() -> None:
+    documents = [
+        Path("README.md").read_text(encoding="utf-8"),
+        Path("docs/detailed-design.md").read_text(encoding="utf-8"),
+        Path("docs/collected-people-merge-plan.md").read_text(encoding="utf-8"),
+        Path("docs/two-level-collected-merge-improvement-plan.md").read_text(
+            encoding="utf-8"
+        ),
+    ]
+
+    for content in documents:
+        assert "covered_draft_ids" in content
+        assert "fact_items" in content
+        assert "高风险" in content
+        assert "6200" in content
+        assert "Python" in content and "计算" in content
 
 
 def test_docs_describe_python_collected_evidence_relations() -> None:

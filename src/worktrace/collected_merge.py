@@ -19,16 +19,20 @@ from .errors import (
     StoreWriteError,
 )
 from .factories import AnalyzerFactory
+from .analyzers.base import Analyzer
 from .analyzers.prompts import (
     build_collected_grouping_prompt,
     build_collected_merge_prompt,
+    build_collected_review_prompt,
     build_collected_render_prompt,
 )
 from .models import (
     CollectedGroupingGroup,
     CollectedGroupingResult,
+    CollectedFactItem,
     CollectedMergeGroup,
     CollectedMergeOutput,
+    CollectedMergeQualitySummary,
     CollectedMergeResult,
     CollectedMergeRunResult,
     CollectedSourceEvent,
@@ -90,6 +94,7 @@ class CollectedMergeRunner:
         self._collected_merge_source_audit: list[dict[str, Any]] = []
         self._collected_merge_filter_diagnostics: list[dict[str, Any]] = []
         self._collected_merge_failure_warnings: list[str] = []
+        self._collected_quality_counters: Counter[str] = Counter()
 
     def run(self, target_date: str) -> CollectedMergeRunResult:
         input_dir = self.build_input_dir(target_date)
@@ -175,6 +180,9 @@ class CollectedMergeRunner:
             merged_event_count=sum(output.merged_event_count for output in outputs),
             skipped_file_count=sum(output.skipped_file_count for output in outputs),
             partial_file_count=sum(output.partial_file_count for output in outputs),
+            quality_summary=aggregate_collected_quality_summaries(
+                [output.quality_summary for output in outputs]
+            ),
             warning_messages=warning_messages,
             self_delivery_status=summarize_self_delivery_status(outputs),
             self_delivery_target=first_output.self_delivery_target,
@@ -255,6 +263,10 @@ class CollectedMergeRunner:
                 merged_event_count=0,
                 skipped_file_count=skipped_file_count,
                 partial_file_count=partial_file_count,
+                quality_summary=CollectedMergeQualitySummary(
+                    input_event_count=source_event_count,
+                    filtered_event_count=source_event_count,
+                ),
                 warning_messages=(
                     scope_warnings
                     or [
@@ -283,6 +295,9 @@ class CollectedMergeRunner:
             merged_event_count=0,
             skipped_file_count=sum(item.skipped_file_count for item in outputs),
             partial_file_count=sum(item.partial_file_count for item in outputs),
+            quality_summary=aggregate_collected_quality_summaries(
+                [output.quality_summary for output in outputs]
+            ),
             warning_messages=missing_warnings,
             self_delivery_status="",
             self_delivery_target=first_output.self_delivery_target,
@@ -302,6 +317,7 @@ class CollectedMergeRunner:
             target_date,
             self_identity.display_name or self_identity.open_id,
         )
+        self._collected_quality_counters = Counter()
         self._start_collected_merge_trace(target_date, input_dir)
         warning_messages: list[str] = []
         (
@@ -374,6 +390,12 @@ class CollectedMergeRunner:
                     if warning not in warning_messages
                 )
                 warning_messages.append(str(exc))
+                quality_summary = build_collected_quality_summary(
+                    parsed_source_events,
+                    source_events,
+                    [],
+                    counters=self._collected_quality_counters,
+                )
                 output = CollectedMergeOutput(
                     input_dir=str(input_dir.resolve()),
                     output_path=None,
@@ -382,6 +404,7 @@ class CollectedMergeRunner:
                     merged_event_count=0,
                     skipped_file_count=skipped_file_count,
                     partial_file_count=partial_file_count,
+                    quality_summary=quality_summary,
                     warning_messages=warning_messages,
                 )
                 self._write_collected_merge_trace_summary(
@@ -395,10 +418,18 @@ class CollectedMergeRunner:
                     skipped_file_count=skipped_file_count,
                     partial_file_count=partial_file_count,
                     warning_messages=warning_messages,
+                    quality_summary=quality_summary,
                 )
                 return output
         else:
             warning_messages.append("No valid source events found.")
+
+        quality_summary = build_collected_quality_summary(
+            parsed_source_events,
+            source_events,
+            merged_events,
+            counters=self._collected_quality_counters,
+        )
 
         try:
             output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -423,6 +454,7 @@ class CollectedMergeRunner:
                 skipped_file_count=skipped_file_count,
                 partial_file_count=partial_file_count,
                 warning_messages=warning_messages,
+                quality_summary=quality_summary,
             )
             return CollectedMergeOutput(
                 input_dir=str(input_dir.resolve()),
@@ -432,6 +464,7 @@ class CollectedMergeRunner:
                 merged_event_count=0,
                 skipped_file_count=skipped_file_count,
                 partial_file_count=partial_file_count,
+                quality_summary=quality_summary,
                 warning_messages=warning_messages,
             )
 
@@ -460,6 +493,7 @@ class CollectedMergeRunner:
             skipped_file_count=skipped_file_count,
             partial_file_count=partial_file_count,
             warning_messages=warning_messages,
+            quality_summary=quality_summary,
         )
 
         return CollectedMergeOutput(
@@ -470,6 +504,7 @@ class CollectedMergeRunner:
             merged_event_count=len(merged_events),
             skipped_file_count=skipped_file_count,
             partial_file_count=partial_file_count,
+            quality_summary=quality_summary,
             warning_messages=warning_messages,
             self_delivery_status=self_delivery_status,
             self_delivery_target=self_delivery_target,
@@ -512,6 +547,11 @@ class CollectedMergeRunner:
             source_events,
             deterministic_groups,
         )
+        grouping_result, review_warnings = self._review_high_risk_groups(
+            target_date,
+            source_events,
+            grouping_result,
+        )
         source_by_id = {item.draft_id: item for item in source_events}
         multi_groups = [
             group for group in grouping_result.groups if len(group.draft_ids) > 1
@@ -541,8 +581,491 @@ class CollectedMergeRunner:
             *deterministic_warnings,
             *grouping_warnings,
             *repair_warnings,
+            *review_warnings,
             *retry_warnings,
             *final_warnings,
+        ]
+
+    def _review_high_risk_groups(
+        self,
+        target_date: str,
+        source_events: list[CollectedSourceEvent],
+        grouping_result: CollectedGroupingResult,
+    ) -> tuple[CollectedGroupingResult, list[str]]:
+        if not self.config.high_risk_review_enabled:
+            return grouping_result, []
+
+        source_by_id = {item.draft_id: item for item in source_events}
+        review_method = getattr(self.analyzer, "review_collected_group", None)
+        review_implementation = getattr(review_method, "__func__", review_method)
+        has_review_capability = bool(
+            callable(review_method)
+            and review_implementation is not Analyzer.review_collected_group
+        )
+        reviewed_groups: list[CollectedGroupingGroup] = []
+        warnings: list[str] = []
+        for group in grouping_result.groups:
+            items = [
+                source_by_id[draft_id]
+                for draft_id in group.draft_ids
+                if draft_id in source_by_id
+            ]
+            reasons = self._collected_group_review_reasons(group, items)
+            if not reasons:
+                reviewed_groups.append(group)
+                continue
+
+            self._collected_quality_counters["high_risk_group_count"] += 1
+            self._collected_quality_counters["review_required"] = 1
+            if not has_review_capability:
+                reviewed_groups.append(group)
+                warnings.append(
+                    "High-risk collected group could not be reviewed because the "
+                    f"analyzer has no review capability: group={group.group_id} "
+                    f"reasons={reasons}."
+                )
+                continue
+
+            try:
+                reviewed, review_warnings = (
+                    self._review_collected_group_with_batching(
+                        target_date,
+                        items,
+                        group,
+                        reasons=reasons,
+                        depth=0,
+                    )
+                )
+            except NotImplementedError:
+                reviewed_groups.append(group)
+                warnings.append(
+                    "High-risk collected group could not be reviewed because the "
+                    f"analyzer has no review capability: group={group.group_id} "
+                    f"reasons={reasons}."
+                )
+                continue
+            self._collected_quality_counters["reviewed_group_count"] += 1
+            self._collected_quality_counters["review_split_group_count"] += int(
+                len(reviewed.groups) > 1
+            )
+            reviewed_groups.extend(reviewed.groups)
+            warnings.extend(review_warnings)
+        return CollectedGroupingResult(groups=reviewed_groups), warnings
+
+    def _collected_group_review_reasons(
+        self,
+        group: CollectedGroupingGroup,
+        source_events: list[CollectedSourceEvent],
+    ) -> list[str]:
+        reasons: list[str] = []
+        if len(group.draft_ids) >= self.config.high_risk_source_event_count:
+            reasons.append("source_event_count")
+        if (
+            len({item.source_file for item in source_events})
+            >= self.config.high_risk_source_file_count
+        ):
+            reasons.append("source_file_count")
+        if (
+            self.config.review_cross_batch_groups
+            and "cross_batch" in group.risk_flags
+        ):
+            reasons.append("cross_batch")
+        if self.config.review_repaired_groups and group.was_repaired:
+            reasons.append("repaired_group")
+        workstreams = {
+            "".join(item.event.workstream_name.casefold().split())
+            for item in source_events
+            if item.event.workstream_name.strip()
+        }
+        if self.config.review_workstream_conflicts and len(workstreams) > 1:
+            reasons.append("workstream_conflict")
+        return reasons
+
+    def _review_collected_group_with_batching(
+        self,
+        target_date: str,
+        source_events: list[CollectedSourceEvent],
+        candidate_group: CollectedGroupingGroup,
+        *,
+        reasons: list[str],
+        depth: int,
+    ) -> tuple[CollectedGroupingResult, list[str]]:
+        prompt_tokens = _estimate_prepared_model_prompt_tokens(
+            build_collected_review_prompt(
+                target_date,
+                source_events,
+                candidate_group,
+                config=self.config,
+                review_reasons=reasons,
+            )
+        )
+        if prompt_tokens <= self.config.max_model_input_tokens:
+            return self._invoke_collected_review_with_retry(
+                target_date,
+                source_events,
+                candidate_group,
+                reasons=reasons,
+            )
+
+        batches = self._pack_collected_review_batches(
+            target_date,
+            source_events,
+            candidate_group,
+            reasons=reasons,
+        )
+        if len(batches) <= 1:
+            if len(source_events) != 1:
+                raise ValueError(
+                    "Collected review prompt exceeds max_model_input_tokens and "
+                    "cannot be split further: "
+                    f"estimated_tokens={prompt_tokens} "
+                    f"limit={self.config.max_model_input_tokens} "
+                    f"group={candidate_group.group_id}"
+                )
+            rendered, render_warnings = self._render_oversized_locked_group(
+                target_date,
+                source_events,
+                CollectedGroupingGroup(
+                    group_id=f"{candidate_group.group_id}-review-summary",
+                    draft_ids=[source_events[0].draft_id],
+                ),
+                depth=depth,
+            )
+            original = source_events[0]
+            summarized_event = replace(
+                original,
+                event=replace(
+                    original.event,
+                    title=rendered.title,
+                    content=rendered.content,
+                    object_hint=rendered.object_hint,
+                    retention_reason=rendered.retention_reason,
+                    retention_detail=rendered.retention_detail,
+                ),
+                prompt_original_content_chars=len(clean_text(original.event.content)),
+            )
+            self._collected_quality_counters["shortened_prompt_count"] += 1
+            reviewed, review_warnings = self._invoke_collected_review_with_retry(
+                target_date,
+                [summarized_event],
+                candidate_group,
+                reasons=reasons,
+            )
+            return reviewed, [
+                "Used hierarchical content summary for oversized high-risk review: "
+                f"group={candidate_group.group_id}.",
+                *render_warnings,
+                *review_warnings,
+            ]
+
+        self._collected_quality_counters["shortened_prompt_count"] += 1
+        warnings = [
+            "Using relation-priority high-risk review batches: "
+            f"group={candidate_group.group_id} depth={depth + 1} "
+            f"batches={len(batches)} input_limit_tokens="
+            f"{self.config.max_model_input_tokens}."
+        ]
+        partial_groups: list[CollectedGroupingGroup] = []
+        for batch_index, batch_events in enumerate(batches, start=1):
+            batch_group = replace(
+                candidate_group,
+                group_id=f"{candidate_group.group_id}-batch-{batch_index}",
+                draft_ids=[item.draft_id for item in batch_events],
+            )
+            reviewed, batch_warnings = self._review_collected_group_with_batching(
+                target_date,
+                batch_events,
+                batch_group,
+                reasons=reasons,
+                depth=depth + 1,
+            )
+            partial_groups.extend(reviewed.groups)
+            warnings.extend(batch_warnings)
+
+        if depth >= 3:
+            warnings.append(
+                "Stopped high-risk review reconciliation after 3 levels; "
+                "reviewed batch groups were kept separate."
+            )
+            return CollectedGroupingResult(groups=partial_groups), warnings
+
+        summary_events, original_ids_by_summary = build_grouping_summary_events(
+            target_date,
+            source_events,
+            partial_groups,
+            depth=depth + 1,
+        )
+        summary_group = CollectedGroupingGroup(
+            group_id=f"{candidate_group.group_id}-reconciliation-{depth + 1}",
+            draft_ids=[item.draft_id for item in summary_events],
+            risk_flags=["cross_batch"],
+        )
+        reconciled, reconciliation_warnings = (
+            self._review_collected_group_with_batching(
+                target_date,
+                summary_events,
+                summary_group,
+                reasons=_dedupe([*reasons, "cross_batch"]),
+                depth=depth + 1,
+            )
+        )
+        warnings.extend(reconciliation_warnings)
+        expanded_groups = [
+            replace(
+                group,
+                group_id=f"{candidate_group.group_id}-review-{index}",
+                draft_ids=_dedupe(
+                    [
+                        original_id
+                        for summary_id in group.draft_ids
+                        for original_id in original_ids_by_summary.get(summary_id, [])
+                    ]
+                ),
+                risk_flags=_dedupe([*group.risk_flags, "cross_batch"]),
+            )
+            for index, group in enumerate(reconciled.groups, start=1)
+        ]
+        expanded = CollectedGroupingResult(groups=expanded_groups)
+        partition_error = collected_grouping_partition_error(
+            expanded,
+            candidate_group.draft_ids,
+        )
+        if partition_error:
+            raise AnalyzerProtocolError(
+                "High-risk review reconciliation did not preserve source coverage: "
+                f"group={candidate_group.group_id} {partition_error}"
+            )
+        return expanded, warnings
+
+    def _pack_collected_review_batches(
+        self,
+        target_date: str,
+        source_events: list[CollectedSourceEvent],
+        candidate_group: CollectedGroupingGroup,
+        *,
+        reasons: list[str],
+    ) -> list[list[CollectedSourceEvent]]:
+        input_limit = self.config.max_model_input_tokens
+
+        def prompt_tokens(events: list[CollectedSourceEvent]) -> int:
+            batch_group = replace(
+                candidate_group,
+                draft_ids=[item.draft_id for item in events],
+            )
+            return _estimate_prepared_model_prompt_tokens(
+                build_collected_review_prompt(
+                    target_date,
+                    events,
+                    batch_group,
+                    config=self.config,
+                    review_reasons=reasons,
+                )
+            )
+
+        components = build_collected_relation_components(source_events, [])
+        batches: list[list[CollectedSourceEvent]] = []
+        current: list[CollectedSourceEvent] = []
+        for component in components:
+            units = (
+                [component]
+                if prompt_tokens(component) <= input_limit
+                else [[item] for item in component]
+            )
+            for unit in units:
+                candidate = [*current, *unit]
+                if current and prompt_tokens(candidate) > input_limit:
+                    batches.append(current)
+                    current = []
+                current.extend(unit)
+        if current:
+            batches.append(current)
+        return batches or [list(source_events)]
+
+    def _invoke_collected_review_with_retry(
+        self,
+        target_date: str,
+        source_events: list[CollectedSourceEvent],
+        candidate_group: CollectedGroupingGroup,
+        *,
+        reasons: list[str],
+    ) -> tuple[CollectedGroupingResult, list[str]]:
+        fitted_events, fit_warnings = self._fit_collected_review_events_to_limit(
+            target_date,
+            source_events,
+            candidate_group,
+            reasons=reasons,
+        )
+        warnings = list(fit_warnings)
+        retryable_error_count = 0
+        invalid_result_count = 0
+        attempt_index = 0
+        retry_reason = "initial"
+        while True:
+            attempt_index += 1
+            prompt = build_collected_review_prompt(
+                target_date,
+                fitted_events,
+                candidate_group,
+                config=self.config,
+                review_reasons=reasons,
+            )
+            prompt_tokens = _estimate_prepared_model_prompt_tokens(prompt)
+            if prompt_tokens > self.config.max_model_input_tokens:
+                raise ValueError(
+                    "Collected review prompt exceeds max_model_input_tokens: "
+                    f"estimated_tokens={prompt_tokens} "
+                    f"limit={self.config.max_model_input_tokens}"
+                )
+            trace_step_index = self._start_collected_merge_trace_attempt(
+                target_date=target_date,
+                source_events=fitted_events,
+                deterministic_groups=[list(candidate_group.draft_ids)],
+                rolling_step_index=1,
+                attempt_index=attempt_index,
+                retry_reason=retry_reason,
+                stage="high_risk_review",
+                prompt_override=prompt,
+                extra_trace={
+                    "candidate_group": candidate_group.to_dict(),
+                    "review_reasons": list(reasons),
+                },
+            )
+            try:
+                result = self.analyzer.review_collected_group(
+                    target_date,
+                    fitted_events,
+                    candidate_group,
+                    review_reasons=reasons,
+                )
+            except RetryableAnalyzerProtocolError as exc:
+                self._record_collected_merge_trace_failure(
+                    step_index=trace_step_index,
+                    error=exc,
+                    retryable=True,
+                )
+                if (
+                    retryable_error_count
+                    >= self.config.collected_merge_retryable_error_limit
+                ):
+                    raise
+                retryable_error_count += 1
+                warning = (
+                    "Retrying high-risk collected group review after retryable "
+                    f"analyzer error: group={candidate_group.group_id} "
+                    f"attempt={attempt_index} error={exc}"
+                )
+                warnings.append(warning)
+                self._collected_merge_failure_warnings.append(warning)
+                self.sleep_func(self.config.collected_merge_retry_delay_seconds)
+                retry_reason = "retryable_error"
+                continue
+            except (AnalyzerProtocolError, ValueError) as exc:
+                self._record_collected_merge_trace_failure(
+                    step_index=trace_step_index,
+                    error=exc,
+                    retryable=False,
+                )
+                raise
+
+            partition_error = collected_grouping_partition_error(
+                result,
+                candidate_group.draft_ids,
+            )
+            self._record_collected_grouping_trace_success(
+                step_index=trace_step_index,
+                grouping_result=result,
+                source_coverage_error=partition_error,
+            )
+            if not partition_error:
+                repaired, repair_warnings = repair_collected_grouping_result(
+                    result,
+                    source_events,
+                    [],
+                )
+                return repaired, [*warnings, *repair_warnings]
+            if (
+                invalid_result_count
+                >= self.config.collected_merge_missing_field_retry_limit
+            ):
+                raise AnalyzerProtocolError(
+                    "High-risk collected group review did not preserve source "
+                    f"coverage: group={candidate_group.group_id} {partition_error}"
+                )
+            invalid_result_count += 1
+            warning = (
+                "Retrying high-risk collected group review because source coverage "
+                f"was invalid: group={candidate_group.group_id} {partition_error}"
+            )
+            warnings.append(warning)
+            self._collected_merge_failure_warnings.append(warning)
+            retry_reason = "invalid_source_coverage"
+
+    def _fit_collected_review_events_to_limit(
+        self,
+        target_date: str,
+        source_events: list[CollectedSourceEvent],
+        candidate_group: CollectedGroupingGroup,
+        *,
+        reasons: list[str],
+    ) -> tuple[list[CollectedSourceEvent], list[str]]:
+        input_limit = self.config.max_model_input_tokens
+
+        def estimate(events: list[CollectedSourceEvent]) -> int:
+            return _estimate_prepared_model_prompt_tokens(
+                build_collected_review_prompt(
+                    target_date,
+                    events,
+                    candidate_group,
+                    config=self.config,
+                    review_reasons=reasons,
+                )
+            )
+
+        full_tokens = estimate(source_events)
+        if full_tokens <= input_limit:
+            return source_events, []
+        empty_events = [
+            replace(
+                item,
+                event=replace(item.event, content=""),
+                prompt_original_content_chars=len(clean_text(item.event.content)),
+            )
+            for item in source_events
+        ]
+        fixed_tokens = estimate(empty_events)
+        if fixed_tokens > input_limit:
+            raise ValueError(
+                "Collected review fixed fields exceed max_model_input_tokens: "
+                f"estimated_tokens={fixed_tokens} limit={input_limit} "
+                f"group={candidate_group.group_id}"
+            )
+        source_totals: dict[str, int] = defaultdict(int)
+        for item in source_events:
+            source_totals[item.source_file or item.person_name or item.draft_id] += len(
+                clean_text(item.event.content)
+            )
+        low = 0
+        high = max(source_totals.values(), default=0)
+        best_events = empty_events
+        best_tokens = fixed_tokens
+        while low <= high:
+            quota = (low + high) // 2
+            candidate = _apply_balanced_source_content_quota(
+                source_events,
+                per_source_char_quota=quota,
+            )
+            candidate_tokens = estimate(candidate)
+            if candidate_tokens <= input_limit:
+                best_events = candidate
+                best_tokens = candidate_tokens
+                low = quota + 1
+            else:
+                high = quota - 1
+        self._collected_quality_counters["shortened_prompt_count"] += 1
+        return best_events, [
+            "Used balanced high-risk review content to fit model input: "
+            f"group={candidate_group.group_id} estimated_tokens={best_tokens} "
+            f"limit={input_limit}."
         ]
 
     def _render_collected_multi_groups(
@@ -654,11 +1177,18 @@ class CollectedMergeRunner:
             )
             rendered = result.groups[0]
             return (
-                replace(rendered, draft_ids=list(group.draft_ids)),
+                replace(
+                    rendered,
+                    draft_ids=list(group.draft_ids),
+                    covered_draft_ids=list(group.draft_ids),
+                    fact_items=list(rendered.fact_items),
+                ),
                 [*retry_warnings, *repair_warnings],
             )
 
+        self._collected_quality_counters["shortened_prompt_count"] += 1
         expanded_events: list[CollectedSourceEvent] = []
+        original_id_by_expanded_id: dict[str, str] = {}
         split_warnings: list[str] = []
         for item in source_events:
             single_tokens = self._estimate_collected_render_prompt_tokens(
@@ -668,6 +1198,7 @@ class CollectedMergeRunner:
             )
             if single_tokens <= input_limit_tokens:
                 expanded_events.append(item)
+                original_id_by_expanded_id[item.draft_id] = item.draft_id
                 continue
             shards = self._split_collected_source_event_for_render(
                 target_date,
@@ -675,6 +1206,9 @@ class CollectedMergeRunner:
                 depth=depth,
             )
             expanded_events.extend(shards)
+            original_id_by_expanded_id.update(
+                {shard.draft_id: item.draft_id for shard in shards}
+            )
             split_warnings.append(
                 "Split oversized collected source event content: "
                 f"draft_id={item.draft_id} shards={len(shards)} "
@@ -705,6 +1239,7 @@ class CollectedMergeRunner:
             chunks.append(current)
 
         summary_events: list[CollectedSourceEvent] = []
+        original_ids_by_summary_id: dict[str, list[str]] = {}
         warnings = [
             *split_warnings,
             "Using hierarchical collected content rendering: "
@@ -725,6 +1260,12 @@ class CollectedMergeRunner:
             )
             event = self._materialize_events(target_date, chunk, result)[0]
             summary_id = f"__content_summary_{depth}_{chunk_index}"
+            original_ids_by_summary_id[summary_id] = _dedupe(
+                [
+                    original_id_by_expanded_id.get(item.draft_id, item.draft_id)
+                    for item in chunk
+                ]
+            )
             summary_events.append(
                 CollectedSourceEvent(
                     draft_id=summary_id,
@@ -765,7 +1306,30 @@ class CollectedMergeRunner:
             depth=depth + 1,
         )
         warnings.extend(recursive_warnings)
-        return replace(rendered, draft_ids=list(group.draft_ids)), warnings
+        return (
+            replace(
+                rendered,
+                draft_ids=list(group.draft_ids),
+                covered_draft_ids=list(group.draft_ids),
+                fact_items=[
+                    replace(
+                        fact,
+                        source_draft_ids=_dedupe(
+                            [
+                                original_id
+                                for summary_id in fact.source_draft_ids
+                                for original_id in original_ids_by_summary_id.get(
+                                    summary_id,
+                                    [],
+                                )
+                            ]
+                        ),
+                    )
+                    for fact in rendered.fact_items
+                ],
+            ),
+            warnings,
+        )
 
     def _split_collected_source_event_for_render(
         self,
@@ -1155,6 +1719,12 @@ class CollectedMergeRunner:
             depth=depth + 1,
         )
         warnings.extend(reconciliation_warnings)
+        repaired_original_ids = {
+            draft_id
+            for partial_group in partial_groups
+            if partial_group.was_repaired
+            for draft_id in partial_group.draft_ids
+        }
         expanded_groups = [
             CollectedGroupingGroup(
                 group_id=f"reconciled-{index}",
@@ -1167,6 +1737,23 @@ class CollectedMergeRunner:
                             [],
                         )
                     ]
+                ),
+                summary_title=group.summary_title,
+                summary_content=group.summary_content,
+                summary_object_hint=group.summary_object_hint,
+                summary_source=group.summary_source,
+                group_reason=list(group.group_reason),
+                risk_flags=_dedupe([*group.risk_flags, "cross_batch"]),
+                was_repaired=(
+                    group.was_repaired
+                    or any(
+                        original_id in repaired_original_ids
+                        for synthetic_id in group.draft_ids
+                        for original_id in source_ids_by_synthetic.get(
+                            synthetic_id,
+                            [],
+                        )
+                    )
                 ),
             )
             for index, group in enumerate(reconciled.groups, start=1)
@@ -1341,6 +1928,7 @@ class CollectedMergeRunner:
             f"estimated_tokens={best_tokens} limit={input_limit_tokens} "
             f"shortened_sources={shortened_sources}."
         )
+        self._collected_quality_counters["shortened_prompt_count"] += 1
         return best_events, [warning]
 
     def _invoke_collected_grouping_once(
@@ -1481,11 +2069,43 @@ class CollectedMergeRunner:
                 )
                 raise
             missing_summary = collected_merge_missing_field_summary(merge_result)
+            coverage_error = "; ".join(
+                value
+                for value in (
+                    collected_merge_partition_error(
+                        merge_result,
+                        [item.draft_id for item in source_events],
+                        locked_groups=deterministic_groups,
+                    ),
+                    collected_merge_coverage_error(merge_result),
+                )
+                if value
+            )
             self._record_collected_merge_trace_success(
                 step_index=trace_step_index,
                 merge_result=merge_result,
                 missing_summary=missing_summary,
+                coverage_error=coverage_error,
             )
+            if coverage_error:
+                if (
+                    missing_field_retry_count
+                    >= self.config.collected_merge_missing_field_retry_limit
+                ):
+                    raise AnalyzerProtocolError(
+                        "Collected content did not preserve source coverage: "
+                        f"{coverage_error}"
+                    )
+                missing_field_retry_count += 1
+                self._collected_quality_counters["content_retry_count"] += 1
+                warning = (
+                    "Retrying collected content because source coverage was "
+                    f"invalid: {coverage_error}"
+                )
+                warnings.append(warning)
+                self._collected_merge_failure_warnings.append(warning)
+                retry_reason = "invalid_source_coverage"
+                continue
             if not self._should_retry_collected_merge_missing_fields(
                 merge_result,
                 missing_summary,
@@ -1495,8 +2115,14 @@ class CollectedMergeRunner:
                 missing_field_retry_count
                 >= self.config.collected_merge_missing_field_retry_limit
             ):
+                if missing_summary.get("content", 0):
+                    raise AnalyzerProtocolError(
+                        "Collected content remained empty after retry: "
+                        f"{format_collected_merge_missing_field_summary(missing_summary)}"
+                    )
                 return merge_result, warnings
             missing_field_retry_count += 1
+            self._collected_quality_counters["content_retry_count"] += 1
             warning = (
                 "Retrying collected merge because required fields were missing: "
                 f"{format_collected_merge_missing_field_summary(missing_summary)}"
@@ -1548,11 +2174,6 @@ class CollectedMergeRunner:
             )
             conflict_detail = clean_text(group.conflict_detail)
             if not merge_owner_conflict:
-                integrated_content = merge_content_texts(
-                    [content, *(item.event.content for item in items)]
-                )
-                if integrated_content != content:
-                    content = integrated_content
                 conflict_detail = ""
             elif not conflict_detail:
                 conflict_detail = "不同来源存在明确事实冲突，已采用合并人来源。"
@@ -1602,6 +2223,12 @@ class CollectedMergeRunner:
                     retention_detail=retention_detail,
                     merge_owner_conflict=merge_owner_conflict,
                     conflict_detail=conflict_detail,
+                    covered_draft_ids=(
+                        None
+                        if group.covered_draft_ids is None
+                        else list(group.covered_draft_ids)
+                    ),
+                    fact_items=list(group.fact_items),
                 )
             )
             if merge_owner_conflict:
@@ -1736,6 +2363,7 @@ class CollectedMergeRunner:
                 path.name,
                 target_date=target_date,
             )
+            parsed_filename = parse_worktrace_markdown_filename(path.name)
             if not person_name:
                 skipped_file_count += 1
                 warnings.append(f"Skipped invalid source filename: {path.name}")
@@ -1832,6 +2460,9 @@ class CollectedMergeRunner:
                         person_name=person_name,
                         source_file=path.name,
                         event=event,
+                        source_report_owner=(
+                            person_name if parsed_filename.is_merged else ""
+                        ),
                     )
                 )
 
@@ -1992,13 +2623,7 @@ class CollectedMergeRunner:
         ]
         if any(event.is_merge_owner_source for event in marked_events):
             return marked_events, []
-
-        warning = (
-            "No merge-owner personal event markdown matched current user "
-            f"'{owner_name}' in directory: {input_dir.resolve()}; "
-            "falling back to standard collected merge."
-        )
-        return marked_events, [warning]
+        return marked_events, []
 
     def _materialize_events(
         self,
@@ -2033,6 +2658,17 @@ class CollectedMergeRunner:
                     for source_event_id in (
                         item.event.source_event_ids or [item.event.event_id]
                     )
+                ]
+            )
+            source_report_owners = _dedupe(
+                [
+                    owner
+                    for item in items
+                    for owner in [
+                        *item.event.source_report_owners,
+                        item.source_report_owner,
+                    ]
+                    if owner
                 ]
             )
             file_links = _merge_file_links(items)
@@ -2103,6 +2739,7 @@ class CollectedMergeRunner:
                     file_links=file_links,
                     source_people=source_people,
                     source_event_ids=source_event_ids,
+                    source_report_owners=source_report_owners,
                     object_hint=group.object_hint,
                     retention_reason=group.retention_reason,
                     retention_detail=group.retention_detail,
@@ -2191,11 +2828,13 @@ class CollectedMergeRunner:
         attempt_index: int,
         retry_reason: str,
         stage: str = "content_merge",
+        prompt_override: str | None = None,
+        extra_trace: dict[str, Any] | None = None,
     ) -> int:
         if self._collected_merge_trace_dir is None:
             return 0
         self._collected_merge_trace_call_index += 1
-        prompt = (
+        prompt = prompt_override or (
             build_collected_grouping_prompt(
                 target_date,
                 source_events,
@@ -2252,6 +2891,8 @@ class CollectedMergeRunner:
                 if item.candidate_summary_source
             ],
         }
+        if extra_trace:
+            step.update(extra_trace)
         self._collected_merge_trace_steps.append(step)
         self._write_collected_merge_trace_step(step)
         (self._collected_merge_trace_dir / step["prompt_file"]).write_text(
@@ -2265,6 +2906,7 @@ class CollectedMergeRunner:
         *,
         step_index: int,
         grouping_result: CollectedGroupingResult,
+        source_coverage_error: str = "",
     ) -> None:
         step = self._collected_merge_trace_step(step_index)
         if step is None:
@@ -2274,6 +2916,7 @@ class CollectedMergeRunner:
                 "status": "success",
                 "raw_group_count": len(grouping_result.groups),
                 "raw_result": grouping_result.to_dict(),
+                "source_coverage_error": source_coverage_error,
             }
         )
         self._write_collected_merge_trace_step(step)
@@ -2284,6 +2927,7 @@ class CollectedMergeRunner:
         step_index: int,
         merge_result: CollectedMergeResult,
         missing_summary: dict[str, int],
+        coverage_error: str = "",
     ) -> None:
         step = self._collected_merge_trace_step(step_index)
         if step is None:
@@ -2294,6 +2938,7 @@ class CollectedMergeRunner:
                 "raw_group_count": len(merge_result.groups),
                 "raw_group_metrics": collected_merge_group_metrics(merge_result),
                 "missing_required_field_summary": missing_summary,
+                "source_coverage_error": coverage_error,
                 "raw_result": merge_result.to_dict(),
             }
         )
@@ -2431,6 +3076,7 @@ class CollectedMergeRunner:
         skipped_file_count: int,
         partial_file_count: int,
         warning_messages: list[str],
+        quality_summary: CollectedMergeQualitySummary,
     ) -> None:
         if self._collected_merge_trace_dir is None:
             return
@@ -2444,6 +3090,7 @@ class CollectedMergeRunner:
             "merged_event_count": merged_event_count,
             "skipped_file_count": skipped_file_count,
             "partial_file_count": partial_file_count,
+            "quality_summary": quality_summary.to_dict(),
             "source_files": self._collected_merge_source_audit,
             "filter_diagnostics": self._collected_merge_filter_diagnostics,
             "failed_step_indexes": [
@@ -2572,6 +3219,78 @@ def collected_merge_missing_field_summary(
     return summary
 
 
+def collected_merge_coverage_error(merge_result: CollectedMergeResult) -> str:
+    errors: list[str] = []
+    for group in merge_result.groups:
+        if group.covered_draft_ids is None:
+            continue
+        expected = set(group.draft_ids)
+        covered = set(group.covered_draft_ids)
+        if covered != expected or len(group.covered_draft_ids) != len(covered):
+            errors.append(
+                f"group={group.group_id} covered_draft_ids_mismatch"
+            )
+            continue
+        if not group.fact_items:
+            errors.append(f"group={group.group_id} fact_items_empty")
+            continue
+        fact_sources: set[str] = set()
+        invalid_fact = False
+        for fact in group.fact_items:
+            sources = set(fact.source_draft_ids)
+            if not clean_text(fact.text) or not sources or not sources.issubset(expected):
+                invalid_fact = True
+                break
+            fact_sources.update(sources)
+        if invalid_fact:
+            errors.append(f"group={group.group_id} fact_item_invalid")
+        elif fact_sources != expected:
+            errors.append(f"group={group.group_id} fact_source_coverage_mismatch")
+    return "; ".join(errors)
+
+
+def collected_merge_partition_error(
+    merge_result: CollectedMergeResult,
+    expected_draft_ids: list[str],
+    *,
+    locked_groups: list[list[str]],
+) -> str:
+    expected = set(expected_draft_ids)
+    flattened = [
+        draft_id
+        for group in merge_result.groups
+        for draft_id in group.draft_ids
+    ]
+    counts = Counter(flattened)
+    details: list[str] = []
+    missing = sorted(expected.difference(counts))
+    unknown = sorted(set(counts).difference(expected))
+    duplicates = sorted(
+        draft_id for draft_id, count in counts.items() if count > 1
+    )
+    if missing:
+        details.append(f"missing_draft_ids={missing}")
+    if unknown:
+        details.append(f"unknown_draft_ids={unknown}")
+    if duplicates:
+        details.append(f"duplicate_draft_ids={duplicates}")
+
+    locked_ids = {
+        draft_id for group in locked_groups for draft_id in group
+    }
+    if locked_groups and locked_ids == expected:
+        expected_groups = Counter(
+            frozenset(group) for group in locked_groups if group
+        )
+        actual_groups = Counter(
+            frozenset(group.draft_ids) for group in merge_result.groups
+            if group.draft_ids
+        )
+        if actual_groups != expected_groups:
+            details.append("locked_groups_changed")
+    return "; ".join(details)
+
+
 def format_collected_merge_missing_field_summary(summary: dict[str, int]) -> str:
     return ", ".join(
         f"{field}={count}"
@@ -2691,6 +3410,158 @@ def collected_merge_source_ids_from_work_events(events: list[WorkEvent]) -> set[
     return {value for value in values if clean_text(value)}
 
 
+def build_collected_quality_summary(
+    parsed_source_events: list[CollectedSourceEvent],
+    filtered_source_events: list[CollectedSourceEvent],
+    output_events: list[WorkEvent],
+    *,
+    counters: Counter[str] | None = None,
+) -> CollectedMergeQualitySummary:
+    counters = counters or Counter()
+    source_id_sets = [
+        {
+            value
+            for value in (
+                item.event.source_event_ids or [item.event.event_id]
+            )
+            if clean_text(value)
+        }
+        for item in filtered_source_events
+    ]
+    output_id_sets = [
+        {
+            value
+            for value in (event.source_event_ids or [event.event_id])
+            if clean_text(value)
+        }
+        for event in output_events
+    ]
+    source_counts_per_output = [
+        sum(
+            1
+            for source_ids in source_id_sets
+            if source_ids and source_ids.issubset(output_ids)
+        )
+        for output_ids in output_id_sets
+    ]
+    covered_source_count = sum(
+        1
+        for source_ids in source_id_sets
+        if source_ids
+        and any(source_ids.issubset(output_ids) for output_ids in output_id_sets)
+    )
+    input_content_chars = sum(
+        len(clean_text(item.event.content)) for item in parsed_source_events
+    )
+    output_content_chars = sum(
+        len(clean_text(event.content)) for event in output_events
+    )
+    source_report_owners = {
+        owner.strip()
+        for item in filtered_source_events
+        for owner in [
+            *item.event.source_report_owners,
+            item.source_report_owner,
+        ]
+        if owner.strip()
+    }
+    input_event_count = len(parsed_source_events)
+    filtered_event_count = len(filtered_source_events)
+    return CollectedMergeQualitySummary(
+        input_event_count=input_event_count,
+        filtered_event_count=filtered_event_count,
+        output_event_count=len(output_events),
+        multi_source_group_count=sum(
+            count > 1 for count in source_counts_per_output
+        ),
+        singleton_group_count=sum(
+            count == 1 for count in source_counts_per_output
+        ),
+        max_source_events_per_group=max(source_counts_per_output, default=0),
+        input_content_chars=input_content_chars,
+        output_content_chars=output_content_chars,
+        event_count_output_input_ratio=_quality_ratio(
+            len(output_events),
+            input_event_count,
+        ),
+        content_chars_output_input_ratio=_quality_ratio(
+            output_content_chars,
+            input_content_chars,
+        ),
+        source_event_coverage_ratio=_quality_ratio(
+            covered_source_count,
+            filtered_event_count,
+        ),
+        source_report_owner_count=len(source_report_owners),
+        high_risk_group_count=int(counters["high_risk_group_count"]),
+        reviewed_group_count=int(counters["reviewed_group_count"]),
+        review_split_group_count=int(counters["review_split_group_count"]),
+        content_retry_count=int(counters["content_retry_count"]),
+        shortened_prompt_count=int(counters["shortened_prompt_count"]),
+        review_required=bool(counters["review_required"]),
+    )
+
+
+def aggregate_collected_quality_summaries(
+    summaries: list[CollectedMergeQualitySummary],
+) -> CollectedMergeQualitySummary:
+    if not summaries:
+        return CollectedMergeQualitySummary()
+    input_event_count = sum(item.input_event_count for item in summaries)
+    filtered_event_count = sum(item.filtered_event_count for item in summaries)
+    output_event_count = sum(item.output_event_count for item in summaries)
+    input_content_chars = sum(item.input_content_chars for item in summaries)
+    output_content_chars = sum(item.output_content_chars for item in summaries)
+    covered_source_count = sum(
+        item.source_event_coverage_ratio * item.filtered_event_count
+        for item in summaries
+    )
+    return CollectedMergeQualitySummary(
+        input_event_count=input_event_count,
+        filtered_event_count=filtered_event_count,
+        output_event_count=output_event_count,
+        multi_source_group_count=sum(
+            item.multi_source_group_count for item in summaries
+        ),
+        singleton_group_count=sum(item.singleton_group_count for item in summaries),
+        max_source_events_per_group=max(
+            (item.max_source_events_per_group for item in summaries),
+            default=0,
+        ),
+        input_content_chars=input_content_chars,
+        output_content_chars=output_content_chars,
+        event_count_output_input_ratio=_quality_ratio(
+            output_event_count,
+            input_event_count,
+        ),
+        content_chars_output_input_ratio=_quality_ratio(
+            output_content_chars,
+            input_content_chars,
+        ),
+        source_event_coverage_ratio=_quality_ratio(
+            covered_source_count,
+            filtered_event_count,
+        ),
+        source_report_owner_count=sum(
+            item.source_report_owner_count for item in summaries
+        ),
+        high_risk_group_count=sum(item.high_risk_group_count for item in summaries),
+        reviewed_group_count=sum(item.reviewed_group_count for item in summaries),
+        review_split_group_count=sum(
+            item.review_split_group_count for item in summaries
+        ),
+        content_retry_count=sum(item.content_retry_count for item in summaries),
+        shortened_prompt_count=sum(item.shortened_prompt_count for item in summaries),
+        review_required=any(item.review_required for item in summaries),
+    )
+
+
+def _quality_ratio(numerator: int | float, denominator: int) -> float:
+    if denominator <= 0:
+        return 0.0
+    return round(float(numerator) / denominator, 4)
+
+
 def collected_merge_text_metrics(rows: list[dict[str, str]]) -> dict[str, Any]:
     result: dict[str, Any] = {}
     for field in ("title", "content", "object_hint", "retention_detail"):
@@ -2703,6 +3574,7 @@ def collected_merge_text_metrics(rows: list[dict[str, str]]) -> dict[str, Any]:
 
 
 def render_collected_merge_trace_summary(summary: dict[str, Any]) -> str:
+    quality = summary.get("quality_summary", {})
     lines = [
         f"# Collected Merge Trace · {summary['target_date']}",
         "",
@@ -2715,6 +3587,29 @@ def render_collected_merge_trace_summary(summary: dict[str, Any]) -> str:
         f"- Source events: {summary['source_event_count']}",
         f"- Merged events: {summary['merged_event_count']}",
         f"- Output: `{summary['output_path']}`",
+        "",
+        "## Quality Summary",
+        "",
+        "| Metric | Value |",
+        "|---|---:|",
+        f"| Input events | {quality.get('input_event_count', 0)} |",
+        f"| Events after filters | {quality.get('filtered_event_count', 0)} |",
+        f"| Output events | {quality.get('output_event_count', 0)} |",
+        f"| Multi-source groups | {quality.get('multi_source_group_count', 0)} |",
+        f"| Singleton groups | {quality.get('singleton_group_count', 0)} |",
+        f"| Max source events per group | {quality.get('max_source_events_per_group', 0)} |",
+        f"| Input content chars | {quality.get('input_content_chars', 0)} |",
+        f"| Output content chars | {quality.get('output_content_chars', 0)} |",
+        f"| Event output/input ratio | {quality.get('event_count_output_input_ratio', 0)} |",
+        f"| Content output/input ratio | {quality.get('content_chars_output_input_ratio', 0)} |",
+        f"| Source event coverage ratio | {quality.get('source_event_coverage_ratio', 0)} |",
+        f"| Source report owners | {quality.get('source_report_owner_count', 0)} |",
+        f"| High-risk groups | {quality.get('high_risk_group_count', 0)} |",
+        f"| Reviewed groups | {quality.get('reviewed_group_count', 0)} |",
+        f"| Review-split groups | {quality.get('review_split_group_count', 0)} |",
+        f"| Content retries | {quality.get('content_retry_count', 0)} |",
+        f"| Shortened prompts | {quality.get('shortened_prompt_count', 0)} |",
+        f"| Review required | {str(bool(quality.get('review_required', False))).lower()} |",
         "",
         "## Step Metrics",
         "",
@@ -2983,6 +3878,17 @@ def build_grouping_summary_events(
                             )
                         ]
                     ),
+                    source_report_owners=_dedupe(
+                        [
+                            owner
+                            for item in items
+                            for owner in [
+                                *item.event.source_report_owners,
+                                item.source_report_owner,
+                            ]
+                            if owner
+                        ]
+                    ),
                     object_hint=summary_object_hint,
                     retention_reason=choose_preferred_text(
                         [item.event.retention_reason for item in items]
@@ -3243,6 +4149,7 @@ def repair_collected_merge_result(
     changed_locked: list[str] = []
 
     for group in merge_result.groups:
+        original_draft_ids = list(group.draft_ids)
         normalized_ids: list[str] = []
         for draft_id in group.draft_ids:
             if draft_id not in expected_set:
@@ -3263,6 +4170,10 @@ def repair_collected_merge_result(
             normalized_ids = list(expected_locked_group)
         for draft_id in normalized_ids:
             seen.add(draft_id)
+        membership_unchanged = bool(
+            len(normalized_ids) == len(original_draft_ids)
+            and set(normalized_ids) == set(original_draft_ids)
+        )
         groups.append(
             CollectedMergeGroup(
                 group_id=group.group_id,
@@ -3274,6 +4185,13 @@ def repair_collected_merge_result(
                 retention_detail=group.retention_detail,
                 merge_owner_conflict=group.merge_owner_conflict,
                 conflict_detail=group.conflict_detail,
+                covered_draft_ids=(
+                    None
+                    if not membership_unchanged
+                    or group.covered_draft_ids is None
+                    else list(group.covered_draft_ids)
+                ),
+                fact_items=(list(group.fact_items) if membership_unchanged else []),
             )
         )
 
@@ -3367,6 +4285,10 @@ def repair_collected_grouping_result(
                     original,
                     draft_ids=list(group.draft_ids),
                     summary_source=summary_source,
+                    was_repaired=(
+                        original.was_repaired
+                        or (not is_singleton and not has_model_summary)
+                    ),
                 )
             )
             continue
@@ -3389,6 +4311,7 @@ def repair_collected_grouping_result(
                     if len(group.draft_ids) == 1
                     else "balanced_fallback"
                 ),
+                was_repaired=True,
             )
         )
 
@@ -3403,6 +4326,32 @@ def repair_collected_grouping_result(
             + ", ".join(missing_summary_groups)
         )
     return CollectedGroupingResult(groups=repaired_groups), warnings
+
+
+def collected_grouping_partition_error(
+    grouping_result: CollectedGroupingResult,
+    expected_draft_ids: list[str],
+) -> str:
+    expected = set(expected_draft_ids)
+    flattened = [
+        draft_id
+        for group in grouping_result.groups
+        for draft_id in group.draft_ids
+    ]
+    counts = Counter(flattened)
+    missing = sorted(expected.difference(counts))
+    unknown = sorted(set(counts).difference(expected))
+    duplicates = sorted(
+        draft_id for draft_id, count in counts.items() if count > 1
+    )
+    details: list[str] = []
+    if missing:
+        details.append(f"missing={missing}")
+    if unknown:
+        details.append(f"unknown={unknown}")
+    if duplicates:
+        details.append(f"duplicates={duplicates}")
+    return "; ".join(details)
 
 
 def _build_singleton_collected_group(

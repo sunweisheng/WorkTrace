@@ -37,6 +37,7 @@ DEFAULT_REACTION_CATALOGS_ROOT = Path("config") / "reaction_catalogs"
 DEFAULT_CONVERSATION_BLACKLIST_FILE_NAME = "config/conversation_blacklist.json"
 DEFAULT_CONVERSATION_WINDOW_FILE_NAME = "config/conversation_window.json"
 DEFAULT_LLM_RETRY_FILE_NAME = "config/llm_retry.json"
+DEFAULT_COLLECTED_MERGE_FILE_NAME = "config/collected_merge.json"
 
 
 @dataclass(frozen=True)
@@ -237,12 +238,7 @@ def load_runtime_config_overrides(
     try:
         payload = json.loads(rules_path.read_text(encoding="utf-8"))
     except FileNotFoundError:
-        return _load_llm_retry_overrides(
-            _load_conversation_window_overrides(
-                _load_event_metadata_overrides(config, base_dir=base_dir), base_dir=base_dir
-            ),
-            base_dir=base_dir,
-        )
+        return _load_supporting_config_overrides(config, base_dir=base_dir)
     except json.JSONDecodeError as exc:
         raise ValueError(
             f"Invalid event rules config: {rules_path} is not valid JSON."
@@ -304,12 +300,7 @@ def load_runtime_config_overrides(
         and excluded_event_keywords == config.excluded_event_keywords
         and self_assignment_keywords == config.self_assignment_keywords
     ):
-        return _load_llm_retry_overrides(
-            _load_conversation_window_overrides(
-                _load_event_metadata_overrides(config, base_dir=base_dir), base_dir=base_dir
-            ),
-            base_dir=base_dir,
-        )
+        return _load_supporting_config_overrides(config, base_dir=base_dir)
 
     config = replace(
         config,
@@ -317,12 +308,78 @@ def load_runtime_config_overrides(
         excluded_event_keywords=excluded_event_keywords,
         self_assignment_keywords=self_assignment_keywords,
     )
-    return _load_llm_retry_overrides(
-        _load_conversation_window_overrides(
-            _load_event_metadata_overrides(config, base_dir=base_dir), base_dir=base_dir
-        ),
-        base_dir=base_dir,
-    )
+    return _load_supporting_config_overrides(config, base_dir=base_dir)
+
+
+def _load_supporting_config_overrides(
+    config: RuntimeConfig,
+    *,
+    base_dir: Path,
+) -> RuntimeConfig:
+    config = _load_event_metadata_overrides(config, base_dir=base_dir)
+    config = _load_conversation_window_overrides(config, base_dir=base_dir)
+    config = _load_llm_retry_overrides(config, base_dir=base_dir)
+    return _load_collected_merge_overrides(config, base_dir=base_dir)
+
+
+def _load_collected_merge_overrides(
+    config: RuntimeConfig,
+    *,
+    base_dir: Path,
+) -> RuntimeConfig:
+    config_path = base_dir / config.collected_merge_file_name
+    try:
+        payload = json.loads(config_path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return config
+    except json.JSONDecodeError as exc:
+        raise ValueError(
+            f"Invalid collected merge config: {config_path} is not valid JSON."
+        ) from exc
+    if not isinstance(payload, dict):
+        raise ValueError(
+            f"Invalid collected merge config: {config_path} must contain a JSON object."
+        )
+
+    bool_keys = {
+        "high_risk_review_enabled",
+        "review_cross_batch_groups",
+        "review_repaired_groups",
+        "review_workstream_conflicts",
+    }
+    int_keys = {
+        "high_risk_source_event_count",
+        "high_risk_source_file_count",
+    }
+    keys = bool_keys | int_keys
+    unexpected = sorted(set(payload).difference(keys))
+    missing = sorted(keys.difference(payload))
+    if unexpected or missing:
+        details = []
+        if unexpected:
+            details.append(f"unsupported keys {', '.join(unexpected)}")
+        if missing:
+            details.append(f"missing keys {', '.join(missing)}")
+        raise ValueError(f"Invalid collected merge config: {'; '.join(details)}.")
+
+    values: dict[str, object] = {}
+    for key in bool_keys:
+        value = payload[key]
+        if not isinstance(value, bool):
+            raise ValueError(
+                f"Invalid collected merge config: {config_path} field `{key}` "
+                "must be a boolean."
+            )
+        values[key] = value
+    for key in int_keys:
+        value = payload[key]
+        if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+            raise ValueError(
+                f"Invalid collected merge config: {config_path} field `{key}` "
+                "must be a positive integer."
+            )
+        values[key] = value
+    return replace(config, **values)
 
 
 def _load_conversation_window_overrides(
@@ -641,6 +698,12 @@ class RuntimeConfig:
     collected_merge_trace_root: Path = field(
         default_factory=lambda: Path("data") / "debug" / "collected_merge"
     )
+    high_risk_review_enabled: bool = True
+    high_risk_source_event_count: int = 10
+    high_risk_source_file_count: int = 4
+    review_cross_batch_groups: bool = True
+    review_repaired_groups: bool = True
+    review_workstream_conflicts: bool = True
     slice_retry_limit: int = 3
     prompt_slice_message_limit: int = 40
     prompt_message_char_limit: int = 300
@@ -688,6 +751,7 @@ class RuntimeConfig:
     conversation_blacklist_file_name: str = DEFAULT_CONVERSATION_BLACKLIST_FILE_NAME
     conversation_window_file_name: str = DEFAULT_CONVERSATION_WINDOW_FILE_NAME
     llm_retry_file_name: str = DEFAULT_LLM_RETRY_FILE_NAME
+    collected_merge_file_name: str = DEFAULT_COLLECTED_MERGE_FILE_NAME
     llm_stream_enabled: bool = False
     llm_tls_verify: bool = False
     llm_sleep_min_seconds: float = 1.0
