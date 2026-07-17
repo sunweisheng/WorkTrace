@@ -23,7 +23,7 @@ runner / collected_merge
 - 多人 Markdown 合并
 - 辅助的结构化工作流归属请求
 
-图片摘要复用同一套模型地址、模型名和 API Key，但由 `OnlineImageSummarizer` 单独发起非流式图片请求。
+图片摘要复用同一套模型地址、模型名、API Key、timeout 和 reasoning effort，但由 `OnlineImageSummarizer` 单独发起非流式图片请求。它当前不复用文本 analyzer 的 HTTP client，`WORKTRACE_LLM_TLS_VERIFY` 只控制 preflight 和文本 analyzer；图片请求保持 OpenAI SDK 自身的证书校验默认行为。
 
 ## 2. 本地私有模型配置
 
@@ -31,16 +31,21 @@ runner / collected_merge
 cp .env.example .env
 ```
 
-必填：
+必填的连接配置只有三项：
 
 ```dotenv
 WORKTRACE_LLM_BASE_URL=https://your-openai-compatible-endpoint.example/v1
 WORKTRACE_LLM_MODEL=your-model-name
 WORKTRACE_LLM_API_KEY=your-api-key
+```
+
+主流程要求最终生效的 reasoning effort 为 `none`。该环境变量未配置时，`RuntimeConfig` 默认使用 `none`；模板显式保留这一行：
+
+```dotenv
 WORKTRACE_LLM_REASONING_EFFORT=none
 ```
 
-可选：
+其他可选项：
 
 ```dotenv
 WORKTRACE_LLM_TIMEOUT_SECONDS=1200

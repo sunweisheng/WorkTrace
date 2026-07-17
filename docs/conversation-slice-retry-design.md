@@ -105,7 +105,7 @@ flowchart TD
 
 - 只在同一会话内组批
 - 保持片段顺序
-- 单个片段过大时仍作为单独批次交给 analyzer，由现有请求错误边界处理
+- 单个片段过大时仍作为单独批次交给 analyzer；默认 Online analyzer 会在远程请求前再次估算完整 prompt，超过 `max_model_input_tokens` 时直接报错，不会把超限请求发送给模型服务
 - 每个批次都携带当前用户身份和 conversation 元数据
 
 analyzer 返回 `BatchSegmentAnalysisResult`，必须对每个输入 `segment_id` 给出一项结果。Python 校验缺失、重复和未知 `segment_id`。

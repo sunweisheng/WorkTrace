@@ -309,6 +309,53 @@ def test_docs_describe_online_template_defaults_and_necessary_names() -> None:
         assert "确有必要时保留姓名" in content
 
 
+def test_docs_describe_three_required_llm_values_and_default_reasoning() -> None:
+    documents = [
+        Path("README.md").read_text(encoding="utf-8"),
+        Path("docs/online-analyzer-usage.md").read_text(encoding="utf-8"),
+        Path("docs/employee-guide.md").read_text(encoding="utf-8"),
+    ]
+
+    for content in documents:
+        assert "三项" in content or "3 项" in content
+        assert "未配置" in content and "默认" in content
+        assert "WORKTRACE_LLM_REASONING_EFFORT" in content
+        assert "4 项" not in content
+
+
+def test_privacy_docs_describe_actual_model_metadata_and_cross_day_context() -> None:
+    documents = [
+        Path("README.md").read_text(encoding="utf-8"),
+        Path("SKILL.md").read_text(encoding="utf-8"),
+        Path("docs/employee-guide.md").read_text(encoding="utf-8"),
+        Path("docs/privacy-note.md").read_text(encoding="utf-8"),
+    ]
+
+    for content in documents:
+        assert "目标日期之外" in content
+        assert "链接 URL" in content
+        assert "消息" in content and "会话" in content and "标识" in content
+    employee = documents[2]
+    assert "prompt 中不直接展开完整链接列表" not in employee
+
+
+def test_anchor_protocol_lists_current_candidate_fact_fields() -> None:
+    content = Path("docs/anchor-analysis-protocol.md").read_text(encoding="utf-8")
+
+    assert "self_relations" in content
+    assert "fact_items" in content
+    assert "fact_risk_flags" in content
+
+
+def test_two_level_merge_doc_marks_ignored_tmp_audit_unavailable() -> None:
+    content = Path("docs/two-level-collected-merge-improvement-plan.md").read_text(
+        encoding="utf-8"
+    )
+
+    assert "未随当前仓库提供" in content
+    assert "tmp/audit_two_level_merge_samples.py" not in content
+
+
 def test_detailed_design_is_the_current_code_source_of_truth() -> None:
     content = Path("docs/detailed-design.md").read_text(encoding="utf-8")
 
