@@ -87,6 +87,23 @@ def test_docs_define_personal_fact_review_evidence_boundary() -> None:
         assert "6200" in content
 
 
+def test_docs_describe_single_source_fact_review_protocol_and_concurrency() -> None:
+    documents = [
+        Path("README.md").read_text(encoding="utf-8"),
+        Path("docs/detailed-design.md").read_text(encoding="utf-8"),
+        Path("docs/online-analyzer-usage.md").read_text(encoding="utf-8"),
+        Path("SKILL.md").read_text(encoding="utf-8"),
+    ]
+
+    for content in documents:
+        assert "一个候选" in content or "单候选" in content
+        assert "draft_id" in content
+        assert "枚举" in content
+        assert "外层重复" in content
+        assert "3" in content and "并发" in content
+        assert "supported=false" in content
+
+
 def test_privacy_docs_describe_current_discovery_and_hidden_metadata() -> None:
     readme = Path("README.md").read_text(encoding="utf-8")
     skill = Path("SKILL.md").read_text(encoding="utf-8")
@@ -131,6 +148,8 @@ def test_debug_docs_cover_both_review_artifacts_and_replay_summary() -> None:
         assert "失败" in content
     for content in (readme, detailed, employee):
         assert "review_artifact_summary" in content
+        assert "llm_usage_summary" in content
+        assert "personal_fact_review_all" in content
 
 
 def test_docs_describe_event_metadata_and_markdown_compatibility() -> None:

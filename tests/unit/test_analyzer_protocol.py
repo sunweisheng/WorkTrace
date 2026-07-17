@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -20,6 +21,34 @@ from src.worktrace.analyzers.output_schemas import (
     retention_review_output_schema,
 )
 from src.worktrace.config import RuntimeConfig, load_runtime_config_overrides
+from src.worktrace.models import (
+    PersonalFactReviewBatch,
+    PersonalFactReviewCandidate,
+    SourceBackedEventDraft,
+)
+
+
+def _personal_fact_review_batch() -> PersonalFactReviewBatch:
+    candidate = SourceBackedEventDraft(
+        draft_id="d1",
+        date="2026-07-15",
+        topic="设备编号修正",
+        content="重新修改未生效的设备编号。",
+        source_message_ids=["m1"],
+        source_conversation_id="oc_1",
+        source_slice_id="slice-1",
+        confidence=0.9,
+    )
+    return PersonalFactReviewBatch(
+        target_date="2026-07-15",
+        batch_id="personal-fact-review-001",
+        candidates=[
+            PersonalFactReviewCandidate(
+                candidate=candidate,
+                allowed_evidence_message_ids=["m1"],
+            )
+        ],
+    )
 
 
 def test_protocol_parsers_accept_valid_payloads() -> None:
@@ -69,18 +98,12 @@ def test_retention_review_protocol_and_schema_use_configured_signal_types() -> N
 
 
 def test_personal_fact_review_protocol_and_schema_require_source_backed_fields() -> None:
-    config = load_runtime_config_overrides(RuntimeConfig(), cwd=Path.cwd())
+    batch = _personal_fact_review_batch()
     payload = {
         "results": [
             {
                 "draft_id": "d1",
                 "supported": True,
-                "topic": "设备编号修正",
-                "content": "重新修改未生效的设备编号。",
-                "action_label": "修改",
-                "object_hint": "设备编号",
-                "retention_detail": "执行人确认重新修改设备编号。",
-                "workstream_key": "",
                 "fact_items": {
                     "topic": {
                         "text": "设备编号修正",
@@ -112,15 +135,32 @@ def test_personal_fact_review_protocol_and_schema_require_source_backed_fields()
     }
 
     parsed = parse_personal_fact_review_payload(payload)
-    schema = personal_fact_review_output_schema(config)
+    schema = personal_fact_review_output_schema(batch)
     item_schema = schema["properties"]["results"]["items"]
+    evidence_schema = item_schema["properties"]["fact_items"]["properties"][
+        "topic"
+    ]["properties"]["evidence_message_ids"]["items"]
 
+    assert parsed.results[0].topic == "设备编号修正"
+    assert parsed.results[0].content == "重新修改未生效的设备编号。"
     assert parsed.results[0].fact_items[2].field_name == "action_label"
     assert parsed.results[0].fact_items[2].text == "修改"
+    assert "topic" not in item_schema["properties"]
     assert "fact_items" in item_schema["required"]
     assert item_schema["properties"]["fact_items"]["type"] == "object"
     assert "action_label" in item_schema["properties"]["fact_items"]["required"]
+    assert item_schema["properties"]["draft_id"]["enum"] == ["d1"]
+    assert evidence_schema["enum"] == ["m1"]
     assert item_schema["additionalProperties"] is False
+
+
+def test_personal_fact_review_schema_requires_single_candidate() -> None:
+    batch = _personal_fact_review_batch()
+
+    with pytest.raises(ValueError, match="exactly one candidate"):
+        personal_fact_review_output_schema(
+            replace(batch, candidates=[*batch.candidates, *batch.candidates])
+        )
 
 
 def test_personal_extraction_schema_requires_fact_evidence_and_configured_risks() -> None:
@@ -140,12 +180,6 @@ def test_personal_fact_review_protocol_rejects_model_keep_drop_field() -> None:
             {
                 "draft_id": "d1",
                 "supported": True,
-                "topic": "设备编号修正",
-                "content": "重新修改设备编号。",
-                "action_label": "修改",
-                "object_hint": "设备编号",
-                "retention_detail": "重新修改设备编号。",
-                "workstream_key": "",
                 "fact_items": {
                     "topic": {"text": "", "evidence_message_ids": []},
                     "content": [],

@@ -27,8 +27,8 @@ def test_runtime_config_defaults_to_online_backend() -> None:
 
     assert config.analyzer_backend == "online"
     assert config.llm_tls_verify is False
-    assert config.llm_sleep_min_seconds == 1.0
-    assert config.llm_sleep_max_seconds == 2.0
+    assert config.llm_sleep_min_seconds == 0.0
+    assert config.llm_sleep_max_seconds == 0.0
 
 
 def test_build_runtime_dependencies_supports_online_analyzer(tmp_path: Path) -> None:

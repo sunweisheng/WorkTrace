@@ -26,6 +26,33 @@ def _load_summary(trace_root: Path) -> dict[str, object]:
     return json.loads(summary_path.read_text(encoding="utf-8"))
 
 
+def _load_llm_usage_summary(
+    trace_root: Path,
+    target_date: object,
+) -> dict[str, object]:
+    if not isinstance(target_date, str) or not target_date:
+        return {}
+    path = trace_root / "conversation_debug" / target_date / "llm_usage.json"
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+    usage = payload.get("usage", {})
+    usage_by_kind = usage.get("by_request_kind", {}) if isinstance(usage, dict) else {}
+    return {
+        "path": str(path.resolve()),
+        "exists": True,
+        "requests": payload.get("requests", []),
+        "by_request_kind": {
+            request_kind: {"token_usage": kind_usage}
+            for request_kind, kind_usage in usage_by_kind.items()
+            if isinstance(request_kind, str) and isinstance(kind_usage, dict)
+        }
+    }
+
+
 def _load_stderr_lines(trace_root: Path) -> list[str]:
     stderr_path = trace_root / "run_stderr.log"
     try:
@@ -181,6 +208,13 @@ def _collect_stage_totals(summary: dict[str, object]) -> list[dict[str, object]]
         {
             "stage": stage,
             "count": aggregate["count"],
+            "timing_basis": (
+                "wall_clock"
+                if stage == "personal_fact_review_all"
+                else "parallel_batch_accumulated"
+                if stage == "personal_fact_review"
+                else "stage_accumulated"
+            ),
             "duration_ms": round(float(aggregate["duration_ms"]), 3),
             "duration_s": round(float(aggregate["duration_ms"]) / 1000, 3),
             "share_of_runner_total_pct": round(
@@ -199,36 +233,128 @@ def _collect_online_llm_summary(summary: dict[str, object]) -> dict[str, object]
     events = timing_summary.get("events", []) if isinstance(timing_summary, dict) else []
     if not isinstance(events, list):
         events = []
+    llm_usage_summary = summary.get("llm_usage_summary", {})
+    usage_requests = (
+        llm_usage_summary.get("requests", [])
+        if isinstance(llm_usage_summary, dict)
+        else []
+    )
     requests: list[dict[str, object]] = []
-    for index, item in enumerate(events, start=1):
-        if not isinstance(item, dict) or item.get("event") != "online_llm.request.completed":
-            continue
-        raw_line = str(item.get("raw_line", ""))
-        request_kind_match = re.search(r'request_kind="([^"]+)"', raw_line)
-        prompt_chars_match = re.search(r'prompt_chars=(\d+)', raw_line)
-        requests.append(
-            {
-                "call_index": len(requests) + 1,
-                "event_index": index,
-                "request_kind": (
-                    request_kind_match.group(1) if request_kind_match else "text_analysis"
-                ),
-                "duration_ms": round(_to_float(item.get("duration_ms")), 3),
-                "prompt_chars": (
-                    int(prompt_chars_match.group(1)) if prompt_chars_match else None
-                ),
-            }
-        )
+    source = "timing_log"
+    if isinstance(usage_requests, list) and usage_requests:
+        source = "llm_usage.json"
+        for item in usage_requests:
+            if not isinstance(item, dict):
+                continue
+            requests.append(
+                {
+                    "call_index": len(requests) + 1,
+                    "request_kind": str(item.get("request_kind", "unknown")),
+                    "duration_ms": round(_to_float(item.get("duration_ms")), 3),
+                    "prompt_chars": item.get("prompt_chars"),
+                    "input_tokens": item.get("input_tokens"),
+                    "output_tokens": item.get("output_tokens"),
+                    "total_tokens": item.get("total_tokens"),
+                }
+            )
+    else:
+        for index, item in enumerate(events, start=1):
+            if (
+                not isinstance(item, dict)
+                or item.get("event") != "online_llm.request.completed"
+            ):
+                continue
+            raw_line = str(item.get("raw_line", ""))
+            request_kind_match = re.search(r'request_kind="([^"]+)"', raw_line)
+            prompt_chars_match = re.search(r'prompt_chars=(\d+)', raw_line)
+            requests.append(
+                {
+                    "call_index": len(requests) + 1,
+                    "event_index": index,
+                    "request_kind": (
+                        request_kind_match.group(1)
+                        if request_kind_match
+                        else "unknown"
+                    ),
+                    "duration_ms": round(_to_float(item.get("duration_ms")), 3),
+                    "prompt_chars": (
+                        int(prompt_chars_match.group(1))
+                        if prompt_chars_match
+                        else None
+                    ),
+                }
+            )
     request_durations = [_to_float(item["duration_ms"]) for item in requests]
     delay_durations = [
         _to_float(item.get("duration_ms"))
         for item in events
         if isinstance(item, dict) and item.get("event") == "online_llm.request.delay"
     ]
+    requests_by_kind: dict[str, list[dict[str, object]]] = {}
+    for item in requests:
+        requests_by_kind.setdefault(str(item["request_kind"]), []).append(item)
+    usage_by_kind = (
+        llm_usage_summary.get("by_request_kind", {})
+        if isinstance(llm_usage_summary, dict)
+        else {}
+    )
     return {
+        "source": source,
+        "request_count": len(requests),
         "request_duration_ms": _build_basic_stats(request_durations),
         "between_request_delay_ms": _build_basic_stats(delay_durations),
+        "by_request_kind": {
+            request_kind: {
+                "request_duration_ms": _build_basic_stats(
+                    [_to_float(item.get("duration_ms")) for item in items]
+                ),
+                "token_usage": (
+                    usage_by_kind.get(request_kind, {}).get("token_usage", {})
+                    if isinstance(usage_by_kind, dict)
+                    and isinstance(usage_by_kind.get(request_kind), dict)
+                    else {}
+                ),
+            }
+            for request_kind, items in sorted(requests_by_kind.items())
+        },
         "calls": requests,
+    }
+
+
+def _collect_personal_fact_review_timing(
+    summary: dict[str, object],
+) -> dict[str, object]:
+    timing_summary = summary.get("timing_summary", {})
+    events = timing_summary.get("events", []) if isinstance(timing_summary, dict) else []
+    if not isinstance(events, list):
+        events = []
+    batch_durations: list[float] = []
+    wall_clock_durations: list[float] = []
+    for item in events:
+        if not isinstance(item, dict) or item.get("event") != "runner.stage.completed":
+            continue
+        raw_line = str(item.get("raw_line", ""))
+        stage_match = re.search(r'stage="([^"]+)"', raw_line)
+        if stage_match is None:
+            continue
+        duration_ms = _to_float(item.get("duration_ms"))
+        if stage_match.group(1) == "personal_fact_review":
+            batch_durations.append(duration_ms)
+        elif stage_match.group(1) == "personal_fact_review_all":
+            wall_clock_durations.append(duration_ms)
+
+    batch_summary = _build_basic_stats(batch_durations)
+    wall_clock_summary = _build_basic_stats(wall_clock_durations)
+    wall_clock_total = _to_float(wall_clock_summary.get("total"))
+    return {
+        "batch_accumulated_ms": batch_summary,
+        "wall_clock_ms": wall_clock_summary,
+        "accumulated_to_wall_clock_ratio": round(
+            _to_float(batch_summary.get("total")) / wall_clock_total,
+            3,
+        )
+        if wall_clock_total
+        else None,
     }
 
 
@@ -285,6 +411,11 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit("Either --date or --trace-root is required.")
 
     summary = _load_summary(trace_root)
+    if not isinstance(summary.get("llm_usage_summary"), dict):
+        summary["llm_usage_summary"] = _load_llm_usage_summary(
+            trace_root,
+            summary.get("target_date"),
+        )
     stderr_lines = _load_llm_stderr_lines(trace_root)
     if not stderr_lines:
         stderr_lines = _load_stderr_lines(trace_root)
@@ -299,6 +430,7 @@ def main(argv: list[str] | None = None) -> int:
         "result": summary.get("result"),
         "stage_totals": _collect_stage_totals(summary),
         "online_llm": _collect_online_llm_summary(summary),
+        "personal_fact_review_timing": _collect_personal_fact_review_timing(summary),
         "hook_exec": hook_exec,
         "curl_http": curl_http,
         "hook_vs_http": _build_hook_vs_http_summary(hook_exec, curl_http),

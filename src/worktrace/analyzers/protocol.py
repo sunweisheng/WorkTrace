@@ -108,7 +108,9 @@ def parse_personal_fact_review_payload(payload: object) -> PersonalFactReviewRes
         normalized = _normalize_personal_fact_review_payload(data)
         return PersonalFactReviewResult.from_dict(normalized)
     except (KeyError, TypeError, ValueError) as exc:
-        raise AnalyzerProtocolError("Invalid personal fact review payload.") from exc
+        raise AnalyzerProtocolError(
+            f"Invalid personal fact review payload: {exc}"
+        ) from exc
 
 
 def _normalize_personal_fact_review_payload(
@@ -119,12 +121,6 @@ def _normalize_personal_fact_review_payload(
     required_fields = {
         "draft_id",
         "supported",
-        "topic",
-        "content",
-        "action_label",
-        "object_hint",
-        "retention_detail",
-        "workstream_key",
         "fact_items",
         "removed_claims",
     }
@@ -132,11 +128,8 @@ def _normalize_personal_fact_review_payload(
     for item in data["results"]:
         if not isinstance(item, dict) or set(item) != required_fields:
             raise ValueError("Personal fact review item fields do not match the contract.")
-        string_fields = required_fields.difference(
-            {"supported", "fact_items", "removed_claims"}
-        )
-        if any(not isinstance(item[field], str) for field in string_fields):
-            raise ValueError("Personal fact review text fields must be strings.")
+        if not isinstance(item["draft_id"], str):
+            raise ValueError("Personal fact review draft_id must be a string.")
         if not isinstance(item["supported"], bool):
             raise ValueError("Personal fact review supported must be a boolean.")
         if not isinstance(item["fact_items"], dict) or not isinstance(
@@ -146,8 +139,37 @@ def _normalize_personal_fact_review_payload(
         if any(not isinstance(claim, str) for claim in item["removed_claims"]):
             raise ValueError("Personal fact review removed_claims must be strings.")
         normalized_facts = _normalize_personal_fact_review_items(item["fact_items"])
-        normalized_results.append({**item, "fact_items": normalized_facts})
+        text_fields = _personal_fact_review_text_fields(normalized_facts)
+        normalized_results.append(
+            {
+                **item,
+                **text_fields,
+                "fact_items": normalized_facts,
+            }
+        )
     return {"results": normalized_results}
+
+
+def _personal_fact_review_text_fields(
+    fact_items: list[dict[str, object]],
+) -> dict[str, str]:
+    field_names = (
+        "topic",
+        "content",
+        "action_label",
+        "object_hint",
+        "retention_detail",
+        "workstream_key",
+    )
+    values: dict[str, str] = {}
+    for field_name in field_names:
+        texts = [
+            str(item["text"])
+            for item in fact_items
+            if item["field"] == field_name
+        ]
+        values[field_name] = "".join(texts)
+    return values
 
 
 def _normalize_personal_fact_review_items(

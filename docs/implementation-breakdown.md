@@ -47,7 +47,8 @@ flowchart LR
 - `_retry_segment_context(...)`：按片段补消息、附件和链接正文
 - `_analyze_anchor_fallback(...)`：分段失败后，直接从本人参与的聊天窗口提炼
 - `_review_retention_candidates(...)`：复核配置命中的临时协作边界候选，并由 Python 应用固定保留规则
-- `_review_personal_event_facts(...)`：复核高风险个人事件的事实证据，接收有原聊天依据的确认或修订
+- `_review_personal_event_facts(...)`：把高风险个人事件拆成单候选请求，最多 3 路并发复核事实证据；每个候选内部重试保持顺序
+- `_review_personal_fact_batch_with_retry(...)`：执行单候选事实复核、协议校验和有限重试
 - `_resolve_workstream_groups(...)`：通过独立 assignment 生成工作流权威分组；失败时回退到初始模型组整合
 - `_attach_event_file_links(...)`：按显式引用或精确附件文件名证据附加文件
 
@@ -82,8 +83,8 @@ flowchart LR
 | `analyzers/online.py` | OpenAI Python SDK + Responses API 默认实现，支持流式接收 |
 | `analyzers/codex.py` | 非默认 Codex CLI 实现 |
 | `analyzers/prompts.py` | 所有语义任务 prompt |
-| `analyzers/output_schemas.py` | Responses API JSON schema |
-| `analyzers/protocol.py` | 模型 JSON 到领域对象的解析与引用恢复 |
+| `analyzers/output_schemas.py` | Responses API JSON schema；事实复核按当前候选动态限制 `draft_id` 和合法证据 ID |
+| `analyzers/protocol.py` | 模型 JSON 到领域对象的解析与引用恢复；事实复核从唯一一份 `fact_items` 派生六个文字字段 |
 
 当前默认 `OnlineLLMAnalyzer` 实现 `segment_conversation(...)`、`analyze_segment_batch(...)`、`review_retention_candidates(...)` 和 `review_personal_event_facts(...)`，因此 `runner` 走分段及两类局部复核主链。是否支持分段和事实复核由能力检查决定，不通过配置字符串猜测。
 
@@ -122,7 +123,7 @@ flowchart LR
 | `config/event_metadata.json` | 本人参与方式英文键、中文显示名和排序 |
 | `config/conversation_blacklist.json` | 整会话排除 |
 | `config/conversation_window.json` | 群聊锚点聚合、初始上下文和按需扩窗阈值 |
-| `config/llm_retry.json` | 分段/提炼重试、流式首次返回超时和并发数 |
+| `config/llm_retry.json` | 分段/提炼重试、流式首次返回超时，以及切分、提炼和个人事实复核并发数 |
 | `config/retention_policy.json` | 个人事件保留提示、结构化业务词、临时协作复核、事实复核条件和模型信号定义 |
 | `config/collected_merge.json` | 多人汇总高风险复核开关、事件数/文件数阈值和复核条件 |
 | `config/attachment_text.json` | 文本附件提取限制 |
@@ -133,7 +134,8 @@ flowchart LR
 
 ## 10. 调试入口
 
-- 个人日报：`--debug-output`，目录 `data/debug/conversations/<date>/`；失败轮次保存 `failure.json`，单片段回退使用 `fallback-01/`，直接提炼回退使用 `_anchor_fallback/`；`retention_review.json` 和 `personal_fact_review.json` 保存两类局部复核尝试及 Python 校验结果，`final_events.json` 保存最终草稿、事件和过滤 warning
+- 个人日报：`--debug-output`，目录 `data/debug/conversations/<date>/`；失败轮次保存 `failure.json`，单片段回退使用 `fallback-01/`，直接提炼回退使用 `_anchor_fallback/`；`retention_review.json` 和 `personal_fact_review.json` 保存两类局部复核尝试及 Python 校验结果，`llm_usage.json` 保存按调用类型的 token 和耗时，`final_events.json` 保存最终草稿、事件和过滤 warning
+- 回放报告：`replay_day_with_trace.py` 把 `llm_usage.json` 汇总到 `llm_usage_summary`；`report_replay_timings.py` 分开输出事实复核候选累计耗时和 `personal_fact_review_all` 墙钟耗时；`report_replay_call_inputs.py` 分开统计文字调用与图片摘要
 - 多人汇总：`WORKTRACE_COLLECTED_MERGE_TRACE=true`，目录默认 `data/debug/collected_merge/<date>/`；`source-audit.json` 保存来源格式、v2 会话证据校验和过滤明细，step JSON/prompt 在请求前写入候选、复核、正文阶段与批次，`summary.json` 和 `summary.md` 保存 Python 质量统计，失败也生成 summary
 - 锚点独立实验：`python3 -m src.worktrace.anchor_experiment ...`
 

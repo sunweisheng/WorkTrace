@@ -125,6 +125,22 @@ def test_load_online_llm_settings_reads_stream_tls_and_sleep_overrides(tmp_path:
     assert settings.sleep_max_seconds == 2.5
 
 
+def test_load_online_llm_settings_accepts_zero_sleep_overrides(tmp_path: Path) -> None:
+    (tmp_path / ".env").write_text(
+        "WORKTRACE_LLM_BASE_URL=https://llm.example/v1\n"
+        "WORKTRACE_LLM_MODEL=provider-model\n"
+        "WORKTRACE_LLM_API_KEY=file-key\n"
+        "WORKTRACE_LLM_SLEEP_MIN_SECONDS=0\n"
+        "WORKTRACE_LLM_SLEEP_MAX_SECONDS=0\n",
+        encoding="utf-8",
+    )
+
+    settings = load_online_llm_settings(RuntimeConfig(), cwd=tmp_path, environ={})
+
+    assert settings.sleep_min_seconds == 0.0
+    assert settings.sleep_max_seconds == 0.0
+
+
 def test_load_online_llm_settings_reads_false_stream_override(tmp_path: Path) -> None:
     (tmp_path / ".env").write_text(
         "WORKTRACE_LLM_BASE_URL=https://llm.example/v1\n"
@@ -226,6 +242,7 @@ def test_load_runtime_config_overrides_reads_llm_retry_settings(tmp_path: Path) 
                 "stream_first_response_timeout_seconds": 61,
                 "max_concurrent_llm_requests": 3,
                 "max_concurrent_event_extraction_requests": 5,
+                "max_concurrent_personal_fact_review_requests": 3,
             }
         ),
         encoding="utf-8",
@@ -238,6 +255,7 @@ def test_load_runtime_config_overrides_reads_llm_retry_settings(tmp_path: Path) 
     assert config.stream_first_response_timeout_seconds == 61
     assert config.max_concurrent_llm_requests == 3
     assert config.max_concurrent_event_extraction_requests == 5
+    assert config.max_concurrent_personal_fact_review_requests == 3
 
 
 def test_load_runtime_config_overrides_reads_self_relation_metadata(

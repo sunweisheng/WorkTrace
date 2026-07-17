@@ -323,8 +323,9 @@ data/debug/conversations/2026-06-23/_merge_day_candidates/
 - `retention_review.json` 中临时协作复核每次尝试的候选摘要、模型信号、证据校验结果和 Python 统计
 - `personal_fact_review.json` 中事实复核的触发原因、修订前后字段、事实证据覆盖、Python 统计和失败重试结果
 - `final_events.json` 中完成文件聚合和排序后的最终事件、证据指纹、文件标识和过滤 warning
+- `llm_usage.json` 中按调用类型记录的成功响应耗时、输入字符数和 provider 返回的 token
 
-使用 `scripts/replay_day_with_trace.py` 回放时，`summary.json` 的 `review_artifact_summary` 会汇总两类复核文件是否存在、尝试次数和失败次数；调用输入报告也会逐次列出复核及其失败重试。复核文件不额外复制整段聊天，完整上下文仍从已有分段调试输入查看。
+使用 `scripts/replay_day_with_trace.py` 回放时，`summary.json` 的 `review_artifact_summary` 会汇总两类复核文件是否存在、尝试次数和失败次数，`llm_usage_summary` 会按调用类型汇总次数、token 和耗时；调用输入报告也会逐次列出复核及其失败重试，并把图片摘要与文字调用分开统计。事实复核并发阶段分析实际运行耗时时看 `personal_fact_review_all` 墙钟值，各候选耗时之和只代表模型调用总负载。复核文件不额外复制整段聊天，完整上下文仍从已有分段调试输入查看。
 
 管理人员开启多人汇总 trace 后，`source-audit.json` 会记录新旧来源文件、部分读取和过滤数量；每个 step JSON 与 prompt 在候选、复核和正文请求前保存，失败时也会生成 summary。`summary.json` 和 `summary.md` 还会记录 Python 计算的输入/输出数量、来源覆盖和高风险复核统计，便于定位失败批次、重试过程以及“哪些共同证据支持合并”或“为什么被拆开”。
 

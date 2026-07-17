@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import json
 from pathlib import Path
 
 import pytest
@@ -254,6 +255,44 @@ def test_review_rejects_fact_evidence_outside_current_chat() -> None:
         validate_personal_fact_review_result(batch, invalid_result)
 
 
+def test_review_reports_missing_required_field_and_false_fallback() -> None:
+    review_candidate = build_personal_fact_review_candidates(
+        [_candidate()],
+        slices=[_slice()],
+        messages=_messages(),
+        policy=POLICY,
+    )[0]
+    batch = PersonalFactReviewBatch(
+        target_date="2026-07-15",
+        batch_id="personal-fact-review-001",
+        candidates=[review_candidate],
+    )
+    result = _review_result()
+    missing_object_result = replace(
+        result,
+        results=[
+            replace(
+                result.results[0],
+                object_hint="",
+                fact_items=[
+                    item
+                    for item in result.results[0].fact_items
+                    if item.field_name != "object_hint"
+                ],
+            )
+        ],
+    )
+
+    with pytest.raises(
+        AnalyzerProtocolError,
+        match=(
+            "missing required event fields: object_hint.*"
+            "Return supported=false"
+        ),
+    ):
+        validate_personal_fact_review_result(batch, missing_object_result)
+
+
 def test_review_batches_obey_model_token_limit() -> None:
     review_candidates = build_personal_fact_review_candidates(
         [_candidate()],
@@ -311,7 +350,16 @@ def test_fact_review_prompt_states_exact_fact_item_coverage_contract() -> None:
     )
 
     prompt = build_personal_fact_review_prompt(batch, config=CONFIG)
+    payload = json.loads(prompt)
+    output_item = payload["required_output_schema"]["results"][0]
 
-    assert "action_label、object_hint、retention_detail" in prompt
-    assert "不加任何分隔符直接拼接后" in prompt
+    assert set(output_item) == {
+        "draft_id",
+        "supported",
+        "fact_items",
+        "removed_claims",
+    }
+    assert "不要在 fact_items 之外重复返回这些文字字段" in prompt
+    assert "缺少任一必填字段的合法证据时必须返回 supported=false" in prompt
+    assert "Python 会直接连接所有 content.text 生成正文" in prompt
     assert "同批其他候选中出现了某个消息 ID" in prompt

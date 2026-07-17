@@ -30,6 +30,7 @@ from .models import (
     MergedEventDraft,
     NormalizedMessage,
     PersonalFactReviewBatch,
+    PersonalFactReviewItemResult,
     PersonalFactReviewResult,
     PersonalFactReviewSummary,
     RetentionReviewBatch,
@@ -167,6 +168,17 @@ class _ConversationSegmentationState:
         default_factory=dict
     )
     failure_counts: dict[str, int] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class _PersonalFactReviewBatchOutcome:
+    batch: PersonalFactReviewBatch
+    validated: dict[str, PersonalFactReviewItemResult]
+    debug_entries: list[dict[str, object]]
+    call_count: int
+    retry_count: int
+    error_summary: str = ""
+    error_kind: str = ""
 
 
 @dataclass
@@ -746,10 +758,6 @@ class DailyTraceRunner:
             candidates=review_candidates,
             config=self.config,
         )
-        reviewed = {}
-        call_count = 0
-        retry_count = 0
-        debug_batches: list[dict[str, object]] = []
         review_method = getattr(
             self.dependencies.analyzer,
             "review_personal_event_facts",
@@ -760,87 +768,61 @@ class DailyTraceRunner:
                 "Personal fact review is enabled but the analyzer does not support it."
             )
 
-        for batch in batches:
-            batch_started_at = perf_counter()
-            last_error = ""
-            for attempt in range(self.config.analysis_batch_retry_limit + 1):
-                result = None
-                attempt_batch = (
-                    batch if not last_error else replace(batch, retry_feedback=last_error)
+        worker_count = min(
+            len(batches),
+            self.config.max_concurrent_personal_fact_review_requests,
+        )
+        review_started_at = perf_counter()
+        with ThreadPoolExecutor(max_workers=worker_count) as executor:
+            futures = [
+                executor.submit(
+                    self._review_personal_fact_batch_with_retry,
+                    batch=batch,
+                    review_method=review_method,
                 )
-                try:
-                    call_count += 1
-                    result = review_method(attempt_batch)
-                    validated = validate_personal_fact_review_result(attempt_batch, result)
-                    reviewed.update(validated)
-                    debug_batches.append(
-                        _personal_fact_review_debug_entry(
-                            batch,
-                            attempt=attempt,
-                            status="success",
-                            result=result,
-                        )
-                    )
-                    log_timing(
-                        logger,
-                        "runner.stage.completed",
-                        batch_started_at,
-                        stage="personal_fact_review",
-                        batch_id=batch.batch_id,
-                        candidate_count=len(batch.candidates),
-                        retry_round=attempt,
-                    )
-                    break
-                except NotImplementedError as exc:
-                    last_error = "Personal fact review is not implemented by the analyzer."
-                    debug_batches.append(
-                        _personal_fact_review_debug_entry(
-                            batch,
-                            attempt=attempt,
-                            status="failed",
-                            result=result,
-                            error_summary=last_error,
-                        )
-                    )
-                    if attempt >= self.config.analysis_batch_retry_limit:
-                        self._dump_personal_fact_review_debug_artifact(
-                            target_date=target_date,
-                            batches=debug_batches,
-                            summary=PersonalFactReviewSummary(
-                                selected_candidate_count=len(review_candidates),
-                                review_batch_count=len(batches),
-                                review_retry_count=retry_count,
-                            ),
-                            error_summary=last_error,
-                        )
-                        raise AnalyzerProtocolError(last_error) from exc
-                    retry_count += 1
-                except AnalyzerProtocolError as exc:
-                    last_error = str(exc)
-                    debug_batches.append(
-                        _personal_fact_review_debug_entry(
-                            batch,
-                            attempt=attempt,
-                            status="failed",
-                            result=result,
-                            error_summary=last_error,
-                        )
-                    )
-                    if attempt >= self.config.analysis_batch_retry_limit:
-                        self._dump_personal_fact_review_debug_artifact(
-                            target_date=target_date,
-                            batches=debug_batches,
-                            summary=PersonalFactReviewSummary(
-                                selected_candidate_count=len(review_candidates),
-                                review_batch_count=len(batches),
-                                review_retry_count=retry_count,
-                            ),
-                            error_summary=last_error,
-                        )
-                        raise AnalyzerProtocolError(
-                            "Personal fact review failed after retries: " + last_error
-                        ) from exc
-                    retry_count += 1
+                for batch in batches
+            ]
+            outcomes = [future.result() for future in futures]
+
+        reviewed: dict[str, PersonalFactReviewItemResult] = {}
+        debug_batches: list[dict[str, object]] = []
+        call_count = sum(outcome.call_count for outcome in outcomes)
+        retry_count = sum(outcome.retry_count for outcome in outcomes)
+        log_timing(
+            logger,
+            "runner.stage.completed",
+            review_started_at,
+            stage="personal_fact_review_all",
+            batch_count=len(batches),
+            worker_count=worker_count,
+            call_count=call_count,
+            retry_count=retry_count,
+        )
+        for outcome in outcomes:
+            reviewed.update(outcome.validated)
+            debug_batches.extend(outcome.debug_entries)
+
+        failed_outcome = next(
+            (outcome for outcome in outcomes if outcome.error_summary),
+            None,
+        )
+        if failed_outcome is not None:
+            self._dump_personal_fact_review_debug_artifact(
+                target_date=target_date,
+                batches=debug_batches,
+                summary=PersonalFactReviewSummary(
+                    selected_candidate_count=len(review_candidates),
+                    review_batch_count=len(batches),
+                    review_retry_count=retry_count,
+                ),
+                error_summary=failed_outcome.error_summary,
+            )
+            if failed_outcome.error_kind == "not_implemented":
+                raise AnalyzerProtocolError(failed_outcome.error_summary)
+            raise AnalyzerProtocolError(
+                "Personal fact review failed after retries: "
+                + failed_outcome.error_summary
+            )
 
         kept, confirmed_count, revised_count, dropped_count = (
             apply_personal_fact_review_results(
@@ -865,6 +847,81 @@ class DailyTraceRunner:
             summary=summary,
         )
         return kept, summary, call_count
+
+    def _review_personal_fact_batch_with_retry(
+        self,
+        *,
+        batch: PersonalFactReviewBatch,
+        review_method,
+    ) -> _PersonalFactReviewBatchOutcome:
+        batch_started_at = perf_counter()
+        last_error = ""
+        debug_entries: list[dict[str, object]] = []
+        retry_count = 0
+        call_count = 0
+
+        for attempt in range(self.config.analysis_batch_retry_limit + 1):
+            result = None
+            attempt_batch = (
+                batch if not last_error else replace(batch, retry_feedback=last_error)
+            )
+            try:
+                call_count += 1
+                result = review_method(attempt_batch)
+                validated = validate_personal_fact_review_result(attempt_batch, result)
+                debug_entries.append(
+                    _personal_fact_review_debug_entry(
+                        batch,
+                        attempt=attempt,
+                        status="success",
+                        result=result,
+                    )
+                )
+                log_timing(
+                    logger,
+                    "runner.stage.completed",
+                    batch_started_at,
+                    stage="personal_fact_review",
+                    batch_id=batch.batch_id,
+                    candidate_count=len(batch.candidates),
+                    retry_round=attempt,
+                )
+                return _PersonalFactReviewBatchOutcome(
+                    batch=batch,
+                    validated=validated,
+                    debug_entries=debug_entries,
+                    call_count=call_count,
+                    retry_count=retry_count,
+                )
+            except NotImplementedError:
+                last_error = "Personal fact review is not implemented by the analyzer."
+                error_kind = "not_implemented"
+            except AnalyzerProtocolError as exc:
+                last_error = str(exc)
+                error_kind = "protocol"
+
+            debug_entries.append(
+                _personal_fact_review_debug_entry(
+                    batch,
+                    attempt=attempt,
+                    status="failed",
+                    result=result,
+                    error_summary=last_error,
+                )
+            )
+            if attempt >= self.config.analysis_batch_retry_limit:
+                return _PersonalFactReviewBatchOutcome(
+                    batch=batch,
+                    validated={},
+                    debug_entries=debug_entries,
+                    call_count=call_count,
+                    retry_count=retry_count,
+                    error_summary=last_error,
+                    error_kind=error_kind,
+                )
+            retry_count += 1
+
+        raise AssertionError("Personal fact review retry loop did not return.")
 
     def _dump_personal_fact_review_debug_artifact(
         self,

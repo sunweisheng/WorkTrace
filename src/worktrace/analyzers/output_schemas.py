@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from ..config import RuntimeConfig
+from ..models import PersonalFactReviewBatch
 
 
 def batch_output_schema(config: RuntimeConfig | None = None) -> dict[str, object]:
@@ -195,7 +196,21 @@ def retention_review_output_schema(config: RuntimeConfig) -> dict[str, object]:
     }
 
 
-def personal_fact_review_output_schema(config: RuntimeConfig) -> dict[str, object]:
+def personal_fact_review_output_schema(
+    batch: PersonalFactReviewBatch,
+) -> dict[str, object]:
+    if len(batch.candidates) != 1:
+        raise ValueError(
+            "Personal fact review schema requires exactly one candidate."
+        )
+    candidate = batch.candidates[0]
+    allowed_evidence_message_ids = list(
+        dict.fromkeys(candidate.allowed_evidence_message_ids)
+    )
+    if not allowed_evidence_message_ids:
+        raise ValueError(
+            "Personal fact review schema requires candidates with allowed evidence."
+        )
     return {
         "type": "object",
         "properties": {
@@ -204,15 +219,14 @@ def personal_fact_review_output_schema(config: RuntimeConfig) -> dict[str, objec
                 "items": {
                     "type": "object",
                     "properties": {
-                        "draft_id": {"type": "string"},
+                        "draft_id": {
+                            "type": "string",
+                            "enum": [candidate.candidate.draft_id],
+                        },
                         "supported": {"type": "boolean"},
-                        "topic": {"type": "string"},
-                        "content": {"type": "string"},
-                        "action_label": {"type": "string"},
-                        "object_hint": {"type": "string"},
-                        "retention_detail": {"type": "string"},
-                        "workstream_key": {"type": "string"},
-                        "fact_items": _personal_fact_review_items_schema(),
+                        "fact_items": _personal_fact_review_items_schema(
+                            allowed_evidence_message_ids
+                        ),
                         "removed_claims": {
                             "type": "array",
                             "items": {"type": "string"},
@@ -221,12 +235,6 @@ def personal_fact_review_output_schema(config: RuntimeConfig) -> dict[str, objec
                     "required": [
                         "draft_id",
                         "supported",
-                        "topic",
-                        "content",
-                        "action_label",
-                        "object_hint",
-                        "retention_detail",
-                        "workstream_key",
                         "fact_items",
                         "removed_claims",
                     ],
@@ -299,14 +307,19 @@ def _segment_candidate_schema(config: RuntimeConfig) -> dict[str, object]:
     }
 
 
-def _personal_fact_review_items_schema() -> dict[str, object]:
+def _personal_fact_review_items_schema(
+    allowed_evidence_message_ids: list[str],
+) -> dict[str, object]:
     single_item = {
         "type": "object",
         "properties": {
             "text": {"type": "string"},
             "evidence_message_ids": {
                 "type": "array",
-                "items": {"type": "string"},
+                "items": {
+                    "type": "string",
+                    "enum": allowed_evidence_message_ids,
+                },
             },
         },
         "required": ["text", "evidence_message_ids"],

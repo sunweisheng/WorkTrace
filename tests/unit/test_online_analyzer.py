@@ -181,12 +181,6 @@ def test_online_analyzer_uses_personal_fact_review_protocol(
                 {
                     "draft_id": "draft-1",
                     "supported": False,
-                    "topic": "",
-                    "content": "",
-                    "action_label": "",
-                    "object_hint": "",
-                    "retention_detail": "",
-                    "workstream_key": "",
                     "fact_items": {
                         "topic": {"text": "", "evidence_message_ids": []},
                         "content": [],
@@ -207,7 +201,9 @@ def test_online_analyzer_uses_personal_fact_review_protocol(
     assert result.results[0].supported is False
     assert captured["request_kind"] == "personal_fact_review"
     assert "messages 才是事实来源" in str(captured["prompt"])
-    assert captured["output_schema"] == personal_fact_review_output_schema(config)
+    assert captured["output_schema"] == personal_fact_review_output_schema(
+        sample_personal_fact_review_batch()
+    )
 
 
 def build_settings(**overrides: object) -> OnlineLLMSettings:
@@ -331,6 +327,23 @@ def test_online_analyzer_sleeps_after_first_request(tmp_path: Path, monkeypatch:
     analyzer.analyze_batch("2026-06-23", sample_batch())
 
     assert sleep_calls == [1.5]
+
+
+def test_online_analyzer_skips_zero_request_delay(tmp_path: Path) -> None:
+    sleep_calls: list[float] = []
+    analyzer = OnlineLLMAnalyzer(
+        config=RuntimeConfig(data_root=tmp_path / "data"),
+        cwd=tmp_path,
+        sleep_func=lambda seconds: sleep_calls.append(seconds),
+        random_uniform=lambda start, end: 0.0,
+    )
+    analyzer._request_count = 1
+
+    analyzer._maybe_sleep_between_requests(
+        build_settings(sleep_min_seconds=0.0, sleep_max_seconds=0.0)
+    )
+
+    assert sleep_calls == []
 
 
 def test_online_analyzer_reuses_global_singleton_until_settings_change(

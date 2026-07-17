@@ -3,12 +3,14 @@ from __future__ import annotations
 from dataclasses import replace
 import json
 from pathlib import Path
+from threading import Barrier, Lock
 
 from src.worktrace.config import RuntimeConfig, load_runtime_config_overrides
 from src.worktrace.constants import DailyRunStatus
 from src.worktrace.factories import RuntimeDependencies
 from src.worktrace.models import (
     BatchAnalysisResult,
+    ConversationSlice,
     ConversationRef,
     NormalizedMessage,
     PersonalFactItem,
@@ -126,6 +128,58 @@ class FactReviewAnalyzer:
         raise AssertionError("A single fact-reviewed candidate must not call merge")
 
 
+class ConcurrentFactReviewAnalyzer:
+    def __init__(self) -> None:
+        self.barrier = Barrier(3)
+        self.lock = Lock()
+        self.active_count = 0
+        self.max_active_count = 0
+
+    def review_personal_event_facts(
+        self,
+        batch,
+    ) -> PersonalFactReviewResult:
+        candidate = batch.candidates[0].candidate
+        evidence_id = batch.candidates[0].allowed_evidence_message_ids[0]
+        with self.lock:
+            self.active_count += 1
+            self.max_active_count = max(self.max_active_count, self.active_count)
+        try:
+            self.barrier.wait(timeout=2)
+            fact_items = [
+                PersonalFactItem("topic", candidate.topic, [evidence_id]),
+                PersonalFactItem("content", candidate.content, [evidence_id]),
+                PersonalFactItem(
+                    "action_label",
+                    candidate.action_label,
+                    [evidence_id],
+                ),
+                PersonalFactItem("object_hint", candidate.object_hint, [evidence_id]),
+                PersonalFactItem(
+                    "retention_detail",
+                    candidate.retention_detail,
+                    [evidence_id],
+                ),
+            ]
+            return PersonalFactReviewResult(
+                results=[
+                    PersonalFactReviewItemResult(
+                        draft_id=candidate.draft_id,
+                        supported=True,
+                        topic=candidate.topic,
+                        content=candidate.content,
+                        action_label=candidate.action_label,
+                        object_hint=candidate.object_hint,
+                        retention_detail=candidate.retention_detail,
+                        fact_items=fact_items,
+                    )
+                ]
+            )
+        finally:
+            with self.lock:
+                self.active_count -= 1
+
+
 def _corrected_result() -> PersonalFactReviewResult:
     topic = "三台设备发货信息修改及归属重置"
     content = "修改三台设备的发货单信息，重新处理未生效的编号，并在后台重置测试网点归属后继续安排签收。"
@@ -177,6 +231,67 @@ def _runner(tmp_path: Path, analyzer: FactReviewAnalyzer) -> DailyTraceRunner:
             event_store=MarkdownEventStore(config=config),
         ),
     )
+
+
+def test_personal_fact_review_runs_three_single_candidate_batches_concurrently(
+    tmp_path: Path,
+) -> None:
+    analyzer = ConcurrentFactReviewAnalyzer()
+    runner = _runner(tmp_path, analyzer)  # type: ignore[arg-type]
+    messages = FactReviewSource().fetch_conversation_messages("2026-07-15", ["oc_1"])
+    message_ids = [message.message_id for message in messages]
+    conversation_slice = ConversationSlice(
+        slice_id="slice-1",
+        conversation_id="oc_1",
+        conversation_name="设备协作群",
+        anchor_message_ids=["m1"],
+        in_day_message_ids=message_ids,
+        messages=messages,
+        primary_message_ids=message_ids,
+        context_message_ids=[],
+        self_evidence_message_ids=["m1"],
+    )
+    candidates = [
+        SourceBackedEventDraft(
+            draft_id=f"d{index}",
+            date="2026-07-15",
+            topic=f"设备事项 {index}",
+            content=f"完成设备事项 {index}。",
+            source_message_ids=message_ids,
+            source_conversation_id="oc_1",
+            source_slice_id="slice-1",
+            confidence=0.9,
+            action_label="完成",
+            object_hint=f"设备 {index}",
+            retention_reason="deliverable_updated",
+            retention_detail=f"设备事项 {index} 已完成。",
+            self_evidence_message_ids=["m1"],
+        )
+        for index in range(1, 4)
+    ]
+
+    kept, summary, call_count = runner._review_personal_event_facts(
+        target_date="2026-07-15",
+        candidates=candidates,
+        conversation_slices=[conversation_slice],
+        messages=messages,
+    )
+
+    assert [candidate.draft_id for candidate in kept] == ["d1", "d2", "d3"]
+    assert analyzer.max_active_count == 3
+    assert call_count == 3
+    assert summary.review_batch_count == 3
+    assert summary.review_retry_count == 0
+    debug_payload = json.loads(
+        (tmp_path / "debug" / "2026-07-15" / "personal_fact_review.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert [item["batch_id"] for item in debug_payload["batches"]] == [
+        "personal-fact-review-001",
+        "personal-fact-review-002",
+        "personal-fact-review-003",
+    ]
 
 
 def test_runner_rewrites_unsupported_personal_facts_before_daily_merge(

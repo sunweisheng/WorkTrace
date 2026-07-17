@@ -236,15 +236,15 @@ sequenceDiagram
 
 `pipeline/personal_fact_review.py` 在临时协作复核之后、跨会话合并之前运行。满足任一条件就复核当前事件：事实证据缺失或不完整、来源消息达到 8 条、来源参与人达到 3 人，或模型返回多个对象、对比案例、多个地点、责任归属、推断决策等配置风险信号。消息数和参与人数由 Python 确定性统计；风险含义由模型依据配置判断。没有候选时不增加模型调用。
 
-复核模型重新读取当前候选的原聊天，返回 `supported`、修订后的六个文字字段、固定六字段证据结构和 `removed_claims`。固定结构要求标题、正文、主要动作、具体对象、保留依据和工作流位置始终存在；协议解析后再统一转换为 `fact_items`。它可以确认原文，也可以删除或改写无依据内容；多人、多地点、多步骤本身不能作为删除理由。Python执行以下固定检查：
+复核模型重新读取当前候选的原聊天，只返回 `supported`、固定六字段结构的 `fact_items` 和 `removed_claims`。标题、正文、主要动作、具体对象、保留依据和工作流文字只在 `fact_items` 中出现一次，不在外层重复；协议解析器再从这唯一来源派生六个文字字段。它可以确认原文，也可以删除或改写无依据内容；多人、多地点、多步骤本身不能作为删除理由。每个请求固定只包含一个候选，动态 schema 把 `draft_id` 固定为当前候选，并把每个证据消息 ID 限制为当前候选的 `allowed_evidence_message_ids` 枚举；Python 继续严格校验结果数量为 1。Python执行以下固定检查：
 
-- 每个输入 `draft_id` 必须按顺序返回一次
-- `fact_items.field` 只能使用协议字段
-- 每项证据消息必须属于当前候选可用的原聊天
-- 标题、正文、动作、对象、保留依据和非空工作流必须被事实项完整覆盖
-- `supported=false` 时文字字段和事实项必须为空，并提供被删除表述
+- 当前 `draft_id` 必须且只能返回一次
+- `fact_items` 必须包含协议固定的六个位置，正文可拆成有序数组，其他位置各一个对象
+- 每项证据消息必须属于当前候选可用的原聊天；schema 枚举和 Python 归属检查同时生效
+- Python 派生的标题、正文、动作、对象、保留依据和非空工作流必须被事实项完整覆盖
+- `supported=false` 时事实文字和证据必须为空，并提供被删除表述
 
-Python不阅读聊天文字判断对比案例、责任人或流程建议，只接收模型的结构化结果并执行 `unsupported_policy`。默认无任何受支持事实时删除；复核技术失败、漏回、重复、字段不完整、非法消息 ID 或覆盖不完整时只重试当前批次，重试后仍错误则整次个人日报 `failed` 且不写文件。每个请求仍受 `max_model_input_tokens=6200` 限制。
+Python不阅读聊天文字判断对比案例、责任人或流程建议，只接收模型的结构化结果并执行 `unsupported_policy`。原聊天无法同时支持非空标题、正文、具体对象和保留依据时删除；复核技术失败、漏回、重复、字段不完整、非法消息 ID 或覆盖不完整时只重试当前候选，重试反馈明确列出缺失字段，重试后仍错误则整次个人日报 `failed` 且不写文件。不同候选通过线程池最多同时处理 `config/llm_retry.json` 配置的 3 条，同一候选内部的重试仍然串行。每个请求仍受 `max_model_input_tokens=6200` 限制。
 
 `DailyRunResult.personal_fact_review_summary` 由 Python 计算选择数、复核数、确认数、修订数、无依据删除数、批次数和重试数。统计进入 CLI stdout JSON 和调试文件 `personal_fact_review.json`，不增加 Markdown 可见字段。
 
@@ -423,7 +423,7 @@ OnlineLLMAnalyzer -> openai Python SDK -> Responses API provider
 
 ### 9.2 `.env` 与环境变量
 
-模型必填项和 timeout/stream/TLS/请求间隔位于 `.env` 或进程环境变量。环境变量优先。
+模型必填项和 timeout/stream/TLS/请求间隔位于 `.env` 或进程环境变量。环境变量优先。当前 `WORKTRACE_LLM_SLEEP_MIN_SECONDS` 和 `WORKTRACE_LLM_SLEEP_MAX_SECONDS` 默认均为 `0`；`0-0` 时 analyzer 不调用 sleep，也不记录 `online_llm.request.delay`。
 
 多人汇总 trace 和字段缺失重试也支持环境覆盖：
 
@@ -440,7 +440,7 @@ OnlineLLMAnalyzer -> openai Python SDK -> Responses API provider
 - `config/event_metadata.json`：参与方式英文键、中文显示名和排序
 - `config/conversation_blacklist.json`：整会话排除
 - `config/conversation_window.json`：初始窗口聚合和按需扩窗阈值
-- `config/llm_retry.json`：分段/提炼重试、流式首次返回超时和并发数
+- `config/llm_retry.json`：分段/提炼重试、流式首次返回超时，以及切分、提炼和个人事实复核并发数
 - `config/retention_policy.json`：个人保留提示、既有业务词、临时协作复核、个人事实复核条件和模型信号定义
 - `config/collected_merge.json`：多人汇总高风险复核开关、阈值和条件
 - `config/attachment_text.json`：文本附件限制
@@ -491,11 +491,13 @@ OnlineLLMAnalyzer -> openai Python SDK -> Responses API provider
 
 segmentation 和 segment batch 的模型失败轮次保存输入、prompt 与 `failure.json`。批次拆分后的单片段回退保存在片段目录的 `fallback-01/`；分段耗尽后的直接提炼保存在 `_anchor_fallback/<conversation>/<anchor-key>/attempt-XX/`。成功轮次继续保存输出和校验结果，异常轮次不伪造模型输出。
 
-`scripts/replay_day_with_trace.py` 生成的 `summary.json` 通过 `review_artifact_summary` 汇总两类复核文件是否存在、统计结果、尝试次数、失败次数和最终错误。`scripts/report_replay_call_inputs.py` 会把两类复核的每次尝试（包括失败重试）作为独立模型调用写入 `call-input-report.md`；完整原聊天仍从已有分段调试输入查看。
+`scripts/replay_day_with_trace.py` 生成的 `summary.json` 通过 `review_artifact_summary` 汇总两类复核文件是否存在、统计结果、尝试次数、失败次数和最终错误，并通过 `llm_usage_summary` 从 `llm_usage.json` 汇总准确的调用类型、次数、token、累计耗时、平均耗时和最长单次耗时。`scripts/report_replay_timings.py` 优先读取该结构按 `request_kind` 展示调用统计；`personal_fact_review` 是并发候选耗时之和，`personal_fact_review_all` 是线程池外记录的真实墙钟耗时，分析阶段瓶颈应使用后者。
+
+`scripts/report_replay_call_inputs.py` 会把分段、提炼、分段失败后的直接提炼和两类复核的每次尝试（包括失败重试）写入 `call-input-report.md`。在线模型成功响应数分为文字与图片摘要，调试文件保存的是文字调用尝试，两种口径不要求相等：请求发送前或服务端失败的尝试可能有调试输入但没有成功响应。`personal_fact_review_summary.review_retry_count` 统计未通过 Python 协议校验后实际发生的局部重试；例如值为 5 表示 5 个失败尝试后来只重试对应候选，最终运行仍可成功。完整原聊天仍从已有分段调试输入查看。
 
 多人汇总 trace 写 `source-audit.json`、step JSON、`step-NNN-prompt.txt`、`summary.json` 和 `summary.md`。每个模型请求前先保存输入和 prompt；成功、失败、重试耗尽和自送达失败都会留下 summary。step 包含候选发现、高风险复核或正式内容阶段、复核原因和前后分组、批次、尝试次数、重试原因、估算 token、`max_model_input_tokens` 上限、辅助字符数、`input_events`、`deterministic_groups`、正文覆盖、`boundary_warnings`、过滤和最终事件。两个 summary 文件还保存 Python 计算的 `quality_summary`，因此可以从来源增强信息追到最终部门事件并核对各级数量和覆盖率。
 
-所有主阶段同时通过 `logging_utils.log_timing(...)` 输出耗时和数量字段。
+所有主阶段同时通过 `logging_utils.log_timing(...)` 输出耗时和数量字段。在线请求日志显式携带 `request_kind`；并发事实复核同时记录单候选累计口径和整体墙钟口径。
 
 ## 13. 已知边界
 

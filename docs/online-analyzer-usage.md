@@ -15,6 +15,8 @@ runner / collected_merge
 
 - 会话锚点窗口分段
 - 会话内片段批量提炼
+- 临时协作局部复核
+- 个人事实局部复核
 - 旧批处理兼容
 - 锚点批量回退
 - 全日跨会话分组
@@ -44,13 +46,15 @@ WORKTRACE_LLM_REASONING_EFFORT=none
 WORKTRACE_LLM_TIMEOUT_SECONDS=1200
 WORKTRACE_LLM_STREAM=true
 WORKTRACE_LLM_TLS_VERIFY=false
-WORKTRACE_LLM_SLEEP_MIN_SECONDS=1
-WORKTRACE_LLM_SLEEP_MAX_SECONDS=2
+WORKTRACE_LLM_SLEEP_MIN_SECONDS=0
+WORKTRACE_LLM_SLEEP_MAX_SECONDS=0
 ```
 
 环境变量优先于仓库根目录 `.env`。真实值不能提交到 git。
 
-模型调用的重试、流式首次返回超时和并发数不在 `.env` 中配置，而由 `config/llm_retry.json` 管理。当前话题切分允许 3 个并发请求，事件提炼允许 5 个；同一会话的话题切分仍保持顺序。分段和提炼的配置值 `3` 均表示首次调用之外最多再重试 3 次。
+默认调用间隔为 `0-0` 秒。两项都为 `0` 时 analyzer 直接跳过 sleep 和 delay 日志；只有 provider 明确要求客户端限速时才配置非零区间。
+
+模型调用的重试、流式首次返回超时和并发数不在 `.env` 中配置，而由 `config/llm_retry.json` 管理。当前话题切分允许 3 个并发请求，事件提炼允许 5 个，个人事实复核允许 3 个；同一会话的话题切分和同一事实复核候选的重试仍保持顺序。分段和提炼的配置值 `3` 均表示首次调用之外最多再重试 3 次。
 
 ## 3. 请求规则
 
@@ -59,10 +63,13 @@ WORKTRACE_LLM_SLEEP_MAX_SECONDS=2
 - prompt 追加 `/no_think`
 - 当 reasoning 配置为 `none` 时发送 `reasoning={"effort":"none"}`
 - 按任务传入严格 JSON schema
+- 个人事实复核每次只发送一个候选；schema 固定唯一 `draft_id`，并枚举当前候选允许引用的证据消息 ID
+- 个人事实复核的六个文字字段只在 `fact_items` 返回一次，不在外层重复，由 Python 派生最终字段
+- `supported=true` 要求标题、正文、具体对象和保留依据都有合法证据；缺少任一必填字段时返回 `supported=false`
 - `stream=true` 时收集 `response.output_text.delta`
 - `stream=false` 时读取完整 Responses payload
 - 流式读取当前以 60 秒作为首次返回和后续无数据读取上限
-- 第二次正式在线请求起，在配置区间内随机等待
+- 配置为非零区间时，第二次正式在线请求起在该区间内随机等待；默认 `0-0` 不等待
 
 图片摘要使用 `input_image`、base64 data URL 和 `detail=low`，不走结构化 JSON schema。
 
@@ -122,3 +129,9 @@ python3 -m src.worktrace.cli --preflight
 `RuntimeConfig(analyzer_backend="codex")` 会装配 `CodexAnalyzer`。它是开发/备选路径，不是 `.env` 中可直接切换的普通用户选项。
 
 runner 通过 analyzer 是否具备分段接口选择执行路径：当前 Online/Codex 实现都应满足 `Analyzer` 抽象契约；自定义旧 analyzer 不支持分段时可走会话级 `ConversationSlice` 兼容路径。
+
+## 9. 调试耗时口径
+
+`--debug-output` 生成的 `llm_usage.json` 按 `request_kind` 保存每次成功响应的耗时、输入字符数和 provider 返回的 token。`scripts/replay_day_with_trace.py` 将这些数据汇总到 `summary.json` 的 `llm_usage_summary`，`scripts/report_replay_timings.py` 优先读取该结构，不再从日志顺序猜测调用类型。
+
+个人事实复核并发时，`personal_fact_review` 表示各候选从首次调用到内部重试结束的耗时，求和后会大于实际运行时间；`personal_fact_review_all` 表示整个并发阶段的墙钟耗时。分析主要耗时时应使用 `personal_fact_review_all`，各候选累计值只用于判断模型调用总负载。

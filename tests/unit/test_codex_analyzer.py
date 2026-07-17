@@ -152,12 +152,6 @@ def test_codex_analyzer_uses_personal_fact_review_protocol(
                 {
                     "draft_id": "draft-1",
                     "supported": False,
-                    "topic": "",
-                    "content": "",
-                    "action_label": "",
-                    "object_hint": "",
-                    "retention_detail": "",
-                    "workstream_key": "",
                     "fact_items": {
                         "topic": {"text": "", "evidence_message_ids": []},
                         "content": [],
@@ -177,7 +171,9 @@ def test_codex_analyzer_uses_personal_fact_review_protocol(
 
     assert result.results[0].supported is False
     assert "messages 才是事实来源" in str(captured["prompt"])
-    assert captured["output_schema"] == personal_fact_review_output_schema(config)
+    assert captured["output_schema"] == personal_fact_review_output_schema(
+        sample_personal_fact_review_batch()
+    )
 
 
 def test_codex_analyzer_surfaces_stderr_tail_on_failure(tmp_path: Path) -> None:

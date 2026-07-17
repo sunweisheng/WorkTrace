@@ -170,6 +170,61 @@ def _analysis_records(
     return records
 
 
+def _anchor_fallback_records(
+    debug_root: Path,
+    *,
+    max_excerpts: int,
+    max_chars: int,
+) -> list[CallInputRecord]:
+    records: list[CallInputRecord] = []
+    for path in sorted(debug_root.glob("_anchor_fallback/**/attempt-*/input.json")):
+        payload = _load_json(path)
+        raw_units = payload.get("anchor_units", [])
+        units = (
+            [item for item in raw_units if isinstance(item, dict)]
+            if isinstance(raw_units, list)
+            else []
+        )
+        messages: list[dict[str, object]] = []
+        seen_ids: set[str] = set()
+        for unit in units:
+            raw_messages = unit.get("messages", [])
+            if not isinstance(raw_messages, list):
+                continue
+            for message in raw_messages:
+                if not isinstance(message, dict):
+                    continue
+                message_id = str(message.get("message_id", ""))
+                if message_id and message_id in seen_ids:
+                    continue
+                if message_id:
+                    seen_ids.add(message_id)
+                messages.append(message)
+        time_range, content_summary = _message_summary(
+            messages,
+            max_excerpts=max_excerpts,
+            max_chars=max_chars,
+        )
+        if (path.parent / "failure.json").exists():
+            status = "failed"
+        elif (path.parent / "output.json").exists():
+            status = "success"
+        else:
+            status = "incomplete"
+        attempt_label = path.parent.name.removeprefix("attempt-")
+        records.append(
+            CallInputRecord(
+                category=f"分段失败直接提炼（第 {attempt_label} 次，{status}）",
+                purpose="话题切分连续失败后，直接从本人参与的聊天窗口提炼候选事件。",
+                source_path=path,
+                item_count=len(messages),
+                time_range=time_range,
+                content_summary=content_summary,
+            )
+        )
+    return records
+
+
 def _review_records(
     debug_root: Path,
     *,
@@ -266,17 +321,26 @@ def _merge_records(
     return records
 
 
-def _read_expected_call_count(trace_root: Path) -> int:
+def _read_completed_call_counts(trace_root: Path) -> dict[str, int]:
     summary = _load_json(trace_root / "summary.json")
     timing = summary.get("timing_summary", {})
     events = timing.get("events", []) if isinstance(timing, dict) else []
     if not isinstance(events, list):
-        return 0
-    return sum(
-        1
+        return {"total": 0, "text": 0, "image": 0}
+    completed = [
+        item
         for item in events
-        if isinstance(item, dict) and item.get("event") == "online_llm.request.completed"
+        if isinstance(item, dict)
+        and item.get("event") == "online_llm.request.completed"
+    ]
+    image_count = sum(
+        1 for item in completed if " image_bytes=" in str(item.get("raw_line", ""))
     )
+    return {
+        "total": len(completed),
+        "text": len(completed) - image_count,
+        "image": image_count,
+    }
 
 
 def _render_report(
@@ -284,14 +348,18 @@ def _render_report(
     target_date: str,
     trace_root: Path,
     records: list[CallInputRecord],
-    expected_call_count: int,
+    completed_call_counts: dict[str, int],
 ) -> str:
     lines = [
         f"# {target_date} 模型调用输入明细",
         "",
-        f"- 计时日志中的文字模型请求数：{expected_call_count}",
-        f"- 可从调试文件还原的调用输入数：{len(records)}",
-        "- 统计口径：每行对应一份实际发送给在线模型的文字输入；内容摘录仅展示该输入内最早的若干条非空消息。",
+        (
+            "- 计时日志中的在线模型成功响应数："
+            f"{completed_call_counts['total']}（文字 {completed_call_counts['text']}，"
+            f"图片摘要 {completed_call_counts['image']}）"
+        ),
+        f"- 调试文件记录的文字调用尝试数：{len(records)}",
+        "- 统计口径：每行对应一份调试文件保存的文字调用输入；成功响应数不含请求发送前或服务端失败的尝试，因此不要求与调试尝试数相等。内容摘录仅展示最早的若干条非空消息。",
         "",
         "| 序号 | 调用类别 | 调用目的 | 涉及数量 | 时间范围 | 内容摘录 | 调试输入 |",
         "| --- | --- | --- | ---: | --- | --- | --- |",
@@ -332,6 +400,11 @@ def main(argv: list[str] | None = None) -> int:
             max_excerpts=args.max_message_excerpts,
             max_chars=args.max_excerpt_chars,
         ),
+        *_anchor_fallback_records(
+            debug_root,
+            max_excerpts=args.max_message_excerpts,
+            max_chars=args.max_excerpt_chars,
+        ),
         *_review_records(
             debug_root,
             max_excerpts=args.max_message_excerpts,
@@ -349,7 +422,7 @@ def main(argv: list[str] | None = None) -> int:
             target_date=args.date,
             trace_root=trace_root,
             records=records,
-            expected_call_count=_read_expected_call_count(trace_root),
+            completed_call_counts=_read_completed_call_counts(trace_root),
         ),
         encoding="utf-8",
     )

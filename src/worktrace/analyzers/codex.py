@@ -207,7 +207,7 @@ class CodexAnalyzer(Analyzer):
     ) -> PersonalFactReviewResult:
         payload = self._invoke_codex(
             self.build_personal_fact_review_prompt(batch),
-            output_schema=personal_fact_review_output_schema(self.config),
+            output_schema=personal_fact_review_output_schema(batch),
         )
         return parse_personal_fact_review_payload(payload)
 

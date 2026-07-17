@@ -207,12 +207,23 @@ def validate_personal_fact_review_result(
             validated[item.draft_id] = item
             continue
 
-        if not all(
-            clean_text(text_fields[field_name])
-            for field_name in ("topic", "content", "object_hint", "retention_detail")
-        ):
+        required_field_names = (
+            "topic",
+            "content",
+            "object_hint",
+            "retention_detail",
+        )
+        missing_field_names = [
+            field_name
+            for field_name in required_field_names
+            if not clean_text(text_fields[field_name])
+        ]
+        if missing_field_names:
             raise AnalyzerProtocolError(
-                "Supported personal fact review result is missing required event fields."
+                "Supported personal fact review result is missing required event fields: "
+                + ", ".join(missing_field_names)
+                + ". Return supported=false when legal evidence cannot support every "
+                "required field."
             )
         try:
             fact_items = validate_personal_fact_items(

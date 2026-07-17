@@ -463,7 +463,7 @@ class OnlineLLMAnalyzer(Analyzer):
     ) -> PersonalFactReviewResult:
         payload = self._invoke_online(
             self.build_personal_fact_review_prompt(batch),
-            output_schema=personal_fact_review_output_schema(self.config),
+            output_schema=personal_fact_review_output_schema(batch),
             request_kind="personal_fact_review",
         )
         try:
@@ -632,6 +632,7 @@ class OnlineLLMAnalyzer(Analyzer):
             logger,
             "online_llm.request.completed",
             started_at,
+            request_kind=request_kind,
             prompt_chars=len(prompt),
             stream_enabled=settings.stream_enabled,
             tls_verify=settings.tls_verify,
@@ -679,6 +680,8 @@ class OnlineLLMAnalyzer(Analyzer):
         return _extract_text_from_responses_payload(payload), payload
 
     def _maybe_sleep_between_requests(self, settings: OnlineLLMSettings) -> None:
+        if settings.sleep_max_seconds <= 0:
+            return
         with self._request_count_lock:
             has_previous_request = self._request_count > 0
         if not has_previous_request:

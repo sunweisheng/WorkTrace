@@ -7,7 +7,7 @@ import re
 import shutil
 import subprocess
 import sys
-from collections import Counter
+from collections import Counter, defaultdict
 from pathlib import Path
 
 
@@ -119,6 +119,88 @@ def _collect_llm_summary(trace_root: Path) -> dict[str, object]:
         "avg_elapsed_ms": avg_elapsed_ms,
         "max_elapsed_ms": max_elapsed_ms,
         "calls": calls,
+    }
+
+
+def _duration_summary(values: list[float]) -> dict[str, float | int]:
+    if not values:
+        return {
+            "count": 0,
+            "total": 0.0,
+            "avg": 0.0,
+            "max": 0.0,
+            "min": 0.0,
+        }
+    total = round(sum(values), 3)
+    return {
+        "count": len(values),
+        "total": total,
+        "avg": round(total / len(values), 3),
+        "max": round(max(values), 3),
+        "min": round(min(values), 3),
+    }
+
+
+def _collect_llm_usage_summary(
+    conversation_debug_root: Path,
+    target_date: str,
+) -> dict[str, object]:
+    path = conversation_debug_root / target_date / "llm_usage.json"
+    if not path.exists():
+        return {
+            "path": str(path.resolve()),
+            "exists": False,
+            "status": "",
+            "request_count": 0,
+            "duration_ms": _duration_summary([]),
+            "token_usage": {},
+            "by_request_kind": {},
+            "requests": [],
+        }
+
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    raw_requests = payload.get("requests", []) if isinstance(payload, dict) else []
+    requests = [item for item in raw_requests if isinstance(item, dict)]
+    durations = [
+        float(item["duration_ms"])
+        for item in requests
+        if isinstance(item.get("duration_ms"), (int, float))
+        and not isinstance(item.get("duration_ms"), bool)
+    ]
+    requests_by_kind: dict[str, list[dict[str, object]]] = defaultdict(list)
+    for item in requests:
+        requests_by_kind[str(item.get("request_kind", "unknown"))].append(item)
+
+    usage = payload.get("usage", {}) if isinstance(payload, dict) else {}
+    usage_by_kind = usage.get("by_request_kind", {}) if isinstance(usage, dict) else {}
+    by_request_kind: dict[str, object] = {}
+    for request_kind, items in sorted(requests_by_kind.items()):
+        kind_durations = [
+            float(item["duration_ms"])
+            for item in items
+            if isinstance(item.get("duration_ms"), (int, float))
+            and not isinstance(item.get("duration_ms"), bool)
+        ]
+        kind_usage = (
+            usage_by_kind.get(request_kind, {})
+            if isinstance(usage_by_kind, dict)
+            else {}
+        )
+        by_request_kind[request_kind] = {
+            "request_count": len(items),
+            "duration_ms": _duration_summary(kind_durations),
+            "token_usage": kind_usage if isinstance(kind_usage, dict) else {},
+        }
+
+    return {
+        "path": str(path.resolve()),
+        "exists": True,
+        "status": str(payload.get("status", "")) if isinstance(payload, dict) else "",
+        "request_count": len(requests),
+        "duration_ms": _duration_summary(durations),
+        "token_usage": usage if isinstance(usage, dict) else {},
+        "by_request_kind": by_request_kind,
+        "requests": requests,
     }
 
 
@@ -301,6 +383,10 @@ def main(argv: list[str] | None = None) -> int:
         conversation_debug_root,
         args.date,
     )
+    llm_usage_summary = _collect_llm_usage_summary(
+        conversation_debug_root,
+        args.date,
+    )
 
     result_payload: object | None = None
     if completed.stdout.strip():
@@ -321,6 +407,7 @@ def main(argv: list[str] | None = None) -> int:
         "result": result_payload,
         "first_pass_summary": first_pass_summary,
         "review_artifact_summary": review_artifact_summary,
+        "llm_usage_summary": llm_usage_summary,
         "llm_summary": llm_summary,
         "timing_summary": timing_summary,
         "llm_checkpoint_summary": _collect_checkpoint_summary(checkpoint_root),

@@ -81,7 +81,7 @@ class RetentionPolicyConfig:
     fact_review_enabled: bool = False
     fact_review_source_message_count: int = 8
     fact_review_source_participant_count: int = 3
-    fact_review_max_batch_candidates: int = 4
+    fact_review_max_batch_candidates: int = 1
     fact_review_unsupported_policy: str = "drop"
     fact_review_rules: tuple[str, ...] = ()
     fact_risk_signals: tuple[RetentionSignalDefinition, ...] = ()
@@ -159,7 +159,7 @@ def _parse_bool_value(raw_value: str, *, env_var: str) -> bool:
     raise ValueError(f"Invalid online LLM boolean: {env_var} must be true or false.")
 
 
-def _parse_positive_float(raw_value: str, *, env_var: str) -> float:
+def _parse_non_negative_float(raw_value: str, *, env_var: str) -> float:
     try:
         value = float(raw_value)
     except ValueError as exc:
@@ -227,7 +227,7 @@ def load_online_llm_settings(
     sleep_min_raw = values.get(config.llm_sleep_min_env_var, "").strip()
     sleep_min_seconds = config.llm_sleep_min_seconds
     if sleep_min_raw:
-        sleep_min_seconds = _parse_positive_float(
+        sleep_min_seconds = _parse_non_negative_float(
             sleep_min_raw,
             env_var=config.llm_sleep_min_env_var,
         )
@@ -235,7 +235,7 @@ def load_online_llm_settings(
     sleep_max_raw = values.get(config.llm_sleep_max_env_var, "").strip()
     sleep_max_seconds = config.llm_sleep_max_seconds
     if sleep_max_raw:
-        sleep_max_seconds = _parse_positive_float(
+        sleep_max_seconds = _parse_non_negative_float(
             sleep_max_raw,
             env_var=config.llm_sleep_max_env_var,
         )
@@ -756,6 +756,7 @@ def _load_llm_retry_overrides(
         "stream_first_response_timeout_seconds",
         "max_concurrent_llm_requests",
         "max_concurrent_event_extraction_requests",
+        "max_concurrent_personal_fact_review_requests",
     }
     unexpected = sorted(set(payload).difference(keys))
     missing = sorted(keys.difference(payload))
@@ -769,7 +770,15 @@ def _load_llm_retry_overrides(
     values = {}
     for key in keys:
         value = payload[key]
-        minimum = 1 if key == "stream_first_response_timeout_seconds" else 0
+        minimum = (
+            1
+            if key
+            in {
+                "stream_first_response_timeout_seconds",
+                "max_concurrent_personal_fact_review_requests",
+            }
+            else 0
+        )
         if not isinstance(value, int) or isinstance(value, bool) or value < minimum:
             raise ValueError(
                 f"Invalid LLM retry config: {retry_path} field `{key}` must be at least {minimum}."
@@ -783,6 +792,9 @@ def _load_llm_retry_overrides(
         max_concurrent_llm_requests=values["max_concurrent_llm_requests"],
         max_concurrent_event_extraction_requests=values[
             "max_concurrent_event_extraction_requests"
+        ],
+        max_concurrent_personal_fact_review_requests=values[
+            "max_concurrent_personal_fact_review_requests"
         ],
     )
 
@@ -880,7 +892,7 @@ def _apply_runtime_env_overrides(
 
     retry_ratio_raw = values.get(config.collected_merge_retry_ratio_env_var, "").strip()
     if retry_ratio_raw:
-        retry_ratio = _parse_positive_float(
+        retry_ratio = _parse_non_negative_float(
             retry_ratio_raw,
             env_var=config.collected_merge_retry_ratio_env_var,
         )
@@ -913,7 +925,7 @@ def _apply_runtime_env_overrides(
         "",
     ).strip()
     if retry_delay_raw:
-        updates["collected_merge_retry_delay_seconds"] = _parse_positive_float(
+        updates["collected_merge_retry_delay_seconds"] = _parse_non_negative_float(
             retry_delay_raw,
             env_var=config.collected_merge_retry_delay_env_var,
         )
@@ -994,6 +1006,7 @@ class RuntimeConfig:
     stream_first_response_timeout_seconds: int = 60
     max_concurrent_llm_requests: int = 1
     max_concurrent_event_extraction_requests: int | None = None
+    max_concurrent_personal_fact_review_requests: int = 1
     anchor_batch_retry_limit: int = 1
     conversation_segmentation_failure_threshold: int = 2
     reaction_discovery_page_limit: int = 3
@@ -1065,8 +1078,8 @@ class RuntimeConfig:
     retention_policy_file_name: str = DEFAULT_RETENTION_POLICY_FILE_NAME
     llm_stream_enabled: bool = False
     llm_tls_verify: bool = False
-    llm_sleep_min_seconds: float = 1.0
-    llm_sleep_max_seconds: float = 2.0
+    llm_sleep_min_seconds: float = 0.0
+    llm_sleep_max_seconds: float = 0.0
     llm_reasoning_effort: str | None = "none"
 
 
