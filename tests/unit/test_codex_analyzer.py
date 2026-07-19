@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from src.worktrace.analyzers.codex import CodexAnalyzer
+from src.worktrace.analyzers.codex import CodexAnalyzer, CodexRequestPacer
 from src.worktrace.analyzers.output_schemas import (
     personal_fact_review_output_schema,
     retention_review_output_schema,
@@ -113,7 +113,7 @@ def test_codex_analyzer_uses_retention_review_protocol(
     analyzer = CodexAnalyzer(config=config, cwd=tmp_path)
     captured: dict[str, object] = {}
 
-    def fake_invoke(prompt, *, output_schema):
+    def fake_invoke(prompt, *, output_schema, request_kind="auxiliary_json"):
         captured.update(prompt=prompt, output_schema=output_schema)
         return {
             "results": [
@@ -145,7 +145,7 @@ def test_codex_analyzer_uses_personal_fact_review_protocol(
     analyzer = CodexAnalyzer(config=config, cwd=tmp_path)
     captured: dict[str, object] = {}
 
-    def fake_invoke(prompt, *, output_schema):
+    def fake_invoke(prompt, *, output_schema, request_kind="auxiliary_json"):
         captured.update(prompt=prompt, output_schema=output_schema)
         return {
             "results": [
@@ -223,3 +223,24 @@ def test_codex_analyzer_rejects_oversized_prompt_before_command(tmp_path: Path) 
         analyzer.analyze_batch("2026-06-23", sample_batch())
 
     assert calls == []
+
+
+def test_codex_request_pacer_reserves_shared_interval(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock_values = iter((100.0, 100.0))
+    sleep_calls: list[float] = []
+    monkeypatch.setattr(
+        "src.worktrace.analyzers.codex.perf_counter",
+        lambda: next(clock_values),
+    )
+    pacer = CodexRequestPacer(
+        1,
+        1,
+        random_uniform=lambda minimum, maximum: 1,
+        sleep_func=lambda seconds: sleep_calls.append(seconds),
+    )
+
+    assert pacer.wait_for_turn() == 0
+    assert pacer.wait_for_turn() == 1
+    assert sleep_calls == [1]

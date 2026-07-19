@@ -931,6 +931,7 @@ def build_collected_grouping_prompt(
                     "summary_title": "string or empty for singleton",
                     "summary_content": "string or empty for singleton",
                     "summary_object_hint": "string or empty for singleton",
+                    "split_reason": "empty because this is not a split review result",
                     "group_reason": [
                         "shared_message | shared_file | same_conversation | same_object | continuous_action"
                     ],
@@ -1019,6 +1020,7 @@ def build_collected_review_prompt(
             "不同业务对象、不同主要动作或不同结果方向应拆开。",
             "不同非空工作流通常拆开，除非共享消息证据且内容明确一致。",
             "多成员组返回非空候选摘要；单成员组三个摘要字段返回空字符串。",
+            "只有将输入的多成员候选拆成多个组时，每个输出组都必须返回非空 split_reason，说明拆开的具体业务差异；未拆开时 split_reason 返回空字符串。",
             "group_reason 和 risk_flags 按实际情况返回。",
         ],
         "required_output_schema": {
@@ -1029,6 +1031,7 @@ def build_collected_review_prompt(
                     "summary_title": "string or empty for singleton",
                     "summary_content": "string or empty for singleton",
                     "summary_object_hint": "string or empty for singleton",
+                    "split_reason": "nonempty only when this review splits the candidate group",
                     "group_reason": [
                         "shared_message | shared_file | same_conversation | same_object | continuous_action"
                     ],

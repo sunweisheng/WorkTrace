@@ -250,7 +250,13 @@ def _collect_online_llm_summary(summary: dict[str, object]) -> dict[str, object]
                 {
                     "call_index": len(requests) + 1,
                     "request_kind": str(item.get("request_kind", "unknown")),
+                    "backend": str(item.get("backend", "online")),
+                    "status": str(item.get("status", "success")),
+                    "fallback_from": item.get("fallback_from"),
+                    "fallback_to": item.get("fallback_to"),
+                    "error_category": item.get("error_category"),
                     "duration_ms": round(_to_float(item.get("duration_ms")), 3),
+                    "codex_wait_ms": round(_to_float(item.get("codex_wait_ms")), 3),
                     "prompt_chars": item.get("prompt_chars"),
                     "input_tokens": item.get("input_tokens"),
                     "output_tokens": item.get("output_tokens"),
@@ -276,6 +282,8 @@ def _collect_online_llm_summary(summary: dict[str, object]) -> dict[str, object]
                         if request_kind_match
                         else "unknown"
                     ),
+                    "backend": "online",
+                    "status": "success",
                     "duration_ms": round(_to_float(item.get("duration_ms")), 3),
                     "prompt_chars": (
                         int(prompt_chars_match.group(1))
@@ -285,10 +293,8 @@ def _collect_online_llm_summary(summary: dict[str, object]) -> dict[str, object]
                 }
             )
     request_durations = [_to_float(item["duration_ms"]) for item in requests]
-    delay_durations = [
-        _to_float(item.get("duration_ms"))
-        for item in events
-        if isinstance(item, dict) and item.get("event") == "online_llm.request.delay"
+    codex_wait_durations = [
+        _to_float(item.get("codex_wait_ms")) for item in requests
     ]
     requests_by_kind: dict[str, list[dict[str, object]]] = {}
     for item in requests:
@@ -298,11 +304,26 @@ def _collect_online_llm_summary(summary: dict[str, object]) -> dict[str, object]
         if isinstance(llm_usage_summary, dict)
         else {}
     )
+    requests_by_backend: dict[str, list[dict[str, object]]] = {}
+    for item in requests:
+        requests_by_backend.setdefault(str(item.get("backend", "online")), []).append(item)
     return {
         "source": source,
         "request_count": len(requests),
         "request_duration_ms": _build_basic_stats(request_durations),
-        "between_request_delay_ms": _build_basic_stats(delay_durations),
+        "codex_wait_ms": _build_basic_stats(codex_wait_durations),
+        "fallback_count": sum(1 for item in requests if item.get("fallback_to")),
+        "by_backend": {
+            backend: {
+                "request_count": len(items),
+                "success_count": sum(item.get("status") == "success" for item in items),
+                "failed_count": sum(item.get("status") == "failed" for item in items),
+                "request_duration_ms": _build_basic_stats(
+                    [_to_float(item.get("duration_ms")) for item in items]
+                ),
+            }
+            for backend, items in sorted(requests_by_backend.items())
+        },
         "by_request_kind": {
             request_kind: {
                 "request_duration_ms": _build_basic_stats(

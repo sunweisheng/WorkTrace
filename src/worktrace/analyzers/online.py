@@ -2,12 +2,11 @@ from __future__ import annotations
 
 import json
 import logging
-import random
 import ssl
 import threading
 from dataclasses import dataclass
 from pathlib import Path
-from time import perf_counter, sleep
+from time import perf_counter
 from typing import Callable
 
 import httpx
@@ -323,15 +322,11 @@ class OnlineLLMAnalyzer(Analyzer):
     config: RuntimeConfig
     cwd: Path | None = None
     settings_loader: Callable[..., OnlineLLMSettings] = load_online_llm_settings
-    random_uniform: Callable[[float, float], float] = random.uniform
-    sleep_func: Callable[[float], None] = sleep
     usage_recorder: LLMUsageRecorder | None = None
 
     def __post_init__(self) -> None:
         if self.cwd is None:
             self.cwd = Path.cwd()
-        self._request_count = 0
-        self._request_count_lock = threading.Lock()
         if self.usage_recorder is None:
             self.usage_recorder = LLMUsageRecorder()
 
@@ -591,7 +586,6 @@ class OnlineLLMAnalyzer(Analyzer):
             )
         started_at = perf_counter()
         settings = self.settings_loader(self.config, cwd=self.cwd, environ=None)
-        self._maybe_sleep_between_requests(settings)
         body = _build_responses_request_body(prompt, settings=settings, schema=output_schema)
 
         try:
@@ -625,8 +619,6 @@ class OnlineLLMAnalyzer(Analyzer):
         except OpenAIError as exc:
             raise AnalyzerProtocolError(str(exc)) from exc
 
-        with self._request_count_lock:
-            self._request_count += 1
         usage = extract_usage(usage_payload)
         duration_ms = log_timing(
             logger,
@@ -645,6 +637,7 @@ class OnlineLLMAnalyzer(Analyzer):
             usage_payload,
             duration_ms=duration_ms,
             prompt_chars=len(prompt),
+            backend="online",
         )
         if not text.strip():
             raise RetryableAnalyzerProtocolError(
@@ -678,23 +671,3 @@ class OnlineLLMAnalyzer(Analyzer):
         response = client.responses.create(**body)
         payload = response.model_dump()
         return _extract_text_from_responses_payload(payload), payload
-
-    def _maybe_sleep_between_requests(self, settings: OnlineLLMSettings) -> None:
-        if settings.sleep_max_seconds <= 0:
-            return
-        with self._request_count_lock:
-            has_previous_request = self._request_count > 0
-        if not has_previous_request:
-            return
-        delay_seconds = self.random_uniform(
-            settings.sleep_min_seconds,
-            settings.sleep_max_seconds,
-        )
-        sleep_started_at = perf_counter()
-        self.sleep_func(delay_seconds)
-        log_timing(
-            logger,
-            "online_llm.request.delay",
-            sleep_started_at,
-            delay_seconds=round(delay_seconds, 3),
-        )

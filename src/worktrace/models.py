@@ -1733,6 +1733,7 @@ class CollectedGroupingGroup:
     summary_content: str = ""
     summary_object_hint: str = ""
     summary_source: str = ""
+    split_reason: str = ""
     group_reason: list[str] = field(default_factory=list)
     risk_flags: list[str] = field(default_factory=list)
     was_repaired: bool = False
@@ -1746,6 +1747,7 @@ class CollectedGroupingGroup:
             summary_content=str(data.get("summary_content", "")),
             summary_object_hint=str(data.get("summary_object_hint", "")),
             summary_source=str(data.get("summary_source", "")),
+            split_reason=str(data.get("split_reason", "")),
             group_reason=_string_list(data.get("group_reason")),
             risk_flags=_string_list(data.get("risk_flags")),
             was_repaired=bool(data.get("was_repaired", False)),
@@ -1759,6 +1761,7 @@ class CollectedGroupingGroup:
             "summary_content": self.summary_content,
             "summary_object_hint": self.summary_object_hint,
             "summary_source": self.summary_source,
+            "split_reason": self.split_reason,
             "group_reason": list(self.group_reason),
             "risk_flags": list(self.risk_flags),
             "was_repaired": self.was_repaired,

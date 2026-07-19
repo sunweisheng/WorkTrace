@@ -28,11 +28,29 @@ def test_usage_recorder_reports_output_tokens_and_missing_values() -> None:
     assert summary["missing_output_tokens_request_count"] == 1
     assert summary["by_request_kind"]["segment_batch_analysis"]["output_tokens"] == 20
     assert summary["by_request_kind"]["image_summary"]["missing_output_tokens_request_count"] == 1
-    assert recorder.records()[0] == {
-        "request_kind": "segment_batch_analysis",
-        "duration_ms": 1234.5,
-        "prompt_chars": 456,
-        "input_tokens": 100,
-        "output_tokens": 20,
-        "total_tokens": 120,
-    }
+    record = recorder.records()[0]
+    assert record["request_kind"] == "segment_batch_analysis"
+    assert record["backend"] == "online"
+    assert record["status"] == "success"
+    assert record["duration_ms"] == 1234.5
+    assert record["prompt_chars"] == 456
+    assert record["input_tokens"] == 100
+    assert record["output_tokens"] == 20
+    assert record["total_tokens"] == 120
+
+
+def test_usage_recorder_marks_codex_tokens_unavailable() -> None:
+    recorder = LLMUsageRecorder()
+    recorder.record(
+        "collected_event_merge",
+        {},
+        backend="codex",
+        duration_ms=1200,
+        codex_wait_ms=100,
+    )
+
+    record = recorder.records()[0]
+
+    assert record["token_usage_status"] == "unavailable"
+    assert recorder.summary()["by_backend"]["codex"]["success_count"] == 1
+    assert recorder.summary()["codex_wait_ms"]["total"] == 100

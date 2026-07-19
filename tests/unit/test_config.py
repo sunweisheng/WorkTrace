@@ -103,16 +103,14 @@ def test_load_online_llm_settings_requires_positive_integer_timeout(tmp_path: Pa
     assert "must be an integer" in str(exc_info.value)
 
 
-def test_load_online_llm_settings_reads_stream_tls_and_sleep_overrides(tmp_path: Path) -> None:
+def test_load_online_llm_settings_reads_stream_tls_and_reasoning_overrides(tmp_path: Path) -> None:
     (tmp_path / ".env").write_text(
         "WORKTRACE_LLM_BASE_URL=https://llm.example/v1\n"
         "WORKTRACE_LLM_MODEL=provider-model\n"
         "WORKTRACE_LLM_API_KEY=file-key\n"
         "WORKTRACE_LLM_STREAM=true\n"
         "WORKTRACE_LLM_TLS_VERIFY=true\n"
-        "WORKTRACE_LLM_REASONING_EFFORT=none\n"
-        "WORKTRACE_LLM_SLEEP_MIN_SECONDS=1.5\n"
-        "WORKTRACE_LLM_SLEEP_MAX_SECONDS=2.5\n",
+        "WORKTRACE_LLM_REASONING_EFFORT=none\n",
         encoding="utf-8",
     )
 
@@ -121,24 +119,6 @@ def test_load_online_llm_settings_reads_stream_tls_and_sleep_overrides(tmp_path:
     assert settings.stream_enabled is True
     assert settings.tls_verify is True
     assert settings.reasoning_effort == "none"
-    assert settings.sleep_min_seconds == 1.5
-    assert settings.sleep_max_seconds == 2.5
-
-
-def test_load_online_llm_settings_accepts_zero_sleep_overrides(tmp_path: Path) -> None:
-    (tmp_path / ".env").write_text(
-        "WORKTRACE_LLM_BASE_URL=https://llm.example/v1\n"
-        "WORKTRACE_LLM_MODEL=provider-model\n"
-        "WORKTRACE_LLM_API_KEY=file-key\n"
-        "WORKTRACE_LLM_SLEEP_MIN_SECONDS=0\n"
-        "WORKTRACE_LLM_SLEEP_MAX_SECONDS=0\n",
-        encoding="utf-8",
-    )
-
-    settings = load_online_llm_settings(RuntimeConfig(), cwd=tmp_path, environ={})
-
-    assert settings.sleep_min_seconds == 0.0
-    assert settings.sleep_max_seconds == 0.0
 
 
 def test_load_online_llm_settings_reads_false_stream_override(tmp_path: Path) -> None:
@@ -243,6 +223,9 @@ def test_load_runtime_config_overrides_reads_llm_retry_settings(tmp_path: Path) 
                 "max_concurrent_llm_requests": 3,
                 "max_concurrent_event_extraction_requests": 5,
                 "max_concurrent_personal_fact_review_requests": 3,
+                "codex_request_interval_min_seconds": 0,
+                "codex_request_interval_max_seconds": 1,
+                "max_concurrent_collected_merge_review_requests": 3,
             }
         ),
         encoding="utf-8",
@@ -256,6 +239,9 @@ def test_load_runtime_config_overrides_reads_llm_retry_settings(tmp_path: Path) 
     assert config.max_concurrent_llm_requests == 3
     assert config.max_concurrent_event_extraction_requests == 5
     assert config.max_concurrent_personal_fact_review_requests == 3
+    assert config.codex_request_interval_min_seconds == 0
+    assert config.codex_request_interval_max_seconds == 1
+    assert config.max_concurrent_collected_merge_review_requests == 3
 
 
 def test_load_runtime_config_overrides_reads_self_relation_metadata(
@@ -306,9 +292,7 @@ def test_load_runtime_config_overrides_reads_collected_merge_env_overrides(
         "WORKTRACE_COLLECTED_MERGE_TRACE=true\n"
         "WORKTRACE_COLLECTED_MERGE_TRACE_ROOT=custom-trace\n"
         "WORKTRACE_COLLECTED_MERGE_MISSING_FIELD_RETRY_RATIO=0.35\n"
-        "WORKTRACE_COLLECTED_MERGE_MISSING_FIELD_RETRY_LIMIT=2\n"
-        "WORKTRACE_COLLECTED_MERGE_RETRYABLE_ERROR_LIMIT=3\n"
-        "WORKTRACE_COLLECTED_MERGE_RETRY_DELAY_SECONDS=4.5\n",
+        "WORKTRACE_COLLECTED_MERGE_MISSING_FIELD_RETRY_LIMIT=2\n",
         encoding="utf-8",
     )
 
@@ -318,8 +302,6 @@ def test_load_runtime_config_overrides_reads_collected_merge_env_overrides(
     assert config.collected_merge_trace_root == Path("custom-trace")
     assert config.collected_merge_missing_field_retry_ratio == 0.35
     assert config.collected_merge_missing_field_retry_limit == 2
-    assert config.collected_merge_retryable_error_limit == 3
-    assert config.collected_merge_retry_delay_seconds == 4.5
 
 
 def test_load_runtime_config_overrides_reads_collected_merge_review_config(
@@ -400,27 +382,6 @@ def test_load_runtime_config_overrides_rejects_invalid_collected_merge_config(
     )
 
     with pytest.raises(ValueError, match="Invalid collected merge config"):
-        load_runtime_config_overrides(RuntimeConfig(), cwd=tmp_path)
-
-
-@pytest.mark.parametrize(
-    ("env_name", "env_value"),
-    [
-        ("WORKTRACE_COLLECTED_MERGE_RETRYABLE_ERROR_LIMIT", "-1"),
-        ("WORKTRACE_COLLECTED_MERGE_RETRY_DELAY_SECONDS", "-0.1"),
-    ],
-)
-def test_load_runtime_config_overrides_rejects_invalid_collected_merge_retry(
-    tmp_path: Path,
-    env_name: str,
-    env_value: str,
-) -> None:
-    (tmp_path / ".env").write_text(
-        f"{env_name}={env_value}\n",
-        encoding="utf-8",
-    )
-
-    with pytest.raises(ValueError):
         load_runtime_config_overrides(RuntimeConfig(), cwd=tmp_path)
 
 
@@ -563,17 +524,25 @@ def test_load_conversation_blacklist_overrides_rejects_invalid_list_shape(
     assert "conversation blacklist config" in str(exc_info.value)
 
 
-def test_load_online_llm_settings_rejects_invalid_sleep_range(tmp_path: Path) -> None:
-    (tmp_path / ".env").write_text(
-        "WORKTRACE_LLM_BASE_URL=https://llm.example/v1\n"
-        "WORKTRACE_LLM_MODEL=provider-model\n"
-        "WORKTRACE_LLM_API_KEY=file-key\n"
-        "WORKTRACE_LLM_SLEEP_MIN_SECONDS=2\n"
-        "WORKTRACE_LLM_SLEEP_MAX_SECONDS=1\n",
+def test_load_runtime_config_overrides_rejects_invalid_codex_interval(tmp_path: Path) -> None:
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    (config_dir / "llm_retry.json").write_text(
+        json.dumps(
+            {
+                "segmentation_retry_limit": 3,
+                "event_extraction_retry_limit": 3,
+                "stream_first_response_timeout_seconds": 60,
+                "max_concurrent_llm_requests": 3,
+                "max_concurrent_event_extraction_requests": 5,
+                "max_concurrent_personal_fact_review_requests": 3,
+                "codex_request_interval_min_seconds": 2,
+                "codex_request_interval_max_seconds": 1,
+                "max_concurrent_collected_merge_review_requests": 3,
+            }
+        ),
         encoding="utf-8",
     )
 
-    with pytest.raises(ValueError) as exc_info:
-        load_online_llm_settings(RuntimeConfig(), cwd=tmp_path, environ={})
-
-    assert "delay range" in str(exc_info.value)
+    with pytest.raises(ValueError, match="codex_request_interval_min_seconds"):
+        load_runtime_config_overrides(RuntimeConfig(), cwd=tmp_path)

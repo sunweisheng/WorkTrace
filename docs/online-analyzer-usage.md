@@ -51,15 +51,13 @@ WORKTRACE_LLM_REASONING_EFFORT=none
 WORKTRACE_LLM_TIMEOUT_SECONDS=1200
 WORKTRACE_LLM_STREAM=true
 WORKTRACE_LLM_TLS_VERIFY=false
-WORKTRACE_LLM_SLEEP_MIN_SECONDS=0
-WORKTRACE_LLM_SLEEP_MAX_SECONDS=0
 ```
 
 环境变量优先于仓库根目录 `.env`。真实值不能提交到 git。
 
-默认调用间隔为 `0-0` 秒。两项都为 `0` 时 analyzer 直接跳过 sleep 和 delay 日志；只有 provider 明确要求客户端限速时才配置非零区间。
+在线文字请求不等待。可切换的在线失败只切换当前请求到 Codex，下一请求仍先使用在线线路；Codex 的 `0-1` 秒调用间隔在 `config/llm_retry.json` 配置。图片摘要不使用 Codex 备用线路。
 
-模型调用的重试、流式首次返回超时和并发数不在 `.env` 中配置，而由 `config/llm_retry.json` 管理。当前话题切分允许 3 个并发请求，事件提炼允许 5 个，个人事实复核允许 3 个；同一会话的话题切分和同一事实复核候选的重试仍保持顺序。分段和提炼的配置值 `3` 均表示首次调用之外最多再重试 3 次。
+模型调用的重试、流式首次返回超时、Codex 间隔和并发数不在 `.env` 中配置，而由 `config/llm_retry.json` 管理。当前话题切分允许 3 个并发请求，事件提炼允许 5 个，个人事实复核和多人高风险复核各允许 3 个；同一会话的话题切分和同一事实复核候选的重试仍保持顺序。分段和提炼的配置值 `3` 均表示首次调用之外最多再重试 3 次。
 
 ## 3. 请求规则
 
@@ -95,7 +93,7 @@ preflight 和正式 analyzer 复用同一 JSON 提取规则，避免模型返回
 python3 -m src.worktrace.cli --preflight
 ```
 
-在线模型探针发送一个最小 JSON schema 请求并要求返回 `{"probe":"ok"}`。探针单次超时上限为 45 秒，即使正式请求 timeout 更长也不会让自检长期挂起。
+在线模型探针发送一个最小 JSON schema 请求并要求返回 `{"probe":"ok"}`。探针单次超时上限为 45 秒，即使正式请求 timeout 更长也不会让自检长期挂起。在线模式还会只检查本机存在 `codex` 命令，为当前请求备用线路做准备，不额外执行 Codex 探针。
 
 个人日报执行前自动调用该检查；`merge-collected` 和 `sync-reaction-catalog` 是独立子命令，不自动运行整套个人日报 preflight。
 

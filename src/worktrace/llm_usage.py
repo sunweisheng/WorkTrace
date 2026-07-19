@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from contextlib import contextmanager
 from dataclasses import dataclass, field
-from threading import Lock
+from threading import Lock, local
 
 
 def extract_usage(payload: object) -> dict[str, int | None]:
@@ -43,6 +44,16 @@ def _read_token_count(usage: dict[str, object], *keys: str) -> int | None:
 class LLMUsageRecorder:
     _records: list[dict[str, int | str | None]] = field(default_factory=list)
     _lock: Lock = field(default_factory=Lock)
+    _context: local = field(default_factory=local)
+
+    @contextmanager
+    def request_context(self, context_id: str):
+        previous = getattr(self._context, "request_context_id", None)
+        self._context.request_context_id = context_id
+        try:
+            yield
+        finally:
+            self._context.request_context_id = previous
 
     def record(
         self,
@@ -51,14 +62,40 @@ class LLMUsageRecorder:
         *,
         duration_ms: float | None = None,
         prompt_chars: int | None = None,
+        backend: str = "online",
+        status: str = "success",
+        fallback_from: str | None = None,
+        fallback_to: str | None = None,
+        error_category: str | None = None,
+        codex_wait_ms: float | None = None,
     ) -> dict[str, int | None]:
         usage = extract_usage(payload)
         with self._lock:
             self._records.append(
                 {
                     "request_kind": request_kind,
+                    "request_context_id": getattr(
+                        self._context,
+                        "request_context_id",
+                        None,
+                    ),
+                    "backend": backend,
+                    "status": status,
+                    "fallback_from": fallback_from,
+                    "fallback_to": fallback_to,
+                    "error_category": error_category,
+                    "token_usage_status": (
+                        "reported"
+                        if any(value is not None for value in usage.values())
+                        else "unavailable"
+                    ),
                     "duration_ms": round(duration_ms, 3) if duration_ms is not None else None,
                     "prompt_chars": prompt_chars,
+                    "codex_wait_ms": (
+                        round(codex_wait_ms, 3)
+                        if codex_wait_ms is not None
+                        else None
+                    ),
                     **usage,
                 }
             )
@@ -68,7 +105,7 @@ class LLMUsageRecorder:
         with self._lock:
             records = list(self._records)
 
-        return _summarize_records(
+        usage_summary = _summarize_records(
             [
                 (
                     str(record["request_kind"]),
@@ -81,6 +118,14 @@ class LLMUsageRecorder:
                 for record in records
             ]
         )
+        return {
+            **usage_summary,
+            "by_backend": _summarize_attempts(records, key="backend"),
+            "fallback_count": sum(1 for record in records if record.get("fallback_to")),
+            "codex_wait_ms": _basic_duration_summary(
+                [record.get("codex_wait_ms") for record in records]
+            ),
+        }
 
     def records(self) -> list[dict[str, int | str | None]]:
         with self._lock:
@@ -116,3 +161,33 @@ def _summarize_usage(
         summary[f"reported_{key}_request_count"] = len(values)
         summary[f"missing_{key}_request_count"] = len(records) - len(values)
     return summary
+
+
+def _basic_duration_summary(values: list[object]) -> dict[str, float | int]:
+    durations = [float(value) for value in values if isinstance(value, int | float)]
+    return {
+        "count": len(durations),
+        "total": round(sum(durations), 3),
+        "max": round(max(durations), 3) if durations else 0.0,
+    }
+
+
+def _summarize_attempts(
+    records: list[dict[str, int | str | None]],
+    *,
+    key: str,
+) -> dict[str, dict[str, object]]:
+    grouped: dict[str, list[dict[str, int | str | None]]] = defaultdict(list)
+    for record in records:
+        grouped[str(record.get(key, "unknown"))].append(record)
+    return {
+        name: {
+            "request_count": len(items),
+            "success_count": sum(item.get("status") == "success" for item in items),
+            "failed_count": sum(item.get("status") == "failed" for item in items),
+            "duration_ms": _basic_duration_summary(
+                [item.get("duration_ms") for item in items]
+            ),
+        }
+        for name, items in sorted(grouped.items())
+    }

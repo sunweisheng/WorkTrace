@@ -85,6 +85,8 @@ def run_preflight_checks(
             ensure_reasoning_disabled(settings.reasoning_effort)
             details["reasoning_effort"] = settings.reasoning_effort or ""
             details.update(probe_online_llm(config, cwd=cwd))
+            details["codex_path"] = require_command("codex")
+            details["codex_fallback"] = "available"
             details["analyzer_backend"] = "online"
         else:
             codex_path = require_command("codex")

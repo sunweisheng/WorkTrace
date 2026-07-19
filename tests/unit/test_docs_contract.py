@@ -289,8 +289,8 @@ def test_docs_describe_enhanced_debug_artifacts() -> None:
         assert "boundary_warnings" in content
         assert "source-audit.json" in content
         assert "partial_file_count" in content
-        assert "WORKTRACE_COLLECTED_MERGE_RETRYABLE_ERROR_LIMIT" in content
-        assert "WORKTRACE_COLLECTED_MERGE_RETRY_DELAY_SECONDS" in content
+        assert "Codex" in content
+        assert "llm_calls" in content or "调用记录" in content
 
 
 def test_docs_describe_online_template_defaults_and_necessary_names() -> None:
@@ -307,6 +307,29 @@ def test_docs_describe_online_template_defaults_and_necessary_names() -> None:
     for content in (privacy, employee_guide):
         assert "参与人名单" in content
         assert "确有必要时保留姓名" in content
+
+
+def test_docs_match_failover_and_collected_merge_optimizations() -> None:
+    documents = [
+        Path("README.md"),
+        Path("SKILL.md"),
+        Path("docs/detailed-design.md"),
+        Path("docs/online-analyzer-usage.md"),
+        Path("docs/collected-people-merge-plan.md"),
+        Path("docs/two-level-collected-merge-improvement-plan.md"),
+        Path("docs/implementation-breakdown.md"),
+    ]
+    content = "\n".join(path.read_text(encoding="utf-8") for path in documents)
+
+    assert "codex_request_interval_min_seconds" in content
+    assert "当前请求" in content
+    assert "单条候选直接保留" in content
+    assert "共同消息指纹或共同文件" in content
+    assert "split_reason" in content
+    assert "最多三路" in content
+    assert "WORKTRACE_LLM_" + "SLEEP_" not in content
+    assert "WORKTRACE_COLLECTED_MERGE_" + "RETRYABLE_ERROR_LIMIT" not in content
+    assert "WORKTRACE_COLLECTED_MERGE_" + "RETRY_DELAY_SECONDS" not in content
 
 
 def test_docs_describe_three_required_llm_values_and_default_reasoning() -> None:

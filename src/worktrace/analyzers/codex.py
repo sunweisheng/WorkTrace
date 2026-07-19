@@ -2,16 +2,19 @@ from __future__ import annotations
 
 import json
 import logging
+import random
 import subprocess
 import tempfile
+import threading
 from dataclasses import dataclass
 from pathlib import Path
-from time import perf_counter
-from typing import Any, Sequence
+from time import perf_counter, sleep
+from typing import Any, Callable, Sequence
 
 from ..config import RuntimeConfig
 from ..errors import AnalyzerProtocolError
 from ..logging_utils import log_timing
+from ..llm_usage import LLMUsageRecorder
 from ..models import (
     AnalysisBatch,
     AnchorUnit,
@@ -77,6 +80,31 @@ from .protocol import (
 logger = logging.getLogger("worktrace")
 
 
+@dataclass
+class CodexRequestPacer:
+    """Reserve Codex start times so concurrent calls keep one shared interval."""
+
+    min_seconds: float
+    max_seconds: float
+    random_uniform: Callable[[float, float], float] = random.uniform
+    sleep_func: Callable[[float], None] = sleep
+
+    def __post_init__(self) -> None:
+        self._lock = threading.Lock()
+        self._next_start_at = 0.0
+
+    def wait_for_turn(self) -> float:
+        now = perf_counter()
+        with self._lock:
+            wait_seconds = max(0.0, self._next_start_at - now)
+            reserved_start = now + wait_seconds
+            interval = self.random_uniform(self.min_seconds, self.max_seconds)
+            self._next_start_at = reserved_start + interval
+        if wait_seconds > 0:
+            self.sleep_func(wait_seconds)
+        return wait_seconds
+
+
 def _format_process_failure(prefix: str, result: object) -> str:
     returncode = getattr(result, "returncode", None)
     stderr = getattr(result, "stderr", "") or ""
@@ -92,12 +120,21 @@ class CodexAnalyzer(Analyzer):
     config: RuntimeConfig
     command_runner: Any | None = None
     cwd: Path | None = None
+    usage_recorder: LLMUsageRecorder | None = None
+    request_pacer: CodexRequestPacer | None = None
 
     def __post_init__(self) -> None:
         if self.command_runner is None:
             self.command_runner = self._run_command
         if self.cwd is None:
             self.cwd = Path.cwd()
+        if self.usage_recorder is None:
+            self.usage_recorder = LLMUsageRecorder()
+        if self.request_pacer is None:
+            self.request_pacer = CodexRequestPacer(
+                self.config.codex_request_interval_min_seconds,
+                self.config.codex_request_interval_max_seconds,
+            )
 
     def analyze_batch(
         self,
@@ -107,6 +144,7 @@ class CodexAnalyzer(Analyzer):
         payload = self._invoke_codex(
             self.build_batch_prompt(batch_input),
             output_schema=batch_output_schema(self.config),
+            request_kind="batch_analysis",
         )
         return parse_batch_analysis_payload(payload)
 
@@ -162,6 +200,7 @@ class CodexAnalyzer(Analyzer):
                 attachment_texts=attachment_texts,
             ),
             output_schema=conversation_segmentation_output_schema(),
+            request_kind="conversation_segmentation",
         )
         return restore_conversation_segmentation_references(
             parse_conversation_segmentation_payload(payload),
@@ -179,6 +218,7 @@ class CodexAnalyzer(Analyzer):
         payload = self._invoke_codex(
             self.build_segment_batch_prompt(batch),
             output_schema=segment_batch_output_schema(self.config),
+            request_kind="segment_batch_analysis",
         )
         return parse_segment_batch_analysis_payload(payload)
 
@@ -192,6 +232,7 @@ class CodexAnalyzer(Analyzer):
         payload = self._invoke_codex(
             self.build_retention_review_prompt(batch),
             output_schema=retention_review_output_schema(self.config),
+            request_kind="retention_review",
         )
         return parse_retention_review_payload(payload)
 
@@ -208,6 +249,7 @@ class CodexAnalyzer(Analyzer):
         payload = self._invoke_codex(
             self.build_personal_fact_review_prompt(batch),
             output_schema=personal_fact_review_output_schema(batch),
+            request_kind="personal_fact_review",
         )
         return parse_personal_fact_review_payload(payload)
 
@@ -229,6 +271,7 @@ class CodexAnalyzer(Analyzer):
         payload = self._invoke_codex(
             build_anchor_batch_analysis_prompt(target_date, anchor_units, config=self.config),
             output_schema=anchor_batch_output_schema(self.config),
+            request_kind="anchor_batch_analysis",
         )
         return parse_anchor_batch_analysis_payload(payload)
 
@@ -240,6 +283,7 @@ class CodexAnalyzer(Analyzer):
         payload = self._invoke_codex(
             build_merge_prompt(target_date, candidates),
             output_schema=merge_output_schema(),
+            request_kind="day_candidate_merge",
         )
         return parse_merge_payload(payload)
 
@@ -257,6 +301,7 @@ class CodexAnalyzer(Analyzer):
                 config=self.config,
             ),
             output_schema=collected_merge_output_schema(),
+            request_kind="collected_event_merge",
         )
         return parse_collected_merge_payload(payload)
 
@@ -274,6 +319,7 @@ class CodexAnalyzer(Analyzer):
                 config=self.config,
             ),
             output_schema=collected_grouping_output_schema(),
+            request_kind="collected_candidate_grouping",
         )
         return parse_collected_grouping_payload(payload)
 
@@ -294,6 +340,7 @@ class CodexAnalyzer(Analyzer):
                 review_reasons=review_reasons,
             ),
             output_schema=collected_grouping_output_schema(),
+            request_kind="collected_group_review",
         )
         return parse_collected_grouping_payload(payload)
 
@@ -320,6 +367,7 @@ class CodexAnalyzer(Analyzer):
         prompt: str,
         *,
         output_schema: dict[str, object] | None = None,
+        request_kind: str = "auxiliary_json",
     ) -> object:
         estimated_tokens = estimate_text_tokens(prompt)
         if estimated_tokens > self.config.max_model_input_tokens:
@@ -351,6 +399,7 @@ class CodexAnalyzer(Analyzer):
             schema_handle.flush()
             schema_handle.close()
 
+        wait_seconds = self.request_pacer.wait_for_turn()
         started_at = perf_counter()
         try:
             if self.config.codex_stdin_mode:
@@ -405,6 +454,16 @@ class CodexAnalyzer(Analyzer):
                 cwd=str(self.cwd),
                 stdin_mode=self.config.codex_stdin_mode,
             )
+            self.usage_recorder.record(
+                request_kind,
+                {},
+                duration_ms=(perf_counter() - started_at) * 1000,
+                prompt_chars=len(prompt),
+                backend="codex",
+                status="failed",
+                error_category="timeout",
+                codex_wait_ms=wait_seconds * 1000,
+            )
             raise AnalyzerProtocolError("Codex analysis timed out.") from exc
 
         log_timing(
@@ -420,13 +479,34 @@ class CodexAnalyzer(Analyzer):
             output_path.unlink(missing_ok=True)
             if schema_path is not None:
                 schema_path.unlink(missing_ok=True)
-            raise AnalyzerProtocolError(
+            error = AnalyzerProtocolError(
                 _format_process_failure("Codex analysis command failed.", result)
             )
+            self.usage_recorder.record(
+                request_kind,
+                {},
+                duration_ms=(perf_counter() - started_at) * 1000,
+                prompt_chars=len(prompt),
+                backend="codex",
+                status="failed",
+                error_category="command_failed",
+                codex_wait_ms=wait_seconds * 1000,
+            )
+            raise error
 
         try:
             content = output_path.read_text(encoding="utf-8").strip()
         except OSError as exc:
+            self.usage_recorder.record(
+                request_kind,
+                {},
+                duration_ms=(perf_counter() - started_at) * 1000,
+                prompt_chars=len(prompt),
+                backend="codex",
+                status="failed",
+                error_category="output_missing",
+                codex_wait_ms=wait_seconds * 1000,
+            )
             raise AnalyzerProtocolError("Codex output file is missing.") from exc
         finally:
             output_path.unlink(missing_ok=True)
@@ -434,9 +514,28 @@ class CodexAnalyzer(Analyzer):
                 schema_path.unlink(missing_ok=True)
 
         try:
-            return json.loads(content)
+            payload = json.loads(content)
         except json.JSONDecodeError:
             try:
-                return load_json_object(content)
+                payload = load_json_object(content)
             except ValueError as exc:
+                self.usage_recorder.record(
+                    request_kind,
+                    {},
+                    duration_ms=(perf_counter() - started_at) * 1000,
+                    prompt_chars=len(prompt),
+                    backend="codex",
+                    status="failed",
+                    error_category="invalid_json",
+                    codex_wait_ms=wait_seconds * 1000,
+                )
                 raise AnalyzerProtocolError("Codex did not return valid JSON.") from exc
+        self.usage_recorder.record(
+            request_kind,
+            {},
+            duration_ms=(perf_counter() - started_at) * 1000,
+            prompt_chars=len(prompt),
+            backend="codex",
+            codex_wait_ms=wait_seconds * 1000,
+        )
+        return payload

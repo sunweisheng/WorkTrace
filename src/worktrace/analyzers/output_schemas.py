@@ -632,6 +632,7 @@ def collected_grouping_output_schema() -> dict[str, object]:
                         "summary_title": {"type": "string"},
                         "summary_content": {"type": "string"},
                         "summary_object_hint": {"type": "string"},
+                        "split_reason": {"type": "string"},
                         "group_reason": {
                             "type": "array",
                             "items": {
@@ -664,6 +665,7 @@ def collected_grouping_output_schema() -> dict[str, object]:
                         "summary_title",
                         "summary_content",
                         "summary_object_hint",
+                        "split_reason",
                         "group_reason",
                         "risk_flags",
                     ],

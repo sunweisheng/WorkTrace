@@ -215,8 +215,6 @@ def build_settings(**overrides: object) -> OnlineLLMSettings:
         stream_first_response_timeout_seconds=60,
         stream_enabled=False,
         tls_verify=False,
-        sleep_min_seconds=1.0,
-        sleep_max_seconds=2.0,
         reasoning_effort=None,
     )
     return OnlineLLMSettings(**(base.__dict__ | overrides))
@@ -288,64 +286,6 @@ def test_extract_text_from_responses_stream_event() -> None:
     ) == '{"candidate_events":[]'
 
 
-def test_online_analyzer_sleeps_after_first_request(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    _close_global_client()
-    sleep_calls: list[float] = []
-    settings = build_settings()
-
-    class FakeResponse:
-        def model_dump(self):
-            return {"output_text": '{"candidate_events":[],"context_requests":[]}'}
-
-    class FakeResponses:
-        def create(self, **kwargs):
-            return FakeResponse()
-
-    class FakeClient:
-        def __init__(self):
-            self.responses = FakeResponses()
-
-    class FakeHttpClient:
-        def __enter__(self):
-            return self
-
-        def __exit__(self, exc_type, exc, tb):
-            return False
-
-    monkeypatch.setattr("src.worktrace.analyzers.online._build_http_client", lambda settings: FakeHttpClient())
-    monkeypatch.setattr("src.worktrace.analyzers.online.OpenAI", lambda **kwargs: FakeClient())
-
-    analyzer = OnlineLLMAnalyzer(
-        config=RuntimeConfig(data_root=tmp_path / "data"),
-        cwd=tmp_path,
-        settings_loader=lambda *args, **kwargs: settings,
-        sleep_func=lambda seconds: sleep_calls.append(seconds),
-        random_uniform=lambda start, end: 1.5,
-    )
-
-    analyzer.analyze_batch("2026-06-23", sample_batch())
-    analyzer.analyze_batch("2026-06-23", sample_batch())
-
-    assert sleep_calls == [1.5]
-
-
-def test_online_analyzer_skips_zero_request_delay(tmp_path: Path) -> None:
-    sleep_calls: list[float] = []
-    analyzer = OnlineLLMAnalyzer(
-        config=RuntimeConfig(data_root=tmp_path / "data"),
-        cwd=tmp_path,
-        sleep_func=lambda seconds: sleep_calls.append(seconds),
-        random_uniform=lambda start, end: 0.0,
-    )
-    analyzer._request_count = 1
-
-    analyzer._maybe_sleep_between_requests(
-        build_settings(sleep_min_seconds=0.0, sleep_max_seconds=0.0)
-    )
-
-    assert sleep_calls == []
-
-
 def test_online_analyzer_reuses_global_singleton_until_settings_change(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -389,7 +329,6 @@ def test_online_analyzer_reuses_global_singleton_until_settings_change(
         config=RuntimeConfig(data_root=tmp_path / "data"),
         cwd=tmp_path,
         settings_loader=lambda *args, **kwargs: settings_queue.pop(0),
-        sleep_func=lambda seconds: None,
     )
 
     analyzer.analyze_batch("2026-06-23", sample_batch())
@@ -432,7 +371,6 @@ def test_online_analyzer_parses_non_stream_response(tmp_path: Path, monkeypatch:
         config=RuntimeConfig(data_root=tmp_path / "data"),
         cwd=tmp_path,
         settings_loader=lambda *args, **kwargs: settings,
-        sleep_func=lambda seconds: None,
     )
 
     result = analyzer.analyze_batch("2026-06-23", sample_batch())
@@ -500,7 +438,6 @@ def test_online_analyzer_parses_stream_response(tmp_path: Path, monkeypatch: pyt
         config=RuntimeConfig(data_root=tmp_path / "data"),
         cwd=tmp_path,
         settings_loader=lambda *args, **kwargs: settings,
-        sleep_func=lambda seconds: None,
     )
 
     result = analyzer.analyze_batch("2026-06-23", sample_batch())
@@ -550,7 +487,6 @@ def test_online_analyzer_wraps_invalid_stream_json(
         config=RuntimeConfig(data_root=tmp_path / "data"),
         cwd=tmp_path,
         settings_loader=lambda *args, **kwargs: settings,
-        sleep_func=lambda seconds: None,
     )
 
     with pytest.raises(RetryableAnalyzerProtocolError) as exc_info:
@@ -588,7 +524,6 @@ def test_online_analyzer_surfaces_timeout(tmp_path: Path, monkeypatch: pytest.Mo
         config=RuntimeConfig(data_root=tmp_path / "data"),
         cwd=tmp_path,
         settings_loader=lambda *args, **kwargs: settings,
-        sleep_func=lambda seconds: None,
     )
 
     with pytest.raises(RetryableAnalyzerProtocolError) as exc_info:
@@ -686,7 +621,6 @@ def test_online_analyzer_classifies_retryable_and_permanent_errors(
             config=RuntimeConfig(data_root=tmp_path / "data"),
             cwd=tmp_path,
             settings_loader=lambda *args, **kwargs: build_settings(),
-            sleep_func=lambda seconds: None,
         )
 
         with pytest.raises(AnalyzerProtocolError) as exc_info:

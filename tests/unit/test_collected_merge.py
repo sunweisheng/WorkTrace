@@ -208,7 +208,6 @@ def _build_runner(
     analyzer=None,
     delivery_channel=None,
     command_runner=None,
-    sleep_func=None,
 ) -> CollectedMergeRunner:
     return CollectedMergeRunner(
         config=config or RuntimeConfig(data_root=tmp_path / "data"),
@@ -217,7 +216,6 @@ def _build_runner(
         command_runner=command_runner or _unexpected_command,
         delivery_channel=delivery_channel or NullDelivery(),
         self_identity_resolver=_fake_self_identity,
-        sleep_func=sleep_func or (lambda seconds: None),
     )
 
 
@@ -1740,124 +1738,6 @@ def test_collected_merge_partially_reads_truncated_source_file(
     ]
 
 
-def test_collected_merge_retries_retryable_error_and_records_each_attempt(
-    tmp_path: Path,
-) -> None:
-    class RetryOnceAnalyzer:
-        def __init__(self) -> None:
-            self.attempts: list[list[str]] = []
-
-        def merge_collected_events(self, target_date, events, deterministic_groups):
-            self.attempts.append([item.draft_id for item in events])
-            if len(self.attempts) == 1:
-                raise RetryableAnalyzerProtocolError("temporary network failure")
-            return CollectedMergeResult(
-                groups=[
-                    CollectedMergeGroup(
-                        group_id="g1",
-                        draft_ids=[item.draft_id for item in events],
-                        title="项目排期",
-                        content="确认项目排期。",
-                        object_hint="项目排期",
-                        retention_reason="decision_made",
-                        retention_detail="形成项目排期确认结果。",
-                    )
-                ]
-            )
-
-    inbox = tmp_path / "merge_inbox" / "2026" / "06" / "29"
-    _write_day_doc(
-        inbox / "2026-06-29-张三.md",
-        [_event(event_id="evt-1", title="项目排期", content="确认项目排期。")],
-        tmp_path,
-    )
-    trace_dir = tmp_path / "trace" / "2026-06-29"
-    trace_dir.mkdir(parents=True)
-    (trace_dir / "step-999.json").write_text("{}", encoding="utf-8")
-    (trace_dir / "step-999-prompt.txt").write_text("stale", encoding="utf-8")
-    sleep_calls: list[float] = []
-    analyzer = RetryOnceAnalyzer()
-
-    result = _build_runner(
-        tmp_path,
-        analyzer=analyzer,
-        sleep_func=lambda seconds: sleep_calls.append(seconds),
-        config=RuntimeConfig(
-            data_root=tmp_path / "data",
-            collected_merge_retryable_error_limit=1,
-            collected_merge_retry_delay_seconds=2,
-            collected_merge_trace_enabled=True,
-            collected_merge_trace_root=tmp_path / "trace",
-        ),
-    ).run("2026-06-29")
-
-    assert result.output_path is not None
-    assert len(analyzer.attempts) == 2
-    assert analyzer.attempts[0] == analyzer.attempts[1]
-    assert sleep_calls == [2]
-    assert not (trace_dir / "step-999.json").exists()
-    assert not (trace_dir / "step-999-prompt.txt").exists()
-    steps = [
-        json.loads(path.read_text(encoding="utf-8"))
-        for path in sorted(trace_dir.glob("step-*.json"))
-    ]
-    assert [item["status"] for item in steps] == ["failed", "success"]
-    assert [item["retry_reason"] for item in steps] == [
-        "initial",
-        "retryable_error",
-    ]
-    assert [item["attempt_index"] for item in steps] == [1, 2]
-    assert (trace_dir / "step-001-prompt.txt").exists()
-    assert (trace_dir / "step-002-prompt.txt").exists()
-
-
-def test_collected_merge_terminal_retryable_failure_writes_summary(
-    tmp_path: Path,
-) -> None:
-    class AlwaysFailAnalyzer:
-        def __init__(self) -> None:
-            self.call_count = 0
-
-        def merge_collected_events(self, target_date, events, deterministic_groups):
-            self.call_count += 1
-            raise RetryableAnalyzerProtocolError("network unavailable")
-
-    inbox = tmp_path / "merge_inbox" / "2026" / "06" / "29"
-    _write_day_doc(
-        inbox / "2026-06-29-张三.md",
-        [_event(event_id="evt-1", title="项目排期", content="确认项目排期。")],
-        tmp_path,
-    )
-    trace_root = tmp_path / "trace"
-    analyzer = AlwaysFailAnalyzer()
-
-    result = _build_runner(
-        tmp_path,
-        analyzer=analyzer,
-        config=RuntimeConfig(
-            data_root=tmp_path / "data",
-            collected_merge_retryable_error_limit=1,
-            collected_merge_trace_enabled=True,
-            collected_merge_trace_root=trace_root,
-        ),
-    ).run("2026-06-29")
-
-    assert result.status == "failed"
-    assert result.output_path is None
-    assert analyzer.call_count == 2
-    assert not (inbox / "2026-06-29-管理者-merged.md").exists()
-    summary = json.loads(
-        (trace_root / "2026-06-29" / "summary.json").read_text(
-            encoding="utf-8"
-        )
-    )
-    assert summary["status"] == "failed"
-    assert summary["output_path"] is None
-    assert summary["failed_step_indexes"] == [1, 2]
-    assert [item["status"] for item in summary["steps"]] == ["failed", "failed"]
-    assert all(item["error"]["retryable"] for item in summary["steps"])
-
-
 def test_collected_merge_does_not_retry_non_retryable_error(tmp_path: Path) -> None:
     class NonRetryableAnalyzer:
         def __init__(self) -> None:
@@ -1873,17 +1753,14 @@ def test_collected_merge_does_not_retry_non_retryable_error(tmp_path: Path) -> N
         [_event(event_id="evt-1", title="项目排期", content="确认项目排期。")],
         tmp_path,
     )
-    sleep_calls: list[float] = []
     analyzer = NonRetryableAnalyzer()
     trace_root = tmp_path / "trace"
 
     result = _build_runner(
         tmp_path,
         analyzer=analyzer,
-        sleep_func=lambda seconds: sleep_calls.append(seconds),
         config=RuntimeConfig(
             data_root=tmp_path / "data",
-            collected_merge_retryable_error_limit=1,
             collected_merge_trace_enabled=True,
             collected_merge_trace_root=trace_root,
         ),
@@ -1891,7 +1768,6 @@ def test_collected_merge_does_not_retry_non_retryable_error(tmp_path: Path) -> N
 
     assert result.status == "failed"
     assert analyzer.call_count == 1
-    assert sleep_calls == []
     step = json.loads(
         (trace_root / "2026-06-29" / "step-001.json").read_text(
             encoding="utf-8"
@@ -1901,96 +1777,14 @@ def test_collected_merge_does_not_retry_non_retryable_error(tmp_path: Path) -> N
     assert step["error"]["retryable"] is False
 
 
-def test_collected_merge_rolling_retries_only_current_batch(tmp_path: Path) -> None:
-    class RollingRetryAnalyzer:
-        def __init__(self) -> None:
-            self.attempts: list[list[str]] = []
-
-        def merge_collected_events(self, target_date, events, deterministic_groups):
-            self.attempts.append([item.draft_id for item in events])
-            if len(self.attempts) == 2:
-                raise RetryableAnalyzerProtocolError("temporary rolling failure")
-            return CollectedMergeResult(
-                groups=[
-                    CollectedMergeGroup(
-                        group_id=f"g{len(self.attempts)}",
-                        draft_ids=[item.draft_id for item in events],
-                        title="滚动汇总事项",
-                        content="确认滚动汇总事项。",
-                        object_hint="滚动汇总事项",
-                        retention_reason="decision_made",
-                        retention_detail="形成滚动汇总事项确认结果。",
-                    )
-                ]
-            )
-
-    inbox = tmp_path / "merge_inbox" / "2026" / "06" / "29"
-    for index, person in enumerate(("张三", "李四", "王五"), start=1):
-        _write_day_doc(
-            inbox / f"2026-06-29-{person}.md",
-            [
-                _event(
-                    event_id=f"evt-{index}",
-                    title=f"项目{index}排期",
-                    content=f"确认项目{index}排期。",
-                )
-            ],
-            tmp_path,
-        )
-    analyzer = RollingRetryAnalyzer()
-    trace_root = tmp_path / "trace"
-
-    result = _build_runner(
-        tmp_path,
-        analyzer=analyzer,
-        config=RuntimeConfig(
-            data_root=tmp_path / "data",
-            max_model_input_tokens=550,
-            collected_merge_retryable_error_limit=1,
-            collected_merge_trace_enabled=True,
-            collected_merge_trace_root=trace_root,
-        ),
-    ).run("2026-06-29")
-
-    assert result.output_path is not None
-    assert len(analyzer.attempts) == 3
-    assert analyzer.attempts[0] != analyzer.attempts[1]
-    assert analyzer.attempts[1] == analyzer.attempts[2]
-    summary = json.loads(
-        (trace_root / "2026-06-29" / "summary.json").read_text(
-            encoding="utf-8"
-        )
-    )
-    assert [item["rolling_step_index"] for item in summary["steps"]] == [1, 2, 2]
-    assert [item["attempt_index"] for item in summary["steps"]] == [1, 1, 2]
-
-
-def test_collected_merge_missing_field_and_error_retries_are_independent(
-    tmp_path: Path,
-) -> None:
-    class MixedRetryAnalyzer:
+def test_collected_merge_does_not_retry_retryable_error(tmp_path: Path) -> None:
+    class RetryableFailureAnalyzer:
         def __init__(self) -> None:
             self.call_count = 0
 
         def merge_collected_events(self, target_date, events, deterministic_groups):
             self.call_count += 1
-            if self.call_count == 2:
-                raise RetryableAnalyzerProtocolError("temporary network failure")
-            return CollectedMergeResult(
-                groups=[
-                    CollectedMergeGroup(
-                        group_id=f"g{self.call_count}",
-                        draft_ids=[item.draft_id for item in events],
-                        title="项目排期",
-                        content="确认项目排期。",
-                        object_hint="项目排期",
-                        retention_reason="decision_made",
-                        retention_detail=(
-                            "" if self.call_count == 1 else "形成项目排期确认结果。"
-                        ),
-                    )
-                ]
-            )
+            raise RetryableAnalyzerProtocolError("temporary network failure")
 
     inbox = tmp_path / "merge_inbox" / "2026" / "06" / "29"
     _write_day_doc(
@@ -1998,33 +1792,12 @@ def test_collected_merge_missing_field_and_error_retries_are_independent(
         [_event(event_id="evt-1", title="项目排期", content="确认项目排期。")],
         tmp_path,
     )
-    analyzer = MixedRetryAnalyzer()
-    trace_root = tmp_path / "trace"
+    analyzer = RetryableFailureAnalyzer()
 
-    result = _build_runner(
-        tmp_path,
-        analyzer=analyzer,
-        config=RuntimeConfig(
-            data_root=tmp_path / "data",
-            collected_merge_missing_field_retry_limit=1,
-            collected_merge_retryable_error_limit=1,
-            collected_merge_trace_enabled=True,
-            collected_merge_trace_root=trace_root,
-        ),
-    ).run("2026-06-29")
+    result = _build_runner(tmp_path, analyzer=analyzer).run("2026-06-29")
 
-    assert result.output_path is not None
-    assert analyzer.call_count == 3
-    summary = json.loads(
-        (trace_root / "2026-06-29" / "summary.json").read_text(
-            encoding="utf-8"
-        )
-    )
-    assert [item["retry_reason"] for item in summary["steps"]] == [
-        "initial",
-        "missing_required_fields",
-        "retryable_error",
-    ]
+    assert result.status == "failed"
+    assert analyzer.call_count == 1
 
 
 def test_collected_merge_mixes_enhanced_legacy_and_upstream_sources(
@@ -2695,7 +2468,11 @@ def test_relation_priority_batches_preserve_same_conversation_candidates(
         ),
     ).run("2026-06-29")
 
-    assert result.merged_event_count == 1
+    assert result.merged_event_count == 4
+    assert any(
+        "Skipped cross-batch coordination" in warning
+        for warning in result.warning_messages
+    )
     assert len(analyzer.grouping_calls) > 1
     assert len(analyzer.merge_calls) > 1
     summary = json.loads(
@@ -2703,11 +2480,6 @@ def test_relation_priority_batches_preserve_same_conversation_candidates(
     )
     assert max(step["prompt_estimated_tokens"] for step in summary["steps"]) <= 2000
     assert {step["input_limit_tokens"] for step in summary["steps"]} == {2000}
-    assert any(
-        item["source"] == "model"
-        for step in summary["steps"]
-        for item in step.get("candidate_summary_sources", [])
-    )
     output = MarkdownEventStore(config=RuntimeConfig()).parse_day_document(
         Path(result.output_path or "").read_text(encoding="utf-8")
     )
@@ -2819,7 +2591,11 @@ def test_relation_priority_batches_match_july_14_event_scale(tmp_path: Path) -> 
     }
     stages = {step["stage"] for step in summary["steps"]}
     assert any(stage.startswith("candidate_grouping_batch_") for stage in stages)
-    assert any(stage.startswith("candidate_reconciliation") for stage in stages)
+    assert not any(stage.startswith("candidate_reconciliation") for stage in stages)
+    assert any(
+        "Skipped cross-batch coordination" in warning
+        for warning in summary["warning_messages"]
+    )
     assert "content_merge" in stages
     output = MarkdownEventStore(config=RuntimeConfig()).parse_day_document(
         Path(result.output_path or "").read_text(encoding="utf-8")
@@ -2921,6 +2697,7 @@ class ReviewAnalyzer(TwoStageAnalyzer):
                     summary_title="复核事项" if len(group) > 1 else "",
                     summary_content="复核后确认属于同一事项。" if len(group) > 1 else "",
                     summary_object_hint="复核事项" if len(group) > 1 else "",
+                    split_reason=("业务对象和主要动作不同。" if self.split else ""),
                     group_reason=["same_object"] if len(group) > 1 else [],
                     risk_flags=[],
                 )
@@ -3169,6 +2946,109 @@ def test_high_risk_review_can_split_group_without_losing_sources(
 
     assert [group.draft_ids for group in reviewed.groups] == [["d0"], ["d1"]]
     assert runner._collected_quality_counters["review_split_group_count"] == 1
+
+
+def test_high_risk_review_skips_singleton_groups(tmp_path: Path) -> None:
+    event = CollectedSourceEvent(
+        "d1",
+        "张三",
+        "张三.md",
+        _event(event_id="e1", title="单条事项", content="单条事项事实。"),
+    )
+    analyzer = ReviewAnalyzer()
+    runner = _build_runner(tmp_path, analyzer=analyzer)
+
+    reviewed, warnings = runner._review_high_risk_groups(
+        "2026-06-29",
+        [event],
+        CollectedGroupingResult(
+            groups=[CollectedGroupingGroup("g1", ["d1"], risk_flags=["cross_batch"])]
+        ),
+    )
+
+    assert reviewed.groups[0].draft_ids == ["d1"]
+    assert analyzer.review_calls == []
+    assert warnings == []
+    assert runner._collected_quality_counters["high_risk_group_count"] == 0
+
+
+def test_high_risk_review_rejects_split_without_reason(tmp_path: Path) -> None:
+    class MissingReasonAnalyzer(ReviewAnalyzer):
+        def review_collected_group(self, target_date, events, candidate_group, *, review_reasons=None):
+            self.review_calls.append({"candidate_group": candidate_group})
+            return CollectedGroupingResult(
+                groups=[
+                    CollectedGroupingGroup("split-1", [events[0].draft_id]),
+                    CollectedGroupingGroup("split-2", [events[1].draft_id]),
+                ]
+            )
+
+    events = [
+        CollectedSourceEvent(
+            f"d{index}",
+            f"人员{index}",
+            f"人员{index}.md",
+            _event(event_id=f"e{index}", title="候选事项", content=f"事实{index}"),
+        )
+        for index in range(2)
+    ]
+    runner = _build_runner(tmp_path, analyzer=MissingReasonAnalyzer())
+
+    reviewed, warnings = runner._review_high_risk_groups(
+        "2026-06-29",
+        events,
+        CollectedGroupingResult(
+            groups=[CollectedGroupingGroup("g1", ["d0", "d1"], risk_flags=["cross_batch"])]
+        ),
+    )
+
+    assert [group.draft_ids for group in reviewed.groups] == [["d0", "d1"]]
+    assert any("no split reason" in warning for warning in warnings)
+
+
+def test_high_risk_review_runs_three_multi_groups_in_parallel(tmp_path: Path) -> None:
+    from threading import Barrier
+
+    class ParallelReviewAnalyzer(ReviewAnalyzer):
+        def __init__(self) -> None:
+            super().__init__()
+            self.barrier = Barrier(3)
+
+        def review_collected_group(self, target_date, events, candidate_group, *, review_reasons=None):
+            self.barrier.wait(timeout=1)
+            return CollectedGroupingResult(groups=[candidate_group])
+
+    events = [
+        CollectedSourceEvent(
+            f"d{index}",
+            f"人员{index}",
+            f"人员{index}.md",
+            _event(event_id=f"e{index}", title="候选事项", content=f"事实{index}"),
+        )
+        for index in range(6)
+    ]
+    groups = [
+        CollectedGroupingGroup(
+            f"g{index}",
+            [f"d{index * 2}", f"d{index * 2 + 1}"],
+            risk_flags=["cross_batch"],
+        )
+        for index in range(3)
+    ]
+    runner = _build_runner(
+        tmp_path,
+        analyzer=ParallelReviewAnalyzer(),
+        config=RuntimeConfig(
+            data_root=tmp_path / "data",
+            max_concurrent_collected_merge_review_requests=3,
+        ),
+    )
+
+    reviewed, _ = runner._review_high_risk_groups(
+        "2026-06-29", events, CollectedGroupingResult(groups=groups)
+    )
+
+    assert [group.group_id for group in reviewed.groups] == ["g0", "g1", "g2"]
 
 
 def test_high_risk_review_invalid_partition_retries_then_fails(

@@ -26,8 +26,6 @@ def test_required_image_summary_bypasses_optional_image_limit(tmp_path, monkeypa
             stream_first_response_timeout_seconds=1,
             stream_enabled=False,
             tls_verify=True,
-            sleep_min_seconds=0,
-            sleep_max_seconds=0,
             reasoning_effort="none",
         ),
     )

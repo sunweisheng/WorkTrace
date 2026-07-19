@@ -253,10 +253,11 @@ def test_collected_grouping_protocol_carries_candidate_summary() -> None:
     assert item_schema["required"] == [
         "group_id",
         "draft_ids",
-        "summary_title",
-        "summary_content",
-        "summary_object_hint",
-        "group_reason",
+            "summary_title",
+            "summary_content",
+            "summary_object_hint",
+            "split_reason",
+            "group_reason",
         "risk_flags",
     ]
 

@@ -68,14 +68,27 @@ class AnalyzerFactory:
         *,
         usage_recorder: LLMUsageRecorder | None = None,
     ) -> Analyzer:
+        recorder = usage_recorder or LLMUsageRecorder()
         if config.analyzer_backend == "online":
+            from .analyzers.codex import CodexAnalyzer
+            from .analyzers.failover import FailoverAnalyzer
             from .analyzers.online import OnlineLLMAnalyzer
 
-            return OnlineLLMAnalyzer(config=config, usage_recorder=usage_recorder)
+            return FailoverAnalyzer(
+                primary=OnlineLLMAnalyzer(
+                    config=config,
+                    usage_recorder=recorder,
+                ),
+                fallback=CodexAnalyzer(
+                    config=config,
+                    usage_recorder=recorder,
+                ),
+                usage_recorder=recorder,
+            )
 
         from .analyzers.codex import CodexAnalyzer
 
-        return CodexAnalyzer(config=config)
+        return CodexAnalyzer(config=config, usage_recorder=recorder)
 
 
 class StorageFactory:

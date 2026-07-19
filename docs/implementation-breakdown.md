@@ -80,8 +80,9 @@ flowchart LR
 | 文件 | 当前职责 |
 | --- | --- |
 | `analyzers/base.py` | 分段、片段批处理、临时协作复核、个人事实复核、旧批处理、分段失败后直接提炼、日级合并和多人合并接口 |
-| `analyzers/online.py` | OpenAI Python SDK + Responses API 默认实现，支持流式接收 |
-| `analyzers/codex.py` | 非默认 Codex CLI 实现 |
+| `analyzers/online.py` | OpenAI Python SDK + Responses API 在线文字实现，支持流式接收且不等待 |
+| `analyzers/codex.py` | Codex CLI 文字实现，使用线程安全的 0-1 秒调用间隔 |
+| `analyzers/failover.py` | 在线文字请求首次发生可切换错误时，仅把当前请求改由 Codex 执行 |
 | `analyzers/prompts.py` | 所有语义任务 prompt |
 | `analyzers/output_schemas.py` | Responses API JSON schema；事实复核按当前候选动态限制 `draft_id` 和合法证据 ID |
 | `analyzers/protocol.py` | 模型 JSON 到领域对象的解析与引用恢复；事实复核从唯一一份 `fact_items` 派生六个文字字段 |
@@ -105,9 +106,9 @@ flowchart LR
 3. 来源事件配置关键词过滤与保留门槛
 4. 全 scope 校验 v2 同日会话指纹，相同 `event_id` 建立确定性组
 5. Python 按共同消息、文件和同日会话建立关系集合，模型使用完整事件正文发现候选组、候选摘要、`group_reason` 和 `risk_flags`
-6. 大 prompt 按关系集合优先分批，跨批用组摘要汇合；达到配置阈值、跨批、分组修复或工作流冲突时增加高风险复核
+6. 大 prompt 按关系集合优先分批；跨批只协调共享消息指纹或文件的候选。单条组直接保留，多条组达到配置阈值、跨批、分组修复或工作流冲突时最多三路高风险复核
 7. 正式内容按锁定候选组分批生成，并返回完整 `covered_draft_ids` 和带来源的 `fact_items`
-8. 可恢复模型错误、复核覆盖和正文覆盖只重试当前批次或当前组，重试耗尽时不写不完整文件
+8. 可切换在线错误立即由 Codex 重做当前请求，不重复在线调用；复核覆盖和正文覆盖只重试当前批次或当前组，重试耗尽时不写不完整文件
 9. 聚合工作流、动作、协作方式、消息指纹、会话指纹、文件标识、来源人员、事件 ID 和上一级负责人
 10. Python 计算 scope 和整次运行的 `quality_summary`，团队 `WorkEvent` 最终过滤、写入和自发送
 
@@ -123,7 +124,7 @@ flowchart LR
 | `config/event_metadata.json` | 本人参与方式英文键、中文显示名和排序 |
 | `config/conversation_blacklist.json` | 整会话排除 |
 | `config/conversation_window.json` | 群聊锚点聚合、初始上下文和按需扩窗阈值 |
-| `config/llm_retry.json` | 分段/提炼重试、流式首次返回超时，以及切分、提炼和个人事实复核并发数 |
+| `config/llm_retry.json` | 分段/提炼重试、流式首次返回超时、Codex 间隔，以及切分、提炼、个人事实复核和多人高风险复核并发数 |
 | `config/retention_policy.json` | 个人事件保留提示、结构化业务词、临时协作复核、事实复核条件和模型信号定义 |
 | `config/collected_merge.json` | 多人汇总高风险复核开关、事件数/文件数阈值和复核条件 |
 | `config/attachment_text.json` | 文本附件提取限制 |

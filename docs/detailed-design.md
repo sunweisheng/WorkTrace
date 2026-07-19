@@ -354,7 +354,7 @@ flowchart TD
     L --> M["最终过滤、写入、自发送"]
 ```
 
-多人合并候选发现默认发送来源 MD 中的完整事件正文：Python 根据共同消息、共同文件形成 `evidence_relations`，并根据同日会话形成 `conversation_groups`；会话哈希本身不进入模型输入。即使消息或文件集合完全相同也不能自动合并。候选模型返回 `group_reason` 和 `risk_flags`。来源事件达到 10 条、来源文件达到 4 个、跨批、Python 修复或不同非空工作流任一条件命中时，根据 `config/collected_merge.json` 增加高风险复核，拿不准时拆组。
+多人合并候选发现默认发送来源 MD 中的完整事件正文：Python 根据共同消息、共同文件形成 `evidence_relations`，并根据同日会话形成 `conversation_groups`；会话哈希本身不进入模型输入。即使消息或文件集合完全相同也不能自动合并。候选模型返回 `group_reason` 和 `risk_flags`。单条候选直接保留，不进入高风险复核。多条候选在来源事件达到 10 条、来源文件达到 4 个、跨批、Python 修复或不同非空工作流任一条件命中时，根据 `config/collected_merge.json` 增加高风险复核，最多三路并行并保持原候选顺序。跨批只协调具有共同消息指纹或共同文件的候选；复核拆开已确认多条候选时，所有输出组必须给出非空 `split_reason`，否则 Python 保留原组并写告警。
 
 候选、复核和正式正文统一受 `max_model_input_tokens=6200` 限制。复核超限时按关系分批，单条正文仍过长时复用正文切片和分层摘要。正式内容必须返回完整 `covered_draft_ids` 和 `fact_items`；Python 检查整批 draft 分配、锁定组和事实来源，只重试当前组，仍不完整则当前 scope 失败且不写文件。若 scope 目录已有同名历史输出，失败不会删除或覆盖旧文件，是否成功必须以本次 CLI JSON 为准。正文不再机械追加全部来源原文。中间 `WorkEvent` 持续携带会话指纹、消息指纹、文件标识、来源人员、来源事件 ID 和来源负责人，最终只生成规范化 `YYYY-MM-DD-登录人姓名-merged.md`。
 
@@ -372,7 +372,7 @@ flowchart TD
 - `workstream_name`、`action_labels`、`self_relations`
 - `evidence_fingerprints`、`conversation_fingerprints`、`file_keys`
 
-候选阶段若模型遗漏 draft，Python 会补 singleton group，并把修复组送入高风险复核；正式正文阶段不修补覆盖缺口。若非正文字段缺失或过度泛化，可从来源事件派生 `object_hint`、`retention_reason`、`retention_detail` 并记录 warning。
+候选阶段若模型遗漏 draft，Python 会补 singleton group；单条修复组直接保留，只有多条修复组才可能进入高风险复核。正式正文阶段不修补覆盖缺口。若非正文字段缺失或过度泛化，可从来源事件派生 `object_hint`、`retention_reason`、`retention_detail` 并记录 warning。
 
 每个 scope 和整次运行都生成 Python 计算的 `quality_summary`，同时进入 CLI JSON、trace `summary.json` 和 `summary.md`。事件数和字符数比例只用于人工查看；一个人部门或没有重复事项时允许输出数等于输入数。
 
@@ -412,8 +412,9 @@ OnlineLLMAnalyzer -> openai Python SDK -> Responses API provider
 - `initial_context_messages_before = 2`
 - `context_expansion_messages_per_direction = 7`
 - `context_expansion_round_limit = 2`
-- `collected_merge_retryable_error_limit = 1`
-- `collected_merge_retry_delay_seconds = 2.0`
+- `codex_request_interval_min_seconds = 0.0`
+- `codex_request_interval_max_seconds = 1.0`
+- `max_concurrent_collected_merge_review_requests = 3`
 - `high_risk_review_enabled = True`
 - `high_risk_source_event_count = 10`
 - `high_risk_source_file_count = 4`
@@ -424,7 +425,7 @@ OnlineLLMAnalyzer -> openai Python SDK -> Responses API provider
 
 ### 9.2 `.env` 与环境变量
 
-模型连接必填项只有 `WORKTRACE_LLM_BASE_URL`、`WORKTRACE_LLM_MODEL`、`WORKTRACE_LLM_API_KEY` 三项。`WORKTRACE_LLM_REASONING_EFFORT` 未配置时使用 `RuntimeConfig.llm_reasoning_effort = "none"`；显式配置为其他值会被 preflight 拒绝。timeout/stream/TLS/请求间隔也位于 `.env` 或进程环境变量，环境变量优先。当前 `WORKTRACE_LLM_SLEEP_MIN_SECONDS` 和 `WORKTRACE_LLM_SLEEP_MAX_SECONDS` 默认均为 `0`；`0-0` 时 analyzer 不调用 sleep，也不记录 `online_llm.request.delay`。`WORKTRACE_LLM_TLS_VERIFY` 只进入 preflight 和文本 analyzer 的 HTTP client；图片摘要使用独立 SDK client 及其默认的证书校验行为。
+模型连接必填项只有 `WORKTRACE_LLM_BASE_URL`、`WORKTRACE_LLM_MODEL`、`WORKTRACE_LLM_API_KEY` 三项。`WORKTRACE_LLM_REASONING_EFFORT` 未配置时使用 `RuntimeConfig.llm_reasoning_effort = "none"`；显式配置为其他值会被 preflight 拒绝。timeout/stream/TLS 位于 `.env` 或进程环境变量，环境变量优先。在线文字请求不等待；可切换失败仅让当前请求改由 Codex 执行，下一请求继续在线优先。Codex 间隔在 `config/llm_retry.json` 统一控制。`WORKTRACE_LLM_TLS_VERIFY` 只进入 preflight 和文本 analyzer 的 HTTP client；图片摘要使用独立 SDK client 及其默认的证书校验行为。
 
 多人汇总 trace 和字段缺失重试也支持环境覆盖：
 
@@ -432,8 +433,6 @@ OnlineLLMAnalyzer -> openai Python SDK -> Responses API provider
 - `WORKTRACE_COLLECTED_MERGE_TRACE_ROOT`
 - `WORKTRACE_COLLECTED_MERGE_MISSING_FIELD_RETRY_RATIO`
 - `WORKTRACE_COLLECTED_MERGE_MISSING_FIELD_RETRY_LIMIT`
-- `WORKTRACE_COLLECTED_MERGE_RETRYABLE_ERROR_LIMIT`
-- `WORKTRACE_COLLECTED_MERGE_RETRY_DELAY_SECONDS`
 
 ### 9.3 JSON 配置
 
@@ -441,7 +440,7 @@ OnlineLLMAnalyzer -> openai Python SDK -> Responses API provider
 - `config/event_metadata.json`：参与方式英文键、中文显示名和排序
 - `config/conversation_blacklist.json`：整会话排除
 - `config/conversation_window.json`：初始窗口聚合和按需扩窗阈值
-- `config/llm_retry.json`：分段/提炼重试、流式首次返回超时，以及切分、提炼和个人事实复核并发数
+- `config/llm_retry.json`：分段/提炼重试、流式首次返回超时、Codex 间隔，以及切分、提炼、个人事实复核和多人高风险复核并发数
 - `config/retention_policy.json`：个人保留提示、既有业务词、临时协作复核、个人事实复核条件和模型信号定义
 - `config/collected_merge.json`：多人汇总高风险复核开关、阈值和条件
 - `config/attachment_text.json`：文本附件限制
@@ -488,7 +487,7 @@ OnlineLLMAnalyzer -> openai Python SDK -> Responses API provider
 - `retention_review.json`：临时协作复核每次尝试的候选摘要、证据范围、模型信号、覆盖统计和协议错误，不额外复制原聊天正文
 - `personal_fact_review.json`：个人事实复核的触发原因、修订前后字段、事实证据覆盖、Python 统计及每次失败返回，不额外复制原聊天正文
 - `final_events.json`：过滤后的合并草稿、文件聚合和排序完成后的 `WorkEvent`、最终阶段 warning
-- `llm_usage.json`：每次模型调用的耗时、输入字符数和 Responses API 返回的输入/输出/总 token，以及汇总、缺失数量和按调用类型统计；缺失时不估算
+- `llm_usage.json`：每次文字调用的线路、成功或失败、切换方向、安全错误类别、耗时和输入字符数；在线线路保留 Responses API token，Codex 明确标记 token 不可用
 
 segmentation 和 segment batch 的模型失败轮次保存输入、prompt 与 `failure.json`。批次拆分后的单片段回退保存在片段目录的 `fallback-01/`；分段耗尽后的直接提炼保存在 `_anchor_fallback/<conversation>/<anchor-key>/attempt-XX/`。成功轮次继续保存输出和校验结果，异常轮次不伪造模型输出。
 
@@ -496,9 +495,9 @@ segmentation 和 segment batch 的模型失败轮次保存输入、prompt 与 `f
 
 `scripts/report_replay_call_inputs.py` 会把分段、提炼、分段失败后的直接提炼和两类复核的每次尝试（包括失败重试）写入 `call-input-report.md`。在线模型成功响应数分为文字与图片摘要，调试文件保存的是文字调用尝试，两种口径不要求相等：请求发送前或服务端失败的尝试可能有调试输入但没有成功响应。`personal_fact_review_summary.review_retry_count` 统计未通过 Python 协议校验后实际发生的局部重试；例如值为 5 表示 5 个失败尝试后来只重试对应候选，最终运行仍可成功。完整原聊天仍从已有分段调试输入查看。
 
-多人汇总 trace 写 `source-audit.json`、step JSON、`step-NNN-prompt.txt`、`summary.json` 和 `summary.md`。每个模型请求前先保存输入和 prompt；成功、失败、重试耗尽和自送达失败都会留下 summary。step 包含候选发现、高风险复核或正式内容阶段、复核原因和前后分组、批次、尝试次数、重试原因、估算 token、`max_model_input_tokens` 上限、辅助字符数、`input_events`、`deterministic_groups`、正文覆盖、`boundary_warnings`、过滤和最终事件。两个 summary 文件还保存 Python 计算的 `quality_summary`，因此可以从来源增强信息追到最终部门事件并核对各级数量和覆盖率。
+多人汇总 trace 写 `source-audit.json`、step JSON、`step-NNN-prompt.txt`、`summary.json` 和 `summary.md`。每个模型请求前先保存输入和 prompt；成功、失败、结果质量重试和自送达失败都会留下 summary。step 包含当前逻辑请求实际使用的在线/Codex 调用记录、候选发现、高风险复核或正式内容阶段、复核原因和前后分组、批次、尝试次数、重试原因、估算 token、`max_model_input_tokens` 上限、辅助字符数、`input_events`、`deterministic_groups`、正文覆盖、`boundary_warnings`、过滤和最终事件。两个 summary 文件还保存 Python 计算的 `quality_summary`、各线路调用数和耗时、切换数以及 Codex 等待统计，因此可以从来源增强信息追到最终部门事件并核对各级数量和覆盖率。
 
-所有主阶段同时通过 `logging_utils.log_timing(...)` 输出耗时和数量字段。在线请求日志显式携带 `request_kind`；并发事实复核同时记录单候选累计口径和整体墙钟口径。
+所有主阶段同时通过 `logging_utils.log_timing(...)` 输出耗时和数量字段。在线和 Codex 记录都显式携带 `request_kind`；在线没有等待日志，Codex 等待单独进入调用记录；并发事实复核同时记录单候选累计口径和整体墙钟口径。
 
 ## 13. 已知边界
 

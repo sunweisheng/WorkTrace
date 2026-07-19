@@ -13,8 +13,6 @@ DEFAULT_LLM_API_KEY_ENV_VAR = "WORKTRACE_LLM_API_KEY"
 DEFAULT_LLM_TIMEOUT_ENV_VAR = "WORKTRACE_LLM_TIMEOUT_SECONDS"
 DEFAULT_LLM_STREAM_ENV_VAR = "WORKTRACE_LLM_STREAM"
 DEFAULT_LLM_TLS_VERIFY_ENV_VAR = "WORKTRACE_LLM_TLS_VERIFY"
-DEFAULT_LLM_SLEEP_MIN_ENV_VAR = "WORKTRACE_LLM_SLEEP_MIN_SECONDS"
-DEFAULT_LLM_SLEEP_MAX_ENV_VAR = "WORKTRACE_LLM_SLEEP_MAX_SECONDS"
 DEFAULT_LLM_REASONING_EFFORT_ENV_VAR = "WORKTRACE_LLM_REASONING_EFFORT"
 DEFAULT_COLLECTED_MERGE_TRACE_ENV_VAR = "WORKTRACE_COLLECTED_MERGE_TRACE"
 DEFAULT_COLLECTED_MERGE_TRACE_ROOT_ENV_VAR = "WORKTRACE_COLLECTED_MERGE_TRACE_ROOT"
@@ -23,12 +21,6 @@ DEFAULT_COLLECTED_MERGE_RETRY_RATIO_ENV_VAR = (
 )
 DEFAULT_COLLECTED_MERGE_RETRY_LIMIT_ENV_VAR = (
     "WORKTRACE_COLLECTED_MERGE_MISSING_FIELD_RETRY_LIMIT"
-)
-DEFAULT_COLLECTED_MERGE_RETRYABLE_ERROR_LIMIT_ENV_VAR = (
-    "WORKTRACE_COLLECTED_MERGE_RETRYABLE_ERROR_LIMIT"
-)
-DEFAULT_COLLECTED_MERGE_RETRY_DELAY_ENV_VAR = (
-    "WORKTRACE_COLLECTED_MERGE_RETRY_DELAY_SECONDS"
 )
 DEFAULT_LLM_ENV_FILE_NAME = ".env"
 DEFAULT_EVENT_RULES_FILE_NAME = "config/event_rules.json"
@@ -50,8 +42,6 @@ class OnlineLLMSettings:
     stream_first_response_timeout_seconds: int
     stream_enabled: bool
     tls_verify: bool
-    sleep_min_seconds: float
-    sleep_max_seconds: float
     reasoning_effort: str | None
 
 
@@ -224,29 +214,6 @@ def load_online_llm_settings(
             env_var=config.llm_tls_verify_env_var,
         )
 
-    sleep_min_raw = values.get(config.llm_sleep_min_env_var, "").strip()
-    sleep_min_seconds = config.llm_sleep_min_seconds
-    if sleep_min_raw:
-        sleep_min_seconds = _parse_non_negative_float(
-            sleep_min_raw,
-            env_var=config.llm_sleep_min_env_var,
-        )
-
-    sleep_max_raw = values.get(config.llm_sleep_max_env_var, "").strip()
-    sleep_max_seconds = config.llm_sleep_max_seconds
-    if sleep_max_raw:
-        sleep_max_seconds = _parse_non_negative_float(
-            sleep_max_raw,
-            env_var=config.llm_sleep_max_env_var,
-        )
-
-    if sleep_min_seconds > sleep_max_seconds:
-        raise ValueError(
-            "Invalid online LLM delay range: "
-            f"{config.llm_sleep_min_env_var} must be less than or equal to "
-            f"{config.llm_sleep_max_env_var}."
-        )
-
     reasoning_effort_raw = values.get(config.llm_reasoning_effort_env_var, "").strip()
     reasoning_effort = reasoning_effort_raw or config.llm_reasoning_effort
 
@@ -258,8 +225,6 @@ def load_online_llm_settings(
         stream_first_response_timeout_seconds=config.stream_first_response_timeout_seconds,
         stream_enabled=stream_enabled,
         tls_verify=tls_verify,
-        sleep_min_seconds=sleep_min_seconds,
-        sleep_max_seconds=sleep_max_seconds,
         reasoning_effort=reasoning_effort,
     )
 
@@ -757,6 +722,9 @@ def _load_llm_retry_overrides(
         "max_concurrent_llm_requests",
         "max_concurrent_event_extraction_requests",
         "max_concurrent_personal_fact_review_requests",
+        "codex_request_interval_min_seconds",
+        "codex_request_interval_max_seconds",
+        "max_concurrent_collected_merge_review_requests",
     }
     unexpected = sorted(set(payload).difference(keys))
     missing = sorted(keys.difference(payload))
@@ -767,15 +735,30 @@ def _load_llm_retry_overrides(
         if missing:
             details.append(f"missing keys {', '.join(missing)}")
         raise ValueError(f"Invalid LLM retry config: {'; '.join(details)}.")
-    values = {}
+    values: dict[str, int | float] = {}
     for key in keys:
         value = payload[key]
+        if key in {
+            "codex_request_interval_min_seconds",
+            "codex_request_interval_max_seconds",
+        }:
+            if (
+                not isinstance(value, int | float)
+                or isinstance(value, bool)
+                or value < 0
+            ):
+                raise ValueError(
+                    f"Invalid LLM retry config: {retry_path} field `{key}` must be non-negative."
+                )
+            values[key] = float(value)
+            continue
         minimum = (
             1
             if key
             in {
                 "stream_first_response_timeout_seconds",
                 "max_concurrent_personal_fact_review_requests",
+                "max_concurrent_collected_merge_review_requests",
             }
             else 0
         )
@@ -784,6 +767,14 @@ def _load_llm_retry_overrides(
                 f"Invalid LLM retry config: {retry_path} field `{key}` must be at least {minimum}."
             )
         values[key] = value
+    if (
+        values["codex_request_interval_min_seconds"]
+        > values["codex_request_interval_max_seconds"]
+    ):
+        raise ValueError(
+            "Invalid LLM retry config: codex_request_interval_min_seconds must be "
+            "less than or equal to codex_request_interval_max_seconds."
+        )
     return replace(
         config,
         anchor_retry_limit=values["segmentation_retry_limit"],
@@ -795,6 +786,15 @@ def _load_llm_retry_overrides(
         ],
         max_concurrent_personal_fact_review_requests=values[
             "max_concurrent_personal_fact_review_requests"
+        ],
+        codex_request_interval_min_seconds=values[
+            "codex_request_interval_min_seconds"
+        ],
+        codex_request_interval_max_seconds=values[
+            "codex_request_interval_max_seconds"
+        ],
+        max_concurrent_collected_merge_review_requests=values[
+            "max_concurrent_collected_merge_review_requests"
         ],
     )
 
@@ -910,26 +910,6 @@ def _apply_runtime_env_overrides(
             env_var=config.collected_merge_retry_limit_env_var,
         )
 
-    retryable_error_limit_raw = values.get(
-        config.collected_merge_retryable_error_limit_env_var,
-        "",
-    ).strip()
-    if retryable_error_limit_raw:
-        updates["collected_merge_retryable_error_limit"] = _parse_non_negative_int(
-            retryable_error_limit_raw,
-            env_var=config.collected_merge_retryable_error_limit_env_var,
-        )
-
-    retry_delay_raw = values.get(
-        config.collected_merge_retry_delay_env_var,
-        "",
-    ).strip()
-    if retry_delay_raw:
-        updates["collected_merge_retry_delay_seconds"] = _parse_non_negative_float(
-            retry_delay_raw,
-            env_var=config.collected_merge_retry_delay_env_var,
-        )
-
     if not updates:
         return config
     return replace(config, **updates)
@@ -1007,6 +987,9 @@ class RuntimeConfig:
     max_concurrent_llm_requests: int = 1
     max_concurrent_event_extraction_requests: int | None = None
     max_concurrent_personal_fact_review_requests: int = 1
+    max_concurrent_collected_merge_review_requests: int = 3
+    codex_request_interval_min_seconds: float = 0.0
+    codex_request_interval_max_seconds: float = 1.0
     anchor_batch_retry_limit: int = 1
     conversation_segmentation_failure_threshold: int = 2
     reaction_discovery_page_limit: int = 3
@@ -1014,8 +997,6 @@ class RuntimeConfig:
     max_model_input_tokens: int = 6200
     collected_merge_missing_field_retry_ratio: float = 0.2
     collected_merge_missing_field_retry_limit: int = 1
-    collected_merge_retryable_error_limit: int = 1
-    collected_merge_retry_delay_seconds: float = 2.0
     collected_merge_trace_enabled: bool = False
     collected_merge_trace_root: Path = field(
         default_factory=lambda: Path("data") / "debug" / "collected_merge"
@@ -1057,17 +1038,11 @@ class RuntimeConfig:
     llm_timeout_env_var: str = DEFAULT_LLM_TIMEOUT_ENV_VAR
     llm_stream_env_var: str = DEFAULT_LLM_STREAM_ENV_VAR
     llm_tls_verify_env_var: str = DEFAULT_LLM_TLS_VERIFY_ENV_VAR
-    llm_sleep_min_env_var: str = DEFAULT_LLM_SLEEP_MIN_ENV_VAR
-    llm_sleep_max_env_var: str = DEFAULT_LLM_SLEEP_MAX_ENV_VAR
     llm_reasoning_effort_env_var: str = DEFAULT_LLM_REASONING_EFFORT_ENV_VAR
     collected_merge_trace_env_var: str = DEFAULT_COLLECTED_MERGE_TRACE_ENV_VAR
     collected_merge_trace_root_env_var: str = DEFAULT_COLLECTED_MERGE_TRACE_ROOT_ENV_VAR
     collected_merge_retry_ratio_env_var: str = DEFAULT_COLLECTED_MERGE_RETRY_RATIO_ENV_VAR
     collected_merge_retry_limit_env_var: str = DEFAULT_COLLECTED_MERGE_RETRY_LIMIT_ENV_VAR
-    collected_merge_retryable_error_limit_env_var: str = (
-        DEFAULT_COLLECTED_MERGE_RETRYABLE_ERROR_LIMIT_ENV_VAR
-    )
-    collected_merge_retry_delay_env_var: str = DEFAULT_COLLECTED_MERGE_RETRY_DELAY_ENV_VAR
     llm_env_file_name: str = DEFAULT_LLM_ENV_FILE_NAME
     event_rules_file_name: str = DEFAULT_EVENT_RULES_FILE_NAME
     event_metadata_file_name: str = DEFAULT_EVENT_METADATA_FILE_NAME
@@ -1078,8 +1053,6 @@ class RuntimeConfig:
     retention_policy_file_name: str = DEFAULT_RETENTION_POLICY_FILE_NAME
     llm_stream_enabled: bool = False
     llm_tls_verify: bool = False
-    llm_sleep_min_seconds: float = 0.0
-    llm_sleep_max_seconds: float = 0.0
     llm_reasoning_effort: str | None = "none"
 
 

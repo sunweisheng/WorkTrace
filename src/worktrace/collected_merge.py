@@ -4,9 +4,11 @@ import json
 import re
 import subprocess
 from collections import Counter, defaultdict
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import nullcontext
 from dataclasses import dataclass, replace
 from pathlib import Path
-from time import sleep
+from threading import Lock
 from typing import Any, Sequence
 
 from .config import RetentionPolicyConfig, RuntimeConfig
@@ -19,6 +21,7 @@ from .errors import (
     StoreWriteError,
 )
 from .factories import AnalyzerFactory
+from .llm_usage import LLMUsageRecorder
 from .analyzers.base import Analyzer
 from .analyzers.prompts import (
     build_collected_grouping_prompt,
@@ -69,7 +72,6 @@ class CollectedMergeRunner:
     command_runner: Any | None = None
     delivery_channel: Any | None = None
     self_identity_resolver: Any | None = None
-    sleep_func: Any | None = None
 
     def __post_init__(self) -> None:
         if self.cwd is None:
@@ -85,9 +87,8 @@ class CollectedMergeRunner:
             )
         if self.self_identity_resolver is None:
             self.self_identity_resolver = self._resolve_self_identity
-        if self.sleep_func is None:
-            self.sleep_func = sleep
         self.store = MarkdownEventStore(config=self.config)
+        self._collected_merge_trace_lock = Lock()
         self._collected_merge_trace_dir: Path | None = None
         self._collected_merge_trace_steps: list[dict[str, Any]] = []
         self._collected_merge_trace_call_index = 0
@@ -95,6 +96,16 @@ class CollectedMergeRunner:
         self._collected_merge_filter_diagnostics: list[dict[str, Any]] = []
         self._collected_merge_failure_warnings: list[str] = []
         self._collected_quality_counters: Counter[str] = Counter()
+
+    def _llm_usage_recorder(self) -> LLMUsageRecorder | None:
+        recorder = getattr(self.analyzer, "usage_recorder", None)
+        return recorder if isinstance(recorder, LLMUsageRecorder) else None
+
+    def _llm_request_context(self, step_index: int):
+        recorder = self._llm_usage_recorder()
+        if recorder is None:
+            return nullcontext()
+        return recorder.request_context(str(step_index))
 
     def run(self, target_date: str) -> CollectedMergeRunResult:
         input_dir = self.build_input_dir(target_date)
@@ -602,9 +613,15 @@ class CollectedMergeRunner:
             callable(review_method)
             and review_implementation is not Analyzer.review_collected_group
         )
-        reviewed_groups: list[CollectedGroupingGroup] = []
+        reviewed_by_index: dict[int, list[CollectedGroupingGroup]] = {}
+        review_jobs: list[
+            tuple[int, CollectedGroupingGroup, list[CollectedSourceEvent], list[str]]
+        ] = []
         warnings: list[str] = []
-        for group in grouping_result.groups:
+        for index, group in enumerate(grouping_result.groups):
+            if len(group.draft_ids) == 1:
+                reviewed_by_index[index] = [group]
+                continue
             items = [
                 source_by_id[draft_id]
                 for draft_id in group.draft_ids
@@ -612,45 +629,71 @@ class CollectedMergeRunner:
             ]
             reasons = self._collected_group_review_reasons(group, items)
             if not reasons:
-                reviewed_groups.append(group)
+                reviewed_by_index[index] = [group]
                 continue
 
             self._collected_quality_counters["high_risk_group_count"] += 1
             self._collected_quality_counters["review_required"] = 1
             if not has_review_capability:
-                reviewed_groups.append(group)
+                reviewed_by_index[index] = [group]
                 warnings.append(
                     "High-risk collected group could not be reviewed because the "
                     f"analyzer has no review capability: group={group.group_id} "
                     f"reasons={reasons}."
                 )
                 continue
+            review_jobs.append((index, group, items, reasons))
 
-            try:
-                reviewed, review_warnings = (
-                    self._review_collected_group_with_batching(
-                        target_date,
-                        items,
-                        group,
-                        reasons=reasons,
-                        depth=0,
-                    )
-                )
-            except NotImplementedError:
-                reviewed_groups.append(group)
-                warnings.append(
-                    "High-risk collected group could not be reviewed because the "
-                    f"analyzer has no review capability: group={group.group_id} "
-                    f"reasons={reasons}."
-                )
-                continue
-            self._collected_quality_counters["reviewed_group_count"] += 1
-            self._collected_quality_counters["review_split_group_count"] += int(
-                len(reviewed.groups) > 1
+        def review_job(
+            group: CollectedGroupingGroup,
+            items: list[CollectedSourceEvent],
+            reasons: list[str],
+        ) -> tuple[CollectedGroupingResult, list[str]]:
+            return self._review_collected_group_with_batching(
+                target_date,
+                items,
+                group,
+                reasons=reasons,
+                depth=0,
             )
-            reviewed_groups.extend(reviewed.groups)
-            warnings.extend(review_warnings)
-        return CollectedGroupingResult(groups=reviewed_groups), warnings
+
+        if review_jobs:
+            max_workers = min(
+                self.config.max_concurrent_collected_merge_review_requests,
+                len(review_jobs),
+            )
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = {
+                    index: executor.submit(review_job, group, items, reasons)
+                    for index, group, items, reasons in review_jobs
+                }
+                for index, group, _items, reasons in review_jobs:
+                    try:
+                        reviewed, review_warnings = futures[index].result()
+                    except NotImplementedError:
+                        reviewed_by_index[index] = [group]
+                        warnings.append(
+                            "High-risk collected group could not be reviewed because the "
+                            f"analyzer has no review capability: group={group.group_id} "
+                            f"reasons={reasons}."
+                        )
+                        continue
+                    reviewed_by_index[index] = list(reviewed.groups)
+                    warnings.extend(review_warnings)
+                    self._collected_quality_counters["reviewed_group_count"] += 1
+                    self._collected_quality_counters["review_split_group_count"] += int(
+                        len(reviewed.groups) > 1
+                    )
+        return (
+            CollectedGroupingResult(
+                groups=[
+                    reviewed_group
+                    for index in range(len(grouping_result.groups))
+                    for reviewed_group in reviewed_by_index[index]
+                ]
+            ),
+            warnings,
+        )
 
     def _collected_group_review_reasons(
         self,
@@ -896,7 +939,6 @@ class CollectedMergeRunner:
             reasons=reasons,
         )
         warnings = list(fit_warnings)
-        retryable_error_count = 0
         invalid_result_count = 0
         attempt_index = 0
         retry_reason = "initial"
@@ -931,34 +973,20 @@ class CollectedMergeRunner:
                 },
             )
             try:
-                result = self.analyzer.review_collected_group(
-                    target_date,
-                    fitted_events,
-                    candidate_group,
-                    review_reasons=reasons,
-                )
+                with self._llm_request_context(trace_step_index):
+                    result = self.analyzer.review_collected_group(
+                        target_date,
+                        fitted_events,
+                        candidate_group,
+                        review_reasons=reasons,
+                    )
             except RetryableAnalyzerProtocolError as exc:
                 self._record_collected_merge_trace_failure(
                     step_index=trace_step_index,
                     error=exc,
                     retryable=True,
                 )
-                if (
-                    retryable_error_count
-                    >= self.config.collected_merge_retryable_error_limit
-                ):
-                    raise
-                retryable_error_count += 1
-                warning = (
-                    "Retrying high-risk collected group review after retryable "
-                    f"analyzer error: group={candidate_group.group_id} "
-                    f"attempt={attempt_index} error={exc}"
-                )
-                warnings.append(warning)
-                self._collected_merge_failure_warnings.append(warning)
-                self.sleep_func(self.config.collected_merge_retry_delay_seconds)
-                retry_reason = "retryable_error"
-                continue
+                raise
             except (AnalyzerProtocolError, ValueError) as exc:
                 self._record_collected_merge_trace_failure(
                     step_index=trace_step_index,
@@ -982,6 +1010,21 @@ class CollectedMergeRunner:
                     source_events,
                     [],
                 )
+                if (
+                    len(candidate_group.draft_ids) > 1
+                    and len(repaired.groups) > 1
+                    and any(not group.split_reason.strip() for group in repaired.groups)
+                ):
+                    warning = (
+                        "High-risk collected group split was rejected because the "
+                        f"review returned no split reason: group={candidate_group.group_id}."
+                    )
+                    warnings.append(warning)
+                    self._collected_merge_failure_warnings.append(warning)
+                    return (
+                        CollectedGroupingResult(groups=[candidate_group]),
+                        [*warnings, *repair_warnings],
+                    )
                 return repaired, [*warnings, *repair_warnings]
             if (
                 invalid_result_count
@@ -1713,10 +1756,25 @@ class CollectedMergeRunner:
             for synthetic_id, original_ids in source_ids_by_synthetic.items()
             if tuple(original_ids) in deterministic_sets
         ]
+        eligible_synthetic_ids = _cross_batch_reconciliation_ids(synthetic_events)
+        if len(eligible_synthetic_ids) < 2:
+            warnings.append(
+                "Skipped cross-batch coordination because no candidate groups share "
+                "message fingerprints or files."
+            )
+            return CollectedGroupingResult(groups=partial_groups), warnings
+        eligible_synthetic_events = [
+            item for item in synthetic_events if item.draft_id in eligible_synthetic_ids
+        ]
+        eligible_deterministic = [
+            group
+            for group in synthetic_deterministic
+            if group[0] in eligible_synthetic_ids
+        ]
         reconciled, reconciliation_warnings = self._group_collected_events_with_batching(
             target_date,
-            synthetic_events,
-            synthetic_deterministic,
+            eligible_synthetic_events,
+            eligible_deterministic,
             depth=depth + 1,
         )
         warnings.extend(reconciliation_warnings)
@@ -1759,7 +1817,27 @@ class CollectedMergeRunner:
             )
             for index, group in enumerate(reconciled.groups, start=1)
         ]
-        return CollectedGroupingResult(groups=expanded_groups), warnings
+        reconciled_original_ids = {
+            draft_id
+            for synthetic_id in eligible_synthetic_ids
+            for draft_id in source_ids_by_synthetic.get(synthetic_id, [])
+        }
+        preserved_groups = [
+            group
+            for group in partial_groups
+            if not set(group.draft_ids).intersection(reconciled_original_ids)
+        ]
+        source_order = {
+            item.draft_id: index for index, item in enumerate(source_events)
+        }
+        return CollectedGroupingResult(
+            groups=sorted(
+                [*preserved_groups, *expanded_groups],
+                key=lambda group: min(
+                    source_order[draft_id] for draft_id in group.draft_ids
+                ),
+            )
+        ), warnings
 
     def _pack_collected_grouping_batches(
         self,
@@ -1941,7 +2019,6 @@ class CollectedMergeRunner:
         stage: str,
     ) -> tuple[CollectedGroupingResult, list[str]]:
         warnings: list[str] = []
-        retryable_error_count = 0
         attempt_index = 0
         retry_reason = "initial"
         while True:
@@ -1967,29 +2044,19 @@ class CollectedMergeRunner:
                 stage=stage,
             )
             try:
-                grouping_result = self.analyzer.group_collected_events(
-                    target_date,
-                    source_events,
-                    deterministic_groups,
-                )
+                with self._llm_request_context(trace_step_index):
+                    grouping_result = self.analyzer.group_collected_events(
+                        target_date,
+                        source_events,
+                        deterministic_groups,
+                    )
             except RetryableAnalyzerProtocolError as exc:
                 self._record_collected_merge_trace_failure(
                     step_index=trace_step_index,
                     error=exc,
                     retryable=True,
                 )
-                if retryable_error_count >= self.config.collected_merge_retryable_error_limit:
-                    raise
-                retryable_error_count += 1
-                warning = (
-                    "Retrying collected candidate grouping after retryable analyzer error: "
-                    f"attempt={attempt_index} error={exc}"
-                )
-                warnings.append(warning)
-                self._collected_merge_failure_warnings.append(warning)
-                self.sleep_func(self.config.collected_merge_retry_delay_seconds)
-                retry_reason = "retryable_error"
-                continue
+                raise
             except (AnalyzerProtocolError, ValueError) as exc:
                 self._record_collected_merge_trace_failure(
                     step_index=trace_step_index,
@@ -2013,7 +2080,6 @@ class CollectedMergeRunner:
     ) -> tuple[CollectedMergeResult, list[str]]:
         warnings: list[str] = []
         missing_field_retry_count = 0
-        retryable_error_count = 0
         attempt_index = 0
         retry_reason = "initial"
         while True:
@@ -2038,30 +2104,19 @@ class CollectedMergeRunner:
                 retry_reason=retry_reason,
             )
             try:
-                merge_result = self.analyzer.merge_collected_events(
-                    target_date,
-                    source_events,
-                    deterministic_groups,
-                )
+                with self._llm_request_context(trace_step_index):
+                    merge_result = self.analyzer.merge_collected_events(
+                        target_date,
+                        source_events,
+                        deterministic_groups,
+                    )
             except RetryableAnalyzerProtocolError as exc:
                 self._record_collected_merge_trace_failure(
                     step_index=trace_step_index,
                     error=exc,
                     retryable=True,
                 )
-                if retryable_error_count >= self.config.collected_merge_retryable_error_limit:
-                    raise
-                retryable_error_count += 1
-                warning = (
-                    "Retrying collected merge after retryable analyzer error: "
-                    f"rolling_step={rolling_step_index} "
-                    f"attempt={attempt_index} error={exc}"
-                )
-                warnings.append(warning)
-                self._collected_merge_failure_warnings.append(warning)
-                self.sleep_func(self.config.collected_merge_retry_delay_seconds)
-                retry_reason = "retryable_error"
-                continue
+                raise
             except (AnalyzerProtocolError, ValueError) as exc:
                 self._record_collected_merge_trace_failure(
                     step_index=trace_step_index,
@@ -2843,7 +2898,9 @@ class CollectedMergeRunner:
     ) -> int:
         if self._collected_merge_trace_dir is None:
             return 0
-        self._collected_merge_trace_call_index += 1
+        with self._collected_merge_trace_lock:
+            self._collected_merge_trace_call_index += 1
+            step_index = self._collected_merge_trace_call_index
         prompt = prompt_override or (
             build_collected_grouping_prompt(
                 target_date,
@@ -2860,7 +2917,7 @@ class CollectedMergeRunner:
             )
         )
         step = {
-            "step_index": self._collected_merge_trace_call_index,
+            "step_index": step_index,
             "status": "started",
             "stage": stage,
             "rolling_step_index": rolling_step_index,
@@ -2869,7 +2926,7 @@ class CollectedMergeRunner:
             "prompt_chars": len(prompt),
             "prompt_estimated_tokens": _estimate_prepared_model_prompt_tokens(prompt),
             "input_limit_tokens": self.config.max_model_input_tokens,
-            "prompt_file": f"step-{self._collected_merge_trace_call_index:03d}-prompt.txt",
+            "prompt_file": f"step-{step_index:03d}-prompt.txt",
             "input": collected_merge_source_metrics(source_events),
             "input_events": [item.to_dict() for item in source_events],
             "deterministic_groups": [list(group) for group in deterministic_groups],
@@ -2903,13 +2960,14 @@ class CollectedMergeRunner:
         }
         if extra_trace:
             step.update(extra_trace)
-        self._collected_merge_trace_steps.append(step)
+        with self._collected_merge_trace_lock:
+            self._collected_merge_trace_steps.append(step)
         self._write_collected_merge_trace_step(step)
         (self._collected_merge_trace_dir / step["prompt_file"]).write_text(
             prompt,
             encoding="utf-8",
         )
-        return self._collected_merge_trace_call_index
+        return step_index
 
     def _record_collected_grouping_trace_success(
         self,
@@ -2929,6 +2987,7 @@ class CollectedMergeRunner:
                 "source_coverage_error": source_coverage_error,
             }
         )
+        self._attach_collected_merge_llm_calls(step)
         self._write_collected_merge_trace_step(step)
 
     def _record_collected_merge_trace_success(
@@ -2952,6 +3011,7 @@ class CollectedMergeRunner:
                 "raw_result": merge_result.to_dict(),
             }
         )
+        self._attach_collected_merge_llm_calls(step)
         self._write_collected_merge_trace_step(step)
 
     def _record_collected_merge_trace_failure(
@@ -2974,20 +3034,34 @@ class CollectedMergeRunner:
                 },
             }
         )
+        self._attach_collected_merge_llm_calls(step)
         self._write_collected_merge_trace_step(step)
+
+    def _attach_collected_merge_llm_calls(self, step: dict[str, Any]) -> None:
+        recorder = self._llm_usage_recorder()
+        if recorder is None:
+            step["llm_calls"] = []
+            return
+        request_context_id = str(step["step_index"])
+        step["llm_calls"] = [
+            record
+            for record in recorder.records()
+            if record.get("request_context_id") == request_context_id
+        ]
 
     def _collected_merge_trace_step(
         self,
         step_index: int,
     ) -> dict[str, Any] | None:
-        return next(
-            (
-                step
-                for step in self._collected_merge_trace_steps
-                if step.get("step_index") == step_index
-            ),
-            None,
-        )
+        with self._collected_merge_trace_lock:
+            return next(
+                (
+                    step
+                    for step in self._collected_merge_trace_steps
+                    if step.get("step_index") == step_index
+                ),
+                None,
+            )
 
     def _record_collected_merge_trace_final(
         self,
@@ -3112,6 +3186,7 @@ class CollectedMergeRunner:
             "skipped_file_count": skipped_file_count,
             "partial_file_count": partial_file_count,
             "quality_summary": quality_summary.to_dict(),
+            "llm_usage_summary": self._collected_merge_llm_usage_summary(),
             "source_files": self._collected_merge_source_audit,
             "filter_diagnostics": self._collected_merge_filter_diagnostics,
             "failed_step_indexes": [
@@ -3130,6 +3205,17 @@ class CollectedMergeRunner:
             render_collected_merge_trace_summary(summary),
             encoding="utf-8",
         )
+
+    def _collected_merge_llm_usage_summary(self) -> dict[str, Any]:
+        recorder = self._llm_usage_recorder()
+        if recorder is None:
+            return {
+                "request_count": 0,
+                "by_backend": {},
+                "fallback_count": 0,
+                "codex_wait_ms": {"count": 0, "total": 0.0, "max": 0.0},
+            }
+        return recorder.summary()
 
     def _resolve_self_identity(self) -> SelfIdentity:
         result = self.command_runner(("lark-cli", "auth", "status"), cwd=self.cwd)
@@ -3811,6 +3897,23 @@ def build_collected_relation_components(
         grouped.values(),
         key=lambda items: min(order[item.draft_id] for item in items),
     )
+
+
+def _cross_batch_reconciliation_ids(
+    summary_events: list[CollectedSourceEvent],
+) -> set[str]:
+    eligible_ids: set[str] = set()
+    for index, left in enumerate(summary_events):
+        left_messages = set(left.event.evidence_fingerprints)
+        left_files = set(left.event.file_keys)
+        for right in summary_events[index + 1 :]:
+            has_shared_message = bool(
+                left_messages.intersection(right.event.evidence_fingerprints)
+            )
+            has_shared_file = bool(left_files.intersection(right.event.file_keys))
+            if has_shared_message or has_shared_file:
+                eligible_ids.update((left.draft_id, right.draft_id))
+    return eligible_ids
 
 
 def build_grouping_summary_events(
