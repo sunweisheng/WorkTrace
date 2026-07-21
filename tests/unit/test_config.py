@@ -318,6 +318,7 @@ def test_load_runtime_config_overrides_reads_collected_merge_review_config(
                 "review_cross_batch_groups": False,
                 "review_repaired_groups": True,
                 "review_workstream_conflicts": False,
+                "review_same_conversation_only_groups": True,
             }
         ),
         encoding="utf-8",
@@ -331,6 +332,7 @@ def test_load_runtime_config_overrides_reads_collected_merge_review_config(
     assert config.review_cross_batch_groups is False
     assert config.review_repaired_groups is True
     assert config.review_workstream_conflicts is False
+    assert config.review_same_conversation_only_groups is True
 
 
 def test_repo_collected_merge_config_matches_review_defaults() -> None:
@@ -345,6 +347,7 @@ def test_repo_collected_merge_config_matches_review_defaults() -> None:
         "review_cross_batch_groups": True,
         "review_repaired_groups": True,
         "review_workstream_conflicts": True,
+        "review_same_conversation_only_groups": True,
     }
 
 
@@ -359,6 +362,7 @@ def test_repo_collected_merge_config_matches_review_defaults() -> None:
             "review_cross_batch_groups": True,
             "review_repaired_groups": True,
             "review_workstream_conflicts": True,
+            "review_same_conversation_only_groups": True,
         },
         {
             "high_risk_review_enabled": "yes",

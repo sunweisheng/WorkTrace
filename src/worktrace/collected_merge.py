@@ -715,6 +715,11 @@ class CollectedMergeRunner:
             reasons.append("cross_batch")
         if self.config.review_repaired_groups and group.was_repaired:
             reasons.append("repaired_group")
+        if (
+            self.config.review_same_conversation_only_groups
+            and _has_same_conversation_only_boundary(source_events)
+        ):
+            reasons.append("same_conversation_only")
         workstreams = {
             "".join(item.event.workstream_name.casefold().split())
             for item in source_events
@@ -999,12 +1004,17 @@ class CollectedMergeRunner:
                 result,
                 candidate_group.draft_ids,
             )
+            relation_error = _same_conversation_only_review_result_error(
+                result,
+                fitted_events,
+                reasons=reasons,
+            )
             self._record_collected_grouping_trace_success(
                 step_index=trace_step_index,
                 grouping_result=result,
-                source_coverage_error=partition_error,
+                source_coverage_error=partition_error or relation_error,
             )
-            if not partition_error:
+            if not partition_error and not relation_error:
                 repaired, repair_warnings = repair_collected_grouping_result(
                     result,
                     source_events,
@@ -1030,18 +1040,32 @@ class CollectedMergeRunner:
                 invalid_result_count
                 >= self.config.collected_merge_missing_field_retry_limit
             ):
+                if relation_error:
+                    raise AnalyzerProtocolError(
+                        "High-risk collected group review returned an unsupported "
+                        "same-conversation subgroup: "
+                        f"group={candidate_group.group_id} {relation_error}"
+                    )
                 raise AnalyzerProtocolError(
                     "High-risk collected group review did not preserve source "
                     f"coverage: group={candidate_group.group_id} {partition_error}"
                 )
             invalid_result_count += 1
-            warning = (
-                "Retrying high-risk collected group review because source coverage "
-                f"was invalid: group={candidate_group.group_id} {partition_error}"
-            )
+            if relation_error:
+                warning = (
+                    "Retrying high-risk collected group review because a "
+                    "same-conversation subgroup had no supported merge basis: "
+                    f"group={candidate_group.group_id} {relation_error}"
+                )
+                retry_reason = "unsupported_same_conversation_subgroup"
+            else:
+                warning = (
+                    "Retrying high-risk collected group review because source coverage "
+                    f"was invalid: group={candidate_group.group_id} {partition_error}"
+                )
+                retry_reason = "invalid_source_coverage"
             warnings.append(warning)
             self._collected_merge_failure_warnings.append(warning)
-            retry_reason = "invalid_source_coverage"
 
     def _fit_collected_review_events_to_limit(
         self,
@@ -4586,6 +4610,116 @@ def _events_share_thread_evidence(left: WorkEvent, right: WorkEvent) -> bool:
         left_messages.intersection(right_messages)
         or left_conversations.intersection(right_conversations)
     )
+
+
+def _has_same_conversation_only_boundary(
+    source_events: list[CollectedSourceEvent],
+) -> bool:
+    if len(source_events) < 2:
+        return False
+
+    parents = list(range(len(source_events)))
+
+    def find(index: int) -> int:
+        while parents[index] != index:
+            parents[index] = parents[parents[index]]
+            index = parents[index]
+        return index
+
+    def merge(left_index: int, right_index: int) -> None:
+        left_root = find(left_index)
+        right_root = find(right_index)
+        if left_root != right_root:
+            parents[right_root] = left_root
+
+    for left_index, left in enumerate(source_events):
+        for right_index in range(left_index + 1, len(source_events)):
+            right = source_events[right_index]
+            shared_messages = set(left.event.evidence_fingerprints).intersection(
+                right.event.evidence_fingerprints
+            )
+            shared_files = set(left.event.file_keys).intersection(
+                right.event.file_keys
+            )
+            if shared_messages or shared_files:
+                merge(left_index, right_index)
+
+    for left_index, left in enumerate(source_events):
+        for right_index in range(left_index + 1, len(source_events)):
+            right = source_events[right_index]
+            shared_conversations = set(
+                left.event.conversation_fingerprints
+            ).intersection(right.event.conversation_fingerprints)
+            if shared_conversations and find(left_index) != find(right_index):
+                return True
+    return False
+
+
+def _same_conversation_only_review_result_error(
+    result: CollectedGroupingResult,
+    source_events: list[CollectedSourceEvent],
+    *,
+    reasons: list[str],
+) -> str:
+    if "same_conversation_only" not in reasons:
+        return ""
+
+    source_by_id = {item.draft_id: item for item in source_events}
+    supported_semantic_reasons = {"same_object", "continuous_action"}
+    invalid_group_ids: list[str] = []
+    for group in result.groups:
+        if len(group.draft_ids) < 2:
+            continue
+        items = [
+            source_by_id[draft_id]
+            for draft_id in group.draft_ids
+            if draft_id in source_by_id
+        ]
+        if len(items) != len(group.draft_ids):
+            continue
+        if _events_have_connected_merge_evidence(items):
+            continue
+        if supported_semantic_reasons.intersection(group.group_reason):
+            continue
+        invalid_group_ids.append(group.group_id or ",".join(group.draft_ids))
+    if not invalid_group_ids:
+        return ""
+    return f"groups_without_merge_basis={sorted(invalid_group_ids)}"
+
+
+def _events_have_connected_merge_evidence(
+    source_events: list[CollectedSourceEvent],
+) -> bool:
+    if len(source_events) < 2:
+        return False
+
+    parents = list(range(len(source_events)))
+
+    def find(index: int) -> int:
+        while parents[index] != index:
+            parents[index] = parents[parents[index]]
+            index = parents[index]
+        return index
+
+    def merge(left_index: int, right_index: int) -> None:
+        left_root = find(left_index)
+        right_root = find(right_index)
+        if left_root != right_root:
+            parents[right_root] = left_root
+
+    for left_index, left in enumerate(source_events):
+        for right_index in range(left_index + 1, len(source_events)):
+            right = source_events[right_index]
+            shared_messages = set(left.event.evidence_fingerprints).intersection(
+                right.event.evidence_fingerprints
+            )
+            shared_files = set(left.event.file_keys).intersection(
+                right.event.file_keys
+            )
+            if shared_messages or shared_files:
+                merge(left_index, right_index)
+
+    return len({find(index) for index in range(len(source_events))}) == 1
 
 
 def _build_boundary_fallback_group(

@@ -620,6 +620,7 @@ def _load_collected_merge_overrides(
         "review_cross_batch_groups",
         "review_repaired_groups",
         "review_workstream_conflicts",
+        "review_same_conversation_only_groups",
     }
     int_keys = {
         "high_risk_source_event_count",
@@ -1007,6 +1008,7 @@ class RuntimeConfig:
     review_cross_batch_groups: bool = True
     review_repaired_groups: bool = True
     review_workstream_conflicts: bool = True
+    review_same_conversation_only_groups: bool = True
     slice_retry_limit: int = 3
     prompt_slice_message_limit: int = 40
     prompt_message_char_limit: int = 300

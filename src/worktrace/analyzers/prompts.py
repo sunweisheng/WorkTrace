@@ -1007,6 +1007,11 @@ def build_collected_review_prompt(
     }
     if runtime_config.review_workstream_conflicts and len(workstreams) > 1:
         computed_review_reasons.append("workstream_conflict")
+    effective_review_reasons = list(
+        dict.fromkeys(
+            computed_review_reasons if review_reasons is None else review_reasons
+        )
+    )
     protocol = {
         "instruction": (
             "复核一个高风险多人事件候选组是否混入了不同真实事项。"
@@ -1021,7 +1026,18 @@ def build_collected_review_prompt(
             "不同非空工作流通常拆开，除非共享消息证据且内容明确一致。",
             "多成员组返回非空候选摘要；单成员组三个摘要字段返回空字符串。",
             "只有将输入的多成员候选拆成多个组时，每个输出组都必须返回非空 split_reason，说明拆开的具体业务差异；未拆开时 split_reason 返回空字符串。",
-            "group_reason 和 risk_flags 按实际情况返回。",
+            "group_reason 只能返回实际成立的共同消息、共同文件、同一对象或连续动作依据；同一会话不能单独作为多成员组的合并依据。",
+            *(
+                [
+                    "本组的来源仅因同一会话跨越多个没有共同消息或共同文件的部分。"
+                    "逐一核对这些部分：只有它们确属同一明确事项时才能保留原组；"
+                    "否则必须拆开，并为每个拆分组写明具体业务差异。"
+                    "任何保留的多成员子组必须有共同消息、共同文件，或在 group_reason 中明确写 same_object 或 continuous_action；"
+                    "只有 same_conversation 的子组会被判为无效。"
+                ]
+                if "same_conversation_only" in effective_review_reasons
+                else []
+            ),
         ],
         "required_output_schema": {
             "groups": [
@@ -1042,13 +1058,7 @@ def build_collected_review_prompt(
             ]
         },
         "target_date": target_date,
-        "review_reasons": list(
-            dict.fromkeys(
-                computed_review_reasons
-                if review_reasons is None
-                else review_reasons
-            )
-        ),
+        "review_reasons": effective_review_reasons,
         "candidate_group": {
             "group_id": candidate_group.group_id,
             "draft_ids": list(candidate_group.draft_ids),
@@ -1125,7 +1135,8 @@ def build_collected_render_prompt(
             "covered_draft_ids 必须完整列出本组全部 draft_id，不得遗漏或增加。",
             (
                 "fact_items 列出正文保留的关键事实；每项 text 必须具体，"
-                "source_draft_ids 只能引用支持该事实的本组 draft_id。"
+                "source_draft_ids 只能引用支持该事实的本组 draft_id；"
+                "本组每个 draft_id 至少要在一项 fact_item 的 source_draft_ids 中出现一次。"
             ),
             _build_sensitive_rule(runtime_config),
         ],

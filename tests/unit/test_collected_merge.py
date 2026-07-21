@@ -1175,6 +1175,11 @@ def test_collected_content_prompts_require_specific_event_titles() -> None:
         build_collected_render_prompt("2026-06-29", events, [["d1"]])
     )
 
+    assert any(
+        "本组每个 draft_id 至少要在一项 fact_item" in rule
+        for rule in render_payload["rules"]
+    )
+
     for payload in (merge_payload, render_payload):
         assert any(
             "具体对象 + 关键动作、进展、结果或风险" in rule
@@ -2913,6 +2918,196 @@ def test_high_risk_review_reasons_follow_configured_conditions(tmp_path: Path) -
         ),
         same_workstream,
     ) == []
+
+
+def test_high_risk_review_marks_disconnected_same_conversation_groups(
+    tmp_path: Path,
+) -> None:
+    events = [
+        CollectedSourceEvent(
+            "d1",
+            "张三",
+            "a.md",
+            _event(
+                event_id="e1",
+                title="技术交流会议安排",
+                content="安排技术交流会议。",
+                conversation_fingerprints=["conversation-1"],
+                evidence_fingerprints=["message-1"],
+            ),
+        ),
+        CollectedSourceEvent(
+            "d2",
+            "李四",
+            "b.md",
+            _event(
+                event_id="e2",
+                title="技术交流参会确认",
+                content="确认参加技术交流会议。",
+                conversation_fingerprints=["conversation-1"],
+                evidence_fingerprints=["message-1"],
+            ),
+        ),
+        CollectedSourceEvent(
+            "d3",
+            "张三",
+            "a.md",
+            _event(
+                event_id="e3",
+                title="奖励表转交",
+                content="转交奖励表。",
+                conversation_fingerprints=["conversation-1"],
+                evidence_fingerprints=["message-2"],
+                file_keys=["file-1"],
+            ),
+        ),
+        CollectedSourceEvent(
+            "d4",
+            "李四",
+            "b.md",
+            _event(
+                event_id="e4",
+                title="奖励表接收",
+                content="确认收到奖励表。",
+                conversation_fingerprints=["conversation-1"],
+                evidence_fingerprints=["message-2"],
+                file_keys=["file-1"],
+            ),
+        ),
+    ]
+    group = CollectedGroupingGroup("g1", ["d1", "d2", "d3", "d4"])
+    runner = _build_runner(tmp_path, analyzer=ReviewAnalyzer())
+
+    assert runner._collected_group_review_reasons(group, events) == [
+        "same_conversation_only"
+    ]
+
+    disabled_runner = _build_runner(
+        tmp_path,
+        analyzer=ReviewAnalyzer(),
+        config=RuntimeConfig(
+            data_root=tmp_path / "data",
+            review_same_conversation_only_groups=False,
+        ),
+    )
+    assert disabled_runner._collected_group_review_reasons(group, events) == []
+
+
+def test_same_conversation_only_review_retries_unsupported_subgroup(
+    tmp_path: Path,
+) -> None:
+    class UnsupportedThenValidAnalyzer(ReviewAnalyzer):
+        def review_collected_group(self, target_date, events, candidate_group, *, review_reasons=None):
+            self.review_calls.append(
+                {
+                    "candidate_group": candidate_group,
+                    "review_reasons": list(review_reasons or []),
+                }
+            )
+            if len(self.review_calls) == 1:
+                return CollectedGroupingResult(
+                    groups=[
+                        CollectedGroupingGroup(
+                            "unsupported",
+                            [item.draft_id for item in events],
+                            summary_title="不同事项",
+                            summary_content="仅因同一会话被放在一起。",
+                            summary_object_hint="不同事项",
+                            group_reason=["same_conversation"],
+                        )
+                    ]
+                )
+            return CollectedGroupingResult(
+                groups=[
+                    CollectedGroupingGroup(
+                        "meeting",
+                        [events[0].draft_id, events[1].draft_id],
+                        summary_title="技术交流会议",
+                        summary_content="安排技术交流会议并确认参会。",
+                        summary_object_hint="技术交流会议",
+                        split_reason="奖励表转交与技术交流会议是不同事项。",
+                        group_reason=["shared_message"],
+                    ),
+                    CollectedGroupingGroup(
+                        "rewards",
+                        [events[2].draft_id, events[3].draft_id],
+                        summary_title="奖励表转交",
+                        summary_content="转交奖励表并确认接收。",
+                        summary_object_hint="奖励表",
+                        split_reason="奖励表转交与技术交流会议是不同事项。",
+                        group_reason=["shared_file"],
+                    ),
+                ]
+            )
+
+    events = [
+        CollectedSourceEvent(
+            "d1",
+            "张三",
+            "a.md",
+            _event(
+                event_id="e1",
+                title="技术交流会议安排",
+                content="安排技术交流会议。",
+                conversation_fingerprints=["conversation-1"],
+                evidence_fingerprints=["message-1"],
+            ),
+        ),
+        CollectedSourceEvent(
+            "d2",
+            "李四",
+            "b.md",
+            _event(
+                event_id="e2",
+                title="技术交流参会确认",
+                content="确认参加技术交流会议。",
+                conversation_fingerprints=["conversation-1"],
+                evidence_fingerprints=["message-1"],
+            ),
+        ),
+        CollectedSourceEvent(
+            "d3",
+            "张三",
+            "a.md",
+            _event(
+                event_id="e3",
+                title="奖励表转交",
+                content="转交奖励表。",
+                conversation_fingerprints=["conversation-1"],
+                evidence_fingerprints=["message-2"],
+                file_keys=["file-1"],
+            ),
+        ),
+        CollectedSourceEvent(
+            "d4",
+            "李四",
+            "b.md",
+            _event(
+                event_id="e4",
+                title="奖励表接收",
+                content="确认收到奖励表。",
+                conversation_fingerprints=["conversation-1"],
+                evidence_fingerprints=["message-2"],
+                file_keys=["file-1"],
+            ),
+        ),
+    ]
+    analyzer = UnsupportedThenValidAnalyzer()
+    runner = _build_runner(tmp_path, analyzer=analyzer)
+
+    reviewed, warnings = runner._invoke_collected_review_with_retry(
+        "2026-06-29",
+        events,
+        CollectedGroupingGroup("g1", [item.draft_id for item in events]),
+        reasons=["same_conversation_only"],
+    )
+
+    assert [group.draft_ids for group in reviewed.groups] == [
+        ["d1", "d2"],
+        ["d3", "d4"],
+    ]
+    assert len(analyzer.review_calls) == 2
+    assert any("no supported merge basis" in warning for warning in warnings)
 
 
 def test_high_risk_review_can_split_group_without_losing_sources(
