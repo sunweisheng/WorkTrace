@@ -158,7 +158,9 @@ def test_markdown_store_roundtrip_keeps_event_metadata_and_hidden_merge_keys(
     assert "attachment-secret-1" not in content
 
 
-def test_markdown_store_renders_unknown_for_missing_new_fields(tmp_path: Path) -> None:
+def test_markdown_store_omits_missing_workstream_but_renders_other_metadata(
+    tmp_path: Path,
+) -> None:
     store = MarkdownEventStore(config=RuntimeConfig(data_root=tmp_path / "data"))
     write_result = store.replace_day(
         "2026-06-22",
@@ -174,7 +176,7 @@ def test_markdown_store_renders_unknown_for_missing_new_fields(tmp_path: Path) -
 
     content = Path(write_result.output_path).read_text(encoding="utf-8")
 
-    assert "- **工作流**: 未明确" in content
+    assert "- **工作流**:" not in content
     assert "- **主要动作**: 未明确" in content
     assert "- **本人参与方式**: 未明确" in content
 

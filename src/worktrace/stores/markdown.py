@@ -165,7 +165,12 @@ class MarkdownEventStore(EventStore):
         content = self._normalize_public_text(event.content)
         object_hint = self._normalize_public_text(event.object_hint)
         retention_detail = self._normalize_public_text(event.retention_detail)
-        workstream_name = self._render_metadata_text(event.workstream_name)
+        workstream_name = self._normalize_public_text(event.workstream_name.strip())
+        workstream_line = (
+            f"- **工作流**: {workstream_name}\n"
+            if workstream_name and workstream_name != UNKNOWN_METADATA_VALUE
+            else ""
+        )
         action_labels = self._render_metadata_values(event.action_labels)
         relation_label = (
             "协作方式"
@@ -184,7 +189,7 @@ class MarkdownEventStore(EventStore):
             f"### {index}. {title}\n\n"
             f"- **日期**: {event.date}\n"
             f"- **事件标题**: {title}\n"
-            f"- **工作流**: {workstream_name}\n"
+            f"{workstream_line}"
             f"- **主要动作**: {action_labels}\n"
             f"- **内容**: {content}\n"
             f"- **具体对象**: {object_hint}\n"
