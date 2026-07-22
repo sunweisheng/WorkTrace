@@ -30,6 +30,7 @@ def test_markdown_store_roundtrip(tmp_path: Path) -> None:
     assert write_result.event_count == 1
     assert loaded is not None
     assert loaded.events[0].event_id == "evt1"
+    assert loaded.events[0].title == "主题"
 
 
 def test_markdown_store_renders_public_event_fields(tmp_path: Path) -> None:
@@ -76,7 +77,7 @@ def test_markdown_store_renders_public_event_fields(tmp_path: Path) -> None:
     assert "<!-- worktrace:retention_reason: decision_made -->" in content
     assert "### 1. 主题一" in content
     assert "- **日期**: 2026-06-22" in content
-    assert "- **事件标题**: 主题一" in content
+    assert "- **事件标题**:" not in content
     assert "- **内容**: 内容一" in content
     assert "- **具体对象**: 项目一" in content
     assert "- **保留理由**: 形成明确决策" in content
@@ -86,7 +87,6 @@ def test_markdown_store_renders_public_event_fields(tmp_path: Path) -> None:
     assert "- **涉及文件**:" in content
     assert "[方案一](https://foo.feishu.cn/docx/abc)" in content
     assert "### 2. 主题二" in content
-    assert "- **事件标题**: 主题二" in content
     assert "- **内容**: 内容二" in content
     assert "- **保留理由**: 形成后续跟进任务" in content
     assert "  - 无" in content
@@ -235,6 +235,8 @@ generator: worktrace
 - **具体对象**: 旧对象
 - **保留理由**: 形成明确决策
 - **保留依据**: 已形成结论。
+- 来源人员: 张三
+- 来源事件 ID: evt-old-source
 - **涉及文件**:
   - 无
 <!-- worktrace:event:end -->
@@ -244,6 +246,8 @@ generator: worktrace
 
     assert loaded.events[0].evidence_fingerprints == [fingerprint]
     assert loaded.events[0].conversation_fingerprints == []
+    assert loaded.events[0].source_people == ["张三"]
+    assert loaded.events[0].source_event_ids == ["evt-old-source"]
     assert store.last_warning_messages == []
 
 
@@ -546,6 +550,8 @@ def test_markdown_store_roundtrip_keeps_collected_source_fields(tmp_path: Path) 
     content = store.build_output_path("2026-06-22").read_text(encoding="utf-8")
     assert "- **协作方式**: 协作参与、反馈验收" in content
     assert "- **本人参与方式**:" not in content
+    assert "- 来源事件 ID:" not in content
+    assert '"source_event_ids":["evt-a","evt-b"]' in content
 
 
 def test_markdown_store_roundtrip_keeps_source_report_owners(tmp_path: Path) -> None:
@@ -572,7 +578,10 @@ def test_markdown_store_roundtrip_keeps_source_report_owners(tmp_path: Path) -> 
     second_loaded = store.parse_day_document(second)
 
     assert "- 来源负责人: 丁金龙、栗栋" in first
+    assert "- 来源事件 ID:" not in first
+    assert '"source_event_ids":["evt-a","evt-b"]' in first
     assert first_loaded.events[0].source_report_owners == ["丁金龙", "栗栋"]
+    assert first_loaded.events[0].source_event_ids == ["evt-a", "evt-b"]
     assert second_loaded.events[0].source_report_owners == ["丁金龙", "栗栋"]
 
 
@@ -587,6 +596,8 @@ def test_markdown_store_reads_old_v2_without_source_report_owners() -> None:
                     event_id="evt1",
                     title="旧 V2 事项",
                     content="旧文件没有来源负责人字段。",
+                    source_people=["张三"],
+                    source_event_ids=["evt-old-source"],
                     conversation_fingerprints=["sha256:" + "a" * 64],
                 )
             ],
@@ -595,11 +606,18 @@ def test_markdown_store_reads_old_v2_without_source_report_owners() -> None:
     )
     assert ',"source_report_owners":[]' in markdown
     markdown = markdown.replace(',"source_report_owners":[]', "")
+    assert ',"source_event_ids":["evt-old-source"]' in markdown
+    markdown = markdown.replace(',"source_event_ids":["evt-old-source"]', "")
+    markdown = markdown.replace(
+        "- 来源人员: 张三\n",
+        "- 来源人员: 张三\n- 来源事件 ID: evt-old-source\n",
+    )
     assert "source_report_owners" not in markdown
 
     loaded = store.parse_day_document(markdown)
 
     assert loaded.events[0].source_report_owners == []
+    assert loaded.events[0].source_event_ids == ["evt-old-source"]
 
 
 def test_markdown_store_auto_repairs_unclosed_last_event_block() -> None:

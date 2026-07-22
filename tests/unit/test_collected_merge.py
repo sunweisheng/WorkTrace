@@ -256,9 +256,11 @@ def test_collected_merge_accepts_upstream_merged_markdown_and_preserves_sources(
     assert analyzer.calls[0]["events"][0].person_name == "部门A"
     content = Path(result.output_path or "").read_text(encoding="utf-8")
     assert "- 来源人员: 张三、李四" in content
-    assert "- 来源事件 ID: evt-a、evt-b" in content
+    assert "- 来源事件 ID:" not in content
+    assert '"source_event_ids":["evt-a","evt-b"]' in content
     assert "- 来源负责人: 部门A" in content
     loaded = MarkdownEventStore(config=RuntimeConfig()).parse_day_document(content)
+    assert loaded.events[0].source_event_ids == ["evt-a", "evt-b"]
     assert loaded.events[0].source_report_owners == ["部门A"]
 
 
@@ -326,7 +328,8 @@ def test_collected_merge_reads_sources_and_renders_source_fields(tmp_path: Path)
     ]
     content = Path(result.output_path).read_text(encoding="utf-8")
     assert "- 来源人员: 张三、李四" in content
-    assert "- 来源事件 ID: evt-shared" in content
+    assert "- 来源事件 ID:" not in content
+    assert '"source_event_ids":["evt-shared"]' in content
     assert "- 来源负责人:" not in content
     assert "项目排期确认" in content
 
@@ -560,7 +563,8 @@ def test_collected_merge_over_threshold_rolls_sources_and_keeps_provenance(
     ]
     content = Path(result.output_path or "").read_text(encoding="utf-8")
     assert "- 来源人员: 张三、李四、王五" in content
-    assert "- 来源事件 ID: evt-张三、evt-李四、evt-王五" in content
+    assert "- 来源事件 ID:" not in content
+    assert '"source_event_ids":["evt-张三","evt-李四","evt-王五"]' in content
     assert "张三文档" in content
     assert "李四文档" in content
     assert "王五文档" in content

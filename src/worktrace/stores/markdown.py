@@ -1,8 +1,8 @@
 from __future__ import annotations
 
+import json
 import os
 import re
-import json
 from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
@@ -188,7 +188,6 @@ class MarkdownEventStore(EventStore):
             f"{merge_meta}\n"
             f"### {index}. {title}\n\n"
             f"- **日期**: {event.date}\n"
-            f"- **事件标题**: {title}\n"
             f"{workstream_line}"
             f"- **主要动作**: {action_labels}\n"
             f"- **内容**: {content}\n"
@@ -276,6 +275,16 @@ class MarkdownEventStore(EventStore):
                 )
             ),
         }
+        source_event_ids = list(
+            dict.fromkeys(
+                source_event_id.strip()
+                for source_event_id in event.source_event_ids
+                if source_event_id.strip()
+                and not INTERNAL_FEISHU_ID_RE.search(source_event_id)
+            )
+        )
+        if source_event_ids:
+            payload["source_event_ids"] = source_event_ids
         return f"{MERGE_META_PREFIX}{json.dumps(payload, ensure_ascii=False, separators=(',', ':'))} -->"
 
     def _redact_internal_ids(self, value: str) -> str:
@@ -424,6 +433,8 @@ class MarkdownEventStore(EventStore):
                 "- **事件标题**: ",
                 "- 事件标题: ",
             )
+            if not title:
+                title = self._extract_event_heading_title(block)
             content = self._extract_value(
                 block,
                 "- **内容**: ",
@@ -468,6 +479,8 @@ class MarkdownEventStore(EventStore):
                 )
             )
             merge_meta = self._extract_merge_meta(block, event_id=event_id)
+            if not source_event_ids:
+                source_event_ids = merge_meta.get("source_event_ids", [])
             if not source_report_owners:
                 source_report_owners = merge_meta.get("source_report_owners", [])
             self_relations = merge_meta.get("self_relations", [])
@@ -556,6 +569,10 @@ class MarkdownEventStore(EventStore):
                     return line[len(prefix) :].strip()
         return ""
 
+    def _extract_event_heading_title(self, block: str) -> str:
+        match = re.search(r"^###\s+\d+\.\s+(.+?)\s*$", block, flags=re.MULTILINE)
+        return match.group(1).strip() if match else ""
+
     def _extract_retention_reason(self, block: str) -> str:
         marker = "<!-- worktrace:retention_reason: "
         for line in block.splitlines():
@@ -574,16 +591,9 @@ class MarkdownEventStore(EventStore):
         return "、".join(cleaned)
 
     def _render_source_lines(self, event: WorkEvent) -> str:
-        if (
-            not event.source_people
-            and not event.source_event_ids
-            and not event.source_report_owners
-        ):
+        if not event.source_people and not event.source_report_owners:
             return ""
-        lines = [
-            f"- 来源人员: {self._render_source_values(event.source_people)}",
-            f"- 来源事件 ID: {self._render_source_values(event.source_event_ids)}",
-        ]
+        lines = [f"- 来源人员: {self._render_source_values(event.source_people)}"]
         if event.source_report_owners:
             lines.append(
                 "- 来源负责人: "
@@ -641,7 +651,7 @@ class MarkdownEventStore(EventStore):
                 "source_report_owners",
             ]
             if payload.get("version") == 2:
-                keys.append("conversation_fingerprints")
+                keys.extend(["conversation_fingerprints", "source_event_ids"])
             for key in keys:
                 value = payload.get(key, [])
                 if not isinstance(value, list) or not all(
@@ -649,12 +659,20 @@ class MarkdownEventStore(EventStore):
                 ):
                     self._record_merge_meta_warning(event_id)
                     return {}
-                if key in {"self_relations", "source_report_owners"} and any(
+                if key in {
+                    "self_relations",
+                    "source_event_ids",
+                    "source_report_owners",
+                } and any(
                     INTERNAL_FEISHU_ID_RE.search(item) for item in value
                 ):
                     self._record_merge_meta_warning(event_id)
                     return {}
-                if key not in {"self_relations", "source_report_owners"}:
+                if key not in {
+                    "self_relations",
+                    "source_event_ids",
+                    "source_report_owners",
+                }:
                     if not all(is_sha256_fingerprint(item) for item in value):
                         self._record_merge_meta_warning(event_id)
                         return {}
