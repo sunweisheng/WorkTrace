@@ -5,9 +5,11 @@ import logging
 import ssl
 import threading
 from dataclasses import dataclass
+from itertools import chain
 from pathlib import Path
+from queue import Empty, Queue
 from time import perf_counter
-from typing import Callable
+from typing import Callable, Iterator
 
 import httpx
 from openai import APIConnectionError, APIStatusError, APITimeoutError, OpenAI, OpenAIError
@@ -85,6 +87,17 @@ _GLOBAL_CLIENT_FINGERPRINT: tuple[object, ...] | None = None
 _GLOBAL_OPENAI_CLIENT: OpenAI | None = None
 _GLOBAL_HTTPX_CLIENT: httpx.Client | None = None
 _GLOBAL_CLIENT_LOCK = threading.Lock()
+
+
+class _FirstStreamEventTimeoutError(TimeoutError):
+    pass
+
+
+@dataclass(frozen=True)
+class _FirstStreamEventResult:
+    stream: object
+    iterator: Iterator[object]
+    event: object | None
 
 
 def _apply_soft_no_think(prompt: str) -> str:
@@ -246,6 +259,96 @@ def _build_http_client(settings: OnlineLLMSettings) -> httpx.Client:
             pool=settings.timeout_seconds,
         ),
     )
+
+
+def _set_stream_body_read_timeout(stream: object, timeout_seconds: float) -> None:
+    response = getattr(stream, "response", None)
+    request = getattr(response, "request", None)
+    extensions = getattr(request, "extensions", None)
+    if not isinstance(extensions, dict):
+        return
+    timeout = extensions.get("timeout")
+    if isinstance(timeout, dict):
+        # HTTPX passes this same mapping to the unread response body.
+        timeout["read"] = timeout_seconds
+
+
+def _close_stream(stream: object) -> None:
+    close = getattr(stream, "close", None)
+    if callable(close):
+        close()
+
+
+def _read_first_stream_event(
+    client: OpenAI,
+    body: dict[str, object],
+    *,
+    first_response_timeout_seconds: float,
+    subsequent_read_timeout_seconds: float,
+) -> _FirstStreamEventResult:
+    result_queue: Queue[_FirstStreamEventResult | BaseException] = Queue(maxsize=1)
+    state_lock = threading.Lock()
+    cancelled = threading.Event()
+    state: dict[str, object] = {}
+
+    def read_first_event() -> None:
+        try:
+            stream = client.responses.create(**body)
+            _set_stream_body_read_timeout(stream, subsequent_read_timeout_seconds)
+            with state_lock:
+                state["stream"] = stream
+                should_cancel = cancelled.is_set()
+            if should_cancel:
+                _close_stream(stream)
+                return
+
+            iterator = iter(stream)
+            try:
+                event = next(iterator)
+            except StopIteration:
+                event = None
+
+            with state_lock:
+                if cancelled.is_set():
+                    return
+                result_queue.put_nowait(
+                    _FirstStreamEventResult(
+                        stream=stream,
+                        iterator=iterator,
+                        event=event,
+                    )
+                )
+        except BaseException as exc:
+            with state_lock:
+                if not cancelled.is_set():
+                    result_queue.put_nowait(exc)
+
+    worker = threading.Thread(
+        target=read_first_event,
+        name="worktrace-first-stream-event",
+        daemon=True,
+    )
+    worker.start()
+    timeout_seconds = min(
+        first_response_timeout_seconds,
+        subsequent_read_timeout_seconds,
+    )
+    try:
+        result = result_queue.get(timeout=timeout_seconds)
+    except Empty as exc:
+        with state_lock:
+            cancelled.set()
+            stream = state.get("stream")
+        if stream is not None:
+            _close_stream(stream)
+        raise _FirstStreamEventTimeoutError(
+            "Online LLM did not return its first stream event before the configured timeout."
+        ) from exc
+
+    if isinstance(result, BaseException):
+        raise result
+    return result
+
 
 def _build_client_fingerprint(settings: OnlineLLMSettings) -> tuple[object, ...]:
     return (
@@ -612,6 +715,10 @@ class OnlineLLMAnalyzer(Analyzer):
             if "certificate verify failed" in reason.lower():
                 raise AnalyzerProtocolError(f"TLS certificate verification failed: {reason}") from exc
             raise RetryableAnalyzerProtocolError(f"Network error: {reason}") from exc
+        except _FirstStreamEventTimeoutError as exc:
+            raise RetryableAnalyzerProtocolError(
+                "Request timed out before the first stream event."
+            ) from exc
         except json.JSONDecodeError as exc:
             raise RetryableAnalyzerProtocolError(
                 "Online LLM stream contained invalid JSON data."
@@ -657,17 +764,32 @@ class OnlineLLMAnalyzer(Analyzer):
     ) -> tuple[str, dict[str, object]]:
         client = _get_or_create_global_client(settings)
         if settings.stream_enabled:
-            response_stream = client.responses.create(**body)
+            first_event = _read_first_stream_event(
+                client,
+                body,
+                first_response_timeout_seconds=(
+                    settings.stream_first_response_timeout_seconds
+                ),
+                subsequent_read_timeout_seconds=settings.timeout_seconds,
+            )
             chunks: list[str] = []
             usage_payload: dict[str, object] = {}
-            for event in response_stream:
-                event_payload = event.model_dump()
-                chunk_text = _extract_text_from_responses_stream_event(event_payload)
-                if chunk_text:
-                    chunks.append(chunk_text)
-                if _has_usage(event_payload):
-                    usage_payload = event_payload
-            return "".join(chunks), usage_payload
+            try:
+                events: Iterator[object]
+                if first_event.event is None:
+                    events = first_event.iterator
+                else:
+                    events = chain((first_event.event,), first_event.iterator)
+                for event in events:
+                    event_payload = event.model_dump()
+                    chunk_text = _extract_text_from_responses_stream_event(event_payload)
+                    if chunk_text:
+                        chunks.append(chunk_text)
+                    if _has_usage(event_payload):
+                        usage_payload = event_payload
+                return "".join(chunks), usage_payload
+            finally:
+                _close_stream(first_event.stream)
         response = client.responses.create(**body)
         payload = response.model_dump()
         return _extract_text_from_responses_payload(payload), payload

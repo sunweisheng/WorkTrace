@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from threading import Event
+from time import monotonic
 
+import httpx
 import pytest
 
 from src.worktrace.analyzers.output_schemas import (
@@ -11,12 +14,14 @@ from src.worktrace.analyzers.output_schemas import (
 )
 from src.worktrace.analyzers.online import (
     OnlineLLMAnalyzer,
+    _FirstStreamEventTimeoutError,
     _apply_soft_no_think,
     _build_http_client,
     _build_responses_request_body,
     _extract_text_from_responses_payload,
     _extract_text_from_responses_stream_event,
     _close_global_client,
+    _read_first_stream_event,
 )
 from src.worktrace.config import (
     OnlineLLMSettings,
@@ -259,7 +264,7 @@ def test_online_analyzer_rejects_oversized_prompt_before_request(
     assert settings_calls == []
 
 
-def test_streaming_client_uses_first_response_timeout_for_reads() -> None:
+def test_streaming_client_uses_first_response_timeout_before_body() -> None:
     client = _build_http_client(
         build_settings(
             timeout_seconds=1200,
@@ -272,6 +277,47 @@ def test_streaming_client_uses_first_response_timeout_for_reads() -> None:
         assert client.timeout.write == 1200
     finally:
         client.close()
+
+
+def test_first_stream_event_timeout_closes_the_pending_stream() -> None:
+    closed = Event()
+    observed_read_timeouts: list[float] = []
+    request = httpx.Request(
+        "POST",
+        "https://llm.example/v1/responses",
+        extensions={"timeout": {"read": 0.01}},
+    )
+
+    class BlockingStream:
+        response = httpx.Response(200, request=request)
+
+        def __iter__(self):
+            observed_read_timeouts.append(request.extensions["timeout"]["read"])
+            closed.wait(timeout=1)
+            return iter(())
+
+        def close(self):
+            closed.set()
+
+    class FakeResponses:
+        def create(self, **kwargs):
+            return BlockingStream()
+
+    class FakeClient:
+        responses = FakeResponses()
+
+    started_at = monotonic()
+    with pytest.raises(_FirstStreamEventTimeoutError):
+        _read_first_stream_event(
+            FakeClient(),
+            {"stream": True},
+            first_response_timeout_seconds=0.05,
+            subsequent_read_timeout_seconds=1.0,
+        )
+
+    assert monotonic() - started_at < 0.5
+    assert closed.is_set()
+    assert observed_read_timeouts == [1.0]
 
 
 def test_extract_text_from_responses_payload() -> None:
@@ -448,6 +494,74 @@ def test_online_analyzer_parses_stream_response(tmp_path: Path, monkeypatch: pyt
     assert analyzer.usage_recorder.summary()["output_tokens"] == 5
 
 
+def test_online_analyzer_does_not_reapply_first_event_timeout_after_stream_starts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _close_global_client()
+    settings = build_settings(
+        stream_enabled=True,
+        timeout_seconds=1,
+        stream_first_response_timeout_seconds=0.1,
+    )
+    request = httpx.Request(
+        "POST",
+        "https://llm.example/v1/responses",
+        extensions={"timeout": {"read": 0.01}},
+    )
+
+    class FakeEvent:
+        def __init__(self, content: str):
+            self.content = content
+
+        def model_dump(self):
+            return {"type": "response.output_text.delta", "delta": self.content}
+
+    class DelayedSecondEventStream:
+        response = httpx.Response(200, request=request)
+
+        def __iter__(self):
+            assert request.extensions["timeout"]["read"] == 1
+            yield FakeEvent('{"candidate_events":[],')
+            Event().wait(timeout=0.15)
+            yield FakeEvent('"context_requests":[]}')
+
+        def close(self):
+            return None
+
+    class FakeResponses:
+        def create(self, **kwargs):
+            return DelayedSecondEventStream()
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            self.responses = FakeResponses()
+
+    class FakeHttpClient:
+        def close(self):
+            return None
+
+    monkeypatch.setattr(
+        "src.worktrace.analyzers.online._build_http_client",
+        lambda settings: FakeHttpClient(),
+    )
+    monkeypatch.setattr(
+        "src.worktrace.analyzers.online.OpenAI",
+        lambda **kwargs: FakeClient(),
+    )
+
+    analyzer = OnlineLLMAnalyzer(
+        config=RuntimeConfig(data_root=tmp_path / "data"),
+        cwd=tmp_path,
+        settings_loader=lambda *args, **kwargs: settings,
+    )
+
+    result = analyzer.analyze_batch("2026-06-23", sample_batch())
+
+    assert result.candidate_events == []
+    assert result.context_requests == []
+
+
 def test_online_analyzer_wraps_invalid_stream_json(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -530,6 +644,26 @@ def test_online_analyzer_surfaces_timeout(tmp_path: Path, monkeypatch: pytest.Mo
         analyzer.analyze_batch("2026-06-23", sample_batch())
 
     assert "timed out" in str(exc_info.value).lower()
+
+
+def test_online_analyzer_surfaces_first_stream_event_timeout(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = build_settings(stream_enabled=True)
+    analyzer = OnlineLLMAnalyzer(
+        config=RuntimeConfig(data_root=tmp_path / "data"),
+        cwd=tmp_path,
+        settings_loader=lambda *args, **kwargs: settings,
+    )
+
+    def raise_first_event_timeout(settings, body):
+        raise _FirstStreamEventTimeoutError("first event timed out")
+
+    monkeypatch.setattr(analyzer, "_invoke_via_sdk", raise_first_event_timeout)
+
+    with pytest.raises(RetryableAnalyzerProtocolError, match="first stream event"):
+        analyzer.analyze_batch("2026-06-23", sample_batch())
 
 
 def test_online_analyzer_classifies_retryable_and_permanent_errors(

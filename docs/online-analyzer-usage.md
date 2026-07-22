@@ -71,7 +71,7 @@ WORKTRACE_LLM_TLS_VERIFY=false
 - `supported=true` 要求标题、正文、具体对象和保留依据都有合法证据；缺少任一必填字段时返回 `supported=false`
 - `stream=true` 时收集 `response.output_text.delta`
 - `stream=false` 时读取完整 Responses payload
-- 流式读取当前以 60 秒作为首次返回和后续无数据读取上限
+- 从请求开始到首个流事件的上限为 60 秒；首个流事件返回后，后续读取改用 `WORKTRACE_LLM_TIMEOUT_SECONDS`
 - 配置为非零区间时，第二次正式在线请求起在该区间内随机等待；默认 `0-0` 不等待
 
 图片摘要使用 `input_image`、base64 data URL 和 `detail=low`，不走结构化 JSON schema。
