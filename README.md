@@ -33,7 +33,7 @@ python3 -m src.worktrace.cli sync-reaction-catalog --source feishu
 
 三个入口都会向 `stdout` 输出 machine-readable JSON。个人日报正式执行前会自动运行 preflight；`merge-collected` 和 `sync-reaction-catalog` 是独立子命令，不走个人日报的整套 preflight。
 
-个人日报把未完成任务的模型中间结果临时保存在 `data/cache/llm/YYYY/MM/YYYY-MM-DD/`：先完成全部窗口切分，再逐批提炼事件。默认重新生成会先删除旧个人日报和当天中间结果，再从头执行；只有明确使用 `--resume` 时才保留输入未变化的中间结果，只补调用缺失部分。Markdown 写入成功后该目录自动删除。
+个人日报把未完成任务的模型中间结果临时保存在 `data/cache/llm/YYYY/MM/YYYY-MM-DD/`：先完成全部窗口切分，再逐批提炼事件。默认重新生成会在 preflight 通过后先删除旧个人日报、当天中间结果和当天个人调试目录，再从头执行；明确使用 `--resume` 时保留这三类旧产物，并只复用输入未变化的中间结果。Markdown 写入成功后，模型中间结果目录自动删除。
 
 `config/llm_retry.json` 可分别设置窗口切分和事件提炼的额外重试次数、流式响应首次返回时间、Codex 调用间隔，以及切分、提炼、个人事实复核和多人高风险复核并发数。当前从请求开始到首个流事件的限制为 60 秒；首个流事件返回后不再使用该限制，后续读取使用 `.env` 的 `WORKTRACE_LLM_TIMEOUT_SECONDS`。
 
@@ -396,6 +396,8 @@ python3 -m src.worktrace.cli --date 2026-07-06 --debug-output
 ```
 
 调试产物位于 `data/debug/conversations/<target_date>/`，可能包含：
+
+普通个人重跑会先删除该日期的旧调试目录；使用 `--resume` 时保留，便于中断后续跑和对照已有调试产物。
 
 - 锚点分段输入、prompt、原始输出和校验结果；失败轮次保存 `failure.json`
 - 分段批次输入、prompt、原始输出和统计；失败轮次保存 `failure.json`

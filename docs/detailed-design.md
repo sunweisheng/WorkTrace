@@ -176,7 +176,7 @@ sequenceDiagram
 
 附件文件名会作为消息元数据进入 prompt。消息明确表示发送、查看、审核、转交或处理附件时，模型可以引用来源消息中的附件 ID；这不代表系统读取了附件正文，也不能据文件名推断正文事实。模型误把消息 ID 当附件 ID 且该消息只有一个附件时，Python 会修复引用；其他无效附件引用会被移除，但候选的其余有效事实仍保留。
 
-话题切分和事件提炼完成后分别写入 `data/cache/llm/YYYY/MM/YYYY-MM-DD/`。文件保存完整输入及其 SHA-256 指纹，只复用输入完全一致的结果。默认运行在 preflight 通过后先删除旧个人日报和当天中间结果；`--resume` 才保留并复用匹配项。Markdown 成功写入后，中间结果会清理，因此该目录只用于未完成任务续跑，不是长期数据仓库。
+话题切分和事件提炼完成后分别写入 `data/cache/llm/YYYY/MM/YYYY-MM-DD/`。文件保存完整输入及其 SHA-256 指纹，只复用输入完全一致的结果。默认运行在 preflight 通过后先删除旧个人日报、当天中间结果和 `data/debug/conversations/<date>/` 当天个人调试目录；`--resume` 保留这三类产物，并只复用输入完全一致的中间结果。Markdown 成功写入后，中间结果会清理，因此该目录只用于未完成任务续跑，不是长期数据仓库。
 
 ### 5.8 上下文请求与重试
 
@@ -478,6 +478,8 @@ OnlineLLMAnalyzer -> openai Python SDK -> Responses API provider
 ## 12. 调试与可观测性
 
 `--debug-output` 将个人日报调试根目录设置为 `data/debug/conversations/<date>/`。落盘对象覆盖：
+
+不带 `--resume` 的个人重跑会在新流程开始前删除当天旧目录，不影响其他日期和 `data/debug/collected_merge/`；带 `--resume` 时保留当天旧目录。
 
 - segmentation
 - segment batch

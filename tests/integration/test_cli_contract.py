@@ -118,6 +118,16 @@ def test_cli_supports_preflight_only_output(capsys, tmp_path) -> None:
 
 def test_cli_debug_output_enables_default_debug_directory(capsys, tmp_path) -> None:
     captured_config = None
+    old_debug_file = (
+        tmp_path
+        / "data"
+        / "debug"
+        / "conversations"
+        / "2026-06-22"
+        / "old.json"
+    )
+    old_debug_file.parent.mkdir(parents=True)
+    old_debug_file.write_text("{}", encoding="utf-8")
 
     def fake_preflight(config, *, cwd):
         from src.worktrace.preflight import PreflightReport
@@ -129,6 +139,7 @@ def test_cli_debug_output_enables_default_debug_directory(capsys, tmp_path) -> N
     def fake_run(*, target_date, config):
         nonlocal captured_config
         captured_config = config
+        assert not old_debug_file.exists()
         return DailyRunResult(
             target_date=target_date,
             conversation_count=0,
@@ -162,8 +173,11 @@ def test_cli_debug_output_enables_default_debug_directory(capsys, tmp_path) -> N
     assert captured_config.conversation_debug_root == tmp_path / "data" / "debug" / "conversations"
 
 
-def test_cli_debug_output_preserves_existing_debug_directory(capsys, tmp_path) -> None:
+def test_cli_debug_output_cleans_configured_debug_directory(capsys, tmp_path) -> None:
     existing_debug_root = tmp_path / "custom-debug"
+    old_debug_file = existing_debug_root / "2026-06-22" / "old.json"
+    old_debug_file.parent.mkdir(parents=True)
+    old_debug_file.write_text("{}", encoding="utf-8")
     captured_config = None
 
     def fake_preflight(config, *, cwd):
@@ -174,6 +188,7 @@ def test_cli_debug_output_preserves_existing_debug_directory(capsys, tmp_path) -
     def fake_run(*, target_date, config):
         nonlocal captured_config
         captured_config = config
+        assert not old_debug_file.exists()
         return DailyRunResult(
             target_date=target_date,
             conversation_count=0,
@@ -210,7 +225,69 @@ def test_cli_debug_output_preserves_existing_debug_directory(capsys, tmp_path) -
     assert captured_config.conversation_debug_root == existing_debug_root
 
 
+def test_cli_resume_preserves_existing_debug_directory(capsys, tmp_path) -> None:
+    old_debug_file = (
+        tmp_path
+        / "data"
+        / "debug"
+        / "conversations"
+        / "2026-06-22"
+        / "old.json"
+    )
+    old_debug_file.parent.mkdir(parents=True)
+    old_debug_file.write_text("{}", encoding="utf-8")
+
+    def fake_preflight(config, *, cwd):
+        from src.worktrace.preflight import PreflightReport
+
+        return PreflightReport(ok=True, details={"cwd": str(cwd)})
+
+    def fake_run(*, target_date, config):
+        assert old_debug_file.exists()
+        return DailyRunResult(
+            target_date=target_date,
+            conversation_count=0,
+            message_count=0,
+            slice_count=0,
+            batch_count=0,
+            event_count=0,
+            skipped_slice_count=0,
+            warning_count=0,
+            status=DailyRunStatus.SUCCESS.value,
+            output_path=str(tmp_path / "data/2026/06/2026-06-22.md"),
+            error_summary="",
+            self_delivery_status="success",
+            self_delivery_target="ou_self",
+            self_delivery_error="",
+        )
+
+    exit_code = main(
+        ["--date", "2026-06-22", "--debug-output", "--resume"],
+        config=RuntimeConfig(data_root=tmp_path / "data"),
+        preflight_func=fake_preflight,
+        run_func=fake_run,
+    )
+
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+
+    assert exit_code == 0
+    assert payload["status"] == DailyRunStatus.SUCCESS.value
+    assert old_debug_file.exists()
+
+
 def test_cli_merge_collected_returns_structured_json(capsys, tmp_path) -> None:
+    personal_debug_file = (
+        tmp_path
+        / "data"
+        / "debug"
+        / "conversations"
+        / "2026-06-29"
+        / "old.json"
+    )
+    personal_debug_file.parent.mkdir(parents=True)
+    personal_debug_file.write_text("{}", encoding="utf-8")
+
     def fake_run(*, target_date, config):
         return CollectedMergeRunResult(
             status=DailyRunStatus.SUCCESS.value,
@@ -258,3 +335,4 @@ def test_cli_merge_collected_returns_structured_json(capsys, tmp_path) -> None:
     assert payload["source_file_count"] == 2
     assert payload["self_delivery_status"] == "success"
     assert payload["outputs"][0]["source_event_count"] == 1
+    assert personal_debug_file.exists()

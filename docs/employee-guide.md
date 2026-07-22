@@ -289,7 +289,7 @@ python -m src.worktrace.cli --date 2026-06-23
 python3 -m src.worktrace.cli --date 2026-06-23 --resume
 ```
 
-未完成任务的分段和提炼结果临时保存在 `data/cache/llm/YYYY/MM/YYYY-MM-DD/`。普通重跑会先删除旧日报和当天中间结果，从头生成；`--resume` 只复用输入完全一致的结果。Markdown 成功写入后，中间结果自动清理。
+未完成任务的分段和提炼结果临时保存在 `data/cache/llm/YYYY/MM/YYYY-MM-DD/`。普通重跑会先删除旧日报、当天中间结果和当天个人调试目录，从头生成；`--resume` 保留这些内容，并只复用输入完全一致的中间结果。Markdown 成功写入后，中间结果自动清理。
 
 如果你需要让技术同事帮你排查“为什么提炼成了这个事件”或“为什么几个事件被合并到一起”，可以在命令后面加上调试开关：
 
@@ -308,6 +308,8 @@ python -m src.worktrace.cli --date 2026-06-23 --debug-output
 ```text
 data/debug/conversations/2026-06-23/
 ```
+
+普通个人重跑会先删除这个日期的旧调试目录；使用 `--resume` 时保留。
 
 其中跨会话 merge 的调试文件会放在：
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import shutil
 import sys
 from dataclasses import replace
 from pathlib import Path
@@ -224,6 +225,15 @@ def _extract_raw_date(argv: list[str]) -> str | None:
 
 def _clear_previous_personal_run(config: RuntimeConfig, target_date: str) -> None:
     clear_day_llm_checkpoints(config, target_date)
+    debug_root = config.conversation_debug_root or (
+        config.data_root / "debug" / "conversations"
+    )
+    debug_day_dir = debug_root / target_date
+    if debug_day_dir.is_dir() and not debug_day_dir.is_symlink():
+        shutil.rmtree(debug_day_dir)
+    else:
+        debug_day_dir.unlink(missing_ok=True)
+
     year, month, _day = target_date.split("-")
     output_dir = config.data_root / year / month
     if not output_dir.exists():
