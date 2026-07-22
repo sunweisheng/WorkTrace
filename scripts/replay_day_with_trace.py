@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import sys
 from collections import Counter, defaultdict
+from datetime import datetime, timezone
 from pathlib import Path
 
 
@@ -62,6 +63,71 @@ def _safe_rmtree(path: Path) -> None:
 def _safe_unlink(path: Path) -> None:
     if path.exists():
         path.unlink()
+
+
+def _now_utc_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _write_status_file(path: Path, payload: dict[str, object]) -> None:
+    temporary_path = path.with_name(f".{path.name}.tmp")
+    temporary_path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    temporary_path.replace(path)
+
+
+def _emit_live_log(path: Path, message: str) -> None:
+    line = f"{_now_utc_iso()} {message}\n"
+    with path.open("a", encoding="utf-8") as stream:
+        stream.write(line)
+        stream.flush()
+    sys.stderr.write(line)
+    sys.stderr.flush()
+
+
+def _run_with_live_stderr(
+    command: list[str],
+    *,
+    cwd: Path,
+    env: dict[str, str],
+    stdout_path: Path,
+    stderr_path: Path,
+) -> subprocess.CompletedProcess[str]:
+    with stdout_path.open("w+", encoding="utf-8") as stdout_stream:
+        process = subprocess.Popen(
+            command,
+            cwd=str(cwd),
+            stdout=stdout_stream,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=env,
+        )
+        if process.stderr is None:
+            raise RuntimeError("Replay subprocess stderr pipe was not created.")
+        try:
+            with stderr_path.open("a", encoding="utf-8") as stderr_stream:
+                for line in process.stderr:
+                    stderr_stream.write(line)
+                    stderr_stream.flush()
+                    sys.stderr.write(line)
+                    sys.stderr.flush()
+            returncode = process.wait()
+        except BaseException:
+            process.kill()
+            process.wait()
+            raise
+        stdout_stream.flush()
+        stdout_stream.seek(0)
+        stdout_text = stdout_stream.read()
+
+    return subprocess.CompletedProcess(
+        command,
+        returncode,
+        stdout=stdout_text,
+        stderr=stderr_path.read_text(encoding="utf-8"),
+    )
 
 
 def _collect_timing(stderr_text: str) -> dict[str, object]:
@@ -362,19 +428,66 @@ def main(argv: list[str] | None = None) -> int:
         f"raise SystemExit(main({cli_args!r}, config=config))\n"
     )
 
-    completed = subprocess.run(
-        ["python3", "-c", runner_script],
-        cwd=str(repo_root),
-        capture_output=True,
-        text=True,
-        env=env,
-        check=False,
-    )
-
     stdout_path = trace_root / "run_stdout.json"
     stderr_path = trace_root / "run_stderr.log"
-    stdout_path.write_text(completed.stdout, encoding="utf-8")
-    stderr_path.write_text(completed.stderr, encoding="utf-8")
+    status_path = trace_root / "run_status.json"
+    stderr_path.write_text("", encoding="utf-8")
+    started_at_utc = _now_utc_iso()
+    running_status: dict[str, object] = {
+        "target_date": args.date,
+        "analyzer_backend": args.analyzer_backend,
+        "status": "running",
+        "started_at_utc": started_at_utc,
+        "completed_at_utc": None,
+        "returncode": None,
+        "error_summary": "",
+    }
+    _write_status_file(status_path, running_status)
+    _emit_live_log(
+        stderr_path,
+        f'replay.run status="running" target_date="{args.date}" '
+        f'analyzer_backend="{args.analyzer_backend}"',
+    )
+    try:
+        completed = _run_with_live_stderr(
+            ["python3", "-c", runner_script],
+            cwd=repo_root,
+            env=env,
+            stdout_path=stdout_path,
+            stderr_path=stderr_path,
+        )
+    except BaseException as exc:
+        failed_status = {
+            **running_status,
+            "status": "failed",
+            "completed_at_utc": _now_utc_iso(),
+            "error_summary": f"{type(exc).__name__}: {exc}",
+        }
+        _write_status_file(status_path, failed_status)
+        _emit_live_log(
+            stderr_path,
+            f'replay.run status="failed" target_date="{args.date}" '
+            f'error_type="{type(exc).__name__}"',
+        )
+        raise
+
+    final_status = "success" if completed.returncode == 0 else "failed"
+    _write_status_file(
+        status_path,
+        {
+            **running_status,
+            "status": final_status,
+            "completed_at_utc": _now_utc_iso(),
+            "returncode": completed.returncode,
+            "error_summary": "" if completed.returncode == 0 else "Replay subprocess failed.",
+        },
+    )
+    _emit_live_log(
+        stderr_path,
+        f'replay.run status="{final_status}" target_date="{args.date}" '
+        f"returncode={completed.returncode}",
+    )
+    completed.stderr = stderr_path.read_text(encoding="utf-8")
 
     timing_summary = _collect_timing(completed.stderr)
     llm_summary = _collect_llm_summary(trace_root)
@@ -403,6 +516,7 @@ def main(argv: list[str] | None = None) -> int:
         "resume_requested": args.resume,
         "max_model_input_tokens": args.max_model_input_tokens,
         "trace_root": str(trace_root.resolve()),
+        "run_status_path": str(status_path.resolve()),
         "returncode": completed.returncode,
         "result": result_payload,
         "first_pass_summary": first_pass_summary,

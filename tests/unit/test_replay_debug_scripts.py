@@ -1,12 +1,22 @@
 from __future__ import annotations
 
+import io
 import json
+import os
+import shlex
+import subprocess
+import sys
 from pathlib import Path
 
+import pytest
+
+import scripts.replay_day_with_trace as replay_debug
+from scripts.hook_trace_wrapper import main as hook_trace_main
 from scripts.replay_day_with_trace import (
     _collect_llm_usage_summary,
     _collect_review_artifact_summary,
     _parse_args,
+    _run_with_live_stderr,
 )
 from scripts.report_replay_call_inputs import (
     _anchor_fallback_records,
@@ -26,6 +36,138 @@ def _write_json(path: Path, payload: dict[str, object]) -> None:
         json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
+
+
+def test_replay_subprocess_streams_stderr_and_keeps_captured_logs(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    stdout_path = tmp_path / "stdout.json"
+    stderr_path = tmp_path / "stderr.log"
+
+    completed = _run_with_live_stderr(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import sys; "
+                "print('stage started', file=sys.stderr, flush=True); "
+                "print('{\"status\":\"ok\"}')"
+            ),
+        ],
+        cwd=tmp_path,
+        env=dict(os.environ),
+        stdout_path=stdout_path,
+        stderr_path=stderr_path,
+    )
+
+    captured = capsys.readouterr()
+    assert completed.returncode == 0
+    assert json.loads(completed.stdout) == {"status": "ok"}
+    assert "stage started" in captured.err
+    assert "stage started" in completed.stderr
+    assert stderr_path.read_text(encoding="utf-8") == completed.stderr
+
+
+def test_hook_trace_writes_running_state_before_call_and_success_afterward(
+    tmp_path: Path,
+    capsys,
+    monkeypatch,
+) -> None:
+    trace_root = tmp_path / "trace"
+    counter_path = trace_root / "counter.txt"
+    meta_path = trace_root / "llm_calls" / "call_001" / "meta.json"
+    child_code = (
+        "import json, sys; "
+        "from pathlib import Path; "
+        f"meta=json.loads(Path({str(meta_path)!r}).read_text(encoding='utf-8')); "
+        "assert meta['status'] == 'running'; "
+        "print('model stage active', file=sys.stderr, flush=True); "
+        "print(json.dumps({'status': 'ok'}))"
+    )
+    monkeypatch.setattr(sys, "stdin", io.StringIO("test prompt"))
+
+    returncode = hook_trace_main(
+        [
+            "--trace-root",
+            str(trace_root),
+            "--counter-path",
+            str(counter_path),
+            "--target-date",
+            "2026-07-15",
+            "--hook-command",
+            shlex.join([sys.executable, "-c", child_code]),
+        ]
+    )
+
+    captured = capsys.readouterr()
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    assert returncode == 0
+    assert meta["status"] == "success"
+    assert meta["returncode"] == 0
+    assert meta["completed_at_utc"]
+    assert "model stage active" in captured.err
+    assert 'hook_llm.call status="running"' in captured.err
+    assert 'hook_llm.call status="success"' in captured.err
+
+
+@pytest.mark.parametrize(
+    ("returncode", "expected_status"),
+    [(0, "success"), (3, "failed")],
+)
+def test_replay_main_updates_run_status_from_subprocess_result(
+    tmp_path: Path,
+    capsys,
+    monkeypatch,
+    returncode: int,
+    expected_status: str,
+) -> None:
+    trace_root = tmp_path / "trace"
+
+    def fake_run(
+        command,
+        *,
+        cwd,
+        env,
+        stdout_path,
+        stderr_path,
+    ):
+        running = json.loads(
+            (trace_root / "run_status.json").read_text(encoding="utf-8")
+        )
+        assert running["status"] == "running"
+        stdout_text = json.dumps({"status": "success"})
+        stdout_path.write_text(stdout_text, encoding="utf-8")
+        with stderr_path.open("a", encoding="utf-8") as stream:
+            stream.write("runner.stage.completed duration_ms=1 stage=\"test\"\n")
+        return subprocess.CompletedProcess(
+            command,
+            returncode,
+            stdout=stdout_text,
+            stderr=stderr_path.read_text(encoding="utf-8"),
+        )
+
+    monkeypatch.setattr(replay_debug, "_run_with_live_stderr", fake_run)
+
+    actual_returncode = replay_debug.main(
+        [
+            "--date",
+            "2026-07-15",
+            "--trace-root",
+            str(trace_root),
+            "--data-root",
+            str(tmp_path / "data"),
+        ]
+    )
+
+    capsys.readouterr()
+    final_status = json.loads(
+        (trace_root / "run_status.json").read_text(encoding="utf-8")
+    )
+    assert actual_returncode == returncode
+    assert final_status["status"] == expected_status
+    assert final_status["returncode"] == returncode
+    assert final_status["completed_at_utc"]
 
 
 def test_replay_summary_collects_review_artifact_status(tmp_path: Path) -> None:

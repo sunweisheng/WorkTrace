@@ -409,11 +409,13 @@ python3 -m src.worktrace.cli --date 2026-07-06 --debug-output
 - `final_events.json`：最终合并草稿、完成文件聚合和排序后的事件，以及最终过滤 warning
 - `llm_usage.json`：每次调用的耗时、输入字符数、服务返回的输入/输出/总 token，以及按调用类型的汇总；未返回用量的调用会单独计数，不会按文本长度估算
 
-`scripts/replay_day_with_trace.py` 的 `summary.json` 会把两类复核文件的路径、统计、尝试次数和失败次数写入 `review_artifact_summary`，并把 `llm_usage.json` 中准确的调用类型、次数、token 和耗时写入 `llm_usage_summary`。`scripts/report_replay_timings.py` 按 `request_kind` 汇总调用；个人事实复核同时显示各候选耗时之和与 `personal_fact_review_all` 整体墙钟耗时，并发效果应看后者，不能把前者当作运行耗时。
+`scripts/replay_day_with_trace.py` 启动后会立即写入 `run_status.json`，执行期间状态为 `running`，结束后按子进程返回结果更新为 `success` 或 `failed`；子进程阶段日志会实时显示在终端并同步追加到 `run_stderr.log`，不再等整次回放结束后统一输出。`summary.json` 会把两类复核文件的路径、统计、尝试次数和失败次数写入 `review_artifact_summary`，并把 `llm_usage.json` 中准确的调用类型、次数、token 和耗时写入 `llm_usage_summary`。`scripts/report_replay_timings.py` 按 `request_kind` 汇总调用；个人事实复核同时显示各候选耗时之和与 `personal_fact_review_all` 整体墙钟耗时，并发效果应看后者，不能把前者当作运行耗时。
 
 `scripts/report_replay_call_inputs.py` 会把分段、提炼、分段失败后的直接提炼以及两类复核的每次尝试列入 `call-input-report.md`。报告分别显示在线模型成功响应数和调试文件保存的文字调用尝试数，并把图片摘要单独计数；请求发送前或服务端失败时两种数量可以不同。`personal_fact_review_summary.review_retry_count=5` 表示 5 次事实复核返回未通过 Python 协议校验，系统只重试了对应候选且最终仍可能成功，不表示整次日报失败了 5 次。
 
 多人汇总跟踪通过 `.env` 的 `WORKTRACE_COLLECTED_MERGE_TRACE=true` 开启，默认写入 `data/debug/collected_merge/<target_date>/`。`source-audit.json` 记录每个来源文件的格式、声明/解析/过滤数量和部分读取状态；每次真实模型调用会在请求前写入 `step-NNN.json` 与 `step-NNN-prompt.txt`，保存估算 token、`max_model_input_tokens` 上限、完整 `input_events`、`deterministic_groups`、各来源完整/实际发送字符数、候选摘要来源及该逻辑请求的在线/Codex 调用记录，成功和失败都会更新状态。`summary.json`、`summary.md` 在模型失败时也会生成，并记录失败步骤、结果质量重试、具体过滤事件、最终事件、`boundary_warnings`、各线路耗时和 Codex 等待。
+
+`scripts/diagnose_collected_merge_rolling.py` 的每个模型步骤也会在调用前写入 `status=running`，并实时输出步骤状态；完成或异常后，同一个 `step-NNN.json` 会更新为 `success` 或 `failed`。调试文件保持 `running` 只表示调用尚未返回，不能据此判断模型无响应。
 
 429、HTTP 5xx、连接失败、超时、流式 JSON 异常及空或无效 JSON 返回会立即由 Codex 重做当前文字请求，后续请求仍优先在线；不会重复在线请求。临时协作复核或个人事实复核的结果缺失、重复、覆盖不完整或证据非法属于结果质量校验，仍只重试当前复核批次。401、403、TLS 证书和请求参数错误不会切换。过滤诊断只记录阶段、类别、来源文件、来源人员、事件 ID 和标题，不记录命中关键词或完整敏感正文。
 

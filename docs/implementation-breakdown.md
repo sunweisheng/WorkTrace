@@ -136,7 +136,7 @@ flowchart LR
 ## 10. 调试入口
 
 - 个人日报：`--debug-output`，目录 `data/debug/conversations/<date>/`；失败轮次保存 `failure.json`，单片段回退使用 `fallback-01/`，直接提炼回退使用 `_anchor_fallback/`；`retention_review.json` 和 `personal_fact_review.json` 保存两类局部复核尝试及 Python 校验结果，`llm_usage.json` 保存按调用类型的 token 和耗时，`final_events.json` 保存最终草稿、事件和过滤 warning
-- 回放报告：`replay_day_with_trace.py` 把 `llm_usage.json` 汇总到 `llm_usage_summary`；`report_replay_timings.py` 分开输出事实复核候选累计耗时和 `personal_fact_review_all` 墙钟耗时；`report_replay_call_inputs.py` 分开统计文字调用与图片摘要
+- 回放报告：`replay_day_with_trace.py` 在执行前写入 `run_status.json`，实时显示并保存子进程阶段日志，结束后更新 `success/failed`，同时把 `llm_usage.json` 汇总到 `llm_usage_summary`；`diagnose_collected_merge_rolling.py` 在每次模型调用前写入 `running` 步骤并在完成或异常后更新结果；`report_replay_timings.py` 分开输出事实复核候选累计耗时和 `personal_fact_review_all` 墙钟耗时；`report_replay_call_inputs.py` 分开统计文字调用与图片摘要
 - 多人汇总：`WORKTRACE_COLLECTED_MERGE_TRACE=true`，目录默认 `data/debug/collected_merge/<date>/`；`source-audit.json` 保存来源格式、v2 会话证据校验和过滤明细，step JSON/prompt 在请求前写入候选、复核、正文阶段与批次，`summary.json` 和 `summary.md` 保存 Python 质量统计，失败也生成 summary
 - 锚点独立实验：`python3 -m src.worktrace.anchor_experiment ...`
 

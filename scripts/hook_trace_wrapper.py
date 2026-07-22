@@ -34,6 +34,20 @@ def _stderr_tail(stderr: str, limit: int = 20) -> str:
     return "\n".join(lines[-limit:])
 
 
+def _write_meta(path: Path, payload: dict[str, object]) -> None:
+    temporary_path = path.with_name(f".{path.name}.tmp")
+    temporary_path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    temporary_path.replace(path)
+
+
+def _emit_status(message: str) -> None:
+    sys.stderr.write(f"{_now_utc_iso()} {message}\n")
+    sys.stderr.flush()
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(add_help=True)
     parser.add_argument("--trace-root", required=True)
@@ -55,22 +69,82 @@ def main(argv: list[str] | None = None) -> int:
     command = shlex.split(args.hook_command)
     started_at_utc = _now_utc_iso()
     started_at = perf_counter()
-    completed = subprocess.run(
-        command,
-        input=prompt,
-        capture_output=True,
-        text=True,
-        cwd=str(Path.cwd()),
-        env=env,
-        check=False,
+    meta_path = call_dir / "meta.json"
+    running_meta: dict[str, object] = {
+        "call_index": call_index,
+        "target_date": args.target_date,
+        "status": "running",
+        "started_at_utc": started_at_utc,
+        "completed_at_utc": None,
+        "elapsed_ms": None,
+        "returncode": None,
+        "prompt_chars": len(prompt),
+        "stdout_chars": 0,
+        "stderr_tail": "",
+        "output_error": "",
+        "hook_command": args.hook_command,
+    }
+    _write_meta(meta_path, running_meta)
+    _emit_status(
+        f'hook_llm.call status="running" call_index={call_index} '
+        f'target_date="{args.target_date}"'
     )
+
+    stdout_path = call_dir / "stdout.txt"
+    stderr_path = call_dir / "stderr.txt"
+    stderr_lines: list[str] = []
+    try:
+        with stdout_path.open("w+", encoding="utf-8") as stdout_stream:
+            process = subprocess.Popen(
+                command,
+                stdin=subprocess.PIPE,
+                stdout=stdout_stream,
+                stderr=subprocess.PIPE,
+                text=True,
+                cwd=str(Path.cwd()),
+                env=env,
+            )
+            if process.stdin is None or process.stderr is None:
+                raise RuntimeError("Hook subprocess pipes were not created.")
+            try:
+                process.stdin.write(prompt)
+                process.stdin.close()
+                with stderr_path.open("w", encoding="utf-8") as stderr_stream:
+                    for line in process.stderr:
+                        stderr_lines.append(line)
+                        stderr_stream.write(line)
+                        stderr_stream.flush()
+                        sys.stderr.write(line)
+                        sys.stderr.flush()
+                returncode = process.wait()
+            except BaseException:
+                process.kill()
+                process.wait()
+                raise
+            stdout_stream.flush()
+            stdout_stream.seek(0)
+            stdout_text = stdout_stream.read()
+    except BaseException as exc:
+        _write_meta(
+            meta_path,
+            {
+                **running_meta,
+                "status": "failed",
+                "completed_at_utc": _now_utc_iso(),
+                "elapsed_ms": round((perf_counter() - started_at) * 1000, 3),
+                "stderr_tail": _stderr_tail("".join(stderr_lines)),
+                "output_error": f"{type(exc).__name__}: {exc}",
+            },
+        )
+        _emit_status(
+            f'hook_llm.call status="failed" call_index={call_index} '
+            f'error_type="{type(exc).__name__}"'
+        )
+        raise
+
     elapsed_ms = round((perf_counter() - started_at) * 1000, 3)
 
-    stdout_text = completed.stdout or ""
-    stderr_text = completed.stderr or ""
-    (call_dir / "stdout.txt").write_text(stdout_text, encoding="utf-8")
-    if stderr_text:
-        (call_dir / "stderr.txt").write_text(stderr_text, encoding="utf-8")
+    stderr_text = "".join(stderr_lines)
 
     parsed_output: object | None = None
     output_error = ""
@@ -86,26 +160,25 @@ def main(argv: list[str] | None = None) -> int:
             encoding="utf-8",
         )
 
+    status = "success" if returncode == 0 and parsed_output is not None else "failed"
     meta = {
-        "call_index": call_index,
-        "target_date": args.target_date,
-        "started_at_utc": started_at_utc,
+        **running_meta,
+        "status": status,
+        "completed_at_utc": _now_utc_iso(),
         "elapsed_ms": elapsed_ms,
-        "returncode": completed.returncode,
-        "prompt_chars": len(prompt),
+        "returncode": returncode,
         "stdout_chars": len(stdout_text),
         "stderr_tail": _stderr_tail(stderr_text),
         "output_error": output_error,
-        "hook_command": args.hook_command,
     }
-    (call_dir / "meta.json").write_text(
-        json.dumps(meta, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
+    _write_meta(meta_path, meta)
+    _emit_status(
+        f'hook_llm.call status="{status}" call_index={call_index} '
+        f"returncode={returncode} elapsed_ms={elapsed_ms}"
     )
 
     sys.stdout.write(stdout_text)
-    sys.stderr.write(stderr_text)
-    return completed.returncode
+    return returncode
 
 
 if __name__ == "__main__":

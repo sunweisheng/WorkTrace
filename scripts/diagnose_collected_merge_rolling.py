@@ -6,8 +6,10 @@ import re
 import sys
 from collections import Counter
 from dataclasses import replace
+from datetime import datetime, timezone
 from pathlib import Path
 from statistics import median
+from time import perf_counter
 from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -37,6 +39,37 @@ SPECIFIC_TOKEN_RE = re.compile(
     r"(\d+(?:\.\d+)?%?|\d{4}年|\d+月|\d+日|v?\d+\.\d+(?:\.\d+)?|[A-Za-z0-9_./-]+\\.(?:md|pdf|xlsx?|docx?|sql))",
     re.IGNORECASE,
 )
+
+
+def _now_utc_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _write_step_trace(path: Path, payload: dict[str, Any]) -> None:
+    temporary_path = path.with_name(f".{path.name}.tmp")
+    temporary_path.write_text(dump_json(payload, pretty=True), encoding="utf-8")
+    temporary_path.replace(path)
+
+
+def _emit_step_status(
+    *,
+    step_index: int,
+    status: str,
+    prompt_chars: int,
+    elapsed_ms: float | None = None,
+    error_type: str = "",
+) -> None:
+    fields = [
+        f'status="{status}"',
+        f"step_index={step_index}",
+        f"prompt_chars={prompt_chars}",
+    ]
+    if elapsed_ms is not None:
+        fields.append(f"elapsed_ms={elapsed_ms:.1f}")
+    if error_type:
+        fields.append(f'error_type="{error_type}"')
+    sys.stderr.write(f"{_now_utc_iso()} collected_merge.debug_step {' '.join(fields)}\n")
+    sys.stderr.flush()
 
 
 def main() -> None:
@@ -133,69 +166,117 @@ class TracingCollectedMergeRunner(CollectedMergeRunner):
             config=self.config,
         )
         input_metrics = _metrics_for_source_events(source_events)
-
-        raw_result, retry_warnings = self._invoke_collected_merge_with_retry(
-            target_date,
-            source_events,
-            deterministic_groups,
-        )
-        repaired_result, repair_warnings = repair_collected_merge_result(
-            raw_result,
-            source_events,
-            deterministic_groups,
-        )
-        repaired_result, metadata_warnings = self._fill_collected_merge_group_metadata(
-            source_events,
-            repaired_result,
-        )
-        materialized_events = self._materialize_events(
-            target_date,
-            source_events,
-            repaired_result,
-        )
-        sensitive_events, sensitive_warnings = self._filter_sensitive_events(
-            target_date,
-            materialized_events,
-        )
-        retained_events, retention_warnings = filter_retained_work_events(
-            sensitive_events,
-        )
-
-        dropped_by_retention = [
-            {
-                "title": event.title,
-                "source_event_ids": list(event.source_event_ids),
-                "retention_reason": event.retention_reason,
-                "retention_detail": event.retention_detail,
-                "rejection_reason": retention_rejection_reason_for_event(event),
-            }
-            for event in sensitive_events
-            if retention_rejection_reason_for_event(event)
-        ]
+        step_path = self.trace_dir / f"step-{step_index:03d}.json"
+        started_at_utc = _now_utc_iso()
+        started_at = perf_counter()
         step_payload = {
             "step_index": step_index,
+            "status": "running",
+            "started_at_utc": started_at_utc,
+            "completed_at_utc": None,
+            "elapsed_ms": None,
             "prompt_chars": len(prompt),
             "input": input_metrics,
-            "raw_group_count": len(raw_result.groups),
-            "raw_group_metrics": _metrics_for_groups(raw_result),
-            "repaired_group_count": len(repaired_result.groups),
-            "materialized_metrics": _metrics_for_work_events(materialized_events),
-            "after_sensitive_metrics": _metrics_for_work_events(sensitive_events),
-            "retained_metrics": _metrics_for_work_events(retained_events),
-            "repair_warnings": repair_warnings,
-            "retry_warnings": retry_warnings,
-            "metadata_warnings": metadata_warnings,
-            "sensitive_warnings": sensitive_warnings,
-            "retention_warnings": retention_warnings,
-            "dropped_by_retention": dropped_by_retention,
-            "raw_result": raw_result.to_dict(),
-            "repaired_result": repaired_result.to_dict(),
-            "retained_events": [event.to_dict() for event in retained_events],
         }
-        (self.trace_dir / f"step-{step_index:03d}.json").write_text(
-            dump_json(step_payload, pretty=True),
-            encoding="utf-8",
+        _write_step_trace(step_path, step_payload)
+        _emit_step_status(
+            step_index=step_index,
+            status="running",
+            prompt_chars=len(prompt),
         )
+
+        try:
+            raw_result, retry_warnings = self._invoke_collected_merge_with_retry(
+                target_date,
+                source_events,
+                deterministic_groups,
+            )
+            repaired_result, repair_warnings = repair_collected_merge_result(
+                raw_result,
+                source_events,
+                deterministic_groups,
+            )
+            repaired_result, metadata_warnings = self._fill_collected_merge_group_metadata(
+                source_events,
+                repaired_result,
+            )
+            materialized_events = self._materialize_events(
+                target_date,
+                source_events,
+                repaired_result,
+            )
+            sensitive_events, sensitive_warnings = self._filter_sensitive_events(
+                target_date,
+                materialized_events,
+            )
+            retained_events, retention_warnings = filter_retained_work_events(
+                sensitive_events,
+            )
+
+            dropped_by_retention = [
+                {
+                    "title": event.title,
+                    "source_event_ids": list(event.source_event_ids),
+                    "retention_reason": event.retention_reason,
+                    "retention_detail": event.retention_detail,
+                    "rejection_reason": retention_rejection_reason_for_event(event),
+                }
+                for event in sensitive_events
+                if retention_rejection_reason_for_event(event)
+            ]
+            elapsed_ms = (perf_counter() - started_at) * 1000
+            step_payload.update(
+                {
+                    "status": "success",
+                    "completed_at_utc": _now_utc_iso(),
+                    "elapsed_ms": round(elapsed_ms, 3),
+                    "raw_group_count": len(raw_result.groups),
+                    "raw_group_metrics": _metrics_for_groups(raw_result),
+                    "repaired_group_count": len(repaired_result.groups),
+                    "materialized_metrics": _metrics_for_work_events(materialized_events),
+                    "after_sensitive_metrics": _metrics_for_work_events(sensitive_events),
+                    "retained_metrics": _metrics_for_work_events(retained_events),
+                    "repair_warnings": repair_warnings,
+                    "retry_warnings": retry_warnings,
+                    "metadata_warnings": metadata_warnings,
+                    "sensitive_warnings": sensitive_warnings,
+                    "retention_warnings": retention_warnings,
+                    "dropped_by_retention": dropped_by_retention,
+                    "raw_result": raw_result.to_dict(),
+                    "repaired_result": repaired_result.to_dict(),
+                    "retained_events": [event.to_dict() for event in retained_events],
+                }
+            )
+            _write_step_trace(step_path, step_payload)
+            _emit_step_status(
+                step_index=step_index,
+                status="success",
+                prompt_chars=len(prompt),
+                elapsed_ms=elapsed_ms,
+            )
+        except Exception as exc:
+            elapsed_ms = (perf_counter() - started_at) * 1000
+            step_payload.update(
+                {
+                    "status": "failed",
+                    "completed_at_utc": _now_utc_iso(),
+                    "elapsed_ms": round(elapsed_ms, 3),
+                    "error": {
+                        "type": type(exc).__name__,
+                        "summary": str(exc),
+                    },
+                }
+            )
+            _write_step_trace(step_path, step_payload)
+            _emit_step_status(
+                step_index=step_index,
+                status="failed",
+                prompt_chars=len(prompt),
+                elapsed_ms=elapsed_ms,
+                error_type=type(exc).__name__,
+            )
+            raise
+
         self.step_summaries.append(
             {
                 key: value
