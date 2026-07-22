@@ -23,7 +23,11 @@ class RetryableAnalyzerProtocolError(AnalyzerProtocolError):
 
 
 class ModelInputLimitError(AnalyzerProtocolError):
-    """Raised before a model request whose estimated total input is too large."""
+    """Raised when a request violates input packing or provider input limits."""
+
+
+class ModelInputRejectedError(ModelInputLimitError):
+    """Raised when the model service rejects a request as invalid input."""
 
 
 class StoreWriteError(WorkTraceError):

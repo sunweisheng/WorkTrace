@@ -17,7 +17,6 @@ from .delivery.feishu_cli import FeishuCliSelfDelivery
 from .errors import (
     AnalyzerProtocolError,
     DeliveryError,
-    ModelInputLimitError,
     RetryableAnalyzerProtocolError,
     StoreWriteError,
 )
@@ -757,7 +756,7 @@ class CollectedMergeRunner:
             ),
             output_schema=collected_grouping_output_schema(),
         )
-        if prompt_tokens <= self.config.max_model_input_tokens:
+        if prompt_tokens <= self.config.model_input_batch_target_tokens:
             return self._invoke_collected_review_with_retry(
                 target_date,
                 source_events,
@@ -773,13 +772,19 @@ class CollectedMergeRunner:
         )
         if len(batches) <= 1:
             if len(source_events) != 1:
-                raise ModelInputLimitError(
-                    "Collected review prompt exceeds max_model_input_tokens and "
-                    "cannot be split further: "
-                    f"estimated_tokens={prompt_tokens} "
-                    f"limit={self.config.max_model_input_tokens} "
-                    f"group={candidate_group.group_id}"
+                reviewed, review_warnings = self._invoke_collected_review_with_retry(
+                    target_date,
+                    source_events,
+                    candidate_group,
+                    reasons=reasons,
                 )
+                return reviewed, [
+                    "Sent indivisible high-risk review above the model input batch target: "
+                    f"group={candidate_group.group_id} "
+                    f"estimated_tokens={prompt_tokens} "
+                    f"target={self.config.model_input_batch_target_tokens}.",
+                    *review_warnings,
+                ]
             rendered, render_warnings = self._render_oversized_locked_group(
                 target_date,
                 source_events,
@@ -820,8 +825,8 @@ class CollectedMergeRunner:
         warnings = [
             "Using relation-priority high-risk review batches: "
             f"group={candidate_group.group_id} depth={depth + 1} "
-            f"batches={len(batches)} input_limit_tokens="
-            f"{self.config.max_model_input_tokens}."
+            f"batches={len(batches)} input_target_tokens="
+            f"{self.config.model_input_batch_target_tokens}."
         ]
         partial_groups: list[CollectedGroupingGroup] = []
         for batch_index, batch_events in enumerate(batches, start=1):
@@ -903,7 +908,7 @@ class CollectedMergeRunner:
         *,
         reasons: list[str],
     ) -> list[list[CollectedSourceEvent]]:
-        input_limit = self.config.max_model_input_tokens
+        input_limit = self.config.model_input_batch_target_tokens
 
         def prompt_tokens(events: list[CollectedSourceEvent]) -> int:
             batch_group = replace(
@@ -971,12 +976,6 @@ class CollectedMergeRunner:
                 prompt,
                 output_schema=collected_grouping_output_schema(),
             )
-            if prompt_tokens > self.config.max_model_input_tokens:
-                raise ModelInputLimitError(
-                    "Collected review prompt exceeds max_model_input_tokens: "
-                    f"estimated_tokens={prompt_tokens} "
-                    f"limit={self.config.max_model_input_tokens}"
-                )
             trace_step_index = self._start_collected_merge_trace_attempt(
                 target_date=target_date,
                 source_events=fitted_events,
@@ -1089,7 +1088,7 @@ class CollectedMergeRunner:
         *,
         reasons: list[str],
     ) -> tuple[list[CollectedSourceEvent], list[str]]:
-        input_limit = self.config.max_model_input_tokens
+        input_limit = self.config.model_input_batch_target_tokens
 
         def estimate(events: list[CollectedSourceEvent]) -> int:
             return _estimate_prepared_model_prompt_tokens(
@@ -1116,11 +1115,11 @@ class CollectedMergeRunner:
         ]
         fixed_tokens = estimate(empty_events)
         if fixed_tokens > input_limit:
-            raise ModelInputLimitError(
-                "Collected review fixed fields exceed max_model_input_tokens: "
-                f"estimated_tokens={fixed_tokens} limit={input_limit} "
-                f"group={candidate_group.group_id}"
-            )
+            return source_events, [
+                "Sent indivisible high-risk review above the model input batch target: "
+                f"group={candidate_group.group_id} "
+                f"estimated_tokens={full_tokens} target={input_limit}."
+            ]
         source_totals: dict[str, int] = defaultdict(int)
         for item in source_events:
             source_totals[item.source_file or item.person_name or item.draft_id] += len(
@@ -1147,7 +1146,7 @@ class CollectedMergeRunner:
         return best_events, [
             "Used balanced high-risk review content to fit model input: "
             f"group={candidate_group.group_id} estimated_tokens={best_tokens} "
-            f"limit={input_limit}."
+            f"target={input_limit}."
         ]
 
     def _render_collected_multi_groups(
@@ -1156,7 +1155,7 @@ class CollectedMergeRunner:
         source_events: list[CollectedSourceEvent],
         groups: list[CollectedGroupingGroup],
     ) -> tuple[list[CollectedMergeGroup], list[str]]:
-        input_limit_tokens = self.config.max_model_input_tokens
+        input_limit_tokens = self.config.model_input_batch_target_tokens
         batches: list[list[CollectedGroupingGroup]] = []
         current: list[CollectedGroupingGroup] = []
 
@@ -1226,7 +1225,7 @@ class CollectedMergeRunner:
             warnings.insert(
                 0,
                 "Using locked-group collected content batches: "
-                f"batches={len(batches)} input_limit_tokens={input_limit_tokens}.",
+                f"batches={len(batches)} input_target_tokens={input_limit_tokens}.",
             )
         return rendered_groups, warnings
 
@@ -1238,7 +1237,7 @@ class CollectedMergeRunner:
         *,
         depth: int,
     ) -> tuple[CollectedMergeGroup, list[str]]:
-        input_limit_tokens = self.config.max_model_input_tokens
+        input_limit_tokens = self.config.model_input_batch_target_tokens
         locked_group = [item.draft_id for item in source_events]
         prompt_tokens = self._estimate_collected_render_prompt_tokens(
             target_date,
@@ -1291,11 +1290,17 @@ class CollectedMergeRunner:
             original_id_by_expanded_id.update(
                 {shard.draft_id: item.draft_id for shard in shards}
             )
-            split_warnings.append(
-                "Split oversized collected source event content: "
-                f"draft_id={item.draft_id} shards={len(shards)} "
-                f"input_limit_tokens={input_limit_tokens}."
-            )
+            if len(shards) == 1 and shards[0].draft_id == item.draft_id:
+                split_warnings.append(
+                    "Sent indivisible collected source event above the model input batch target: "
+                    f"draft_id={item.draft_id} target_tokens={input_limit_tokens}."
+                )
+            else:
+                split_warnings.append(
+                    "Split oversized collected source event content: "
+                    f"draft_id={item.draft_id} shards={len(shards)} "
+                    f"input_target_tokens={input_limit_tokens}."
+                )
         source_events = expanded_events
         locked_group = [item.draft_id for item in source_events]
         expanded_prompt_tokens = self._estimate_collected_render_prompt_tokens(
@@ -1370,24 +1375,38 @@ class CollectedMergeRunner:
             summary_prompt_tokens > input_limit_tokens
             and summary_prompt_tokens >= expanded_prompt_tokens
         ):
-            raise ModelInputLimitError(
-                "Hierarchical collected content rendering did not reduce model input: "
-                f"group={group.group_id} depth={depth + 1} "
-                f"before_tokens={expanded_prompt_tokens} "
-                f"after_tokens={summary_prompt_tokens} "
-                f"limit={input_limit_tokens}"
+            direct_result, direct_retry_warnings = self._invoke_collected_merge_with_retry(
+                target_date,
+                summary_events,
+                [[item.draft_id for item in summary_events]],
+                rolling_step_index=depth + 1,
             )
-
-        rendered, recursive_warnings = self._render_oversized_locked_group(
-            target_date,
-            summary_events,
-            CollectedGroupingGroup(
-                group_id=group.group_id,
-                draft_ids=[item.draft_id for item in summary_events],
-            ),
-            depth=depth + 1,
-        )
-        warnings.extend(recursive_warnings)
+            direct_result, direct_repair_warnings = repair_collected_merge_result(
+                direct_result,
+                summary_events,
+                [[item.draft_id for item in summary_events]],
+            )
+            rendered = direct_result.groups[0]
+            warnings.extend(
+                [
+                    "Sent indivisible hierarchical summary above the model input batch target: "
+                    f"group={group.group_id} estimated_tokens={summary_prompt_tokens} "
+                    f"target={input_limit_tokens}.",
+                    *direct_retry_warnings,
+                    *direct_repair_warnings,
+                ]
+            )
+        else:
+            rendered, recursive_warnings = self._render_oversized_locked_group(
+                target_date,
+                summary_events,
+                CollectedGroupingGroup(
+                    group_id=group.group_id,
+                    draft_ids=[item.draft_id for item in summary_events],
+                ),
+                depth=depth + 1,
+            )
+            warnings.extend(recursive_warnings)
         return (
             replace(
                 rendered,
@@ -1420,7 +1439,7 @@ class CollectedMergeRunner:
         *,
         depth: int,
     ) -> list[CollectedSourceEvent]:
-        input_limit_tokens = self.config.max_model_input_tokens
+        input_limit_tokens = self.config.model_input_batch_target_tokens
         original_content = clean_text(source_event.event.content)
         empty_event = replace(
             source_event,
@@ -1433,16 +1452,9 @@ class CollectedMergeRunner:
             [[empty_event.draft_id]],
         )
         if empty_tokens > input_limit_tokens:
-            raise ModelInputLimitError(
-                "Collected source event fixed fields exceed max_model_input_tokens: "
-                f"draft_id={source_event.draft_id} "
-                f"estimated_tokens={empty_tokens} limit={input_limit_tokens}"
-            )
+            return [source_event]
         if not original_content:
-            raise ModelInputLimitError(
-                "Collected source event exceeds max_model_input_tokens without "
-                f"splittable content: draft_id={source_event.draft_id}"
-            )
+            return [source_event]
 
         shards: list[CollectedSourceEvent] = []
         remaining = original_content
@@ -1472,10 +1484,7 @@ class CollectedMergeRunner:
                 else:
                     high = length - 1
             if best_length <= 0:
-                raise ModelInputLimitError(
-                    "Unable to split collected source event below model input limit: "
-                    f"draft_id={source_event.draft_id} limit={input_limit_tokens}"
-                )
+                return [source_event]
             split_length = _preferred_content_split_index(remaining, best_length)
             content = remaining[:split_length].strip()
             if not content:
@@ -1548,7 +1557,7 @@ class CollectedMergeRunner:
             target_date,
             source_events,
         )
-        input_limit_tokens = self.config.max_model_input_tokens
+        input_limit_tokens = self.config.model_input_batch_target_tokens
         if prompt_tokens <= input_limit_tokens or len(source_groups) < 3:
             merged_events, merge_warnings = self._merge_collected_event_batch(
                 target_date,
@@ -1566,7 +1575,7 @@ class CollectedMergeRunner:
         rolling_notice = (
             "Using rolling collected merge: "
             f"input_estimated_tokens={prompt_tokens} "
-            f"input_limit_tokens={input_limit_tokens} calls={call_count}"
+            f"input_target_tokens={input_limit_tokens} calls={call_count}"
         )
         return merged_events, [*deterministic_warnings, rolling_notice, *rolling_warnings]
 
@@ -1716,7 +1725,7 @@ class CollectedMergeRunner:
             source_events,
             deterministic_groups,
         )
-        input_limit_tokens = self.config.max_model_input_tokens
+        input_limit_tokens = self.config.model_input_batch_target_tokens
         if prompt_tokens <= input_limit_tokens:
             return self._invoke_collected_grouping_once(
                 target_date,
@@ -1737,7 +1746,7 @@ class CollectedMergeRunner:
         warnings = [
             "Using relation-priority collected candidate grouping: "
             f"input_estimated_tokens={prompt_tokens} "
-            f"input_limit_tokens={input_limit_tokens} batches={len(batches)}."
+            f"input_target_tokens={input_limit_tokens} batches={len(batches)}."
         ]
         partial_groups: list[CollectedGroupingGroup] = []
         deterministic_sets = {tuple(group) for group in deterministic_groups}
@@ -1884,7 +1893,7 @@ class CollectedMergeRunner:
         source_events: list[CollectedSourceEvent],
         deterministic_groups: list[list[str]],
     ) -> list[list[CollectedSourceEvent]]:
-        input_limit_tokens = self.config.max_model_input_tokens
+        input_limit_tokens = self.config.model_input_batch_target_tokens
         components = build_collected_relation_components(
             source_events,
             deterministic_groups,
@@ -1972,7 +1981,7 @@ class CollectedMergeRunner:
         source_events: list[CollectedSourceEvent],
         deterministic_groups: list[list[str]],
     ) -> tuple[list[CollectedSourceEvent], list[str]]:
-        input_limit_tokens = self.config.max_model_input_tokens
+        input_limit_tokens = self.config.model_input_batch_target_tokens
         full_tokens = self._estimate_collected_grouping_prompt_tokens(
             target_date,
             source_events,
@@ -1995,17 +2004,11 @@ class CollectedMergeRunner:
             deterministic_groups,
         )
         if fixed_tokens > input_limit_tokens:
-            locked_ids = [
-                draft_id
-                for group in deterministic_groups
-                for draft_id in group
+            return source_events, [
+                "Sent indivisible collected candidate input above the model input batch target: "
+                f"estimated_tokens={full_tokens} target={input_limit_tokens} "
+                f"draft_ids={[item.draft_id for item in source_events]}."
             ]
-            raise ModelInputLimitError(
-                "Collected candidate fixed fields exceed max_model_input_tokens: "
-                f"estimated_tokens={fixed_tokens} limit={input_limit_tokens} "
-                f"draft_ids={[item.draft_id for item in source_events]} "
-                f"deterministic_ids={locked_ids}"
-            )
 
         source_totals: dict[str, int] = defaultdict(int)
         for item in source_events:
@@ -2043,7 +2046,7 @@ class CollectedMergeRunner:
         )
         warning = (
             "Used balanced collected candidate content to fit model input: "
-            f"estimated_tokens={best_tokens} limit={input_limit_tokens} "
+            f"estimated_tokens={best_tokens} target={input_limit_tokens} "
             f"shortened_sources={shortened_sources}."
         )
         self._collected_quality_counters["shortened_prompt_count"] += 1
@@ -2067,12 +2070,6 @@ class CollectedMergeRunner:
                 source_events,
                 deterministic_groups,
             )
-            if prompt_tokens > self.config.max_model_input_tokens:
-                raise ModelInputLimitError(
-                    "Collected candidate prompt exceeds max_model_input_tokens: "
-                    f"estimated_tokens={prompt_tokens} "
-                    f"limit={self.config.max_model_input_tokens}"
-                )
             trace_step_index = self._start_collected_merge_trace_attempt(
                 target_date=target_date,
                 source_events=source_events,
@@ -2128,12 +2125,6 @@ class CollectedMergeRunner:
                 source_events,
                 deterministic_groups,
             )
-            if prompt_tokens > self.config.max_model_input_tokens:
-                raise ModelInputLimitError(
-                    "Collected render prompt exceeds max_model_input_tokens: "
-                    f"estimated_tokens={prompt_tokens} "
-                    f"limit={self.config.max_model_input_tokens}"
-                )
             trace_step_index = self._start_collected_merge_trace_attempt(
                 target_date=target_date,
                 source_events=source_events,
@@ -2977,7 +2968,14 @@ class CollectedMergeRunner:
                 prompt,
                 output_schema=output_schema,
             ),
-            "input_limit_tokens": self.config.max_model_input_tokens,
+            "input_target_tokens": self.config.model_input_batch_target_tokens,
+            "oversized_singleton": (
+                _estimate_prepared_model_prompt_tokens(
+                    prompt,
+                    output_schema=output_schema,
+                )
+                > self.config.model_input_batch_target_tokens
+            ),
             "prompt_file": f"step-{step_index:03d}-prompt.txt",
             "input": collected_merge_source_metrics(source_events),
             "input_events": [item.to_dict() for item in source_events],
@@ -3775,7 +3773,7 @@ def render_collected_merge_trace_summary(summary: dict[str, Any]) -> str:
         "",
         "## Step Metrics",
         "",
-        "| Step | Stage | Status | Batch/Rolling step | Attempt | Retry reason | Estimated input tokens | Input limit | Prompt chars | Input events | Raw groups | Retained events | Error |",
+        "| Step | Stage | Status | Batch/Rolling step | Attempt | Retry reason | Estimated input tokens | Input target | Prompt chars | Input events | Raw groups | Retained events | Error |",
         "|---:|---|---|---:|---:|---|---:|---:|---:|---:|---:|---:|---|",
     ]
     for step in summary["steps"]:
@@ -3783,7 +3781,7 @@ def render_collected_merge_trace_summary(summary: dict[str, Any]) -> str:
         error_summary = str(step.get("error", {}).get("summary", "")).replace("|", "\\|")
         lines.append(
             "| {step} | {stage} | {status} | {rolling} | {attempt} | {retry_reason} | "
-            "{input_tokens} | {input_limit} | {prompt_chars} | {input_events} | "
+            "{input_tokens} | {input_target} | {prompt_chars} | {input_events} | "
             "{raw_groups} | {retained_events} | {error} |".format(
                 step=step.get("step_index", ""),
                 stage=step.get("stage", ""),
@@ -3795,7 +3793,7 @@ def render_collected_merge_trace_summary(summary: dict[str, Any]) -> str:
                     "input_estimated_tokens",
                     step.get("prompt_estimated_tokens", ""),
                 ),
-                input_limit=step.get("input_limit_tokens", ""),
+                input_target=step.get("input_target_tokens", ""),
                 prompt_chars=step.get("prompt_chars", ""),
                 input_events=step.get("input", {}).get("event_count", ""),
                 raw_groups=step.get("raw_group_count", ""),

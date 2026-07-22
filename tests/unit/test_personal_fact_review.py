@@ -293,7 +293,7 @@ def test_review_reports_missing_required_field_and_false_fallback() -> None:
         validate_personal_fact_review_result(batch, missing_object_result)
 
 
-def test_review_batches_obey_model_token_limit() -> None:
+def test_single_oversized_fact_review_is_marked_for_model_invocation() -> None:
     review_candidates = build_personal_fact_review_candidates(
         [_candidate()],
         slices=[_slice()],
@@ -301,12 +301,15 @@ def test_review_batches_obey_model_token_limit() -> None:
         policy=POLICY,
     )
 
-    with pytest.raises(AnalyzerProtocolError, match="max_model_input_tokens"):
-        pack_personal_fact_review_batches(
-            target_date="2026-07-15",
-            candidates=review_candidates,
-            config=replace(CONFIG, max_model_input_tokens=1),
-        )
+    batches = pack_personal_fact_review_batches(
+        target_date="2026-07-15",
+        candidates=review_candidates,
+        config=replace(CONFIG, model_input_batch_target_tokens=1),
+    )
+
+    assert len(batches) == 1
+    assert batches[0].oversized_singleton is True
+    assert batches[0].estimated_input_tokens > batches[0].input_target_tokens
 
 
 def test_review_batches_obey_candidate_limit() -> None:

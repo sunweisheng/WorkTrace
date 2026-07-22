@@ -1102,7 +1102,7 @@ def build_collected_review_prompt(
             for item in events
         ],
         "config_context": {
-            "max_model_input_tokens": runtime_config.max_model_input_tokens,
+            "model_input_batch_target_tokens": runtime_config.model_input_batch_target_tokens,
         },
     }
     return dump_json(protocol, pretty=True)

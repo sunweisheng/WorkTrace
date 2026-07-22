@@ -438,7 +438,7 @@ def test_collected_merge_under_threshold_uses_single_analyzer_call(
         analyzer=analyzer,
         config=RuntimeConfig(
             data_root=tmp_path / "data",
-            max_model_input_tokens=1_000_000,
+            model_input_batch_target_tokens=1_000_000,
         ),
     ).run("2026-06-29")
 
@@ -524,7 +524,7 @@ def test_collected_merge_over_threshold_rolls_sources_and_keeps_provenance(
         analyzer=analyzer,
         config=RuntimeConfig(
             data_root=tmp_path / "data",
-            max_model_input_tokens=1000,
+            model_input_batch_target_tokens=1000,
             self_relation_types=(
                 EventMetadataItem("collaboration", "协作参与", 10),
             ),
@@ -572,7 +572,7 @@ def test_collected_merge_over_threshold_rolls_sources_and_keeps_provenance(
     assert "- **协作方式**: 协作参与" in content
     assert any(
         warning.startswith("Using rolling collected merge:")
-        and "input_limit_tokens=1" in warning
+        and "input_target_tokens=1" in warning
         and "calls=2" in warning
         for warning in result.warning_messages
     )
@@ -635,7 +635,7 @@ def test_collected_merge_rolling_preserves_owner_signal_between_steps(
         analyzer=analyzer,
         config=RuntimeConfig(
             data_root=tmp_path / "data",
-            max_model_input_tokens=1000,
+            model_input_batch_target_tokens=1000,
         ),
     ).run("2026-06-29")
 
@@ -2181,7 +2181,7 @@ def test_balanced_candidate_content_fits_limit_across_sources(tmp_path: Path) ->
     input_limit_tokens = 1400
     config = RuntimeConfig(
         data_root=tmp_path / "data",
-        max_model_input_tokens=input_limit_tokens,
+        model_input_batch_target_tokens=input_limit_tokens,
     )
     runner = _build_runner(tmp_path, config=config, analyzer=TwoStageAnalyzer())
     events = [
@@ -2220,7 +2220,7 @@ def test_single_oversized_render_event_is_split_below_limit(tmp_path: Path) -> N
     input_limit_tokens = 1400
     config = RuntimeConfig(
         data_root=tmp_path / "data",
-        max_model_input_tokens=input_limit_tokens,
+        model_input_batch_target_tokens=input_limit_tokens,
     )
     runner = _build_runner(tmp_path, config=config, analyzer=TwoStageAnalyzer())
     source = CollectedSourceEvent(
@@ -2479,7 +2479,7 @@ def test_relation_priority_batches_preserve_same_conversation_candidates(
         analyzer=analyzer,
         config=RuntimeConfig(
             data_root=tmp_path / "data",
-            max_model_input_tokens=2000,
+            model_input_batch_target_tokens=2000,
             collected_merge_trace_enabled=True,
             collected_merge_trace_root=trace_root,
         ),
@@ -2496,7 +2496,7 @@ def test_relation_priority_batches_preserve_same_conversation_candidates(
         (trace_root / "2026-06-29" / "summary.json").read_text(encoding="utf-8")
     )
     assert max(step["input_estimated_tokens"] for step in summary["steps"]) <= 2000
-    assert {step["input_limit_tokens"] for step in summary["steps"]} == {2000}
+    assert {step["input_target_tokens"] for step in summary["steps"]} == {2000}
     output = MarkdownEventStore(config=RuntimeConfig()).parse_day_document(
         Path(result.output_path or "").read_text(encoding="utf-8")
     )
@@ -2587,7 +2587,7 @@ def test_relation_priority_batches_match_july_14_event_scale(tmp_path: Path) -> 
         analyzer=analyzer,
         config=RuntimeConfig(
             data_root=tmp_path / "data",
-            max_model_input_tokens=input_limit_tokens,
+            model_input_batch_target_tokens=input_limit_tokens,
             collected_merge_trace_enabled=True,
             collected_merge_trace_root=trace_root,
         ),
@@ -2603,7 +2603,7 @@ def test_relation_priority_batches_match_july_14_event_scale(tmp_path: Path) -> 
         max(step["input_estimated_tokens"] for step in summary["steps"])
         <= input_limit_tokens
     )
-    assert {step["input_limit_tokens"] for step in summary["steps"]} == {
+    assert {step["input_target_tokens"] for step in summary["steps"]} == {
         input_limit_tokens
     }
     stages = {step["stage"] for step in summary["steps"]}
@@ -2638,7 +2638,7 @@ def test_relation_priority_batching_fits_138_and_195_event_scales(
 ) -> None:
     config = RuntimeConfig(
         data_root=tmp_path / "data",
-        max_model_input_tokens=6200,
+        model_input_batch_target_tokens=6200,
     )
     runner = _build_runner(tmp_path, config=config, analyzer=TwoStageAnalyzer())
 
@@ -3315,7 +3315,7 @@ def test_high_risk_review_batches_large_group_within_token_limit(
         analyzer=analyzer,
         config=RuntimeConfig(
             data_root=tmp_path / "data",
-            max_model_input_tokens=6200,
+            model_input_batch_target_tokens=6200,
             collected_merge_trace_enabled=True,
             collected_merge_trace_root=trace_root,
         ),
@@ -3384,7 +3384,7 @@ def test_high_risk_review_summarizes_single_oversized_content_before_review(
         analyzer=analyzer,
         config=RuntimeConfig(
             data_root=tmp_path / "data",
-            max_model_input_tokens=6200,
+            model_input_batch_target_tokens=6200,
             collected_merge_trace_enabled=True,
             collected_merge_trace_root=trace_root,
         ),

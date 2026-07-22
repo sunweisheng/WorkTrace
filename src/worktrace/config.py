@@ -995,7 +995,7 @@ class RuntimeConfig:
     conversation_segmentation_failure_threshold: int = 2
     reaction_discovery_page_limit: int = 3
     slice_base_limit: int = 150
-    max_model_input_tokens: int = 6200
+    model_input_batch_target_tokens: int = 5200
     collected_merge_missing_field_retry_ratio: float = 0.2
     collected_merge_missing_field_retry_limit: int = 1
     collected_merge_trace_enabled: bool = False

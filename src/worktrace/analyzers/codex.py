@@ -39,7 +39,7 @@ from ..models import (
 )
 from ..utils.json_io import load_json_object
 from ..utils.token_estimation import estimate_model_input_tokens
-from .base import Analyzer
+from .base import Analyzer, is_indivisible_collected_request, oversized_input_kwargs
 from .output_schemas import (
     anchor_batch_output_schema,
     batch_output_schema,
@@ -186,6 +186,7 @@ class CodexAnalyzer(Analyzer):
         response_signals: list[ResponseSignal],
         hard_boundary_before_ids: set[str],
         attachment_texts: list[AttachmentTextBlock] | None = None,
+        allow_oversized_input: bool = False,
     ) -> ConversationSegmentationResult:
         payload = self._invoke_codex(
             self.build_segmentation_prompt(
@@ -201,6 +202,7 @@ class CodexAnalyzer(Analyzer):
             ),
             output_schema=conversation_segmentation_output_schema(),
             request_kind="conversation_segmentation",
+            **oversized_input_kwargs(allow_oversized_input),
         )
         return restore_conversation_segmentation_references(
             parse_conversation_segmentation_payload(payload),
@@ -219,6 +221,7 @@ class CodexAnalyzer(Analyzer):
             self.build_segment_batch_prompt(batch),
             output_schema=segment_batch_output_schema(self.config),
             request_kind="segment_batch_analysis",
+            **oversized_input_kwargs(batch.oversized_singleton),
         )
         return parse_segment_batch_analysis_payload(payload)
 
@@ -233,6 +236,7 @@ class CodexAnalyzer(Analyzer):
             self.build_retention_review_prompt(batch),
             output_schema=retention_review_output_schema(self.config),
             request_kind="retention_review",
+            **oversized_input_kwargs(batch.oversized_singleton),
         )
         return parse_retention_review_payload(payload)
 
@@ -250,6 +254,7 @@ class CodexAnalyzer(Analyzer):
             self.build_personal_fact_review_prompt(batch),
             output_schema=personal_fact_review_output_schema(batch),
             request_kind="personal_fact_review",
+            **oversized_input_kwargs(batch.oversized_singleton),
         )
         return parse_personal_fact_review_payload(payload)
 
@@ -272,6 +277,9 @@ class CodexAnalyzer(Analyzer):
             build_anchor_batch_analysis_prompt(target_date, anchor_units, config=self.config),
             output_schema=anchor_batch_output_schema(self.config),
             request_kind="anchor_batch_analysis",
+            **oversized_input_kwargs(
+                len(anchor_units) == 1 and anchor_units[0].oversized_singleton
+            ),
         )
         return parse_anchor_batch_analysis_payload(payload)
 
@@ -284,6 +292,7 @@ class CodexAnalyzer(Analyzer):
             build_merge_prompt(target_date, candidates),
             output_schema=merge_output_schema(),
             request_kind="day_candidate_merge",
+            **oversized_input_kwargs(len(candidates) == 1),
         )
         return parse_merge_payload(payload)
 
@@ -302,6 +311,9 @@ class CodexAnalyzer(Analyzer):
             ),
             output_schema=collected_merge_output_schema(),
             request_kind="collected_event_merge",
+            **oversized_input_kwargs(
+                is_indivisible_collected_request(events, deterministic_groups)
+            ),
         )
         return parse_collected_merge_payload(payload)
 
@@ -320,6 +332,9 @@ class CodexAnalyzer(Analyzer):
             ),
             output_schema=collected_grouping_output_schema(),
             request_kind="collected_candidate_grouping",
+            **oversized_input_kwargs(
+                is_indivisible_collected_request(events, deterministic_groups)
+            ),
         )
         return parse_collected_grouping_payload(payload)
 
@@ -341,6 +356,7 @@ class CodexAnalyzer(Analyzer):
             ),
             output_schema=collected_grouping_output_schema(),
             request_kind="collected_group_review",
+            **oversized_input_kwargs(True),
         )
         return parse_collected_grouping_payload(payload)
 
@@ -368,18 +384,34 @@ class CodexAnalyzer(Analyzer):
         *,
         output_schema: dict[str, object] | None = None,
         request_kind: str = "auxiliary_json",
+        allow_oversized_input: bool = False,
     ) -> object:
         request_schema = output_schema if self.config.codex_stdin_mode else None
         estimated_tokens = estimate_model_input_tokens(
             prompt,
             output_schema=request_schema,
         )
-        if estimated_tokens > self.config.max_model_input_tokens:
+        target_tokens = self.config.model_input_batch_target_tokens
+        oversized_singleton = estimated_tokens > target_tokens and allow_oversized_input
+        if estimated_tokens > target_tokens and not allow_oversized_input:
             raise ModelInputLimitError(
-                "Model input exceeds max_model_input_tokens before Codex request: "
+                "Model input exceeds model_input_batch_target_tokens before Codex request "
+                "and was not marked as an indivisible input: "
                 f"estimated_tokens={estimated_tokens} "
-                f"limit={self.config.max_model_input_tokens}"
+                f"target={target_tokens} request_kind={request_kind}"
             )
+        if oversized_singleton:
+            logger.warning(
+                "codex.oversized_singleton request_kind=%s estimated_input_tokens=%s input_target_tokens=%s",
+                request_kind,
+                estimated_tokens,
+                target_tokens,
+            )
+        input_metrics = {
+            "estimated_input_tokens": estimated_tokens,
+            "input_target_tokens": target_tokens,
+            "oversized_singleton": oversized_singleton,
+        }
         with tempfile.NamedTemporaryFile(
             prefix="worktrace-codex-",
             suffix=".json",
@@ -467,6 +499,7 @@ class CodexAnalyzer(Analyzer):
                 status="failed",
                 error_category="timeout",
                 codex_wait_ms=wait_seconds * 1000,
+                **input_metrics,
             )
             raise AnalyzerProtocolError("Codex analysis timed out.") from exc
 
@@ -495,6 +528,7 @@ class CodexAnalyzer(Analyzer):
                 status="failed",
                 error_category="command_failed",
                 codex_wait_ms=wait_seconds * 1000,
+                **input_metrics,
             )
             raise error
 
@@ -510,6 +544,7 @@ class CodexAnalyzer(Analyzer):
                 status="failed",
                 error_category="output_missing",
                 codex_wait_ms=wait_seconds * 1000,
+                **input_metrics,
             )
             raise AnalyzerProtocolError("Codex output file is missing.") from exc
         finally:
@@ -532,6 +567,7 @@ class CodexAnalyzer(Analyzer):
                     status="failed",
                     error_category="invalid_json",
                     codex_wait_ms=wait_seconds * 1000,
+                    **input_metrics,
                 )
                 raise AnalyzerProtocolError("Codex did not return valid JSON.") from exc
         self.usage_recorder.record(
@@ -541,5 +577,6 @@ class CodexAnalyzer(Analyzer):
             prompt_chars=len(prompt),
             backend="codex",
             codex_wait_ms=wait_seconds * 1000,
+            **input_metrics,
         )
         return payload

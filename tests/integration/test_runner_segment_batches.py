@@ -8,7 +8,7 @@ from time import sleep
 
 from src.worktrace.config import EventMetadataItem, RuntimeConfig
 from src.worktrace.constants import DailyRunStatus
-from src.worktrace.errors import AnalyzerProtocolError
+from src.worktrace.errors import AnalyzerProtocolError, ModelInputRejectedError
 from src.worktrace.factories import RuntimeDependencies
 from src.worktrace.models import (
     AnchorAnalysisResult,
@@ -722,7 +722,7 @@ def test_runner_prioritizes_larger_inputs_for_segmentation_and_event_extraction(
         data_root=tmp_path / "data",
         max_concurrent_llm_requests=1,
         max_concurrent_event_extraction_requests=1,
-        max_model_input_tokens=6_200,
+        model_input_batch_target_tokens=6_200,
         prompt_message_char_limit=2_000,
     )
     runner = DailyTraceRunner(
@@ -886,7 +886,7 @@ def test_runner_splits_segment_batches_in_timeline_order_when_token_limit_is_hit
 
     probe_config = _config(
         data_root=tmp_path / "probe-data",
-        max_model_input_tokens=100_000,
+        model_input_batch_target_tokens=100_000,
     )
     probe_analyzer = SplitAnalyzer()
     probe_runner = DailyTraceRunner(
@@ -917,7 +917,7 @@ def test_runner_splits_segment_batches_in_timeline_order_when_token_limit_is_hit
 
     config = _config(
         data_root=tmp_path / "data",
-        max_model_input_tokens=single_tokens,
+        model_input_batch_target_tokens=single_tokens,
     )
     analyzer = SplitAnalyzer()
     runner = DailyTraceRunner(
@@ -941,6 +941,35 @@ def test_runner_splits_segment_batches_in_timeline_order_when_token_limit_is_hit
     assert analyzer.batch_calls == 2
 
 
+def test_runner_does_not_retry_model_input_rejection(tmp_path: Path) -> None:
+    class RejectingAnalyzer(SegmentBatchAnalyzer):
+        def analyze_segment_batch(self, batch):
+            self.batch_calls += 1
+            raise ModelInputRejectedError("HTTP 400: model input rejected")
+
+    config = _config(
+        data_root=tmp_path / "data",
+        model_input_batch_target_tokens=100_000,
+    )
+    analyzer = RejectingAnalyzer()
+    runner = DailyTraceRunner(
+        config=config,
+        dependencies=RuntimeDependencies(
+            chat_source=SegmentSource(),
+            content_resolver=SegmentResolver(),
+            analyzer=analyzer,
+            delivery_channel=SegmentDelivery(),
+            event_store=MarkdownEventStore(config=config),
+        ),
+    )
+
+    result = runner.run("2026-07-10")
+
+    assert result.status == DailyRunStatus.FAILED.value
+    assert result.output_path is None
+    assert analyzer.batch_calls == 1
+
+
 def test_segmentation_window_is_split_until_complete_inputs_fit_limit() -> None:
     messages = [
         _message(
@@ -962,7 +991,7 @@ def test_segmentation_window_is_split_until_complete_inputs_fit_limit() -> None:
     )
     identity = SelfIdentity("ou_self", "张宝华", "test")
     probe_config = _config(
-        max_model_input_tokens=100_000,
+        model_input_batch_target_tokens=100_000,
         prompt_message_char_limit=3_000,
     )
 
@@ -983,7 +1012,6 @@ def test_segmentation_window_is_split_until_complete_inputs_fit_limit() -> None:
         anchor,
         estimate=estimate,
         input_limit=input_limit,
-        request_kind="conversation segmentation",
     )
 
     assert len(parts) == 2
@@ -997,13 +1025,13 @@ def test_segmentation_window_is_split_until_complete_inputs_fit_limit() -> None:
 
 def test_anchor_fallback_batches_are_repacked_by_complete_input_limit() -> None:
     anchors = [_anchor_unit(index) for index in range(1, 4)]
-    probe_config = _config(max_model_input_tokens=100_000)
+    probe_config = _config(model_input_batch_target_tokens=100_000)
     input_limit = _estimate_anchor_batch_input_tokens(
         "2026-07-10",
         anchors[:2],
         probe_config,
     )
-    config = replace(probe_config, max_model_input_tokens=input_limit)
+    config = replace(probe_config, model_input_batch_target_tokens=input_limit)
     assert (
         _estimate_anchor_batch_input_tokens("2026-07-10", anchors, config)
         > input_limit
@@ -1072,7 +1100,7 @@ def test_cross_conversation_merge_reconciles_token_limited_batches(
     analyzer = MergeAnalyzer()
     config = _config(
         data_root=tmp_path / "data",
-        max_model_input_tokens=pair_limit,
+        model_input_batch_target_tokens=pair_limit,
     )
     runner = DailyTraceRunner(
         config=config,
@@ -1640,6 +1668,7 @@ def test_runner_stops_remaining_segmentation_after_same_failure_threshold(
         conversation_segmentation_failure_threshold=2,
         anchor_batch_size=3,
         max_concurrent_llm_requests=3,
+        model_input_batch_target_tokens=100_000,
     )
     runner = DailyTraceRunner(
         config=config,
@@ -1661,7 +1690,6 @@ def test_runner_stops_remaining_segmentation_after_same_failure_threshold(
         for batch in analyzer.anchor_batches
         for anchor_id in batch
     ] == ["oc_1:om_005", "oc_1:om_037", "oc_1:om_070"]
-    assert all(len(batch) == 1 for batch in analyzer.anchor_batches)
     assert "Stopped remaining anchor segmentation after repeated" in result.error_summary
 
 

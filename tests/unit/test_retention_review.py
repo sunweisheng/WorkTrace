@@ -292,7 +292,7 @@ def test_review_batches_split_before_the_model_token_limit() -> None:
         output_schema=retention_review_output_schema(CONFIG),
         append_no_think=True,
     )
-    limited_config = replace(CONFIG, max_model_input_tokens=single_tokens + 10)
+    limited_config = replace(CONFIG, model_input_batch_target_tokens=single_tokens + 10)
 
     batches = pack_retention_review_batches(
         target_date="2026-07-15",
@@ -307,15 +307,18 @@ def test_review_batches_split_before_the_model_token_limit() -> None:
             output_schema=retention_review_output_schema(limited_config),
             append_no_think=True,
         )
-        assert estimated_tokens <= limited_config.max_model_input_tokens
+        assert estimated_tokens <= limited_config.model_input_batch_target_tokens
 
 
-def test_single_oversized_review_candidate_fails_before_model_invocation() -> None:
+def test_single_oversized_review_candidate_is_marked_for_model_invocation() -> None:
     item = _review_batch().candidates[0]
 
-    with pytest.raises(AnalyzerProtocolError, match="max_model_input_tokens"):
-        pack_retention_review_batches(
-            target_date="2026-07-15",
-            candidates=[item],
-            config=replace(CONFIG, max_model_input_tokens=1),
-        )
+    batches = pack_retention_review_batches(
+        target_date="2026-07-15",
+        candidates=[item],
+        config=replace(CONFIG, model_input_batch_target_tokens=1),
+    )
+
+    assert len(batches) == 1
+    assert batches[0].oversized_singleton is True
+    assert batches[0].estimated_input_tokens > batches[0].input_target_tokens

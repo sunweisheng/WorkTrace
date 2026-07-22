@@ -6,7 +6,6 @@ from datetime import datetime, timezone
 from ..analyzers.output_schemas import segment_batch_output_schema
 from ..analyzers.prompts import build_segment_batch_analysis_prompt
 from ..config import RuntimeConfig
-from ..errors import ModelInputLimitError
 from ..models import (
     BatchAnalysisResult,
     BatchSegmentAnalysisResult,
@@ -275,7 +274,7 @@ def pack_segment_units(
         if (
             current
             and _estimate_segment_batch_tokens(proposal, config)
-            > config.max_model_input_tokens
+            > config.model_input_batch_target_tokens
         ):
             batches.append(
                 _build_segment_analysis_batch(
@@ -297,16 +296,21 @@ def pack_segment_units(
                 units=current,
             )
         )
+    marked_batches: list[SegmentAnalysisBatch] = []
     for batch in batches:
         estimated_tokens = _estimate_segment_batch_tokens(batch, config)
-        if estimated_tokens > config.max_model_input_tokens:
-            raise ModelInputLimitError(
-                "Segment analysis prompt exceeds max_model_input_tokens: "
-                f"segments={[item.segment_id for item in batch.segments]} "
-                f"estimated_tokens={estimated_tokens} "
-                f"limit={config.max_model_input_tokens}."
+        marked_batches.append(
+            replace(
+                batch,
+                estimated_input_tokens=estimated_tokens,
+                input_target_tokens=config.model_input_batch_target_tokens,
+                oversized_singleton=(
+                    len(batch.segments) == 1
+                    and estimated_tokens > config.model_input_batch_target_tokens
+                ),
             )
-    return batches
+        )
+    return marked_batches
 
 
 def validate_segment_batch_result(

@@ -47,10 +47,12 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Keep previous debug artifacts and LLM checkpoints, then resume matching calls.",
     )
     parser.add_argument(
+        "--model-input-batch-target-tokens",
         "--max-model-input-tokens",
+        dest="model_input_batch_target_tokens",
         type=int,
         default=None,
-        help="Override the model batch input limit for this replay only.",
+        help="Override the model input batch target for this replay only.",
     )
     return parser.parse_args(argv)
 
@@ -371,8 +373,11 @@ def _collect_checkpoint_summary(checkpoint_root: Path) -> dict[str, object]:
 
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
-    if args.max_model_input_tokens is not None and args.max_model_input_tokens <= 0:
-        raise SystemExit("--max-model-input-tokens must be positive.")
+    if (
+        args.model_input_batch_target_tokens is not None
+        and args.model_input_batch_target_tokens <= 0
+    ):
+        raise SystemExit("--model-input-batch-target-tokens must be positive.")
     repo_root = Path.cwd()
     trace_root = Path(args.trace_root) if args.trace_root else repo_root / "data" / "replay-trace" / args.date
     data_root = Path(args.data_root) if args.data_root else repo_root / "data"
@@ -408,9 +413,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.resume:
         cli_args.append("--resume")
     config_overrides = ""
-    if args.max_model_input_tokens is not None:
+    if args.model_input_batch_target_tokens is not None:
         config_overrides = (
-            f"    max_model_input_tokens={args.max_model_input_tokens},\n"
+            f"    model_input_batch_target_tokens={args.model_input_batch_target_tokens},\n"
         )
     runner_script = (
         "from dataclasses import replace\n"
@@ -514,7 +519,7 @@ def main(argv: list[str] | None = None) -> int:
         "codex_stdin_mode": args.codex_stdin_mode,
         "data_root": str(data_root.resolve()),
         "resume_requested": args.resume,
-        "max_model_input_tokens": args.max_model_input_tokens,
+        "model_input_batch_target_tokens": args.model_input_batch_target_tokens,
         "trace_root": str(trace_root.resolve()),
         "run_status_path": str(status_path.resolve()),
         "returncode": completed.returncode,

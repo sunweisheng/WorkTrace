@@ -62,7 +62,7 @@ flowchart TD
 - 已生成的图片摘要
 - reaction 的本地中文说明和语义
 
-进入分段模型前，Python 会按最终分段 prompt、`/no_think`、完整 JSON Schema 和结构化输出包装估算输入。超出 `max_model_input_tokens` 时先按锚点拆分，再按连续消息拆分，并保留拆分窗口需要的直接 reply/quote 上下文；只有单条消息和必要协议字段组成的最小窗口仍超限时才失败，且不会发送模型请求。
+进入分段模型前，Python 会按最终分段 prompt、`/no_think`、完整 JSON Schema 和结构化输出包装估算输入。超出 `model_input_batch_target_tokens` 时先按锚点拆分，再按连续消息拆分，并保留拆分窗口需要的直接 reply/quote 上下文；单条消息和必要协议字段组成的最小窗口仍超过目标时标记为 `oversized_singleton` 后发送，由模型服务决定是否接受。
 
 ## 5. 会话分段
 
@@ -107,7 +107,7 @@ flowchart TD
 
 - 只在同一会话内组批
 - 保持片段顺序
-- 单个片段在本阶段仍超限时，`pack_segment_units(...)` 直接报错，不创建可发送批次；analyzer 还会在实际请求前执行同口径的最后检查
+- 单个片段在本阶段仍超过目标时，`pack_segment_units(...)` 创建带 `oversized_singleton` 标记的单片段批次；analyzer 只允许带该标记的请求越过目标
 - 每个批次都携带当前用户身份和 conversation 元数据
 
 analyzer 返回 `BatchSegmentAnalysisResult`，必须对每个输入 `segment_id` 给出一项结果。Python 校验缺失、重复和未知 `segment_id`。

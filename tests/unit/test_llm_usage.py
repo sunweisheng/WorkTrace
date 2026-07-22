@@ -17,6 +17,9 @@ def test_usage_recorder_reports_output_tokens_and_missing_values() -> None:
         {"usage": {"input_tokens": 100, "output_tokens": 20, "total_tokens": 120}},
         duration_ms=1234.5,
         prompt_chars=456,
+        estimated_input_tokens=5_900,
+        input_target_tokens=5_200,
+        oversized_singleton=True,
     )
     recorder.record("image_summary", {})
 
@@ -37,6 +40,11 @@ def test_usage_recorder_reports_output_tokens_and_missing_values() -> None:
     assert record["input_tokens"] == 100
     assert record["output_tokens"] == 20
     assert record["total_tokens"] == 120
+    assert record["estimated_input_tokens"] == 5_900
+    assert record["input_target_tokens"] == 5_200
+    assert record["input_target_overage_tokens"] == 700
+    assert record["oversized_singleton"] is True
+    assert summary["oversized_singleton_request_count"] == 1
 
 
 def test_usage_recorder_marks_codex_tokens_unavailable() -> None:

@@ -57,6 +57,7 @@ class Analyzer(ABC):
         response_signals: list[ResponseSignal],
         hard_boundary_before_ids: set[str],
         attachment_texts: list[AttachmentTextBlock] | None = None,
+        allow_oversized_input: bool = False,
     ) -> ConversationSegmentationResult:
         raise NotImplementedError
 
@@ -155,3 +156,17 @@ class Analyzer(ABC):
         review_reasons: list[str] | None = None,
     ) -> CollectedGroupingResult:
         raise NotImplementedError
+
+
+def is_indivisible_collected_request(
+    events: list[CollectedSourceEvent],
+    deterministic_groups: list[list[str]],
+) -> bool:
+    if len(events) <= 1:
+        return True
+    event_ids = {item.draft_id for item in events}
+    return any(set(group) == event_ids for group in deterministic_groups)
+
+
+def oversized_input_kwargs(allow: bool) -> dict[str, bool]:
+    return {"allow_oversized_input": True} if allow else {}

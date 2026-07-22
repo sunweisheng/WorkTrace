@@ -885,7 +885,15 @@ class DailyTraceRunner:
         for attempt in range(self.config.analysis_batch_retry_limit + 1):
             result = None
             attempt_batch = (
-                batch if not last_error else replace(batch, retry_feedback=last_error)
+                batch
+                if not last_error
+                else replace(
+                    batch,
+                    retry_feedback=last_error,
+                    oversized_singleton=(
+                        batch.oversized_singleton or len(batch.candidates) == 1
+                    ),
+                )
             )
             try:
                 call_count += 1
@@ -1222,8 +1230,7 @@ class DailyTraceRunner:
                         config=self.config,
                         reaction_catalog=self.reaction_catalog,
                     ),
-                    input_limit=self.config.max_model_input_tokens,
-                    request_kind="conversation segmentation",
+                    input_limit=self.config.model_input_batch_target_tokens,
                 )
                 fitted_anchors.extend(split_anchors)
             segmentation_states.append(
@@ -1530,6 +1537,7 @@ class DailyTraceRunner:
                     response_signals=response_signals,
                     hard_boundary_before_ids=hard_boundary_before_ids,
                     attachment_texts=anchor_unit.attachment_texts,
+                    allow_oversized_input=anchor_unit.oversized_singleton,
                 )
             except ModelInputLimitError:
                 raise
@@ -1754,8 +1762,7 @@ class DailyTraceRunner:
                     [item],
                     self.config,
                 ),
-                input_limit=self.config.max_model_input_tokens,
-                request_kind="anchor fallback",
+                input_limit=self.config.model_input_batch_target_tokens,
             )
             fitted_units.extend(split_units)
         batches = _pack_anchor_units_by_model_input(
@@ -1979,6 +1986,19 @@ class DailyTraceRunner:
                 self_display_name=batch.self_display_name,
                 segments=[unit],
             )
+            single_estimated_tokens = _segment_batch_input_size(
+                single_batch,
+                self.config,
+            )
+            single_batch = replace(
+                single_batch,
+                estimated_input_tokens=single_estimated_tokens,
+                input_target_tokens=self.config.model_input_batch_target_tokens,
+                oversized_singleton=(
+                    single_estimated_tokens
+                    > self.config.model_input_batch_target_tokens
+                ),
+            )
             prompt = (
                 self.dependencies.analyzer.build_segment_batch_prompt(single_batch)
                 if hasattr(self.dependencies.analyzer, "build_segment_batch_prompt")
@@ -2184,6 +2204,7 @@ class DailyTraceRunner:
                     expanded_conversation_messages,
                     self_open_id=self_identity.open_id,
                 ),
+                allow_oversized_input=True,
             )
         except ModelInputLimitError:
             raise
@@ -2798,7 +2819,7 @@ class DailyTraceRunner:
     ) -> tuple[CrossConversationGroupResult, list[str]]:
         if (
             _estimate_day_merge_input_tokens(target_date, candidates)
-            <= self.config.max_model_input_tokens
+            <= self.config.model_input_batch_target_tokens
         ):
             return self.dependencies.analyzer.merge_day_candidates(
                 target_date,
@@ -2808,7 +2829,7 @@ class DailyTraceRunner:
         batches = _pack_day_merge_candidates(
             target_date=target_date,
             candidates=candidates,
-            input_limit=self.config.max_model_input_tokens,
+            input_limit=self.config.model_input_batch_target_tokens,
         )
         local_groups: list[CrossConversationGroup] = []
         warnings: list[str] = []
@@ -2859,7 +2880,7 @@ class DailyTraceRunner:
             summary_batches = _pack_day_merge_candidates(
                 target_date=target_date,
                 candidates=summaries,
-                input_limit=self.config.max_model_input_tokens,
+                input_limit=self.config.model_input_batch_target_tokens,
             )
             summary_groups: list[CrossConversationGroup] = []
             for batch_index, batch in enumerate(summary_batches, start=1):
@@ -2933,7 +2954,7 @@ class DailyTraceRunner:
             assignment_batches = _pack_workstream_assignment_candidates(
                 target_date=target_date,
                 candidates=candidates,
-                input_limit=self.config.max_model_input_tokens,
+                input_limit=self.config.model_input_batch_target_tokens,
             )
             assignment_prompts: list[str] = []
             assignments: list[WorkstreamAssignment] = []
@@ -2941,10 +2962,19 @@ class DailyTraceRunner:
                 batch_prompt = build_workstream_assignment_prompt(target_date, batch)
                 assignment_prompts.append(batch_prompt)
                 prompt = "\n\n".join(assignment_prompts)
-                payload = request_json(
-                    batch_prompt,
-                    output_schema=workstream_assignment_output_schema(),
-                )
+                request_kwargs = {
+                    "output_schema": workstream_assignment_output_schema(),
+                }
+                if (
+                    len(batch) == 1
+                    and _estimate_workstream_assignment_input_tokens(
+                        target_date,
+                        batch,
+                    )
+                    > self.config.model_input_batch_target_tokens
+                ):
+                    request_kwargs["allow_oversized_input"] = True
+                payload = request_json(batch_prompt, **request_kwargs)
                 if not isinstance(payload, dict):
                     raise TypeError("Workstream assignment response must be an object.")
                 assignments.extend(
@@ -3028,7 +3058,7 @@ class DailyTraceRunner:
                 target_date=target_date,
                 known_workstreams=known_workstreams,
                 candidates=unassigned_candidates,
-                input_limit=self.config.max_model_input_tokens,
+                input_limit=self.config.model_input_batch_target_tokens,
             )
             review_prompts: list[str] = []
             followup_assignments: list[WorkstreamAssignment] = []
@@ -3040,10 +3070,20 @@ class DailyTraceRunner:
                 )
                 review_prompts.append(batch_prompt)
                 prompt = "\n\n".join(review_prompts)
-                payload = request_json(
-                    batch_prompt,
-                    output_schema=workstream_assignment_output_schema(),
-                )
+                request_kwargs = {
+                    "output_schema": workstream_assignment_output_schema(),
+                }
+                if (
+                    len(batch) == 1
+                    and _estimate_unassigned_workstream_input_tokens(
+                        target_date,
+                        known_workstreams=known_workstreams,
+                        candidates=batch,
+                    )
+                    > self.config.model_input_batch_target_tokens
+                ):
+                    request_kwargs["allow_oversized_input"] = True
+                payload = request_json(batch_prompt, **request_kwargs)
                 if not isinstance(payload, dict):
                     raise TypeError("Unassigned workstream response must be an object.")
                 followup_assignments.extend(
@@ -3293,6 +3333,9 @@ def _retention_review_debug_entry(
 ) -> dict[str, object]:
     return {
         "batch_id": batch.batch_id,
+        "estimated_input_tokens": batch.estimated_input_tokens,
+        "input_target_tokens": batch.input_target_tokens,
+        "oversized_singleton": batch.oversized_singleton,
         "attempt": attempt,
         "status": status,
         "candidates": [
@@ -3322,6 +3365,9 @@ def _personal_fact_review_debug_entry(
 ) -> dict[str, object]:
     return {
         "batch_id": batch.batch_id,
+        "estimated_input_tokens": batch.estimated_input_tokens,
+        "input_target_tokens": batch.input_target_tokens,
+        "oversized_singleton": batch.oversized_singleton,
         "attempt": attempt,
         "status": status,
         "candidates": [
@@ -3518,7 +3564,6 @@ def _split_anchor_unit_to_model_limit(
     *,
     estimate: Callable[[AnchorUnit], int],
     input_limit: int,
-    request_kind: str,
 ) -> list[AnchorUnit]:
     pending = [anchor_unit]
     fitted: list[AnchorUnit] = []
@@ -3530,11 +3575,8 @@ def _split_anchor_unit_to_model_limit(
             continue
         split_units = _split_anchor_unit_once(current)
         if not split_units:
-            raise ModelInputLimitError(
-                f"Minimum {request_kind} input exceeds max_model_input_tokens: "
-                f"anchor={current.anchor_unit_id} "
-                f"estimated_tokens={estimated_tokens} limit={input_limit}."
-            )
+            fitted.append(replace(current, oversized_singleton=True))
+            continue
         pending = [*split_units, *pending]
     return fitted
 
@@ -3749,7 +3791,7 @@ def _pack_anchor_units_by_model_input(
         if current and (
             len(proposal) > max_batch_size
             or _estimate_anchor_batch_input_tokens(target_date, proposal, config)
-            > config.max_model_input_tokens
+            > config.model_input_batch_target_tokens
         ):
             batches.append(current)
             current = [anchor_unit]
@@ -3795,7 +3837,6 @@ def _pack_workstream_assignment_candidates(
             batch,
         ),
         input_limit=input_limit,
-        request_kind="workstream assignment",
     )
 
 
@@ -3831,7 +3872,6 @@ def _pack_unassigned_workstream_candidates(
             candidates=batch,
         ),
         input_limit=input_limit,
-        request_kind="unassigned workstream review",
     )
 
 
@@ -3840,18 +3880,10 @@ def _pack_candidates_by_input_limit(
     candidates: list[SourceBackedEventDraft],
     estimate: Callable[[list[SourceBackedEventDraft]], int],
     input_limit: int,
-    request_kind: str,
 ) -> list[list[SourceBackedEventDraft]]:
     batches: list[list[SourceBackedEventDraft]] = []
     current: list[SourceBackedEventDraft] = []
     for candidate in candidates:
-        single_tokens = estimate([candidate])
-        if single_tokens > input_limit:
-            raise ModelInputLimitError(
-                f"Minimum {request_kind} input exceeds max_model_input_tokens: "
-                f"draft={candidate.draft_id} "
-                f"estimated_tokens={single_tokens} limit={input_limit}."
-            )
         proposal = [*current, candidate]
         estimated_tokens = estimate(proposal)
         if current and estimated_tokens > input_limit:

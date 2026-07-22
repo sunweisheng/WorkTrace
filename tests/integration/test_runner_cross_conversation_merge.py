@@ -564,7 +564,7 @@ def test_workstream_resolution_rebatches_complete_inputs_before_request(
     analyzer = BatchedWorkstreamAnalyzer()
     config = RuntimeConfig(
         data_root=tmp_path / "data",
-        max_model_input_tokens=pair_limit,
+        model_input_batch_target_tokens=pair_limit,
     )
     runner = DailyTraceRunner(
         config=config,

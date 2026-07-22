@@ -42,7 +42,7 @@ def _read_token_count(usage: dict[str, object], *keys: str) -> int | None:
 
 @dataclass
 class LLMUsageRecorder:
-    _records: list[dict[str, int | str | None]] = field(default_factory=list)
+    _records: list[dict[str, bool | int | str | None]] = field(default_factory=list)
     _lock: Lock = field(default_factory=Lock)
     _context: local = field(default_factory=local)
 
@@ -68,6 +68,9 @@ class LLMUsageRecorder:
         fallback_to: str | None = None,
         error_category: str | None = None,
         codex_wait_ms: float | None = None,
+        estimated_input_tokens: int | None = None,
+        input_target_tokens: int | None = None,
+        oversized_singleton: bool = False,
     ) -> dict[str, int | None]:
         usage = extract_usage(payload)
         with self._lock:
@@ -91,6 +94,15 @@ class LLMUsageRecorder:
                     ),
                     "duration_ms": round(duration_ms, 3) if duration_ms is not None else None,
                     "prompt_chars": prompt_chars,
+                    "estimated_input_tokens": estimated_input_tokens,
+                    "input_target_tokens": input_target_tokens,
+                    "input_target_overage_tokens": (
+                        max(estimated_input_tokens - input_target_tokens, 0)
+                        if estimated_input_tokens is not None
+                        and input_target_tokens is not None
+                        else None
+                    ),
+                    "oversized_singleton": oversized_singleton,
                     "codex_wait_ms": (
                         round(codex_wait_ms, 3)
                         if codex_wait_ms is not None
@@ -122,12 +134,15 @@ class LLMUsageRecorder:
             **usage_summary,
             "by_backend": _summarize_attempts(records, key="backend"),
             "fallback_count": sum(1 for record in records if record.get("fallback_to")),
+            "oversized_singleton_request_count": sum(
+                record.get("oversized_singleton") is True for record in records
+            ),
             "codex_wait_ms": _basic_duration_summary(
                 [record.get("codex_wait_ms") for record in records]
             ),
         }
 
-    def records(self) -> list[dict[str, int | str | None]]:
+    def records(self) -> list[dict[str, bool | int | str | None]]:
         with self._lock:
             return [dict(record) for record in self._records]
 
@@ -173,11 +188,11 @@ def _basic_duration_summary(values: list[object]) -> dict[str, float | int]:
 
 
 def _summarize_attempts(
-    records: list[dict[str, int | str | None]],
+    records: list[dict[str, bool | int | str | None]],
     *,
     key: str,
 ) -> dict[str, dict[str, object]]:
-    grouped: dict[str, list[dict[str, int | str | None]]] = defaultdict(list)
+    grouped: dict[str, list[dict[str, bool | int | str | None]]] = defaultdict(list)
     for record in records:
         grouped[str(record.get(key, "unknown"))].append(record)
     return {

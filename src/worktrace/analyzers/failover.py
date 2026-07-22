@@ -4,7 +4,11 @@ from dataclasses import dataclass
 from time import perf_counter
 from typing import Any
 
-from ..errors import AnalyzerProtocolError, RetryableAnalyzerProtocolError
+from ..errors import (
+    AnalyzerProtocolError,
+    ModelInputRejectedError,
+    RetryableAnalyzerProtocolError,
+)
 from ..llm_usage import LLMUsageRecorder
 from ..models import (
     AnalysisBatch,
@@ -46,6 +50,8 @@ _REQUEST_KINDS = {
 
 
 def _safe_error_category(error: Exception) -> str:
+    if isinstance(error, ModelInputRejectedError):
+        return "request_rejected"
     message = str(error).lower()
     if "429" in message or "rate limit" in message:
         return "rate_limited"
@@ -66,6 +72,16 @@ def _safe_error_category(error: Exception) -> str:
     if "json" in message:
         return "invalid_json"
     return "invalid_protocol"
+
+
+def _input_metrics(error: Exception) -> dict[str, int | bool | None]:
+    return {
+        "estimated_input_tokens": getattr(error, "estimated_input_tokens", None),
+        "input_target_tokens": getattr(error, "input_target_tokens", None),
+        "oversized_singleton": bool(
+            getattr(error, "oversized_singleton", False)
+        ),
+    }
 
 
 @dataclass
@@ -90,6 +106,7 @@ class FailoverAnalyzer(Analyzer):
                 fallback_from="online",
                 fallback_to="codex",
                 error_category=_safe_error_category(exc),
+                **_input_metrics(exc),
             )
             return getattr(self.fallback, method_name)(*args, **kwargs)
         except AnalyzerProtocolError as exc:
@@ -100,6 +117,7 @@ class FailoverAnalyzer(Analyzer):
                 backend="online",
                 status="failed",
                 error_category=_safe_error_category(exc),
+                **_input_metrics(exc),
             )
             raise
 
@@ -118,6 +136,7 @@ class FailoverAnalyzer(Analyzer):
         response_signals: list[ResponseSignal],
         hard_boundary_before_ids: set[str],
         attachment_texts: list[AttachmentTextBlock] | None = None,
+        allow_oversized_input: bool = False,
     ) -> ConversationSegmentationResult:
         return self._call(
             "segment_conversation",
@@ -130,6 +149,7 @@ class FailoverAnalyzer(Analyzer):
             response_signals=response_signals,
             hard_boundary_before_ids=hard_boundary_before_ids,
             attachment_texts=attachment_texts,
+            allow_oversized_input=allow_oversized_input,
         )
 
     def build_segment_batch_prompt(self, batch: SegmentAnalysisBatch) -> str:

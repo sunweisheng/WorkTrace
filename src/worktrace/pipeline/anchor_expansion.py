@@ -140,7 +140,7 @@ def expand_anchor_unit_context(
             anchor_unit.conversation_id,
             valid_message_ids,
             direction,
-            min(request.limit, config.max_model_input_tokens),
+            min(request.limit, config.model_input_batch_target_tokens),
         )
         if reaction_catalog is not None:
             related = enrich_message_reactions(related, reaction_catalog)

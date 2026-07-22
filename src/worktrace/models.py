@@ -396,6 +396,7 @@ class AnchorUnit:
     anchor_signals: list["AnchorSignal"] = field(default_factory=list)
     attachment_texts: list[AttachmentTextBlock] = field(default_factory=list)
     linked_file_texts: list[LinkedFileTextBlock] = field(default_factory=list)
+    oversized_singleton: bool = False
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> AnchorUnit:
@@ -430,6 +431,7 @@ class AnchorUnit:
                 LinkedFileTextBlock.from_dict(item)
                 for item in _dict_list(data.get("linked_file_texts"))
             ],
+            oversized_singleton=bool(data.get("oversized_singleton", False)),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -449,6 +451,7 @@ class AnchorUnit:
             "anchor_signals": [item.to_dict() for item in self.anchor_signals],
             "attachment_texts": [item.to_dict() for item in self.attachment_texts],
             "linked_file_texts": [item.to_dict() for item in self.linked_file_texts],
+            "oversized_singleton": self.oversized_singleton,
         }
 
 
@@ -749,6 +752,9 @@ class SegmentAnalysisBatch:
     self_open_id: str
     self_display_name: str
     segments: list[ConversationSegmentUnit]
+    estimated_input_tokens: int = 0
+    input_target_tokens: int = 0
+    oversized_singleton: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -758,6 +764,9 @@ class SegmentAnalysisBatch:
             "self_open_id": self.self_open_id,
             "self_display_name": self.self_display_name,
             "segments": [item.to_dict() for item in self.segments],
+            "estimated_input_tokens": self.estimated_input_tokens,
+            "input_target_tokens": self.input_target_tokens,
+            "oversized_singleton": self.oversized_singleton,
         }
 
 
@@ -899,6 +908,9 @@ class RetentionReviewBatch:
     target_date: str
     batch_id: str
     candidates: list[RetentionReviewCandidate] = field(default_factory=list)
+    estimated_input_tokens: int = 0
+    input_target_tokens: int = 0
+    oversized_singleton: bool = False
 
 
 @dataclass(frozen=True)
@@ -981,6 +993,9 @@ class PersonalFactReviewBatch:
     batch_id: str
     candidates: list[PersonalFactReviewCandidate] = field(default_factory=list)
     retry_feedback: str = ""
+    estimated_input_tokens: int = 0
+    input_target_tokens: int = 0
+    oversized_singleton: bool = False
 
 
 @dataclass(frozen=True)

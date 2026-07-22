@@ -31,6 +31,7 @@ from src.worktrace.config import (
 from src.worktrace.errors import (
     AnalyzerProtocolError,
     ModelInputLimitError,
+    ModelInputRejectedError,
     RetryableAnalyzerProtocolError,
 )
 from src.worktrace.models import (
@@ -254,16 +255,44 @@ def test_online_analyzer_rejects_oversized_prompt_before_request(
     analyzer = OnlineLLMAnalyzer(
         config=RuntimeConfig(
             data_root=tmp_path / "data",
-            max_model_input_tokens=1,
+            model_input_batch_target_tokens=1,
         ),
         cwd=tmp_path,
         settings_loader=lambda *args, **kwargs: settings_calls.append(True),
     )
 
-    with pytest.raises(AnalyzerProtocolError, match="max_model_input_tokens"):
+    with pytest.raises(AnalyzerProtocolError, match="model_input_batch_target_tokens"):
         analyzer.analyze_batch("2026-06-23", sample_batch())
 
     assert settings_calls == []
+
+
+def test_online_analyzer_allows_marked_indivisible_input(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    analyzer = OnlineLLMAnalyzer(
+        config=RuntimeConfig(
+            data_root=tmp_path / "data",
+            model_input_batch_target_tokens=1,
+        ),
+        cwd=tmp_path,
+    )
+    captured: dict[str, object] = {}
+
+    def fake_prepared(prompt, **kwargs):
+        captured.update(kwargs)
+        return {}
+
+    monkeypatch.setattr(analyzer, "_invoke_online_prepared", fake_prepared)
+
+    assert analyzer._invoke_online(
+        "oversized",
+        request_kind="segment_batch_analysis",
+        allow_oversized_input=True,
+    ) == {}
+    assert captured["oversized_singleton"] is True
+    assert captured["estimated_input_tokens"] > captured["input_target_tokens"]
 
 
 def test_online_analyzer_counts_output_schema_before_request(tmp_path: Path) -> None:
@@ -281,13 +310,13 @@ def test_online_analyzer_counts_output_schema_before_request(tmp_path: Path) -> 
     analyzer = OnlineLLMAnalyzer(
         config=RuntimeConfig(
             data_root=tmp_path / "data",
-            max_model_input_tokens=prompt_only_tokens,
+            model_input_batch_target_tokens=prompt_only_tokens,
         ),
         cwd=tmp_path,
         settings_loader=lambda *args, **kwargs: settings_calls.append(True),
     )
 
-    with pytest.raises(ModelInputLimitError, match="max_model_input_tokens"):
+    with pytest.raises(ModelInputLimitError, match="model_input_batch_target_tokens"):
         analyzer.request_json(prompt, output_schema=output_schema)
 
     assert settings_calls == []
@@ -729,7 +758,7 @@ def test_online_analyzer_classifies_retryable_and_permanent_errors(
         ),
         (
             status_error(BadRequestError, 400, "bad request"),
-            AnalyzerProtocolError,
+            ModelInputRejectedError,
         ),
         (
             status_error(APIStatusError, 500, "server error"),

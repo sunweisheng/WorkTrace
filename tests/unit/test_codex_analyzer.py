@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -214,16 +215,42 @@ def test_codex_analyzer_rejects_oversized_prompt_before_command(tmp_path: Path) 
         config=RuntimeConfig(
             data_root=tmp_path / "data",
             analyzer_backend="codex",
-            max_model_input_tokens=1,
+            model_input_batch_target_tokens=1,
         ),
         command_runner=fake_runner,
         cwd=tmp_path,
     )
 
-    with pytest.raises(AnalyzerProtocolError, match="max_model_input_tokens"):
+    with pytest.raises(AnalyzerProtocolError, match="model_input_batch_target_tokens"):
         analyzer.analyze_batch("2026-06-23", sample_batch())
 
     assert calls == []
+
+
+def test_codex_analyzer_allows_marked_indivisible_input(tmp_path: Path) -> None:
+    def fake_runner(args, *, cwd=None, timeout=None, input_text=None):
+        output_path = Path(args[args.index("-o") + 1])
+        output_path.write_text("{}", encoding="utf-8")
+        return subprocess.CompletedProcess(args=args, returncode=0, stdout="", stderr="")
+
+    analyzer = CodexAnalyzer(
+        config=RuntimeConfig(
+            data_root=tmp_path / "data",
+            analyzer_backend="codex",
+            model_input_batch_target_tokens=1,
+        ),
+        command_runner=fake_runner,
+        cwd=tmp_path,
+    )
+
+    assert analyzer._invoke_codex(
+        "oversized",
+        request_kind="segment_batch_analysis",
+        allow_oversized_input=True,
+    ) == {}
+    record = analyzer.usage_recorder.records()[0]
+    assert record["oversized_singleton"] is True
+    assert record["estimated_input_tokens"] > record["input_target_tokens"]
 
 
 def test_codex_analyzer_counts_output_schema_before_command(tmp_path: Path) -> None:
@@ -245,13 +272,13 @@ def test_codex_analyzer_counts_output_schema_before_command(tmp_path: Path) -> N
             data_root=tmp_path / "data",
             analyzer_backend="codex",
             codex_stdin_mode=True,
-            max_model_input_tokens=prompt_only_tokens,
+            model_input_batch_target_tokens=prompt_only_tokens,
         ),
         command_runner=fake_runner,
         cwd=tmp_path,
     )
 
-    with pytest.raises(ModelInputLimitError, match="max_model_input_tokens"):
+    with pytest.raises(ModelInputLimitError, match="model_input_batch_target_tokens"):
         analyzer._invoke_codex(prompt, output_schema=output_schema)
 
     assert calls == []

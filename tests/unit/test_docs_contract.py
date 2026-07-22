@@ -61,7 +61,8 @@ def test_docs_define_retention_review_model_and_python_boundaries() -> None:
         assert "旧" in content and "追溯" in content
     for content in (documents[0], documents[1], documents[3]):
         assert "retention_review_summary" in content
-        assert "6200" in content
+        assert "model_input_batch_target_tokens" in content
+        assert "5200" in content
 
 
 def test_docs_define_personal_fact_review_evidence_boundary() -> None:
@@ -84,7 +85,8 @@ def test_docs_define_personal_fact_review_evidence_boundary() -> None:
     for content in (documents[0], documents[1], documents[3]):
         assert "fact_risk_flags" in content
         assert "personal_fact_review_summary" in content
-        assert "6200" in content
+        assert "model_input_batch_target_tokens" in content
+        assert "5200" in content
 
 
 def test_docs_describe_single_source_fact_review_protocol_and_concurrency() -> None:
@@ -189,7 +191,7 @@ def test_docs_define_collected_merge_boundaries_and_conflict_priority() -> None:
         assert "合并人" in content
         assert "关系优先" in content
         assert "来源事件 ID" in content
-        assert "max_model_input_tokens" in content
+        assert "model_input_batch_target_tokens" in content
         assert "collected_merge_prompt_char_threshold" not in content
 
 
@@ -250,7 +252,8 @@ def test_docs_describe_coverage_review_and_python_quality_calculation() -> None:
         assert "covered_draft_ids" in content
         assert "fact_items" in content
         assert "高风险" in content
-        assert "6200" in content
+        assert "model_input_batch_target_tokens" in content
+        assert "5200" in content
         assert "Python" in content and "计算" in content
 
 

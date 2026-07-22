@@ -99,7 +99,7 @@ def test_failover_does_not_switch_model_input_limit_errors() -> None:
     class Online:
         def analyze_batch(self, target_date, batch_input):
             raise ModelInputLimitError(
-                "Model input exceeds max_model_input_tokens"
+                "Model input exceeds model_input_batch_target_tokens"
             )
 
     class Codex:
@@ -117,10 +117,44 @@ def test_failover_does_not_switch_model_input_limit_errors() -> None:
         usage_recorder=LLMUsageRecorder(),
     )
 
-    with pytest.raises(ModelInputLimitError, match="max_model_input_tokens"):
+    with pytest.raises(ModelInputLimitError, match="model_input_batch_target_tokens"):
         analyzer.analyze_batch("2026-07-17", object())
 
     assert codex.calls == 0
+
+
+def test_failover_records_provider_input_rejection_without_switching() -> None:
+    from src.worktrace.errors import ModelInputRejectedError
+    from src.worktrace.llm_usage import LLMUsageRecorder
+
+    class Online:
+        def analyze_batch(self, target_date, batch_input):
+            error = ModelInputRejectedError("HTTP 400: model input rejected")
+            error.estimated_input_tokens = 7_596
+            error.input_target_tokens = 5_200
+            error.oversized_singleton = True
+            raise error
+
+    class Codex:
+        def analyze_batch(self, target_date, batch_input):
+            raise AssertionError("Codex must not run")
+
+    recorder = LLMUsageRecorder()
+    analyzer = FailoverAnalyzer(
+        primary=Online(),
+        fallback=Codex(),
+        usage_recorder=recorder,
+    )
+
+    with pytest.raises(ModelInputRejectedError, match="HTTP 400"):
+        analyzer.analyze_batch("2026-07-20", object())
+
+    record = recorder.records()[0]
+    assert record["error_category"] == "request_rejected"
+    assert record["estimated_input_tokens"] == 7_596
+    assert record["input_target_tokens"] == 5_200
+    assert record["input_target_overage_tokens"] == 2_396
+    assert record["oversized_singleton"] is True
 
 
 def test_runtime_config_defaults_to_online_backend() -> None:

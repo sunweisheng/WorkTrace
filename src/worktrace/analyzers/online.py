@@ -19,6 +19,7 @@ from ..config import OnlineLLMSettings, RuntimeConfig, load_online_llm_settings
 from ..errors import (
     AnalyzerProtocolError,
     ModelInputLimitError,
+    ModelInputRejectedError,
     RetryableAnalyzerProtocolError,
 )
 from ..logging_utils import log_timing
@@ -51,7 +52,7 @@ from ..utils.token_estimation import (
     estimate_model_input_tokens,
     prepare_model_prompt,
 )
-from .base import Analyzer
+from .base import Analyzer, is_indivisible_collected_request, oversized_input_kwargs
 from .output_schemas import (
     anchor_batch_output_schema,
     batch_output_schema,
@@ -448,12 +449,14 @@ class OnlineLLMAnalyzer(Analyzer):
         prompt: str,
         *,
         output_schema: dict[str, object] | None = None,
+        allow_oversized_input: bool = False,
     ) -> object:
         """Run an explicit JSON request for auxiliary, non-daily workflows."""
         return self._invoke_online(
             prompt,
             output_schema=output_schema,
             request_kind="auxiliary_json",
+            allow_oversized_input=allow_oversized_input,
         )
 
     def build_segmentation_prompt(
@@ -494,6 +497,7 @@ class OnlineLLMAnalyzer(Analyzer):
         response_signals: list[ResponseSignal],
         hard_boundary_before_ids: set[str],
         attachment_texts: list[AttachmentTextBlock] | None = None,
+        allow_oversized_input: bool = False,
     ) -> ConversationSegmentationResult:
         payload = self._invoke_online(
             self.build_segmentation_prompt(
@@ -509,6 +513,7 @@ class OnlineLLMAnalyzer(Analyzer):
             ),
             output_schema=conversation_segmentation_output_schema(),
             request_kind="conversation_segmentation",
+            **oversized_input_kwargs(allow_oversized_input),
         )
         return restore_conversation_segmentation_references(
             parse_conversation_segmentation_payload(payload),
@@ -527,6 +532,7 @@ class OnlineLLMAnalyzer(Analyzer):
             self.build_segment_batch_prompt(batch),
             output_schema=segment_batch_output_schema(self.config),
             request_kind="segment_batch_analysis",
+            **oversized_input_kwargs(batch.oversized_singleton),
         )
         return parse_segment_batch_analysis_payload(payload)
 
@@ -541,6 +547,7 @@ class OnlineLLMAnalyzer(Analyzer):
             self.build_retention_review_prompt(batch),
             output_schema=retention_review_output_schema(self.config),
             request_kind="retention_review",
+            **oversized_input_kwargs(batch.oversized_singleton),
         )
         try:
             return parse_retention_review_payload(payload)
@@ -561,6 +568,7 @@ class OnlineLLMAnalyzer(Analyzer):
             self.build_personal_fact_review_prompt(batch),
             output_schema=personal_fact_review_output_schema(batch),
             request_kind="personal_fact_review",
+            **oversized_input_kwargs(batch.oversized_singleton),
         )
         try:
             return parse_personal_fact_review_payload(payload)
@@ -586,6 +594,9 @@ class OnlineLLMAnalyzer(Analyzer):
             build_anchor_batch_analysis_prompt(target_date, anchor_units, config=self.config),
             output_schema=anchor_batch_output_schema(self.config),
             request_kind="anchor_batch_analysis",
+            **oversized_input_kwargs(
+                len(anchor_units) == 1 and anchor_units[0].oversized_singleton
+            ),
         )
         return parse_anchor_batch_analysis_payload(payload)
 
@@ -598,6 +609,7 @@ class OnlineLLMAnalyzer(Analyzer):
             build_merge_prompt(target_date, candidates),
             output_schema=merge_output_schema(),
             request_kind="day_candidate_merge",
+            **oversized_input_kwargs(len(candidates) == 1),
         )
         self.last_merge_payload = payload
         return parse_merge_payload(payload)
@@ -617,6 +629,9 @@ class OnlineLLMAnalyzer(Analyzer):
             ),
             output_schema=collected_merge_output_schema(),
             request_kind="collected_event_merge",
+            **oversized_input_kwargs(
+                is_indivisible_collected_request(events, deterministic_groups)
+            ),
         )
         self.last_collected_merge_payload = payload
         try:
@@ -639,6 +654,9 @@ class OnlineLLMAnalyzer(Analyzer):
             ),
             output_schema=collected_grouping_output_schema(),
             request_kind="collected_candidate_grouping",
+            **oversized_input_kwargs(
+                is_indivisible_collected_request(events, deterministic_groups)
+            ),
         )
         try:
             return parse_collected_grouping_payload(payload)
@@ -663,6 +681,7 @@ class OnlineLLMAnalyzer(Analyzer):
             ),
             output_schema=collected_grouping_output_schema(),
             request_kind="collected_group_review",
+            **oversized_input_kwargs(True),
         )
         try:
             return parse_collected_grouping_payload(payload)
@@ -675,19 +694,55 @@ class OnlineLLMAnalyzer(Analyzer):
         *,
         output_schema: dict[str, object] | None = None,
         request_kind: str,
+        allow_oversized_input: bool = False,
     ) -> object:
         estimated_tokens = estimate_model_input_tokens(
             prompt,
             output_schema=output_schema,
             append_no_think=True,
         )
-        if estimated_tokens > self.config.max_model_input_tokens:
+        target_tokens = self.config.model_input_batch_target_tokens
+        oversized_singleton = estimated_tokens > target_tokens and allow_oversized_input
+        if estimated_tokens > target_tokens and not allow_oversized_input:
             raise ModelInputLimitError(
-                "Model input exceeds max_model_input_tokens before online request: "
+                "Model input exceeds model_input_batch_target_tokens before online request "
+                "and was not marked as an indivisible input: "
                 f"estimated_tokens={estimated_tokens} "
-                f"limit={self.config.max_model_input_tokens} "
+                f"target={target_tokens} "
                 f"request_kind={request_kind}"
             )
+        if oversized_singleton:
+            logger.warning(
+                "online_llm.oversized_singleton request_kind=%s estimated_input_tokens=%s input_target_tokens=%s",
+                request_kind,
+                estimated_tokens,
+                target_tokens,
+            )
+        try:
+            return self._invoke_online_prepared(
+                prompt,
+                output_schema=output_schema,
+                request_kind=request_kind,
+                estimated_input_tokens=estimated_tokens,
+                input_target_tokens=target_tokens,
+                oversized_singleton=oversized_singleton,
+            )
+        except AnalyzerProtocolError as exc:
+            exc.estimated_input_tokens = estimated_tokens
+            exc.input_target_tokens = target_tokens
+            exc.oversized_singleton = oversized_singleton
+            raise
+
+    def _invoke_online_prepared(
+        self,
+        prompt: str,
+        *,
+        output_schema: dict[str, object] | None,
+        request_kind: str,
+        estimated_input_tokens: int,
+        input_target_tokens: int,
+        oversized_singleton: bool,
+    ) -> object:
         started_at = perf_counter()
         settings = self.settings_loader(self.config, cwd=self.cwd, environ=None)
         body = _build_responses_request_body(prompt, settings=settings, schema=output_schema)
@@ -701,7 +756,7 @@ class OnlineLLMAnalyzer(Analyzer):
         except RateLimitError as exc:
             raise RetryableAnalyzerProtocolError("HTTP 429: rate limited.") from exc
         except BadRequestError as exc:
-            raise AnalyzerProtocolError(str(exc)) from exc
+            raise ModelInputRejectedError(str(exc)) from exc
         except APIStatusError as exc:
             error_type = (
                 RetryableAnalyzerProtocolError
@@ -746,6 +801,9 @@ class OnlineLLMAnalyzer(Analyzer):
             duration_ms=duration_ms,
             prompt_chars=len(prompt),
             backend="online",
+            estimated_input_tokens=estimated_input_tokens,
+            input_target_tokens=input_target_tokens,
+            oversized_singleton=oversized_singleton,
         )
         if not text.strip():
             raise RetryableAnalyzerProtocolError(

@@ -188,10 +188,10 @@ def _limit_expanded_messages(
     kept = list(original_messages)
     for message in ordered:
         proposal = sorted([*kept, message], key=lambda item: (item.send_time, item.message_id))
-        if _estimate_messages_tokens(proposal, config) > config.max_model_input_tokens:
+        if _estimate_messages_tokens(proposal, config) > config.model_input_batch_target_tokens:
             if warning_sink is not None:
                 warning_sink.append(
-                    f"Skipped expanded context message because it exceeds the model input limit: {message.message_id}."
+                    f"Skipped expanded context message because it exceeds the model input batch target: {message.message_id}."
                 )
             continue
         kept = proposal

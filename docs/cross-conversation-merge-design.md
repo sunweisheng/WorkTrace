@@ -38,7 +38,7 @@ flowchart TD
     A["已过滤候选"] --> B{"候选数量"}
     B -->|"0"| C["空日输出"]
     B -->|"1"| D["Python 单例组"]
-    B -->|">1"| E{"完整输入是否超过 6200?"}
+    B -->|">1"| E{"完整输入是否超过 5200 分批目标?"}
     E -->|"否"| F0["LLM merge_day_candidates"]
     E -->|"是"| E1["按候选分批做局部分组"]
     E1 --> E2["局部组生成紧凑摘要"]
@@ -49,7 +49,7 @@ flowchart TD
     F -->|"合法"| H["初始模型组"]
     G --> H
     H --> I{"analyzer 支持 request_json?"}
-    I -->|"是"| J["按完整输入上限做 workstream assignment"]
+    I -->|"是"| J["按完整输入分批目标做 workstream assignment"]
     J --> K["groups_from_workstream_assignments"]
     K --> L{"有未分配候选且已有工作流?"}
     L -->|"是"| M["在已知工作流上下文中 follow-up"]
@@ -81,7 +81,7 @@ flowchart TD
 
 模型只提出哪些候选可能属于同一真实事项，不生成最终正文。
 
-请求前按最终提示词、`/no_think`、完整 JSON Schema 和结构化输出包装估算输入。全部候选超过 `max_model_input_tokens` 时，runner 按候选顺序组装不超限批次；单候选批次直接形成单例组，其余批次分别调用 `merge_day_candidates(...)`。局部分组完成后，每组生成紧凑临时候选，再做一次跨批语义判断；临时候选只用于分组，最终结果必须映射回原始 draft ID。若摘要数量仍无法放入一次请求，则继续按相同完整输入上限分批，绝不发送超限请求。
+请求前按最终提示词、`/no_think`、完整 JSON Schema 和结构化输出包装估算输入。全部候选超过 `model_input_batch_target_tokens` 时，runner 按候选顺序组装到分批目标内；单候选批次直接形成单例组，其余批次分别调用 `merge_day_candidates(...)`。局部分组完成后，每组生成紧凑临时候选，再做一次跨批语义判断；临时候选只用于分组，最终结果必须映射回原始 draft ID。若摘要数量仍无法放入一次请求，则继续按相同目标分批；单个最小输入允许越过目标。
 
 `validate_cross_conversation_groups(...)` 要求：
 
@@ -96,7 +96,7 @@ flowchart TD
 
 ### 5.1 首轮 assignment
 
-analyzer 支持 `request_json(...)` 时，runner 调用 `build_workstream_assignment_prompt(...)`。全部候选无法一次放入完整输入上限时，按候选顺序继续组装成多个不超限批次，再合并各批 assignment；单个候选本身仍超限时不发送请求，转入失败回退。每项 `WorkstreamAssignment` 包含：
+analyzer 支持 `request_json(...)` 时，runner 调用 `build_workstream_assignment_prompt(...)`。全部候选无法一次放入分批目标时，按候选顺序继续组装成多个批次，再合并各批 assignment；单个候选本身仍超过目标时标记后发送，模型服务拒绝时转入失败回退。每项 `WorkstreamAssignment` 包含：
 
 - `draft_id`
 - `parent_draft_id`
@@ -107,7 +107,7 @@ analyzer 支持 `request_json(...)` 时，runner 调用 `build_workstream_assign
 
 ### 5.2 未分配候选 follow-up
 
-如果首轮留下未分配候选，且已经形成已知工作流，runner 构造 `known_workstream_context` 再请求一次。未分配候选的组合输入过大时也按同一完整输入上限继续组批，不发送超限请求。
+如果首轮留下未分配候选，且已经形成已知工作流，runner 构造 `known_workstream_context` 再请求一次。未分配候选的组合输入过大时也按同一分批目标继续组批；单个最小输入允许越过目标。
 
 follow-up 约束：
 

@@ -5,7 +5,7 @@ from dataclasses import replace
 from ..analyzers.output_schemas import personal_fact_review_output_schema
 from ..analyzers.prompts import build_personal_fact_review_prompt
 from ..config import RetentionPolicyConfig, RuntimeConfig
-from ..errors import AnalyzerProtocolError, ModelInputLimitError
+from ..errors import AnalyzerProtocolError
 from ..models import (
     ConversationSlice,
     NormalizedMessage,
@@ -145,7 +145,7 @@ def pack_personal_fact_review_batches(
                 len(proposal)
                 > config.retention_policy.fact_review_max_batch_candidates
                 or _estimate_personal_fact_review_tokens(probe, config)
-                > config.max_model_input_tokens
+                > config.model_input_batch_target_tokens
             )
         ):
             batches.append(
@@ -167,15 +167,24 @@ def pack_personal_fact_review_batches(
             )
         )
 
+    marked_batches: list[PersonalFactReviewBatch] = []
     for batch in batches:
         estimated_tokens = _estimate_personal_fact_review_tokens(batch, config)
-        if estimated_tokens > config.max_model_input_tokens:
-            raise ModelInputLimitError(
-                "Personal fact review prompt exceeds max_model_input_tokens: "
-                f"batch={batch.batch_id} estimated_tokens={estimated_tokens} "
-                f"limit={config.max_model_input_tokens}."
+        marked_batches.append(
+            PersonalFactReviewBatch(
+                target_date=batch.target_date,
+                batch_id=batch.batch_id,
+                candidates=list(batch.candidates),
+                retry_feedback=batch.retry_feedback,
+                estimated_input_tokens=estimated_tokens,
+                input_target_tokens=config.model_input_batch_target_tokens,
+                oversized_singleton=(
+                    len(batch.candidates) == 1
+                    and estimated_tokens > config.model_input_batch_target_tokens
+                ),
             )
-    return batches
+        )
+    return marked_batches
 
 
 def validate_personal_fact_review_result(

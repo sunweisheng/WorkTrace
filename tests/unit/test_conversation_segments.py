@@ -422,13 +422,45 @@ def test_segment_batch_packing_preserves_validated_turn_order() -> None:
         self_open_id="ou_self",
         self_display_name="张宝华",
         units=[first, second],
-        config=RuntimeConfig(max_model_input_tokens=100_000),
+        config=RuntimeConfig(model_input_batch_target_tokens=100_000),
     )
 
     assert [unit.segment_id for unit in batches[0].segments] == [
         "turn-later-id",
         "turn-earlier-id",
     ]
+
+
+def test_segment_batch_marks_indivisible_input_above_batch_target() -> None:
+    unit = _unit(
+        "turn-oversized",
+        [
+            _message(
+                "om_1",
+                sender_open_id="ou_self",
+                minute=0,
+                text="超长事项" * 6_000,
+            )
+        ],
+        primary_message_ids=["om_1"],
+        self_evidence_message_ids=["om_1"],
+    )
+
+    batches = pack_segment_units(
+        target_date="2026-07-10",
+        self_open_id="ou_self",
+        self_display_name="张宝华",
+        units=[unit],
+        config=RuntimeConfig(
+            model_input_batch_target_tokens=5_200,
+            prompt_message_char_limit=100_000,
+        ),
+    )
+
+    assert len(batches) == 1
+    assert batches[0].oversized_singleton is True
+    assert batches[0].estimated_input_tokens > 5_200
+    assert batches[0].input_target_tokens == 5_200
 
 
 def test_segment_batch_filters_duplicate_unknown_and_cross_segment_results() -> None:

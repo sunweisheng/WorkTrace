@@ -3,7 +3,7 @@ from __future__ import annotations
 from ..analyzers.output_schemas import retention_review_output_schema
 from ..analyzers.prompts import build_retention_review_prompt
 from ..config import RetentionPolicyConfig, RuntimeConfig
-from ..errors import AnalyzerProtocolError, ModelInputLimitError
+from ..errors import AnalyzerProtocolError
 from ..models import (
     ConversationSlice,
     NormalizedMessage,
@@ -106,7 +106,7 @@ def pack_retention_review_batches(
         if (
             current
             and _estimate_review_prompt_tokens(probe, config)
-            > config.max_model_input_tokens
+            > config.model_input_batch_target_tokens
         ):
             batches.append(
                 RetentionReviewBatch(
@@ -126,15 +126,23 @@ def pack_retention_review_batches(
                 candidates=current,
             )
         )
+    marked_batches: list[RetentionReviewBatch] = []
     for batch in batches:
         estimated_tokens = _estimate_review_prompt_tokens(batch, config)
-        if estimated_tokens > config.max_model_input_tokens:
-            raise ModelInputLimitError(
-                "Retention review prompt exceeds max_model_input_tokens: "
-                f"batch={batch.batch_id} estimated_tokens={estimated_tokens} "
-                f"limit={config.max_model_input_tokens}."
+        marked_batches.append(
+            RetentionReviewBatch(
+                target_date=batch.target_date,
+                batch_id=batch.batch_id,
+                candidates=list(batch.candidates),
+                estimated_input_tokens=estimated_tokens,
+                input_target_tokens=config.model_input_batch_target_tokens,
+                oversized_singleton=(
+                    len(batch.candidates) == 1
+                    and estimated_tokens > config.model_input_batch_target_tokens
+                ),
             )
-    return batches
+        )
+    return marked_batches
 
 
 def validate_retention_review_result(
