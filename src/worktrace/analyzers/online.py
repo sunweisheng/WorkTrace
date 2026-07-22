@@ -16,7 +16,11 @@ from openai import APIConnectionError, APIStatusError, APITimeoutError, OpenAI, 
 from openai import AuthenticationError, BadRequestError, PermissionDeniedError, RateLimitError
 
 from ..config import OnlineLLMSettings, RuntimeConfig, load_online_llm_settings
-from ..errors import AnalyzerProtocolError, RetryableAnalyzerProtocolError
+from ..errors import (
+    AnalyzerProtocolError,
+    ModelInputLimitError,
+    RetryableAnalyzerProtocolError,
+)
 from ..logging_utils import log_timing
 from ..llm_usage import LLMUsageRecorder, extract_usage
 from ..models import (
@@ -42,7 +46,11 @@ from ..models import (
     RetentionReviewResult,
 )
 from ..utils.json_io import parse_json_value_from_text
-from ..utils.token_estimation import estimate_text_tokens
+from ..utils.token_estimation import (
+    build_structured_output_text_config,
+    estimate_model_input_tokens,
+    prepare_model_prompt,
+)
 from .base import Analyzer
 from .output_schemas import (
     anchor_batch_output_schema,
@@ -101,10 +109,7 @@ class _FirstStreamEventResult:
 
 
 def _apply_soft_no_think(prompt: str) -> str:
-    stripped = prompt.rstrip()
-    if stripped.endswith("/no_think"):
-        return stripped
-    return f"{stripped}\n/no_think"
+    return prepare_model_prompt(prompt, append_no_think=True)
 
 
 def _extract_text_from_chat_payload(payload: object) -> str:
@@ -227,14 +232,7 @@ def _build_responses_request_body(
     if settings.reasoning_effort == "none":
         body["reasoning"] = {"effort": "none"}
     if schema is not None:
-        body["text"] = {
-            "format": {
-                "type": "json_schema",
-                "name": "worktrace_output",
-                "schema": schema,
-                "strict": True,
-            }
-        }
+        body["text"] = build_structured_output_text_config(schema)
     return body
 
 
@@ -678,10 +676,13 @@ class OnlineLLMAnalyzer(Analyzer):
         output_schema: dict[str, object] | None = None,
         request_kind: str,
     ) -> object:
-        prepared_prompt = _apply_soft_no_think(prompt)
-        estimated_tokens = estimate_text_tokens(prepared_prompt)
+        estimated_tokens = estimate_model_input_tokens(
+            prompt,
+            output_schema=output_schema,
+            append_no_think=True,
+        )
         if estimated_tokens > self.config.max_model_input_tokens:
-            raise AnalyzerProtocolError(
+            raise ModelInputLimitError(
                 "Model input exceeds max_model_input_tokens before online request: "
                 f"estimated_tokens={estimated_tokens} "
                 f"limit={self.config.max_model_input_tokens} "

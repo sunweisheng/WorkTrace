@@ -2,9 +2,10 @@ from __future__ import annotations
 
 from dataclasses import replace
 
+from ..analyzers.output_schemas import personal_fact_review_output_schema
 from ..analyzers.prompts import build_personal_fact_review_prompt
 from ..config import RetentionPolicyConfig, RuntimeConfig
-from ..errors import AnalyzerProtocolError
+from ..errors import AnalyzerProtocolError, ModelInputLimitError
 from ..models import (
     ConversationSlice,
     NormalizedMessage,
@@ -16,7 +17,7 @@ from ..models import (
     SourceBackedEventDraft,
 )
 from ..utils.text import clean_text
-from ..utils.token_estimation import estimate_text_tokens
+from ..utils.token_estimation import estimate_model_input_tokens
 from .validation import PERSONAL_FACT_FIELDS
 
 
@@ -169,7 +170,7 @@ def pack_personal_fact_review_batches(
     for batch in batches:
         estimated_tokens = _estimate_personal_fact_review_tokens(batch, config)
         if estimated_tokens > config.max_model_input_tokens:
-            raise AnalyzerProtocolError(
+            raise ModelInputLimitError(
                 "Personal fact review prompt exceeds max_model_input_tokens: "
                 f"batch={batch.batch_id} estimated_tokens={estimated_tokens} "
                 f"limit={config.max_model_input_tokens}."
@@ -416,5 +417,8 @@ def _estimate_personal_fact_review_tokens(
     batch: PersonalFactReviewBatch,
     config: RuntimeConfig,
 ) -> int:
-    prompt = build_personal_fact_review_prompt(batch, config=config).rstrip()
-    return estimate_text_tokens(f"{prompt}\n/no_think")
+    return estimate_model_input_tokens(
+        build_personal_fact_review_prompt(batch, config=config),
+        output_schema=personal_fact_review_output_schema(batch),
+        append_no_think=True,
+    )

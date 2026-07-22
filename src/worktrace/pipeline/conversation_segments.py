@@ -2,9 +2,11 @@ from __future__ import annotations
 
 from dataclasses import replace
 from datetime import datetime, timezone
-import json
 
+from ..analyzers.output_schemas import segment_batch_output_schema
+from ..analyzers.prompts import build_segment_batch_analysis_prompt
 from ..config import RuntimeConfig
+from ..errors import ModelInputLimitError
 from ..models import (
     BatchAnalysisResult,
     BatchSegmentAnalysisResult,
@@ -18,7 +20,7 @@ from ..models import (
 )
 from ..reaction_catalog import ReactionCatalog
 from ..utils.text import clean_text
-from ..utils.token_estimation import estimate_text_tokens
+from ..utils.token_estimation import estimate_model_input_tokens
 
 
 def build_response_signals(
@@ -261,31 +263,50 @@ def pack_segment_units(
     # `units` is already in the validated conversation timeline order.  Message ids
     # are opaque identifiers, so sorting by them can silently reorder a batch.
     ordered = list(units)
-    batches: list[list[ConversationSegmentUnit]] = []
+    batches: list[SegmentAnalysisBatch] = []
     current: list[ConversationSegmentUnit] = []
-    current_size = 0
     for unit in ordered:
-        unit_size = _estimate_unit_tokens(unit)
-        if current and current_size + unit_size > config.max_model_input_tokens:
-            batches.append(current)
-            current = []
-            current_size = 0
-        current.append(unit)
-        current_size += unit_size
-    if current:
-        batches.append(current)
-
-    return [
-        SegmentAnalysisBatch(
+        proposal = _build_segment_analysis_batch(
             target_date=target_date,
-            conversation_id=batch[0].conversation_id,
-            conversation_name=batch[0].conversation_name,
             self_open_id=self_open_id,
             self_display_name=self_display_name,
-            segments=batch,
+            units=[*current, unit],
         )
-        for batch in batches
-    ]
+        if (
+            current
+            and _estimate_segment_batch_tokens(proposal, config)
+            > config.max_model_input_tokens
+        ):
+            batches.append(
+                _build_segment_analysis_batch(
+                    target_date=target_date,
+                    self_open_id=self_open_id,
+                    self_display_name=self_display_name,
+                    units=current,
+                )
+            )
+            current = [unit]
+            continue
+        current = [*current, unit]
+    if current:
+        batches.append(
+            _build_segment_analysis_batch(
+                target_date=target_date,
+                self_open_id=self_open_id,
+                self_display_name=self_display_name,
+                units=current,
+            )
+        )
+    for batch in batches:
+        estimated_tokens = _estimate_segment_batch_tokens(batch, config)
+        if estimated_tokens > config.max_model_input_tokens:
+            raise ModelInputLimitError(
+                "Segment analysis prompt exceeds max_model_input_tokens: "
+                f"segments={[item.segment_id for item in batch.segments]} "
+                f"estimated_tokens={estimated_tokens} "
+                f"limit={config.max_model_input_tokens}."
+            )
+    return batches
 
 
 def validate_segment_batch_result(
@@ -468,9 +489,32 @@ def _explicitly_assigns_to_self(
     )
 
 
-def _estimate_unit_tokens(unit: ConversationSegmentUnit) -> int:
-    serialized = json.dumps(unit.to_dict(), ensure_ascii=False, separators=(",", ":"))
-    return estimate_text_tokens(serialized)
+def _build_segment_analysis_batch(
+    *,
+    target_date: str,
+    self_open_id: str,
+    self_display_name: str,
+    units: list[ConversationSegmentUnit],
+) -> SegmentAnalysisBatch:
+    return SegmentAnalysisBatch(
+        target_date=target_date,
+        conversation_id=units[0].conversation_id,
+        conversation_name=units[0].conversation_name,
+        self_open_id=self_open_id,
+        self_display_name=self_display_name,
+        segments=list(units),
+    )
+
+
+def _estimate_segment_batch_tokens(
+    batch: SegmentAnalysisBatch,
+    config: RuntimeConfig,
+) -> int:
+    return estimate_model_input_tokens(
+        build_segment_batch_analysis_prompt(batch, config=config),
+        output_schema=segment_batch_output_schema(config),
+        append_no_think=True,
+    )
 
 
 def _normalize_action_time(value: str, fallback: str) -> str:

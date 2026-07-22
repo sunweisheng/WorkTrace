@@ -12,7 +12,7 @@ from time import perf_counter, sleep
 from typing import Any, Callable, Sequence
 
 from ..config import RuntimeConfig
-from ..errors import AnalyzerProtocolError
+from ..errors import AnalyzerProtocolError, ModelInputLimitError
 from ..logging_utils import log_timing
 from ..llm_usage import LLMUsageRecorder
 from ..models import (
@@ -38,7 +38,7 @@ from ..models import (
     RetentionReviewResult,
 )
 from ..utils.json_io import load_json_object
-from ..utils.token_estimation import estimate_text_tokens
+from ..utils.token_estimation import estimate_model_input_tokens
 from .base import Analyzer
 from .output_schemas import (
     anchor_batch_output_schema,
@@ -369,9 +369,13 @@ class CodexAnalyzer(Analyzer):
         output_schema: dict[str, object] | None = None,
         request_kind: str = "auxiliary_json",
     ) -> object:
-        estimated_tokens = estimate_text_tokens(prompt)
+        request_schema = output_schema if self.config.codex_stdin_mode else None
+        estimated_tokens = estimate_model_input_tokens(
+            prompt,
+            output_schema=request_schema,
+        )
         if estimated_tokens > self.config.max_model_input_tokens:
-            raise AnalyzerProtocolError(
+            raise ModelInputLimitError(
                 "Model input exceeds max_model_input_tokens before Codex request: "
                 f"estimated_tokens={estimated_tokens} "
                 f"limit={self.config.max_model_input_tokens}"

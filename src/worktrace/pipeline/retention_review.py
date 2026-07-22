@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+from ..analyzers.output_schemas import retention_review_output_schema
 from ..analyzers.prompts import build_retention_review_prompt
 from ..config import RetentionPolicyConfig, RuntimeConfig
-from ..errors import AnalyzerProtocolError
+from ..errors import AnalyzerProtocolError, ModelInputLimitError
 from ..models import (
     ConversationSlice,
     NormalizedMessage,
@@ -12,7 +13,7 @@ from ..models import (
     RetentionReviewResult,
     SourceBackedEventDraft,
 )
-from ..utils.token_estimation import estimate_text_tokens
+from ..utils.token_estimation import estimate_model_input_tokens
 
 
 def select_retention_review_candidates(
@@ -128,7 +129,7 @@ def pack_retention_review_batches(
     for batch in batches:
         estimated_tokens = _estimate_review_prompt_tokens(batch, config)
         if estimated_tokens > config.max_model_input_tokens:
-            raise AnalyzerProtocolError(
+            raise ModelInputLimitError(
                 "Retention review prompt exceeds max_model_input_tokens: "
                 f"batch={batch.batch_id} estimated_tokens={estimated_tokens} "
                 f"limit={config.max_model_input_tokens}."
@@ -213,5 +214,8 @@ def _estimate_review_prompt_tokens(
     batch: RetentionReviewBatch,
     config: RuntimeConfig,
 ) -> int:
-    prompt = build_retention_review_prompt(batch, config=config).rstrip()
-    return estimate_text_tokens(f"{prompt}\n/no_think")
+    return estimate_model_input_tokens(
+        build_retention_review_prompt(batch, config=config),
+        output_schema=retention_review_output_schema(config),
+        append_no_think=True,
+    )

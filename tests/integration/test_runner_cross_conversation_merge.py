@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from src.worktrace.config import RuntimeConfig
@@ -19,7 +20,10 @@ from src.worktrace.pipeline.cross_conversation_merge import (
     consolidate_workstream_groups,
     materialize_grouped_merged_drafts,
 )
-from src.worktrace.runner import DailyTraceRunner
+from src.worktrace.runner import (
+    DailyTraceRunner,
+    _estimate_workstream_assignment_input_tokens,
+)
 from src.worktrace.stores.markdown import MarkdownEventStore
 
 
@@ -513,6 +517,94 @@ def test_runner_uses_llm_workstream_resolution_and_dumps_evidence(tmp_path: Path
     assert (merge_dir / "workstream_resolution_validated.json").exists()
     assert (merge_dir / "workstream_resolution_followup_input.json").exists()
     assert (merge_dir / "workstream_resolution_followup_output.json").exists()
+
+
+def test_workstream_resolution_rebatches_complete_inputs_before_request(
+    tmp_path: Path,
+) -> None:
+    candidates = [
+        _draft(
+            draft_id=f"draft-{index}",
+            topic=f"事项 {index}",
+            content=f"内容 {index} " + ("x" * 900),
+            source_message_ids=[f"om_{index}"],
+            source_conversation_id=f"oc_{index}",
+            source_slice_id=f"slice-{index}",
+            object_hint=f"对象 {index}",
+            retention_detail=f"依据 {index}",
+        )
+        for index in range(1, 5)
+    ]
+    pair_limit = _estimate_workstream_assignment_input_tokens(
+        "2026-06-22",
+        candidates[:2],
+    )
+
+    class BatchedWorkstreamAnalyzer(MergeAnalyzer):
+        def __init__(self) -> None:
+            super().__init__()
+            self.workstream_batches: list[list[str]] = []
+
+        def request_json(self, prompt, *, output_schema):
+            payload = json.loads(prompt)
+            draft_ids = [item["draft_id"] for item in payload["candidates"]]
+            self.workstream_batches.append(draft_ids)
+            return {
+                "assignments": [
+                    {
+                        "draft_id": draft_id,
+                        "parent_draft_id": draft_id,
+                        "root_workstream_name": f"workstream-{draft_id}",
+                        "evidence_message_ids": [],
+                    }
+                    for draft_id in draft_ids
+                ]
+            }
+
+    analyzer = BatchedWorkstreamAnalyzer()
+    config = RuntimeConfig(
+        data_root=tmp_path / "data",
+        max_model_input_tokens=pair_limit,
+    )
+    runner = DailyTraceRunner(
+        config=config,
+        dependencies=RuntimeDependencies(
+            chat_source=MergeSource(),
+            content_resolver=MergeResolver(),
+            analyzer=analyzer,
+            delivery_channel=MergeDelivery(),
+            event_store=MarkdownEventStore(config=config),
+        ),
+    )
+
+    groups, warnings = runner._resolve_workstream_groups(
+        target_date="2026-06-22",
+        model_groups=[
+            CrossConversationGroup(
+                group_id=f"group-{index}",
+                draft_ids=[candidate.draft_id],
+                primary_draft_id=candidate.draft_id,
+            )
+            for index, candidate in enumerate(candidates, start=1)
+        ],
+        candidates=candidates,
+    )
+
+    candidate_by_id = {candidate.draft_id: candidate for candidate in candidates}
+    assert analyzer.workstream_batches == [
+        ["draft-1", "draft-2"],
+        ["draft-3", "draft-4"],
+    ]
+    assert all(
+        _estimate_workstream_assignment_input_tokens(
+            "2026-06-22",
+            [candidate_by_id[draft_id] for draft_id in batch],
+        )
+        <= pair_limit
+        for batch in analyzer.workstream_batches
+    )
+    assert {group.primary_draft_id for group in groups} == set(candidate_by_id)
+    assert warnings == []
 
 
 class MissingDraftMergeAnalyzer(MergeAnalyzer):

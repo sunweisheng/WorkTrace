@@ -32,7 +32,17 @@ from src.worktrace.models import (
     SelfIdentity,
     SourceBackedEventDraft,
 )
-from src.worktrace.runner import DailyTraceRunner
+from src.worktrace.pipeline.conversation_segments import _estimate_segment_batch_tokens
+from src.worktrace.reaction_catalog import ReactionCatalog
+from src.worktrace.runner import (
+    DailyTraceRunner,
+    _estimate_anchor_batch_input_tokens,
+    _estimate_day_merge_input_tokens,
+    _estimate_segmentation_input_tokens,
+    _pack_anchor_units_by_model_input,
+    _split_anchor_unit_once,
+    _split_anchor_unit_to_model_limit,
+)
 from src.worktrace.stores.markdown import MarkdownEventStore
 
 
@@ -156,6 +166,7 @@ class SegmentBatchAnalyzer:
         self.segmentation_calls = 0
         self.batch_calls = 0
         self.batch_segment_ids: list[list[str]] = []
+        self.analysis_batches = []
 
     def segment_conversation(self, **kwargs):
         self.segmentation_calls += 1
@@ -181,6 +192,7 @@ class SegmentBatchAnalyzer:
     def analyze_segment_batch(self, batch):
         self.batch_calls += 1
         self.batch_segment_ids.append([unit.segment_id for unit in batch.segments])
+        self.analysis_batches.append(batch)
         source_ids = {
             "turn-release": "om_1",
             "turn-risk": "om_3",
@@ -710,7 +722,7 @@ def test_runner_prioritizes_larger_inputs_for_segmentation_and_event_extraction(
         data_root=tmp_path / "data",
         max_concurrent_llm_requests=1,
         max_concurrent_event_extraction_requests=1,
-        max_model_input_tokens=1,
+        max_model_input_tokens=6_200,
         prompt_message_char_limit=2_000,
     )
     runner = DailyTraceRunner(
@@ -853,6 +865,7 @@ def test_runner_splits_segment_batches_in_timeline_order_when_token_limit_is_hit
         def analyze_segment_batch(self, batch):
             self.batch_calls += 1
             self.batch_segment_ids.append([unit.segment_id for unit in batch.segments])
+            self.analysis_batches.append(batch)
             source_ids = {
                 unit.segment_id: unit.primary_message_ids[0]
                 for unit in batch.segments
@@ -871,7 +884,41 @@ def test_runner_splits_segment_batches_in_timeline_order_when_token_limit_is_hit
                 ]
             )
 
-    config = _config(data_root=tmp_path / "data", max_model_input_tokens=1)
+    probe_config = _config(
+        data_root=tmp_path / "probe-data",
+        max_model_input_tokens=100_000,
+    )
+    probe_analyzer = SplitAnalyzer()
+    probe_runner = DailyTraceRunner(
+        config=probe_config,
+        dependencies=RuntimeDependencies(
+            chat_source=SegmentSource(),
+            content_resolver=SegmentResolver(),
+            analyzer=probe_analyzer,
+            delivery_channel=SegmentDelivery(),
+            event_store=MarkdownEventStore(config=probe_config),
+        ),
+    )
+
+    probe_result = probe_runner.run("2026-07-10")
+
+    assert probe_result.status == DailyRunStatus.SUCCESS.value
+    assert len(probe_analyzer.analysis_batches) == 1
+    combined_batch = probe_analyzer.analysis_batches[0]
+    combined_tokens = _estimate_segment_batch_tokens(combined_batch, probe_config)
+    single_tokens = max(
+        _estimate_segment_batch_tokens(
+            replace(combined_batch, segments=[unit]),
+            probe_config,
+        )
+        for unit in combined_batch.segments
+    )
+    assert single_tokens < combined_tokens
+
+    config = _config(
+        data_root=tmp_path / "data",
+        max_model_input_tokens=single_tokens,
+    )
     analyzer = SplitAnalyzer()
     runner = DailyTraceRunner(
         config=config,
@@ -892,6 +939,164 @@ def test_runner_splits_segment_batches_in_timeline_order_when_token_limit_is_hit
         ["anchor-002:turn-risk"],
     ]
     assert analyzer.batch_calls == 2
+
+
+def test_segmentation_window_is_split_until_complete_inputs_fit_limit() -> None:
+    messages = [
+        _message(
+            f"om_split_{index}",
+            sender_open_id="ou_self",
+            minute=index,
+            text=f"事项{index}" * 700,
+        )
+        for index in range(4)
+    ]
+    anchor = AnchorUnit(
+        anchor_unit_id="oversized-window",
+        conversation_id="oc_1",
+        conversation_name="项目群",
+        anchor_message_ids=[item.message_id for item in messages],
+        in_day_message_ids=[item.message_id for item in messages],
+        base_message_ids=[item.message_id for item in messages],
+        messages=messages,
+    )
+    identity = SelfIdentity("ou_self", "张宝华", "test")
+    probe_config = _config(
+        max_model_input_tokens=100_000,
+        prompt_message_char_limit=3_000,
+    )
+
+    def estimate(item: AnchorUnit) -> int:
+        return _estimate_segmentation_input_tokens(
+            target_date="2026-07-10",
+            anchor_unit=item,
+            self_identity=identity,
+            config=probe_config,
+            reaction_catalog=ReactionCatalog.empty("test"),
+        )
+
+    first_split = _split_anchor_unit_once(anchor)
+    input_limit = max(estimate(item) for item in first_split)
+    assert estimate(anchor) > input_limit
+
+    parts = _split_anchor_unit_to_model_limit(
+        anchor,
+        estimate=estimate,
+        input_limit=input_limit,
+        request_kind="conversation segmentation",
+    )
+
+    assert len(parts) == 2
+    assert all(estimate(item) <= input_limit for item in parts)
+    assert {
+        message_id
+        for item in parts
+        for message_id in item.base_message_ids
+    } == {message.message_id for message in messages}
+
+
+def test_anchor_fallback_batches_are_repacked_by_complete_input_limit() -> None:
+    anchors = [_anchor_unit(index) for index in range(1, 4)]
+    probe_config = _config(max_model_input_tokens=100_000)
+    input_limit = _estimate_anchor_batch_input_tokens(
+        "2026-07-10",
+        anchors[:2],
+        probe_config,
+    )
+    config = replace(probe_config, max_model_input_tokens=input_limit)
+    assert (
+        _estimate_anchor_batch_input_tokens("2026-07-10", anchors, config)
+        > input_limit
+    )
+
+    batches = _pack_anchor_units_by_model_input(
+        target_date="2026-07-10",
+        anchor_units=anchors,
+        config=config,
+        max_batch_size=3,
+    )
+
+    assert [len(batch) for batch in batches] == [2, 1]
+    assert all(
+        _estimate_anchor_batch_input_tokens("2026-07-10", batch, config)
+        <= input_limit
+        for batch in batches
+    )
+
+
+def test_cross_conversation_merge_reconciles_token_limited_batches(
+    tmp_path: Path,
+) -> None:
+    candidates = [
+        replace(
+            _candidate(f"draft-{index}", f"om_{index}"),
+            content=f"候选事项{index}" * 500,
+        )
+        for index in range(4)
+    ]
+    pair_limit = max(
+        _estimate_day_merge_input_tokens("2026-07-10", candidates[:2]),
+        _estimate_day_merge_input_tokens("2026-07-10", candidates[2:]),
+    )
+    assert (
+        _estimate_day_merge_input_tokens("2026-07-10", candidates) > pair_limit
+    )
+
+    class MergeAnalyzer:
+        def __init__(self) -> None:
+            self.calls: list[list[SourceBackedEventDraft]] = []
+
+        def merge_day_candidates(self, target_date, batch):
+            self.calls.append(list(batch))
+            if all(item.draft_id.startswith("__cross_batch_summary_") for item in batch):
+                return CrossConversationGroupResult(
+                    groups=[
+                        CrossConversationGroup(
+                            group_id="summary-group",
+                            draft_ids=[item.draft_id for item in batch],
+                            primary_draft_id=batch[0].draft_id,
+                        )
+                    ]
+                )
+            return CrossConversationGroupResult(
+                groups=[
+                    CrossConversationGroup(
+                        group_id=item.draft_id,
+                        draft_ids=[item.draft_id],
+                        primary_draft_id=item.draft_id,
+                    )
+                    for item in batch
+                ]
+            )
+
+    analyzer = MergeAnalyzer()
+    config = _config(
+        data_root=tmp_path / "data",
+        max_model_input_tokens=pair_limit,
+    )
+    runner = DailyTraceRunner(
+        config=config,
+        dependencies=RuntimeDependencies(
+            chat_source=SegmentSource(),
+            content_resolver=SegmentResolver(),
+            analyzer=analyzer,
+            delivery_channel=SegmentDelivery(),
+            event_store=MarkdownEventStore(config=config),
+        ),
+    )
+
+    result, warnings = runner._merge_day_candidates_with_batching(
+        "2026-07-10",
+        candidates,
+    )
+
+    assert len(analyzer.calls) == 3
+    assert all(
+        _estimate_day_merge_input_tokens("2026-07-10", batch) <= pair_limit
+        for batch in analyzer.calls
+    )
+    assert result.groups[0].draft_ids == [item.draft_id for item in candidates]
+    assert warnings == []
 
 
 def test_runner_retries_failed_batch_then_degrades_to_individual_segments(
@@ -1451,8 +1656,12 @@ def test_runner_stops_remaining_segmentation_after_same_failure_threshold(
 
     assert result.status == DailyRunStatus.SUCCESS_WITH_WARNINGS.value
     assert len(analyzer.segmentation_inputs) == 2
-    assert len(analyzer.anchor_batches) == 1
-    assert len(analyzer.anchor_batches[0]) == 3
+    assert [
+        anchor_id
+        for batch in analyzer.anchor_batches
+        for anchor_id in batch
+    ] == ["oc_1:om_005", "oc_1:om_037", "oc_1:om_070"]
+    assert all(len(batch) == 1 for batch in analyzer.anchor_batches)
     assert "Stopped remaining anchor segmentation after repeated" in result.error_summary
 
 

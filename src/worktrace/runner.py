@@ -7,12 +7,19 @@ import logging
 from pathlib import Path
 import re
 from time import perf_counter
+from typing import Callable
 from urllib.parse import urlsplit
 
 from .config import RuntimeConfig
 from .analyzers.base import Analyzer
 from .constants import DailyRunStatus
-from .errors import AnalyzerProtocolError, ChatSourceError, DeliveryError, StoreWriteError
+from .errors import (
+    AnalyzerProtocolError,
+    ChatSourceError,
+    DeliveryError,
+    ModelInputLimitError,
+    StoreWriteError,
+)
 from .factories import RuntimeDependencies, build_runtime_dependencies
 from .logging_utils import log_timing
 from .models import (
@@ -24,6 +31,7 @@ from .models import (
     ContextRequest,
     ConversationSegmentUnit,
     CrossConversationGroup,
+    CrossConversationGroupResult,
     DailyRunResult,
     EventFileLink,
     WorkEvent,
@@ -43,9 +51,16 @@ from .models import (
     WorkstreamAssignment,
     WorkstreamAssignmentResult,
 )
-from .analyzers.output_schemas import workstream_assignment_output_schema
+from .analyzers.output_schemas import (
+    anchor_batch_output_schema,
+    conversation_segmentation_output_schema,
+    merge_output_schema,
+    workstream_assignment_output_schema,
+)
 from .analyzers.prompts import (
     build_anchor_batch_analysis_prompt,
+    build_conversation_segmentation_prompt,
+    build_merge_prompt,
     build_unassigned_workstream_assignment_prompt,
     build_workstream_assignment_prompt,
 )
@@ -114,6 +129,8 @@ from .pipeline.validation import (
 from .utils.link_refs import build_message_link_id
 from .utils.hashing import file_key_from_attachment_id, file_key_from_url
 from .utils.json_io import dump_json
+from .utils.text import choose_preferred_text, clean_text, merge_content_texts
+from .utils.token_estimation import estimate_model_input_tokens
 
 logger = logging.getLogger("worktrace")
 _LINK_TEXT_TOKEN_RE = re.compile(r"[A-Za-z0-9_]{2,}|[\u4e00-\u9fff]{2,}")
@@ -408,10 +425,13 @@ class DailyTraceRunner:
                     )
                 else:
                     merge_started_at = perf_counter()
-                    group_result = self.dependencies.analyzer.merge_day_candidates(
-                        target_date,
-                        all_candidates,
+                    group_result, merge_batch_warnings = (
+                        self._merge_day_candidates_with_batching(
+                            target_date,
+                            all_candidates,
+                        )
                     )
+                    warning_messages.extend(merge_batch_warnings)
                     self._dump_merge_debug_artifacts(
                         target_date=target_date,
                         candidates=all_candidates,
@@ -682,6 +702,8 @@ class DailyTraceRunner:
                         )
                         raise AnalyzerProtocolError(last_error) from exc
                     retry_count += 1
+                except ModelInputLimitError:
+                    raise
                 except AnalyzerProtocolError as exc:
                     last_error = str(exc)
                     debug_batches.append(
@@ -896,6 +918,8 @@ class DailyTraceRunner:
             except NotImplementedError:
                 last_error = "Personal fact review is not implemented by the analyzer."
                 error_kind = "not_implemented"
+            except ModelInputLimitError:
+                raise
             except AnalyzerProtocolError as exc:
                 last_error = str(exc)
                 error_kind = "protocol"
@@ -1187,11 +1211,26 @@ class DailyTraceRunner:
                 self._hydrate_anchor_link_titles(item)
                 for item in conversation_anchors
             ]
+            fitted_anchors: list[AnchorUnit] = []
+            for anchor in hydrated_anchors:
+                split_anchors = _split_anchor_unit_to_model_limit(
+                    anchor,
+                    estimate=lambda item: _estimate_segmentation_input_tokens(
+                        target_date=target_date,
+                        anchor_unit=item,
+                        self_identity=self_identity,
+                        config=self.config,
+                        reaction_catalog=self.reaction_catalog,
+                    ),
+                    input_limit=self.config.max_model_input_tokens,
+                    request_kind="conversation segmentation",
+                )
+                fitted_anchors.extend(split_anchors)
             segmentation_states.append(
                 _ConversationSegmentationState(
                     conversation_id=conversation_id,
-                    conversation_name=hydrated_anchors[0].conversation_name,
-                    anchors=hydrated_anchors,
+                    conversation_name=fitted_anchors[0].conversation_name,
+                    anchors=fitted_anchors,
                 )
             )
 
@@ -1492,6 +1531,8 @@ class DailyTraceRunner:
                     hard_boundary_before_ids=hard_boundary_before_ids,
                     attachment_texts=anchor_unit.attachment_texts,
                 )
+            except ModelInputLimitError:
+                raise
             except AnalyzerProtocolError as exc:
                 model_call_count += 1
                 segmentation_error = str(exc)
@@ -1704,7 +1745,26 @@ class DailyTraceRunner:
         skipped_count = 0
         call_count = 0
         batch_size = max(self.config.anchor_batch_size, 1)
-        for start in range(0, len(anchor_units), batch_size):
+        fitted_units: list[AnchorUnit] = []
+        for anchor_unit in anchor_units:
+            split_units = _split_anchor_unit_to_model_limit(
+                anchor_unit,
+                estimate=lambda item: _estimate_anchor_batch_input_tokens(
+                    target_date,
+                    [item],
+                    self.config,
+                ),
+                input_limit=self.config.max_model_input_tokens,
+                request_kind="anchor fallback",
+            )
+            fitted_units.extend(split_units)
+        batches = _pack_anchor_units_by_model_input(
+            target_date=target_date,
+            anchor_units=fitted_units,
+            config=self.config,
+            max_batch_size=batch_size,
+        )
+        for batch in batches:
             (
                 batch_results,
                 batch_warnings,
@@ -1712,7 +1772,7 @@ class DailyTraceRunner:
                 batch_call_count,
             ) = self._resolve_anchor_batch(
                 target_date=target_date,
-                anchor_units=anchor_units[start : start + batch_size],
+                anchor_units=batch,
             )
             results.update(batch_results)
             warnings.extend(batch_warnings)
@@ -1746,6 +1806,8 @@ class DailyTraceRunner:
                     anchor_units,
                 )
                 call_count += 1
+            except ModelInputLimitError:
+                raise
             except AnalyzerProtocolError as exc:
                 call_count += 1
                 self._dump_anchor_fallback_failure_debug_artifacts(
@@ -1885,6 +1947,8 @@ class DailyTraceRunner:
                     candidate_event_count=len(candidates),
                 )
                 return candidates, warnings, skipped_count, call_count
+            except ModelInputLimitError:
+                raise
             except AnalyzerProtocolError as exc:
                 call_count += 1
                 self._dump_segment_batch_failure_debug_artifacts(
@@ -1923,6 +1987,8 @@ class DailyTraceRunner:
             try:
                 result = self.dependencies.analyzer.analyze_segment_batch(single_batch)
                 call_count += 1
+            except ModelInputLimitError:
+                raise
             except AnalyzerProtocolError as exc:
                 self._dump_segment_batch_failure_debug_artifacts(
                     batch=single_batch,
@@ -2119,6 +2185,8 @@ class DailyTraceRunner:
                     self_open_id=self_identity.open_id,
                 ),
             )
+        except ModelInputLimitError:
+            raise
         except AnalyzerProtocolError:
             return (
                 [],
@@ -2723,6 +2791,132 @@ class DailyTraceRunner:
                 encoding="utf-8",
             )
 
+    def _merge_day_candidates_with_batching(
+        self,
+        target_date: str,
+        candidates: list[SourceBackedEventDraft],
+    ) -> tuple[CrossConversationGroupResult, list[str]]:
+        if (
+            _estimate_day_merge_input_tokens(target_date, candidates)
+            <= self.config.max_model_input_tokens
+        ):
+            return self.dependencies.analyzer.merge_day_candidates(
+                target_date,
+                candidates,
+            ), []
+
+        batches = _pack_day_merge_candidates(
+            target_date=target_date,
+            candidates=candidates,
+            input_limit=self.config.max_model_input_tokens,
+        )
+        local_groups: list[CrossConversationGroup] = []
+        warnings: list[str] = []
+        for batch_index, batch in enumerate(batches, start=1):
+            if len(batch) == 1:
+                candidate = batch[0]
+                local_groups.append(
+                    CrossConversationGroup(
+                        group_id=f"cross-batch-{batch_index:03d}-single",
+                        draft_ids=[candidate.draft_id],
+                        primary_draft_id=candidate.draft_id,
+                        workstream_name=candidate.workstream_key.strip(),
+                    )
+                )
+                continue
+            result = self.dependencies.analyzer.merge_day_candidates(
+                target_date,
+                batch,
+            )
+            try:
+                result = validate_cross_conversation_groups(result, batch)
+            except AnalyzerProtocolError:
+                result, repair_warnings = normalize_cross_conversation_groups_with_fallback(
+                    result,
+                    batch,
+                )
+                warnings.extend(repair_warnings)
+            local_groups.extend(result.groups)
+
+        summaries, original_ids_by_summary, primary_id_by_summary = (
+            _build_cross_batch_summary_candidates(
+                target_date=target_date,
+                candidates=candidates,
+                groups=local_groups,
+                content_char_limit=self.config.prompt_message_char_limit,
+            )
+        )
+        if len(summaries) == 1:
+            summary_groups = [
+                CrossConversationGroup(
+                    group_id="cross-summary-single",
+                    draft_ids=[summaries[0].draft_id],
+                    primary_draft_id=summaries[0].draft_id,
+                    workstream_name=summaries[0].workstream_key.strip(),
+                )
+            ]
+        else:
+            summary_batches = _pack_day_merge_candidates(
+                target_date=target_date,
+                candidates=summaries,
+                input_limit=self.config.max_model_input_tokens,
+            )
+            summary_groups: list[CrossConversationGroup] = []
+            for batch_index, batch in enumerate(summary_batches, start=1):
+                if len(batch) == 1:
+                    summary = batch[0]
+                    summary_groups.append(
+                        CrossConversationGroup(
+                            group_id=f"cross-summary-{batch_index:03d}-single",
+                            draft_ids=[summary.draft_id],
+                            primary_draft_id=summary.draft_id,
+                            workstream_name=summary.workstream_key.strip(),
+                        )
+                    )
+                    continue
+                result = self.dependencies.analyzer.merge_day_candidates(
+                    target_date,
+                    batch,
+                )
+                try:
+                    result = validate_cross_conversation_groups(result, batch)
+                except AnalyzerProtocolError:
+                    result, repair_warnings = (
+                        normalize_cross_conversation_groups_with_fallback(
+                            result,
+                            batch,
+                        )
+                    )
+                    warnings.extend(repair_warnings)
+                summary_groups.extend(result.groups)
+
+        mapped_groups: list[CrossConversationGroup] = []
+        for group_index, group in enumerate(summary_groups, start=1):
+            draft_ids = list(
+                dict.fromkeys(
+                    draft_id
+                    for summary_id in group.draft_ids
+                    for draft_id in original_ids_by_summary.get(summary_id, [])
+                )
+            )
+            if not draft_ids:
+                continue
+            primary_draft_id = primary_id_by_summary.get(
+                group.primary_draft_id,
+                draft_ids[0],
+            )
+            if primary_draft_id not in draft_ids:
+                primary_draft_id = draft_ids[0]
+            mapped_groups.append(
+                CrossConversationGroup(
+                    group_id=f"cross-reconciled-{group_index:03d}",
+                    draft_ids=draft_ids,
+                    primary_draft_id=primary_draft_id,
+                    workstream_name=group.workstream_name,
+                )
+            )
+        return CrossConversationGroupResult(groups=mapped_groups), warnings
+
     def _resolve_workstream_groups(
         self,
         *,
@@ -2734,15 +2928,29 @@ class DailyTraceRunner:
         if not callable(request_json):
             return consolidate_workstream_groups(model_groups, candidates)
 
-        prompt = build_workstream_assignment_prompt(target_date, candidates)
+        prompt = ""
         try:
-            payload = request_json(
-                prompt,
-                output_schema=workstream_assignment_output_schema(),
+            assignment_batches = _pack_workstream_assignment_candidates(
+                target_date=target_date,
+                candidates=candidates,
+                input_limit=self.config.max_model_input_tokens,
             )
-            if not isinstance(payload, dict):
-                raise TypeError("Workstream assignment response must be an object.")
-            assignment_result = WorkstreamAssignmentResult.from_dict(payload)
+            assignment_prompts: list[str] = []
+            assignments: list[WorkstreamAssignment] = []
+            for batch in assignment_batches:
+                batch_prompt = build_workstream_assignment_prompt(target_date, batch)
+                assignment_prompts.append(batch_prompt)
+                prompt = "\n\n".join(assignment_prompts)
+                payload = request_json(
+                    batch_prompt,
+                    output_schema=workstream_assignment_output_schema(),
+                )
+                if not isinstance(payload, dict):
+                    raise TypeError("Workstream assignment response must be an object.")
+                assignments.extend(
+                    WorkstreamAssignmentResult.from_dict(payload).assignments
+                )
+            assignment_result = WorkstreamAssignmentResult(assignments=assignments)
             groups, warnings = groups_from_workstream_assignments(
                 assignment_result,
                 candidates,
@@ -2814,19 +3022,36 @@ class DailyTraceRunner:
         if not unassigned_candidates or not known_workstreams:
             return initial_result, []
 
-        prompt = build_unassigned_workstream_assignment_prompt(
-            target_date,
-            known_workstreams=known_workstreams,
-            unassigned_candidates=unassigned_candidates,
-        )
+        prompt = ""
         try:
-            payload = request_json(
-                prompt,
-                output_schema=workstream_assignment_output_schema(),
+            review_batches = _pack_unassigned_workstream_candidates(
+                target_date=target_date,
+                known_workstreams=known_workstreams,
+                candidates=unassigned_candidates,
+                input_limit=self.config.max_model_input_tokens,
             )
-            if not isinstance(payload, dict):
-                raise TypeError("Unassigned workstream response must be an object.")
-            followup_result = WorkstreamAssignmentResult.from_dict(payload)
+            review_prompts: list[str] = []
+            followup_assignments: list[WorkstreamAssignment] = []
+            for batch in review_batches:
+                batch_prompt = build_unassigned_workstream_assignment_prompt(
+                    target_date,
+                    known_workstreams=known_workstreams,
+                    unassigned_candidates=batch,
+                )
+                review_prompts.append(batch_prompt)
+                prompt = "\n\n".join(review_prompts)
+                payload = request_json(
+                    batch_prompt,
+                    output_schema=workstream_assignment_output_schema(),
+                )
+                if not isinstance(payload, dict):
+                    raise TypeError("Unassigned workstream response must be an object.")
+                followup_assignments.extend(
+                    WorkstreamAssignmentResult.from_dict(payload).assignments
+                )
+            followup_result = WorkstreamAssignmentResult(
+                assignments=followup_assignments
+            )
         except (AnalyzerProtocolError, TypeError, ValueError) as exc:
             self._dump_workstream_followup_debug_artifacts(
                 target_date=target_date,
@@ -3235,6 +3460,509 @@ def _build_known_workstream_context(
             }
         )
     return context
+
+
+def _estimate_segmentation_input_tokens(
+    *,
+    target_date: str,
+    anchor_unit: AnchorUnit,
+    self_identity: SelfIdentity,
+    config: RuntimeConfig,
+    reaction_catalog: ReactionCatalog | None,
+) -> int:
+    response_signals = build_response_signals(
+        anchor_unit.messages,
+        self_open_id=self_identity.open_id,
+        reaction_catalog=reaction_catalog,
+    )
+    prompt = build_conversation_segmentation_prompt(
+        target_date=target_date,
+        conversation_id=anchor_unit.conversation_id,
+        conversation_name=anchor_unit.conversation_name,
+        messages=anchor_unit.messages,
+        self_open_id=self_identity.open_id,
+        self_display_name=self_identity.display_name,
+        response_signals=response_signals,
+        hard_boundary_before_ids=build_hard_boundary_message_ids(
+            anchor_unit.messages,
+            self_open_id=self_identity.open_id,
+        ),
+        attachment_texts=anchor_unit.attachment_texts,
+        config=config,
+    )
+    return estimate_model_input_tokens(
+        prompt,
+        output_schema=conversation_segmentation_output_schema(),
+        append_no_think=True,
+    )
+
+
+def _estimate_anchor_batch_input_tokens(
+    target_date: str,
+    anchor_units: list[AnchorUnit],
+    config: RuntimeConfig,
+) -> int:
+    return estimate_model_input_tokens(
+        build_anchor_batch_analysis_prompt(
+            target_date,
+            anchor_units,
+            config=config,
+        ),
+        output_schema=anchor_batch_output_schema(config),
+        append_no_think=True,
+    )
+
+
+def _split_anchor_unit_to_model_limit(
+    anchor_unit: AnchorUnit,
+    *,
+    estimate: Callable[[AnchorUnit], int],
+    input_limit: int,
+    request_kind: str,
+) -> list[AnchorUnit]:
+    pending = [anchor_unit]
+    fitted: list[AnchorUnit] = []
+    while pending:
+        current = pending.pop(0)
+        estimated_tokens = estimate(current)
+        if estimated_tokens <= input_limit:
+            fitted.append(current)
+            continue
+        split_units = _split_anchor_unit_once(current)
+        if not split_units:
+            raise ModelInputLimitError(
+                f"Minimum {request_kind} input exceeds max_model_input_tokens: "
+                f"anchor={current.anchor_unit_id} "
+                f"estimated_tokens={estimated_tokens} limit={input_limit}."
+            )
+        pending = [*split_units, *pending]
+    return fitted
+
+
+def _split_anchor_unit_once(anchor_unit: AnchorUnit) -> list[AnchorUnit]:
+    messages = sorted(
+        anchor_unit.messages,
+        key=lambda item: (item.send_time, item.message_id),
+    )
+    position_by_id = {
+        message.message_id: index for index, message in enumerate(messages)
+    }
+    main_ids = [
+        message.message_id
+        for message in messages
+        if message.message_id
+        in set(anchor_unit.base_message_ids or anchor_unit.in_day_message_ids)
+    ]
+    if not main_ids:
+        main_ids = [message.message_id for message in messages]
+    anchor_ids = [
+        message.message_id
+        for message in messages
+        if message.message_id in set(anchor_unit.anchor_message_ids)
+    ]
+
+    if len(anchor_ids) > 1:
+        midpoint = len(anchor_ids) // 2
+        left_anchor_ids = anchor_ids[:midpoint]
+        right_anchor_ids = anchor_ids[midpoint:]
+        right_start = min(position_by_id[item] for item in right_anchor_ids)
+        left_main_ids = [
+            item for item in main_ids if position_by_id.get(item, right_start) < right_start
+        ]
+        right_main_ids = [
+            item for item in main_ids if position_by_id.get(item, -1) >= right_start
+        ]
+        return [
+            _build_split_anchor_unit(
+                anchor_unit,
+                main_ids=left_main_ids,
+                anchor_ids=left_anchor_ids,
+                suffix="part-1",
+            ),
+            _build_split_anchor_unit(
+                anchor_unit,
+                main_ids=right_main_ids,
+                anchor_ids=right_anchor_ids,
+                suffix="part-2",
+            ),
+        ]
+
+    if len(main_ids) > 1:
+        midpoint = len(main_ids) // 2
+        chunks = [main_ids[:midpoint], main_ids[midpoint:]]
+        return [
+            _build_split_anchor_unit(
+                anchor_unit,
+                main_ids=chunk,
+                anchor_ids=anchor_ids,
+                suffix=f"part-{index}",
+            )
+            for index, chunk in enumerate(chunks, start=1)
+        ]
+
+    if len(anchor_unit.attachment_texts) > 1:
+        midpoint = len(anchor_unit.attachment_texts) // 2
+        return [
+            _build_split_anchor_unit(
+                anchor_unit,
+                main_ids=main_ids,
+                anchor_ids=anchor_ids,
+                suffix=f"attachment-{index}",
+                attachment_texts=blocks,
+            )
+            for index, blocks in enumerate(
+                (
+                    anchor_unit.attachment_texts[:midpoint],
+                    anchor_unit.attachment_texts[midpoint:],
+                ),
+                start=1,
+            )
+        ]
+
+    if len(anchor_unit.linked_file_texts) > 1:
+        midpoint = len(anchor_unit.linked_file_texts) // 2
+        return [
+            _build_split_anchor_unit(
+                anchor_unit,
+                main_ids=main_ids,
+                anchor_ids=anchor_ids,
+                suffix=f"linked-{index}",
+                linked_file_texts=blocks,
+            )
+            for index, blocks in enumerate(
+                (
+                    anchor_unit.linked_file_texts[:midpoint],
+                    anchor_unit.linked_file_texts[midpoint:],
+                ),
+                start=1,
+            )
+        ]
+
+    return []
+
+
+def _build_split_anchor_unit(
+    anchor_unit: AnchorUnit,
+    *,
+    main_ids: list[str],
+    anchor_ids: list[str],
+    suffix: str,
+    attachment_texts=None,
+    linked_file_texts=None,
+) -> AnchorUnit:
+    core_ids = set([*main_ids, *anchor_ids])
+    messages = sorted(
+        anchor_unit.messages,
+        key=lambda item: (item.send_time, item.message_id),
+    )
+    core_messages = [message for message in messages if message.message_id in core_ids]
+    referenced_ids = {
+        relation_id
+        for message in core_messages
+        for relation_id in (message.reply_to_message_id, message.quote_message_id)
+        if relation_id
+    }
+    selected_ids = set(core_ids)
+    selected_ids.update(
+        message.message_id
+        for message in messages
+        if (
+            message.message_id in referenced_ids
+            or message.reply_to_message_id in core_ids
+            or message.quote_message_id in core_ids
+        )
+    )
+    selected_messages = [
+        message for message in messages if message.message_id in selected_ids
+    ]
+    selected_message_ids = {message.message_id for message in selected_messages}
+    selected_attachment_texts = list(
+        attachment_texts
+        if attachment_texts is not None
+        else (
+            block
+            for block in anchor_unit.attachment_texts
+            if block.message_id in selected_message_ids
+        )
+    )
+    selected_linked_file_texts = list(
+        linked_file_texts
+        if linked_file_texts is not None
+        else (
+            block
+            for block in anchor_unit.linked_file_texts
+            if block.message_id in selected_message_ids
+        )
+    )
+    attachment_ids = {
+        attachment.attachment_id
+        for message in selected_messages
+        for attachment in message.attachments
+    }
+    return replace(
+        anchor_unit,
+        anchor_unit_id=f"{anchor_unit.anchor_unit_id}:{suffix}",
+        anchor_message_ids=[item for item in anchor_ids if item in selected_message_ids],
+        in_day_message_ids=[item for item in main_ids if item in selected_message_ids],
+        base_message_ids=[item for item in main_ids if item in selected_message_ids],
+        messages=selected_messages,
+        relation_context_message_ids=[
+            item
+            for item in anchor_unit.relation_context_message_ids
+            if item in selected_message_ids and item not in core_ids
+        ],
+        timeline_context_message_ids=[
+            item
+            for item in anchor_unit.timeline_context_message_ids
+            if item in selected_message_ids and item not in core_ids
+        ],
+        reply_relation_ids=[
+            item for item in anchor_unit.reply_relation_ids if item in selected_message_ids
+        ],
+        quote_relation_ids=[
+            item for item in anchor_unit.quote_relation_ids if item in selected_message_ids
+        ],
+        attachment_refs=[
+            item
+            for item in anchor_unit.attachment_refs
+            if item.attachment_id in attachment_ids
+        ],
+        anchor_signals=[
+            item for item in anchor_unit.anchor_signals if item.message_id in set(anchor_ids)
+        ],
+        attachment_texts=selected_attachment_texts,
+        linked_file_texts=selected_linked_file_texts,
+    )
+
+
+def _pack_anchor_units_by_model_input(
+    *,
+    target_date: str,
+    anchor_units: list[AnchorUnit],
+    config: RuntimeConfig,
+    max_batch_size: int,
+) -> list[list[AnchorUnit]]:
+    batches: list[list[AnchorUnit]] = []
+    current: list[AnchorUnit] = []
+    for anchor_unit in anchor_units:
+        proposal = [*current, anchor_unit]
+        if current and (
+            len(proposal) > max_batch_size
+            or _estimate_anchor_batch_input_tokens(target_date, proposal, config)
+            > config.max_model_input_tokens
+        ):
+            batches.append(current)
+            current = [anchor_unit]
+            continue
+        current = proposal
+    if current:
+        batches.append(current)
+    return batches
+
+
+def _estimate_day_merge_input_tokens(
+    target_date: str,
+    candidates: list[SourceBackedEventDraft],
+) -> int:
+    return estimate_model_input_tokens(
+        build_merge_prompt(target_date, candidates),
+        output_schema=merge_output_schema(),
+        append_no_think=True,
+    )
+
+
+def _estimate_workstream_assignment_input_tokens(
+    target_date: str,
+    candidates: list[SourceBackedEventDraft],
+) -> int:
+    return estimate_model_input_tokens(
+        build_workstream_assignment_prompt(target_date, candidates),
+        output_schema=workstream_assignment_output_schema(),
+        append_no_think=True,
+    )
+
+
+def _pack_workstream_assignment_candidates(
+    *,
+    target_date: str,
+    candidates: list[SourceBackedEventDraft],
+    input_limit: int,
+) -> list[list[SourceBackedEventDraft]]:
+    return _pack_candidates_by_input_limit(
+        candidates=candidates,
+        estimate=lambda batch: _estimate_workstream_assignment_input_tokens(
+            target_date,
+            batch,
+        ),
+        input_limit=input_limit,
+        request_kind="workstream assignment",
+    )
+
+
+def _estimate_unassigned_workstream_input_tokens(
+    target_date: str,
+    *,
+    known_workstreams: list[dict[str, object]],
+    candidates: list[SourceBackedEventDraft],
+) -> int:
+    return estimate_model_input_tokens(
+        build_unassigned_workstream_assignment_prompt(
+            target_date,
+            known_workstreams=known_workstreams,
+            unassigned_candidates=candidates,
+        ),
+        output_schema=workstream_assignment_output_schema(),
+        append_no_think=True,
+    )
+
+
+def _pack_unassigned_workstream_candidates(
+    *,
+    target_date: str,
+    known_workstreams: list[dict[str, object]],
+    candidates: list[SourceBackedEventDraft],
+    input_limit: int,
+) -> list[list[SourceBackedEventDraft]]:
+    return _pack_candidates_by_input_limit(
+        candidates=candidates,
+        estimate=lambda batch: _estimate_unassigned_workstream_input_tokens(
+            target_date,
+            known_workstreams=known_workstreams,
+            candidates=batch,
+        ),
+        input_limit=input_limit,
+        request_kind="unassigned workstream review",
+    )
+
+
+def _pack_candidates_by_input_limit(
+    *,
+    candidates: list[SourceBackedEventDraft],
+    estimate: Callable[[list[SourceBackedEventDraft]], int],
+    input_limit: int,
+    request_kind: str,
+) -> list[list[SourceBackedEventDraft]]:
+    batches: list[list[SourceBackedEventDraft]] = []
+    current: list[SourceBackedEventDraft] = []
+    for candidate in candidates:
+        single_tokens = estimate([candidate])
+        if single_tokens > input_limit:
+            raise ModelInputLimitError(
+                f"Minimum {request_kind} input exceeds max_model_input_tokens: "
+                f"draft={candidate.draft_id} "
+                f"estimated_tokens={single_tokens} limit={input_limit}."
+            )
+        proposal = [*current, candidate]
+        estimated_tokens = estimate(proposal)
+        if current and estimated_tokens > input_limit:
+            batches.append(current)
+            current = [candidate]
+            continue
+        current = proposal
+    if current:
+        batches.append(current)
+    return batches
+
+
+def _pack_day_merge_candidates(
+    *,
+    target_date: str,
+    candidates: list[SourceBackedEventDraft],
+    input_limit: int,
+) -> list[list[SourceBackedEventDraft]]:
+    batches: list[list[SourceBackedEventDraft]] = []
+    current: list[SourceBackedEventDraft] = []
+    for candidate in candidates:
+        proposal = [*current, candidate]
+        if (
+            current
+            and _estimate_day_merge_input_tokens(target_date, proposal) > input_limit
+        ):
+            batches.append(current)
+            current = [candidate]
+            continue
+        current = proposal
+    if current:
+        batches.append(current)
+    return batches
+
+
+def _build_cross_batch_summary_candidates(
+    *,
+    target_date: str,
+    candidates: list[SourceBackedEventDraft],
+    groups: list[CrossConversationGroup],
+    content_char_limit: int,
+) -> tuple[
+    list[SourceBackedEventDraft],
+    dict[str, list[str]],
+    dict[str, str],
+]:
+    candidate_by_id = {candidate.draft_id: candidate for candidate in candidates}
+    summaries: list[SourceBackedEventDraft] = []
+    original_ids_by_summary: dict[str, list[str]] = {}
+    primary_id_by_summary: dict[str, str] = {}
+    used_ids = set(candidate_by_id)
+    for index, group in enumerate(groups, start=1):
+        members = [
+            candidate_by_id[draft_id]
+            for draft_id in group.draft_ids
+            if draft_id in candidate_by_id
+        ]
+        if not members:
+            continue
+        primary = candidate_by_id.get(group.primary_draft_id)
+        if primary not in members:
+            primary = members[0]
+        summary_id = f"__cross_batch_summary_{index:03d}"
+        while summary_id in used_ids:
+            summary_id = f"_{summary_id}"
+        used_ids.add(summary_id)
+        content = merge_content_texts([item.content for item in members])
+        content = _bounded_text_excerpt(content, max(content_char_limit, 1))
+        workstream_names = [
+            item.workstream_key.strip()
+            for item in members
+            if item.workstream_key.strip()
+        ]
+        summaries.append(
+            replace(
+                primary,
+                draft_id=summary_id,
+                date=target_date,
+                topic=primary.topic
+                or choose_preferred_text([item.topic for item in members]),
+                content=content,
+                object_hint=primary.object_hint
+                or choose_preferred_text([item.object_hint for item in members]),
+                workstream_key=group.workstream_name.strip()
+                or (workstream_names[0] if workstream_names else ""),
+                source_message_ids=list(
+                    dict.fromkeys(
+                        message_id
+                        for item in members
+                        for message_id in item.source_message_ids
+                    )
+                ),
+            )
+        )
+        original_ids_by_summary[summary_id] = [item.draft_id for item in members]
+        primary_id_by_summary[summary_id] = primary.draft_id
+    return summaries, original_ids_by_summary, primary_id_by_summary
+
+
+def _bounded_text_excerpt(value: str, limit: int) -> str:
+    value = clean_text(value)
+    if len(value) <= limit:
+        return value
+    if limit <= 3:
+        return value[:limit]
+    available = limit - 3
+    prefix_length = available // 2
+    suffix_length = available - prefix_length
+    return f"{value[:prefix_length].rstrip()}...{value[-suffix_length:].lstrip()}"[
+        :limit
+    ]
 
 
 def _anchor_unit_to_slice(anchor_unit: AnchorUnit) -> ConversationSlice:

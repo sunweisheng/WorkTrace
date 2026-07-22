@@ -2178,7 +2178,11 @@ def test_grouping_summary_event_uses_model_summary_and_keeps_evidence() -> None:
 
 
 def test_balanced_candidate_content_fits_limit_across_sources(tmp_path: Path) -> None:
-    config = RuntimeConfig(data_root=tmp_path / "data", max_model_input_tokens=900)
+    input_limit_tokens = 1400
+    config = RuntimeConfig(
+        data_root=tmp_path / "data",
+        max_model_input_tokens=input_limit_tokens,
+    )
     runner = _build_runner(tmp_path, config=config, analyzer=TwoStageAnalyzer())
     events = [
         CollectedSourceEvent(
@@ -2202,7 +2206,7 @@ def test_balanced_candidate_content_fits_limit_across_sources(tmp_path: Path) ->
 
     assert runner._estimate_collected_grouping_prompt_tokens(
         "2026-06-29", fitted, []
-    ) <= 900
+    ) <= input_limit_tokens
     assert all(item.event.content for item in fitted)
     assert all(
         len(item.event.content) < len(original.event.content)
@@ -2213,7 +2217,11 @@ def test_balanced_candidate_content_fits_limit_across_sources(tmp_path: Path) ->
 
 
 def test_single_oversized_render_event_is_split_below_limit(tmp_path: Path) -> None:
-    config = RuntimeConfig(data_root=tmp_path / "data", max_model_input_tokens=900)
+    input_limit_tokens = 1400
+    config = RuntimeConfig(
+        data_root=tmp_path / "data",
+        max_model_input_tokens=input_limit_tokens,
+    )
     runner = _build_runner(tmp_path, config=config, analyzer=TwoStageAnalyzer())
     source = CollectedSourceEvent(
         draft_id="d1",
@@ -2237,7 +2245,7 @@ def test_single_oversized_render_event_is_split_below_limit(tmp_path: Path) -> N
     assert all(
         runner._estimate_collected_render_prompt_tokens(
             "2026-06-29", [item], [[item.draft_id]]
-        ) <= 900
+        ) <= input_limit_tokens
         for item in shards
     )
     assert all(item.event.source_event_ids == ["e1"] for item in shards)
@@ -2477,7 +2485,7 @@ def test_relation_priority_batches_preserve_same_conversation_candidates(
         ),
     ).run("2026-06-29")
 
-    assert result.merged_event_count == 4
+    assert result.merged_event_count == 6
     assert any(
         "Skipped cross-batch coordination" in warning
         for warning in result.warning_messages
@@ -2487,7 +2495,7 @@ def test_relation_priority_batches_preserve_same_conversation_candidates(
     summary = json.loads(
         (trace_root / "2026-06-29" / "summary.json").read_text(encoding="utf-8")
     )
-    assert max(step["prompt_estimated_tokens"] for step in summary["steps"]) <= 2000
+    assert max(step["input_estimated_tokens"] for step in summary["steps"]) <= 2000
     assert {step["input_limit_tokens"] for step in summary["steps"]} == {2000}
     output = MarkdownEventStore(config=RuntimeConfig()).parse_day_document(
         Path(result.output_path or "").read_text(encoding="utf-8")
@@ -2592,7 +2600,7 @@ def test_relation_priority_batches_match_july_14_event_scale(tmp_path: Path) -> 
         (trace_root / "2026-06-29" / "summary.json").read_text(encoding="utf-8")
     )
     assert (
-        max(step["prompt_estimated_tokens"] for step in summary["steps"])
+        max(step["input_estimated_tokens"] for step in summary["steps"])
         <= input_limit_tokens
     )
     assert {step["input_limit_tokens"] for step in summary["steps"]} == {
@@ -3326,7 +3334,7 @@ def test_high_risk_review_batches_large_group_within_token_limit(
     assert len(analyzer.review_calls) > 1
     assert any("review batches" in item for item in warnings)
     assert max(
-        step["prompt_estimated_tokens"]
+        step["input_estimated_tokens"]
         for step in runner._collected_merge_trace_steps
     ) <= 6200
 
@@ -3396,7 +3404,7 @@ def test_high_risk_review_summarizes_single_oversized_content_before_review(
     assert len(analyzer.review_calls) == 1
     assert any("hierarchical content summary" in item for item in warnings)
     assert max(
-        step["prompt_estimated_tokens"]
+        step["input_estimated_tokens"]
         for step in runner._collected_merge_trace_steps
     ) <= 6200
 

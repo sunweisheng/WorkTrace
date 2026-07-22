@@ -30,6 +30,7 @@ from src.worktrace.config import (
 )
 from src.worktrace.errors import (
     AnalyzerProtocolError,
+    ModelInputLimitError,
     RetryableAnalyzerProtocolError,
 )
 from src.worktrace.models import (
@@ -42,6 +43,7 @@ from src.worktrace.models import (
     RetentionReviewCandidate,
     SourceBackedEventDraft,
 )
+from src.worktrace.utils.token_estimation import estimate_model_input_tokens
 
 
 def sample_batch() -> AnalysisBatch:
@@ -260,6 +262,33 @@ def test_online_analyzer_rejects_oversized_prompt_before_request(
 
     with pytest.raises(AnalyzerProtocolError, match="max_model_input_tokens"):
         analyzer.analyze_batch("2026-06-23", sample_batch())
+
+    assert settings_calls == []
+
+
+def test_online_analyzer_counts_output_schema_before_request(tmp_path: Path) -> None:
+    prompt = "short prompt"
+    output_schema = {
+        "type": "object",
+        "description": "x" * 600,
+        "additionalProperties": False,
+    }
+    prompt_only_tokens = estimate_model_input_tokens(
+        prompt,
+        append_no_think=True,
+    )
+    settings_calls = []
+    analyzer = OnlineLLMAnalyzer(
+        config=RuntimeConfig(
+            data_root=tmp_path / "data",
+            max_model_input_tokens=prompt_only_tokens,
+        ),
+        cwd=tmp_path,
+        settings_loader=lambda *args, **kwargs: settings_calls.append(True),
+    )
+
+    with pytest.raises(ModelInputLimitError, match="max_model_input_tokens"):
+        analyzer.request_json(prompt, output_schema=output_schema)
 
     assert settings_calls == []
 

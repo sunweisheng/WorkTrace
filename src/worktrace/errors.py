@@ -22,6 +22,10 @@ class RetryableAnalyzerProtocolError(AnalyzerProtocolError):
     """Raised when retrying the same analyzer request may succeed."""
 
 
+class ModelInputLimitError(AnalyzerProtocolError):
+    """Raised before a model request whose estimated total input is too large."""
+
+
 class StoreWriteError(WorkTraceError):
     """Raised when store write or validation fails."""
 

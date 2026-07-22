@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from src.worktrace.analyzers.output_schemas import retention_review_output_schema
 from src.worktrace.analyzers.prompts import build_retention_review_prompt
 from src.worktrace.config import RuntimeConfig, load_runtime_config_overrides
 from src.worktrace.errors import AnalyzerProtocolError
@@ -24,7 +25,7 @@ from src.worktrace.pipeline.retention_review import (
     select_retention_review_candidates,
     validate_retention_review_result,
 )
-from src.worktrace.utils.token_estimation import estimate_text_tokens
+from src.worktrace.utils.token_estimation import estimate_model_input_tokens
 
 
 CONFIG = load_runtime_config_overrides(RuntimeConfig(), cwd=Path.cwd())
@@ -286,9 +287,10 @@ def test_review_batches_split_before_the_model_token_limit() -> None:
         batch_id="probe",
         candidates=[first_item],
     )
-    single_tokens = estimate_text_tokens(
-        build_retention_review_prompt(single_probe, config=CONFIG).rstrip()
-        + "\n/no_think"
+    single_tokens = estimate_model_input_tokens(
+        build_retention_review_prompt(single_probe, config=CONFIG),
+        output_schema=retention_review_output_schema(CONFIG),
+        append_no_think=True,
     )
     limited_config = replace(CONFIG, max_model_input_tokens=single_tokens + 10)
 
@@ -300,9 +302,10 @@ def test_review_batches_split_before_the_model_token_limit() -> None:
 
     assert [len(batch.candidates) for batch in batches] == [1, 1]
     for batch in batches:
-        estimated_tokens = estimate_text_tokens(
-            build_retention_review_prompt(batch, config=limited_config).rstrip()
-            + "\n/no_think"
+        estimated_tokens = estimate_model_input_tokens(
+            build_retention_review_prompt(batch, config=limited_config),
+            output_schema=retention_review_output_schema(limited_config),
+            append_no_think=True,
         )
         assert estimated_tokens <= limited_config.max_model_input_tokens
 

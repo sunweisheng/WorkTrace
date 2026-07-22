@@ -11,7 +11,7 @@ from src.worktrace.analyzers.output_schemas import (
     retention_review_output_schema,
 )
 from src.worktrace.config import RuntimeConfig, load_runtime_config_overrides
-from src.worktrace.errors import AnalyzerProtocolError
+from src.worktrace.errors import AnalyzerProtocolError, ModelInputLimitError
 from src.worktrace.models import (
     AnalysisBatch,
     ConversationSlice,
@@ -22,6 +22,7 @@ from src.worktrace.models import (
     RetentionReviewCandidate,
     SourceBackedEventDraft,
 )
+from src.worktrace.utils.token_estimation import estimate_model_input_tokens
 
 
 def sample_batch() -> AnalysisBatch:
@@ -221,6 +222,37 @@ def test_codex_analyzer_rejects_oversized_prompt_before_command(tmp_path: Path) 
 
     with pytest.raises(AnalyzerProtocolError, match="max_model_input_tokens"):
         analyzer.analyze_batch("2026-06-23", sample_batch())
+
+    assert calls == []
+
+
+def test_codex_analyzer_counts_output_schema_before_command(tmp_path: Path) -> None:
+    prompt = "short prompt"
+    output_schema = {
+        "type": "object",
+        "description": "x" * 600,
+        "additionalProperties": False,
+    }
+    prompt_only_tokens = estimate_model_input_tokens(prompt)
+    calls = []
+
+    def fake_runner(args, *, cwd=None, timeout=None, input_text=None):
+        calls.append(args)
+        raise AssertionError("command must not run")
+
+    analyzer = CodexAnalyzer(
+        config=RuntimeConfig(
+            data_root=tmp_path / "data",
+            analyzer_backend="codex",
+            codex_stdin_mode=True,
+            max_model_input_tokens=prompt_only_tokens,
+        ),
+        command_runner=fake_runner,
+        cwd=tmp_path,
+    )
+
+    with pytest.raises(ModelInputLimitError, match="max_model_input_tokens"):
+        analyzer._invoke_codex(prompt, output_schema=output_schema)
 
     assert calls == []
 

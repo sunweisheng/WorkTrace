@@ -92,6 +92,37 @@ def test_failover_does_not_switch_permanent_online_errors() -> None:
     assert recorder.records()[0]["error_category"] == "authentication"
 
 
+def test_failover_does_not_switch_model_input_limit_errors() -> None:
+    from src.worktrace.errors import ModelInputLimitError
+    from src.worktrace.llm_usage import LLMUsageRecorder
+
+    class Online:
+        def analyze_batch(self, target_date, batch_input):
+            raise ModelInputLimitError(
+                "Model input exceeds max_model_input_tokens"
+            )
+
+    class Codex:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def analyze_batch(self, target_date, batch_input):
+            self.calls += 1
+            return "codex-result"
+
+    codex = Codex()
+    analyzer = FailoverAnalyzer(
+        primary=Online(),
+        fallback=codex,
+        usage_recorder=LLMUsageRecorder(),
+    )
+
+    with pytest.raises(ModelInputLimitError, match="max_model_input_tokens"):
+        analyzer.analyze_batch("2026-07-17", object())
+
+    assert codex.calls == 0
+
+
 def test_runtime_config_defaults_to_online_backend() -> None:
     config = RuntimeConfig()
 
