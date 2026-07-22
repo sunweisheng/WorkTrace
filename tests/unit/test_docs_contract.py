@@ -327,9 +327,23 @@ def test_docs_match_failover_and_collected_merge_optimizations() -> None:
     assert "共同消息指纹或共同文件" in content
     assert "split_reason" in content
     assert "最多三路" in content
+    assert "在线文字请求之间不增加随机等待" in content
+    assert "第二次正式在线请求起" not in content
     assert "WORKTRACE_LLM_" + "SLEEP_" not in content
     assert "WORKTRACE_COLLECTED_MERGE_" + "RETRYABLE_ERROR_LIMIT" not in content
     assert "WORKTRACE_COLLECTED_MERGE_" + "RETRY_DELAY_SECONDS" not in content
+
+
+def test_preflight_docs_cover_codex_fallback_and_delivery_boundary() -> None:
+    readme = Path("README.md").read_text(encoding="utf-8")
+    employee_guide = Path("docs/employee-guide.md").read_text(encoding="utf-8")
+    implementation = Path("docs/implementation-breakdown.md").read_text(
+        encoding="utf-8"
+    )
+
+    for content in (readme, employee_guide, implementation):
+        assert "Codex" in content or "`codex`" in content
+    assert "自检不会发送测试文件" in employee_guide
 
 
 def test_docs_describe_three_required_llm_values_and_default_reasoning() -> None:

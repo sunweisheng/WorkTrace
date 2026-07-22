@@ -9,7 +9,7 @@
 | 文件 | 当前职责 |
 | --- | --- |
 | `src/worktrace/cli.py` | 解析个人日报、`merge-collected`、`sync-reaction-catalog`，加载配置，输出 JSON 和退出码 |
-| `src/worktrace/preflight.py` | 检查 Python、lark-cli user 身份、在线模型、数据目录和时区 |
+| `src/worktrace/preflight.py` | 检查 Python、lark-cli user 身份、在线模型、Codex 备用命令、数据目录和时区 |
 | `src/worktrace/config.py` | 合并 `RuntimeConfig`、`.env`、进程环境变量及各类 JSON 配置 |
 | `src/worktrace/factories.py` | 装配聊天源、内容解析器、analyzer、store 和投递通道 |
 

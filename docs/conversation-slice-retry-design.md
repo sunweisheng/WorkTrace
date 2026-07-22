@@ -62,6 +62,8 @@ flowchart TD
 - 已生成的图片摘要
 - reaction 的本地中文说明和语义
 
+进入分段模型前，Python 会按最终分段 prompt、`/no_think`、完整 JSON Schema 和结构化输出包装估算输入。超出 `max_model_input_tokens` 时先按锚点拆分，再按连续消息拆分，并保留拆分窗口需要的直接 reply/quote 上下文；只有单条消息和必要协议字段组成的最小窗口仍超限时才失败，且不会发送模型请求。
+
 ## 5. 会话分段
 
 ### 5.1 模型输出
@@ -101,11 +103,11 @@ flowchart TD
 
 ## 7. 片段组批
 
-校验后的 `ConversationSegmentUnit` 由 `pack_segment_units(...)` 按 `max_model_input_tokens` 分批。当前规则：
+校验后的 `ConversationSegmentUnit` 由 `pack_segment_units(...)` 按最终 prompt、`/no_think`、完整 JSON Schema 和结构化输出包装的合计估算分批。当前规则：
 
 - 只在同一会话内组批
 - 保持片段顺序
-- 单个片段过大时仍作为单独批次交给 analyzer；默认 Online analyzer 会在远程请求前再次估算完整 prompt，超过 `max_model_input_tokens` 时直接报错，不会把超限请求发送给模型服务
+- 单个片段在本阶段仍超限时，`pack_segment_units(...)` 直接报错，不创建可发送批次；analyzer 还会在实际请求前执行同口径的最后检查
 - 每个批次都携带当前用户身份和 conversation 元数据
 
 analyzer 返回 `BatchSegmentAnalysisResult`，必须对每个输入 `segment_id` 给出一项结果。Python 校验缺失、重复和未知 `segment_id`。

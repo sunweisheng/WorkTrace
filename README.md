@@ -379,6 +379,7 @@ python3 -m src.worktrace.cli --preflight
 
 - Python 3.11+
 - `lark-cli` 可执行且当前身份是 user
+- `codex` 命令可执行，供在线文字请求失败时切换当前请求
 - 在线模型三项必填连接配置
 - reasoning effort 的最终生效值为 `none`（未配置时使用代码默认值）
 - Responses API 结构化探针
