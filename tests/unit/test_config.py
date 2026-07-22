@@ -413,6 +413,8 @@ def test_repo_event_rules_use_rule_lists_only() -> None:
     assert "人员留任" in payload["sensitive_event_keywords"]
     assert "git pull" in payload["excluded_event_keywords"]
     assert "merged.md" in payload["excluded_event_keywords"]
+    assert "WorkTrace" in payload["excluded_event_keywords"]
+    assert "skills.gydev.cn" in payload["excluded_event_keywords"]
     assert "麻烦" in payload["self_assignment_keywords"]
     assert "处理" in payload["self_assignment_keywords"]
 

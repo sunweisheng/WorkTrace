@@ -243,6 +243,42 @@ def test_merged_markdown_title_is_excluded_at_all_three_layers() -> None:
     assert event_warnings == ["Filtered excluded event."]
 
 
+def test_repo_product_keywords_are_excluded_at_all_three_layers() -> None:
+    for index, keyword in enumerate(("WorkTrace", "skills.gydev.cn"), start=1):
+        content = f"讨论 {keyword} 的安装与使用。"
+        candidate = SourceBackedEventDraft(
+            draft_id=f"evt-product-{index}",
+            date="2026-07-22",
+            topic="工具使用沟通",
+            content=content,
+            source_message_ids=[f"m{index}"],
+            source_conversation_id=f"c{index}",
+            source_slice_id=f"s{index}",
+            confidence=0.9,
+        )
+        merged = MergedEventDraft(
+            date=candidate.date,
+            topic=candidate.topic,
+            content=candidate.content,
+            source_message_ids=candidate.source_message_ids,
+            source_conversation_ids=[candidate.source_conversation_id],
+        )
+        event = WorkEvent(
+            date=candidate.date,
+            event_id=candidate.draft_id,
+            title=candidate.topic,
+            content=candidate.content,
+        )
+
+        candidate_kept, _ = filter_candidate_drafts([candidate], REPO_CONFIG)
+        merged_kept, _ = filter_merged_drafts([merged], REPO_CONFIG)
+        event_kept, _ = filter_work_events([event], REPO_CONFIG)
+
+        assert candidate_kept == []
+        assert merged_kept == []
+        assert event_kept == []
+
+
 def test_work_event_filter_removes_sensitive_file_link_without_leaking_title() -> None:
     events = [
         WorkEvent(

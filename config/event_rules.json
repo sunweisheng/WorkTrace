@@ -43,7 +43,9 @@
   ],
   "excluded_event_keywords": [
     "git pull",
-    "merged.md"
+    "merged.md",
+    "WorkTrace",
+    "skills.gydev.cn"
   ],
   "self_assignment_keywords": [
     "帮",
