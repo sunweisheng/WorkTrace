@@ -652,7 +652,7 @@ class OnlineLLMAnalyzer(Analyzer):
                 deterministic_groups,
                 config=self.config,
             ),
-            output_schema=collected_grouping_output_schema(),
+            output_schema=collected_grouping_output_schema(self.config),
             request_kind="collected_candidate_grouping",
             **oversized_input_kwargs(
                 is_indivisible_collected_request(events, deterministic_groups)
@@ -679,7 +679,7 @@ class OnlineLLMAnalyzer(Analyzer):
                 config=self.config,
                 review_reasons=review_reasons,
             ),
-            output_schema=collected_grouping_output_schema(),
+            output_schema=collected_grouping_output_schema(self.config),
             request_kind="collected_group_review",
             **oversized_input_kwargs(True),
         )

@@ -1786,18 +1786,30 @@ class CollectedGroupingGroup:
 @dataclass(frozen=True)
 class CollectedGroupingResult:
     groups: list[CollectedGroupingGroup] = field(default_factory=list)
+    split_reason: str = ""
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "CollectedGroupingResult":
+        groups = [
+            CollectedGroupingGroup.from_dict(item)
+            for item in _dict_list(data.get("groups"))
+        ]
+        split_reason = str(data.get("split_reason", "")).strip()
+        if not split_reason:
+            split_reason = next(
+                (group.split_reason.strip() for group in groups if group.split_reason.strip()),
+                "",
+            )
         return cls(
-            groups=[
-                CollectedGroupingGroup.from_dict(item)
-                for item in _dict_list(data.get("groups"))
-            ]
+            groups=groups,
+            split_reason=split_reason,
         )
 
     def to_dict(self) -> dict[str, Any]:
-        return {"groups": [item.to_dict() for item in self.groups]}
+        return {
+            "split_reason": self.split_reason,
+            "groups": [item.to_dict() for item in self.groups],
+        }
 
 
 @dataclass(frozen=True)

@@ -252,7 +252,7 @@ merge_inbox/2026/07/06/
 
 个人事件会对“日期 + 原始会话 ID”计算不可逆会话指纹；同一天同一会话的不同消息因此可以建立候选关系。Python 只把临时 `conversation_groups` 和共同消息、共同文件集合比较形成的 `evidence_relations` 发送给模型，不发送原始会话 ID 或长指纹。消息或文件集合完全相同也不能自动合并，第一阶段 LLM 必须判断是否属于同一真实事项，第二阶段才生成正式汇总；同一会话不会自动强制合并。工作流相同不能单独作为合并依据；不同工作流仍默认拆开，只有共享会话或共同消息且模型确认内容一致时允许合并，冲突工作流字段留空并写 warning。主要动作或本人参与方式等公开业务字段缺失时仍显示“未明确”；工作流为空时不显示该字段。
 
-候选发现默认发送来源 MD 中的完整事件正文，不再按原始聊天消息的 `prompt_message_char_limit` 固定截取。模型同时返回 `group_reason` 和 `risk_flags`。来源事件达到 10 条、来源文件达到 4 个、跨批判断、Python 修复、不同非空工作流，或同一会话连接了多个没有共同消息或共同文件的部分时，根据 `config/collected_merge.json` 增加一次高风险复核；复核拿不准时拆开。后一类复核中，任何保留的多事件子组必须存在共同消息、共同文件，或明确为同一对象、连续动作；仅以同一会话作为依据会被重试。来源负责人相同不能单独作为合并依据。
+候选发现默认发送来源 MD 中的完整事件正文，不再按原始聊天消息的 `prompt_message_char_limit` 固定截取。模型同时返回 `group_reason` 和 `risk_flags`；合法原因及说明由 `config/collected_merge.json` 的 `group_reason_definitions` 提供。`shared_file` 只表示 Python 证据确认的同一个文件，不包括格式相同、名称相似或用途相近的不同文件；不同文件属于同一报送周期、提交任务或成套交付材料时使用 `same_deliverable_batch`。来源事件达到 10 条、来源文件达到 4 个、跨批判断、Python 修复、不同非空工作流，或同一会话连接了多个没有共同消息或共同文件的部分时增加高风险复核；复核拿不准时拆开。后一类复核中，任何保留的多事件子组必须存在共同消息、共同文件，或使用配置允许的语义合并依据；仅以同一会话作为依据会被重试。拆组时只返回一条顶层 `split_reason` 解释整体分组差异，不要求每个子组重复填写。来源负责人相同不能单独作为合并依据。
 
 候选、复核和正式正文请求统一按包含 JSON Schema 的完整模型输入估算使用 `model_input_batch_target_tokens=5200` 分批。能够拆分时先按消息、文件和会话关系优先分批，必要时复用正文切片和分层摘要；最小必要输入仍超过目标时标记后发送，由模型服务决定是否接受。正式正文必须返回完整 `covered_draft_ids` 和带来源的 `fact_items`；Python 只重试当前组的结果质量问题，模型明确拒绝输入或重试后仍不完整时当前 scope 失败，不写不完整文件。若当前 scope 已有同名历史输出，失败不会删除或覆盖它，判断本次结果必须以 CLI JSON 的 `status` 和 `outputs` 为准。单条事件组直接保留原文，不增加模型调用；正文不再把全部来源原文机械追加到模型结果。
 
@@ -348,7 +348,7 @@ WORKTRACE_COLLECTED_MERGE_MISSING_FIELD_RETRY_LIMIT=1
 | `config/conversation_window.json` | 群聊锚点聚合、初始上下文和按需扩窗轮数 |
 | `config/llm_retry.json` | 分段/提炼重试、流式首次返回超时、Codex 调用间隔，以及切分、提炼、个人事实复核和多人高风险复核并发数 |
 | `config/retention_policy.json` | 个人事件保留提示、既有业务词、临时协作复核、事实复核条件和模型信号定义 |
-| `config/collected_merge.json` | 多人汇总高风险复核开关、事件数/文件数阈值和复核条件 |
+| `config/collected_merge.json` | 多人汇总高风险复核开关、事件数/文件数阈值、复核条件和合并原因定义 |
 | `config/attachment_text.json` | 文本附件扩窗的开关、扩展名、数量和大小限制 |
 | `config/image_summary.json` | 图片摘要开关、提示词、数量和大小限制 |
 | `config/reaction_catalogs/*.json` | reaction 的名称、说明、语义和资源路径 |
@@ -419,6 +419,8 @@ python3 -m src.worktrace.cli --date 2026-07-06 --debug-output
 多人汇总跟踪通过 `.env` 的 `WORKTRACE_COLLECTED_MERGE_TRACE=true` 开启，默认写入 `data/debug/collected_merge/<target_date>/`。`source-audit.json` 记录每个来源文件的格式、声明/解析/过滤数量和部分读取状态；每次真实模型调用会在请求前写入 `step-NNN.json` 与 `step-NNN-prompt.txt`。其中 `prompt_estimated_tokens` 只记录最终文字提示词，`input_estimated_tokens` 记录加入完整 JSON Schema 和结构化输出包装后的输入估算，`input_target_tokens` 和 `oversized_singleton` 说明是否越过分批目标；step 还保存完整 `input_events`、`deterministic_groups`、各来源完整/实际发送字符数、候选摘要来源及该逻辑请求的在线/Codex 调用记录，成功和失败都会更新状态。`summary.json`、`summary.md` 在模型失败时也会生成，并记录失败步骤、结果质量重试、具体过滤事件、最终事件、`boundary_warnings`、各线路耗时和 Codex 等待。
 
 `scripts/diagnose_collected_merge_rolling.py` 的每个模型步骤也会在调用前写入 `status=running`，并实时输出步骤状态；完成或异常后，同一个 `step-NNN.json` 会更新为 `success` 或 `failed`。调试文件保持 `running` 只表示调用尚未返回，不能据此判断模型无响应。
+
+`python3 scripts/replay_collected_review_failures.py` 会离线回放失败清单中的 M07-M11，按当前 Python 规则重新检查来源覆盖、合并依据和整体拆分理由，不调用在线模型。加 `--output-dir <目录>` 可写出新版 prompt、Schema 和汇总；后续 Function Calling 实验把结果保存为 `<result-dir>/M07.json` 等文件后，可用 `--result-dir <目录>` 复核新返回。
 
 429、HTTP 5xx、连接失败、超时、流式 JSON 异常及空或无效 JSON 返回会立即由 Codex 重做当前文字请求，后续请求仍优先在线；不会重复在线请求。临时协作复核或个人事实复核的结果缺失、重复、覆盖不完整或证据非法属于结果质量校验，仍只重试当前复核批次。401、403、TLS 证书和请求参数错误不会切换。过滤诊断只记录阶段、类别、来源文件、来源人员、事件 ID 和标题，不记录命中关键词或完整敏感正文。
 

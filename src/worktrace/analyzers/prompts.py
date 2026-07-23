@@ -895,6 +895,7 @@ def build_collected_grouping_prompt(
     config: RuntimeConfig | None = None,
 ) -> str:
     runtime_config = config or RuntimeConfig()
+    reason_definitions = runtime_config.collected_group_reason_definitions
     deterministic_ids = {
         draft_id for group in deterministic_groups for draft_id in group
     }
@@ -919,11 +920,15 @@ def build_collected_grouping_prompt(
                 "待办和明确冲突，不得按人员逐条罗列或补充来源中没有的事实。"
             ),
             "只有一条记录的组将三个 summary 字段返回空字符串，由 Python 保留原事件。",
-            "group_reason 只返回实际成立的共同消息、共同文件、同日会话、相同对象或连续动作依据。",
+            (
+                "group_reason 只返回 group_reason_definitions 中实际成立的依据；"
+                "不得把不同但相似的文件当成同一个共同文件。"
+            ),
             "risk_flags 标记跨批、工作流冲突、对象过宽或来源很多等需要复核的风险。",
             "来源负责人相同不能单独作为合并依据。",
         ],
         "required_output_schema": {
+            "split_reason": "empty because this is not a split review result",
             "groups": [
                 {
                     "group_id": "string",
@@ -931,15 +936,17 @@ def build_collected_grouping_prompt(
                     "summary_title": "string or empty for singleton",
                     "summary_content": "string or empty for singleton",
                     "summary_object_hint": "string or empty for singleton",
-                    "split_reason": "empty because this is not a split review result",
                     "group_reason": [
-                        "shared_message | shared_file | same_conversation | same_object | continuous_action"
+                        " | ".join(item.key for item in reason_definitions)
                     ],
                     "risk_flags": [
                         "cross_batch | workstream_conflict | broad_object | large_group"
                     ],
                 }
             ]
+        },
+        "group_reason_definitions": {
+            item.key: item.description for item in reason_definitions
         },
         "target_date": target_date,
         "deterministic_groups": deterministic_groups,
@@ -985,6 +992,10 @@ def build_collected_review_prompt(
     review_reasons: list[str] | None = None,
 ) -> str:
     runtime_config = config or RuntimeConfig()
+    reason_definitions = runtime_config.collected_group_reason_definitions
+    semantic_reason_keys = [
+        item.key for item in reason_definitions if item.supports_semantic_merge
+    ]
     computed_review_reasons: list[str] = []
     if len(candidate_group.draft_ids) >= runtime_config.high_risk_source_event_count:
         computed_review_reasons.append("source_event_count")
@@ -1025,14 +1036,23 @@ def build_collected_review_prompt(
             "不同业务对象、不同主要动作或不同结果方向应拆开。",
             "不同非空工作流通常拆开，除非共享消息证据且内容明确一致。",
             "多成员组返回非空候选摘要；单成员组三个摘要字段返回空字符串。",
-            "只有将输入的多成员候选拆成多个组时，每个输出组都必须返回非空 split_reason，说明拆开的具体业务差异；未拆开时 split_reason 返回空字符串。",
-            "group_reason 只能返回实际成立的共同消息、共同文件、同一对象或连续动作依据；同一会话不能单独作为多成员组的合并依据。",
+            (
+                "只有将输入的多成员候选拆成多个组时，返回一条非空的顶层 split_reason，"
+                "整体说明各组的具体业务差异；未拆开时返回空字符串。"
+            ),
+            (
+                "group_reason 只能返回 group_reason_definitions 中实际成立的依据；"
+                "共同消息和共同文件只能在 evidence_relations 明确支持时使用，"
+                "同一会话不能单独作为多成员组的合并依据。"
+            ),
             *(
                 [
                     "本组的来源仅因同一会话跨越多个没有共同消息或共同文件的部分。"
                     "逐一核对这些部分：只有它们确属同一明确事项时才能保留原组；"
-                    "否则必须拆开，并为每个拆分组写明具体业务差异。"
-                    "任何保留的多成员子组必须有共同消息、共同文件，或在 group_reason 中明确写 same_object 或 continuous_action；"
+                    "否则必须拆开，并用一条顶层 split_reason 写明各组的具体业务差异。"
+                    "任何保留的多成员子组必须有共同消息、共同文件，或在 group_reason 中明确写配置允许的语义依据："
+                    + "、".join(semantic_reason_keys)
+                    + "；"
                     "只有 same_conversation 的子组会被判为无效。"
                 ]
                 if "same_conversation_only" in effective_review_reasons
@@ -1040,6 +1060,7 @@ def build_collected_review_prompt(
             ),
         ],
         "required_output_schema": {
+            "split_reason": "nonempty only when this review splits the candidate group",
             "groups": [
                 {
                     "group_id": "string",
@@ -1047,15 +1068,17 @@ def build_collected_review_prompt(
                     "summary_title": "string or empty for singleton",
                     "summary_content": "string or empty for singleton",
                     "summary_object_hint": "string or empty for singleton",
-                    "split_reason": "nonempty only when this review splits the candidate group",
                     "group_reason": [
-                        "shared_message | shared_file | same_conversation | same_object | continuous_action"
+                        " | ".join(item.key for item in reason_definitions)
                     ],
                     "risk_flags": [
                         "cross_batch | workstream_conflict | broad_object | large_group"
                     ],
                 }
             ]
+        },
+        "group_reason_definitions": {
+            item.key: item.description for item in reason_definitions
         },
         "target_date": target_date,
         "review_reasons": effective_review_reasons,

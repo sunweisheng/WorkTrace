@@ -754,7 +754,7 @@ class CollectedMergeRunner:
                 config=self.config,
                 review_reasons=reasons,
             ),
-            output_schema=collected_grouping_output_schema(),
+            output_schema=collected_grouping_output_schema(self.config),
         )
         if prompt_tokens <= self.config.model_input_batch_target_tokens:
             return self._invoke_collected_review_with_retry(
@@ -923,7 +923,7 @@ class CollectedMergeRunner:
                     config=self.config,
                     review_reasons=reasons,
                 ),
-                output_schema=collected_grouping_output_schema(),
+                output_schema=collected_grouping_output_schema(self.config),
             )
 
         components = build_collected_relation_components(source_events, [])
@@ -974,7 +974,7 @@ class CollectedMergeRunner:
             )
             prompt_tokens = _estimate_prepared_model_prompt_tokens(
                 prompt,
-                output_schema=collected_grouping_output_schema(),
+                output_schema=collected_grouping_output_schema(self.config),
             )
             trace_step_index = self._start_collected_merge_trace_attempt(
                 target_date=target_date,
@@ -1017,10 +1017,11 @@ class CollectedMergeRunner:
                 result,
                 candidate_group.draft_ids,
             )
-            relation_error = _same_conversation_only_review_result_error(
+            relation_error = _collected_review_result_basis_error(
                 result,
                 fitted_events,
                 reasons=reasons,
+                config=self.config,
             )
             self._record_collected_grouping_trace_success(
                 step_index=trace_step_index,
@@ -1036,11 +1037,12 @@ class CollectedMergeRunner:
                 if (
                     len(candidate_group.draft_ids) > 1
                     and len(repaired.groups) > 1
-                    and any(not group.split_reason.strip() for group in repaired.groups)
+                    and not _collected_grouping_split_reason(repaired)
                 ):
                     warning = (
                         "High-risk collected group split was rejected because the "
-                        f"review returned no split reason: group={candidate_group.group_id}."
+                        "review returned no overall split reason: "
+                        f"group={candidate_group.group_id}."
                     )
                     warnings.append(warning)
                     self._collected_merge_failure_warnings.append(warning)
@@ -1056,7 +1058,7 @@ class CollectedMergeRunner:
                 if relation_error:
                     raise AnalyzerProtocolError(
                         "High-risk collected group review returned an unsupported "
-                        "same-conversation subgroup: "
+                        "merge basis: "
                         f"group={candidate_group.group_id} {relation_error}"
                     )
                 raise AnalyzerProtocolError(
@@ -1066,11 +1068,11 @@ class CollectedMergeRunner:
             invalid_result_count += 1
             if relation_error:
                 warning = (
-                    "Retrying high-risk collected group review because a "
-                    "same-conversation subgroup had no supported merge basis: "
+                    "Retrying high-risk collected group review because a subgroup "
+                    "had an unsupported merge basis: "
                     f"group={candidate_group.group_id} {relation_error}"
                 )
-                retry_reason = "unsupported_same_conversation_subgroup"
+                retry_reason = "unsupported_merge_basis"
             else:
                 warning = (
                     "Retrying high-risk collected group review because source coverage "
@@ -1099,7 +1101,7 @@ class CollectedMergeRunner:
                     config=self.config,
                     review_reasons=reasons,
                 ),
-                output_schema=collected_grouping_output_schema(),
+                output_schema=collected_grouping_output_schema(self.config),
             )
 
         full_tokens = estimate(source_events)
@@ -2378,7 +2380,7 @@ class CollectedMergeRunner:
                 deterministic_groups,
                 config=self.config,
             ),
-            output_schema=collected_grouping_output_schema(),
+            output_schema=collected_grouping_output_schema(self.config),
         )
 
     def _group_source_events_for_rolling(
@@ -2950,7 +2952,7 @@ class CollectedMergeRunner:
             )
         )
         output_schema = (
-            collected_grouping_output_schema()
+            collected_grouping_output_schema(self.config)
             if stage.startswith("candidate_") or stage == "high_risk_review"
             else collected_merge_output_schema()
         )
@@ -4505,7 +4507,10 @@ def repair_collected_grouping_result(
             "Used balanced candidate content because model summaries were missing: "
             + ", ".join(missing_summary_groups)
         )
-    return CollectedGroupingResult(groups=repaired_groups), warnings
+    return CollectedGroupingResult(
+        groups=repaired_groups,
+        split_reason=_collected_grouping_split_reason(grouping_result),
+    ), warnings
 
 
 def collected_grouping_partition_error(
@@ -4684,17 +4689,23 @@ def _has_same_conversation_only_boundary(
     return False
 
 
-def _same_conversation_only_review_result_error(
+def _collected_review_result_basis_error(
     result: CollectedGroupingResult,
     source_events: list[CollectedSourceEvent],
     *,
     reasons: list[str],
+    config: RuntimeConfig,
 ) -> str:
-    if "same_conversation_only" not in reasons:
-        return ""
-
+    requires_supported_basis = "same_conversation_only" in reasons
     source_by_id = {item.draft_id: item for item in source_events}
-    supported_semantic_reasons = {"same_object", "continuous_action"}
+    reason_definitions = {
+        item.key: item for item in config.collected_group_reason_definitions
+    }
+    supported_semantic_reasons = {
+        item.key
+        for item in config.collected_group_reason_definitions
+        if item.supports_semantic_merge
+    }
     invalid_group_ids: list[str] = []
     for group in result.groups:
         if len(group.draft_ids) < 2:
@@ -4705,6 +4716,26 @@ def _same_conversation_only_review_result_error(
             if draft_id in source_by_id
         ]
         if len(items) != len(group.draft_ids):
+            continue
+        invalid_declared_reasons = [
+            reason
+            for reason in group.group_reason
+            if (
+                reason in reason_definitions
+                and reason_definitions[reason].evidence_relation
+                and not _events_have_connected_relation(
+                    items,
+                    reason_definitions[reason].evidence_relation,
+                )
+            )
+        ]
+        if invalid_declared_reasons:
+            invalid_group_ids.append(
+                (group.group_id or ",".join(group.draft_ids))
+                + f":invalid_reasons={sorted(invalid_declared_reasons)}"
+            )
+            continue
+        if not requires_supported_basis:
             continue
         if _events_have_connected_merge_evidence(items):
             continue
@@ -4718,6 +4749,13 @@ def _same_conversation_only_review_result_error(
 
 def _events_have_connected_merge_evidence(
     source_events: list[CollectedSourceEvent],
+) -> bool:
+    return _events_have_connected_relation(source_events, "message_or_file")
+
+
+def _events_have_connected_relation(
+    source_events: list[CollectedSourceEvent],
+    relation: str,
 ) -> bool:
     if len(source_events) < 2:
         return False
@@ -4745,10 +4783,32 @@ def _events_have_connected_merge_evidence(
             shared_files = set(left.event.file_keys).intersection(
                 right.event.file_keys
             )
-            if shared_messages or shared_files:
+            shared_conversations = set(
+                left.event.conversation_fingerprints
+            ).intersection(right.event.conversation_fingerprints)
+            is_related = {
+                "message": bool(shared_messages),
+                "file": bool(shared_files),
+                "conversation": bool(shared_conversations),
+                "message_or_file": bool(shared_messages or shared_files),
+            }.get(relation, False)
+            if is_related:
                 merge(left_index, right_index)
 
     return len({find(index) for index in range(len(source_events))}) == 1
+
+
+def _collected_grouping_split_reason(result: CollectedGroupingResult) -> str:
+    if result.split_reason.strip():
+        return result.split_reason.strip()
+    return next(
+        (
+            group.split_reason.strip()
+            for group in result.groups
+            if group.split_reason.strip()
+        ),
+        "",
+    )
 
 
 def _build_boundary_fallback_group(

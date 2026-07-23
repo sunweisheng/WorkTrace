@@ -234,6 +234,7 @@ def test_retention_review_protocol_rejects_incomplete_shapes(payload: object) ->
 
 def test_collected_grouping_protocol_carries_candidate_summary() -> None:
     payload = {
+        "split_reason": "价格方案与执行反馈属于不同事项。",
         "groups": [
             {
                 "group_id": "g1",
@@ -250,16 +251,41 @@ def test_collected_grouping_protocol_carries_candidate_summary() -> None:
     item_schema = schema["properties"]["groups"]["items"]
 
     assert parsed.groups[0].summary_content == payload["groups"][0]["summary_content"]
+    assert parsed.split_reason == payload["split_reason"]
+    assert schema["required"] == ["split_reason", "groups"]
     assert item_schema["required"] == [
         "group_id",
         "draft_ids",
-            "summary_title",
-            "summary_content",
-            "summary_object_hint",
-            "split_reason",
-            "group_reason",
+        "summary_title",
+        "summary_content",
+        "summary_object_hint",
+        "group_reason",
         "risk_flags",
     ]
+    assert "same_deliverable_batch" in item_schema["properties"]["group_reason"][
+        "items"
+    ]["enum"]
+
+
+def test_collected_grouping_protocol_reads_legacy_group_split_reason() -> None:
+    parsed = parse_collected_grouping_payload(
+        {
+            "groups": [
+                {
+                    "group_id": "g1",
+                    "draft_ids": ["d1"],
+                    "split_reason": "旧记录中的整体拆分理由。",
+                },
+                {
+                    "group_id": "g2",
+                    "draft_ids": ["d2"],
+                    "split_reason": "",
+                },
+            ]
+        }
+    )
+
+    assert parsed.split_reason == "旧记录中的整体拆分理由。"
 
 
 def test_anchor_status_list_string_is_normalized_to_single_status() -> None:

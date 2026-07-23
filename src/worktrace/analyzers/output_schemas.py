@@ -615,10 +615,21 @@ def workstream_assignment_output_schema() -> dict[str, object]:
     }
 
 
-def collected_grouping_output_schema() -> dict[str, object]:
+def collected_grouping_output_schema(
+    config: RuntimeConfig | None = None,
+) -> dict[str, object]:
+    runtime_config = config or RuntimeConfig()
+    reason_definitions = runtime_config.collected_group_reason_definitions
     return {
         "type": "object",
         "properties": {
+            "split_reason": {
+                "type": "string",
+                "description": (
+                    "高风险复核拆成多个组时，填写一条能够说明整体分组差异的原因；"
+                    "未拆分或普通候选分组时返回空字符串。"
+                ),
+            },
             "groups": {
                 "type": "array",
                 "items": {
@@ -632,18 +643,11 @@ def collected_grouping_output_schema() -> dict[str, object]:
                         "summary_title": {"type": "string"},
                         "summary_content": {"type": "string"},
                         "summary_object_hint": {"type": "string"},
-                        "split_reason": {"type": "string"},
                         "group_reason": {
                             "type": "array",
                             "items": {
                                 "type": "string",
-                                "enum": [
-                                    "shared_message",
-                                    "shared_file",
-                                    "same_conversation",
-                                    "same_object",
-                                    "continuous_action",
-                                ],
+                                "enum": [item.key for item in reason_definitions],
                             },
                         },
                         "risk_flags": {
@@ -665,7 +669,6 @@ def collected_grouping_output_schema() -> dict[str, object]:
                         "summary_title",
                         "summary_content",
                         "summary_object_hint",
-                        "split_reason",
                         "group_reason",
                         "risk_flags",
                     ],
@@ -673,7 +676,7 @@ def collected_grouping_output_schema() -> dict[str, object]:
                 },
             },
         },
-        "required": ["groups"],
+        "required": ["split_reason", "groups"],
         "additionalProperties": False,
     }
 

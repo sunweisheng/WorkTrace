@@ -2074,6 +2074,9 @@ def test_collected_grouping_prompt_uses_same_day_conversation_candidates() -> No
     assert message_a not in prompt
     assert message_b not in prompt
     assert payload["events"][0]["content"] == long_content
+    assert payload["required_output_schema"]["split_reason"].startswith("empty")
+    assert "same_deliverable_batch" in payload["group_reason_definitions"]
+    assert "不同文件" in payload["group_reason_definitions"]["shared_file"]
 
 
 def test_grouping_repair_preserves_only_matching_candidate_summary() -> None:
@@ -2707,6 +2710,7 @@ class ReviewAnalyzer(TwoStageAnalyzer):
             draft_ids = draft_ids[:1]
         groups = [[draft_id] for draft_id in draft_ids] if self.split else [draft_ids]
         return CollectedGroupingResult(
+            split_reason=("业务对象和主要动作不同。" if self.split else ""),
             groups=[
                 CollectedGroupingGroup(
                     group_id=f"review-{index}",
@@ -2714,7 +2718,6 @@ class ReviewAnalyzer(TwoStageAnalyzer):
                     summary_title="复核事项" if len(group) > 1 else "",
                     summary_content="复核后确认属于同一事项。" if len(group) > 1 else "",
                     summary_object_hint="复核事项" if len(group) > 1 else "",
-                    split_reason=("业务对象和主要动作不同。" if self.split else ""),
                     group_reason=["same_object"] if len(group) > 1 else [],
                     risk_flags=[],
                 )
@@ -3119,7 +3122,133 @@ def test_same_conversation_only_review_retries_unsupported_subgroup(
         ["d3", "d4"],
     ]
     assert len(analyzer.review_calls) == 2
-    assert any("no supported merge basis" in warning for warning in warnings)
+    assert any("unsupported merge basis" in warning for warning in warnings)
+
+
+def test_same_conversation_review_accepts_same_deliverable_batch_reason(
+    tmp_path: Path,
+) -> None:
+    class SharedFileThenDeliverableBatchAnalyzer(ReviewAnalyzer):
+        def review_collected_group(
+            self,
+            target_date,
+            events,
+            candidate_group,
+            *,
+            review_reasons=None,
+        ):
+            self.review_calls.append({"candidate_group": candidate_group})
+            reason = (
+                "shared_file"
+                if len(self.review_calls) == 1
+                else "same_deliverable_batch"
+            )
+            return CollectedGroupingResult(
+                groups=[
+                    CollectedGroupingGroup(
+                        "reports",
+                        [item.draft_id for item in events],
+                        summary_title="同批工作记录提交",
+                        summary_content="两人分别提交了同一批次的工作记录。",
+                        summary_object_hint="同批工作记录",
+                        group_reason=[reason],
+                    )
+                ]
+            )
+
+    events = [
+        CollectedSourceEvent(
+            "d1",
+            "张三",
+            "张三.md",
+            _event(
+                event_id="e1",
+                title="张三工作记录",
+                content="提交张三工作记录。",
+                conversation_fingerprints=["conversation-1"],
+                file_keys=["file-1"],
+            ),
+        ),
+        CollectedSourceEvent(
+            "d2",
+            "李四",
+            "李四.md",
+            _event(
+                event_id="e2",
+                title="李四工作记录",
+                content="提交李四工作记录。",
+                conversation_fingerprints=["conversation-1"],
+                file_keys=["file-2"],
+            ),
+        ),
+    ]
+    analyzer = SharedFileThenDeliverableBatchAnalyzer()
+    runner = _build_runner(tmp_path, analyzer=analyzer)
+
+    reviewed, warnings = runner._invoke_collected_review_with_retry(
+        "2026-06-29",
+        events,
+        CollectedGroupingGroup("g1", ["d1", "d2"]),
+        reasons=["same_conversation_only"],
+    )
+
+    assert reviewed.groups[0].group_reason == ["same_deliverable_batch"]
+    assert len(analyzer.review_calls) == 2
+    assert any("unsupported merge basis" in warning for warning in warnings)
+
+
+def test_other_high_risk_review_rejects_false_shared_file(tmp_path: Path) -> None:
+    class FalseSharedFileAnalyzer(ReviewAnalyzer):
+        def review_collected_group(
+            self,
+            target_date,
+            events,
+            candidate_group,
+            *,
+            review_reasons=None,
+        ):
+            self.review_calls.append({"candidate_group": candidate_group})
+            return CollectedGroupingResult(
+                groups=[
+                    CollectedGroupingGroup(
+                        "reports",
+                        [item.draft_id for item in events],
+                        summary_title="同批工作记录",
+                        summary_content="两人分别提交了工作记录。",
+                        summary_object_hint="工作记录",
+                        group_reason=["shared_file"],
+                    )
+                ]
+            )
+
+    events = [
+        CollectedSourceEvent(
+            f"d{index}",
+            f"人员{index}",
+            f"人员{index}.md",
+            _event(
+                event_id=f"e{index}",
+                title="工作记录",
+                content="提交工作记录。",
+                file_keys=[f"file-{index}"],
+            ),
+        )
+        for index in range(2)
+    ]
+    analyzer = FalseSharedFileAnalyzer()
+    runner = _build_runner(
+        tmp_path,
+        analyzer=analyzer,
+        config=RuntimeConfig(collected_merge_missing_field_retry_limit=0),
+    )
+
+    with pytest.raises(AnalyzerProtocolError, match="unsupported merge basis"):
+        runner._invoke_collected_review_with_retry(
+            "2026-06-29",
+            events,
+            CollectedGroupingGroup("g1", ["d0", "d1"]),
+            reasons=["source_event_count"],
+        )
 
 
 def test_high_risk_review_can_split_group_without_losing_sources(
@@ -3210,7 +3339,55 @@ def test_high_risk_review_rejects_split_without_reason(tmp_path: Path) -> None:
     )
 
     assert [group.draft_ids for group in reviewed.groups] == [["d0", "d1"]]
-    assert any("no split reason" in warning for warning in warnings)
+    assert any("no overall split reason" in warning for warning in warnings)
+
+
+def test_high_risk_review_accepts_one_legacy_group_split_reason(
+    tmp_path: Path,
+) -> None:
+    class OneLegacyReasonAnalyzer(ReviewAnalyzer):
+        def review_collected_group(
+            self,
+            target_date,
+            events,
+            candidate_group,
+            *,
+            review_reasons=None,
+        ):
+            return CollectedGroupingResult(
+                groups=[
+                    CollectedGroupingGroup(
+                        "split-1",
+                        [events[0].draft_id],
+                        split_reason="两个子组的业务对象不同。",
+                    ),
+                    CollectedGroupingGroup("split-2", [events[1].draft_id]),
+                ]
+            )
+
+    events = [
+        CollectedSourceEvent(
+            f"d{index}",
+            f"人员{index}",
+            f"人员{index}.md",
+            _event(event_id=f"e{index}", title="候选事项", content=f"事实{index}"),
+        )
+        for index in range(2)
+    ]
+    runner = _build_runner(tmp_path, analyzer=OneLegacyReasonAnalyzer())
+
+    reviewed, warnings = runner._review_high_risk_groups(
+        "2026-06-29",
+        events,
+        CollectedGroupingResult(
+            groups=[
+                CollectedGroupingGroup("g1", ["d0", "d1"], risk_flags=["cross_batch"])
+            ]
+        ),
+    )
+
+    assert [group.draft_ids for group in reviewed.groups] == [["d0"], ["d1"]]
+    assert warnings == []
 
 
 def test_high_risk_review_runs_three_multi_groups_in_parallel(tmp_path: Path) -> None:

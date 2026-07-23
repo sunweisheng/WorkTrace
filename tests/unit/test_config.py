@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import json
+from dataclasses import asdict
 from pathlib import Path
 
 import pytest
 
 from src.worktrace.config import (
+    DEFAULT_COLLECTED_GROUP_REASON_DEFINITIONS,
     RuntimeConfig,
     load_conversation_blacklist_overrides,
     load_runtime_config_overrides,
@@ -319,6 +321,10 @@ def test_load_runtime_config_overrides_reads_collected_merge_review_config(
                 "review_repaired_groups": True,
                 "review_workstream_conflicts": False,
                 "review_same_conversation_only_groups": True,
+                "group_reason_definitions": [
+                    asdict(item)
+                    for item in DEFAULT_COLLECTED_GROUP_REASON_DEFINITIONS
+                ],
             }
         ),
         encoding="utf-8",
@@ -333,6 +339,9 @@ def test_load_runtime_config_overrides_reads_collected_merge_review_config(
     assert config.review_repaired_groups is True
     assert config.review_workstream_conflicts is False
     assert config.review_same_conversation_only_groups is True
+    assert config.collected_group_reason_definitions[-1].key == (
+        "same_deliverable_batch"
+    )
 
 
 def test_repo_collected_merge_config_matches_review_defaults() -> None:
@@ -348,6 +357,9 @@ def test_repo_collected_merge_config_matches_review_defaults() -> None:
         "review_repaired_groups": True,
         "review_workstream_conflicts": True,
         "review_same_conversation_only_groups": True,
+        "group_reason_definitions": [
+            asdict(item) for item in DEFAULT_COLLECTED_GROUP_REASON_DEFINITIONS
+        ],
     }
 
 

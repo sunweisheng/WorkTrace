@@ -356,7 +356,7 @@ flowchart TD
     L --> M["最终过滤、写入、自发送"]
 ```
 
-多人合并候选发现默认发送来源 MD 中的完整事件正文：Python 根据共同消息、共同文件形成 `evidence_relations`，并根据同日会话形成 `conversation_groups`；会话哈希本身不进入模型输入。即使消息或文件集合完全相同也不能自动合并。候选模型返回 `group_reason` 和 `risk_flags`。单条候选直接保留，不进入高风险复核。多条候选在来源事件达到 10 条、来源文件达到 4 个、跨批、Python 修复、不同非空工作流，或同一会话连接了多个没有共同消息或共同文件的部分时，根据 `config/collected_merge.json` 增加高风险复核，最多三路并行并保持原候选顺序。跨批只协调具有共同消息指纹或共同文件的候选；同一会话复核中，Python 检查每个保留的多事件子组：必须有共同消息、共同文件，或模型确认同一对象、连续动作，不能仅依据同一会话，否则重试。复核拆开已确认多条候选时，所有输出组必须给出非空 `split_reason`，否则 Python 保留原组并写告警。
+多人合并候选发现默认发送来源 MD 中的完整事件正文：Python 根据共同消息、共同文件形成 `evidence_relations`，并根据同日会话形成 `conversation_groups`；会话哈希本身不进入模型输入。即使消息或文件集合完全相同也不能自动合并。候选模型返回 `group_reason` 和 `risk_flags`，原因枚举、说明、证据关系类型及是否允许作为语义依据由 `config/collected_merge.json` 的 `group_reason_definitions` 提供。`shared_file` 必须有同一文件的 Python 证据；不同文件若属于同一报送周期、提交任务或成套交付材料，使用 `same_deliverable_batch`。单条候选直接保留，不进入高风险复核。多条候选在来源事件达到 10 条、来源文件达到 4 个、跨批、Python 修复、不同非空工作流，或同一会话连接了多个没有共同消息或共同文件的部分时增加高风险复核，最多三路并行并保持原候选顺序。跨批只协调具有共同消息指纹或共同文件的候选；同一会话复核中，Python 检查每个保留的多事件子组是否有确定性证据或配置允许的语义依据，不能仅依据同一会话。复核拆组时只要求一条顶层 `split_reason` 解释整体差异；旧记录只要任一子组有非空理由也兼容接受，完全没有理由时才保留原组并写告警。
 
 候选、复核和正式正文统一按最终提示词、在线请求追加的 `/no_think`、完整 JSON Schema 和结构化输出包装的合计估算，以 `model_input_batch_target_tokens=5200` 为分批目标。复核超过目标时按关系分批，单条正文仍过长时复用正文切片和分层摘要；不可继续拆分的最小输入允许发送，由模型服务决定是否接受。正式内容必须返回完整 `covered_draft_ids` 和 `fact_items`；Python 检查整批 draft 分配、锁定组和事实来源，只重试当前组的结果质量问题，模型明确拒绝输入或结果仍不完整时当前 scope 失败且不写文件。若 scope 目录已有同名历史输出，失败不会删除或覆盖旧文件，是否成功必须以本次 CLI JSON 为准。正文不再机械追加全部来源原文。中间 `WorkEvent` 持续携带会话指纹、消息指纹、文件标识、来源人员、来源事件 ID 和来源负责人，最终只生成规范化 `YYYY-MM-DD-登录人姓名-merged.md`。
 
@@ -500,6 +500,8 @@ segmentation 和 segment batch 的模型失败轮次保存输入、prompt 与 `f
 `scripts/report_replay_call_inputs.py` 会把分段、提炼、分段失败后的直接提炼和两类复核的每次尝试（包括失败重试）写入 `call-input-report.md`。在线模型成功响应数分为文字与图片摘要，调试文件保存的是文字调用尝试，两种口径不要求相等：请求发送前或服务端失败的尝试可能有调试输入但没有成功响应。`personal_fact_review_summary.review_retry_count` 统计未通过 Python 协议校验后实际发生的局部重试；例如值为 5 表示 5 个失败尝试后来只重试对应候选，最终运行仍可成功。完整原聊天仍从已有分段调试输入查看。
 
 多人汇总 trace 写 `source-audit.json`、step JSON、`step-NNN-prompt.txt`、`summary.json` 和 `summary.md`。每个模型请求前先保存输入和 prompt；成功、失败、结果质量重试和自送达失败都会留下 summary。step 中的 `prompt_estimated_tokens` 仅表示文字提示词，`input_estimated_tokens` 表示包含 JSON Schema 和结构化输出包装的完整输入估算，`input_target_tokens` 与 `oversized_singleton` 记录是否越过分批目标；其余字段包括当前逻辑请求实际使用的在线/Codex 调用记录、候选发现、高风险复核或正式内容阶段、复核原因和前后分组、批次、尝试次数、重试原因、辅助字符数、`input_events`、`deterministic_groups`、正文覆盖、`boundary_warnings`、过滤和最终事件。两个 summary 文件还保存 Python 计算的 `quality_summary`、各线路调用数和耗时、切换数以及 Codex 等待统计，因此可以从来源增强信息追到最终部门事件并核对各级数量和覆盖率。
+
+`scripts/replay_collected_review_failures.py` 默认读取在线失败清单中的 M07-M11，离线重建当前高风险复核 prompt 和 Schema，并用生产校验逻辑检查历史返回或 `--result-dir` 提供的新实验结果。该脚本不调用模型；`--output-dir` 只写调试报告和后续实验输入。
 
 所有主阶段同时通过 `logging_utils.log_timing(...)` 输出耗时和数量字段。在线和 Codex 记录都显式携带 `request_kind`；在线没有等待日志，Codex 等待单独进入调用记录；并发事实复核同时记录单候选累计口径和整体墙钟口径。
 

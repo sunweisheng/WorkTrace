@@ -59,6 +59,58 @@ class RetentionSignalDefinition:
 
 
 @dataclass(frozen=True)
+class CollectedGroupReasonDefinition:
+    key: str
+    description: str
+    evidence_relation: str = ""
+    supports_semantic_merge: bool = False
+
+
+DEFAULT_COLLECTED_GROUP_REASON_DEFINITIONS = (
+    CollectedGroupReasonDefinition(
+        key="shared_message",
+        description=(
+            "事件之间存在 Python evidence_relations 明确给出的共同消息；"
+            "没有共同消息计数时不得使用。"
+        ),
+        evidence_relation="message",
+    ),
+    CollectedGroupReasonDefinition(
+        key="shared_file",
+        description=(
+            "事件之间引用系统识别的同一个文件；不同文件即使格式、名称或用途相似也不得使用。"
+        ),
+        evidence_relation="file",
+    ),
+    CollectedGroupReasonDefinition(
+        key="same_conversation",
+        description=(
+            "事件来自同一天同一会话；只能用于候选发现，不能单独支持高风险多事件子组。"
+        ),
+        evidence_relation="conversation",
+    ),
+    CollectedGroupReasonDefinition(
+        key="same_object",
+        description="事件处理同一个明确业务对象，不是宽泛领域或相似标题。",
+        supports_semantic_merge=True,
+    ),
+    CollectedGroupReasonDefinition(
+        key="continuous_action",
+        description="事件是同一事项的前后连续动作，能够说明动作顺序或承接关系。",
+        supports_semantic_merge=True,
+    ),
+    CollectedGroupReasonDefinition(
+        key="same_deliverable_batch",
+        description=(
+            "事件涉及不同文件，但属于同一报送周期、同一提交任务或同一套交付材料；"
+            "仅文件格式相同或名称相似不足以成立。"
+        ),
+        supports_semantic_merge=True,
+    ),
+)
+
+
+@dataclass(frozen=True)
 class RetentionPolicyConfig:
     review_enabled: bool = False
     review_retention_reasons: tuple[str, ...] = ()
@@ -626,7 +678,8 @@ def _load_collected_merge_overrides(
         "high_risk_source_event_count",
         "high_risk_source_file_count",
     }
-    keys = bool_keys | int_keys
+    definition_key = "group_reason_definitions"
+    keys = bool_keys | int_keys | {definition_key}
     unexpected = sorted(set(payload).difference(keys))
     missing = sorted(keys.difference(payload))
     if unexpected or missing:
@@ -654,7 +707,75 @@ def _load_collected_merge_overrides(
                 "must be a positive integer."
             )
         values[key] = value
+    definitions = _read_collected_group_reason_definitions(
+        payload[definition_key],
+        config_path=config_path,
+    )
+    values["collected_group_reason_definitions"] = definitions
     return replace(config, **values)
+
+
+def _read_collected_group_reason_definitions(
+    raw_value: object,
+    *,
+    config_path: Path,
+) -> tuple[CollectedGroupReasonDefinition, ...]:
+    if not isinstance(raw_value, list) or not raw_value:
+        raise ValueError(
+            "Invalid collected merge config: "
+            f"{config_path} field `group_reason_definitions` must be a non-empty list."
+        )
+    definitions: list[CollectedGroupReasonDefinition] = []
+    seen: set[str] = set()
+    expected_keys = {
+        "key",
+        "description",
+        "evidence_relation",
+        "supports_semantic_merge",
+    }
+    supported_relations = {"", "message", "file", "conversation"}
+    for item in raw_value:
+        if not isinstance(item, dict) or set(item) != expected_keys:
+            raise ValueError(
+                "Invalid collected merge config: `group_reason_definitions` items "
+                "must contain key, description, evidence_relation and "
+                "supports_semantic_merge."
+            )
+        key = item["key"]
+        description = item["description"]
+        evidence_relation = item["evidence_relation"]
+        supports_semantic_merge = item["supports_semantic_merge"]
+        if not all(
+            isinstance(value, str)
+            for value in (key, description, evidence_relation)
+        ) or not isinstance(supports_semantic_merge, bool):
+            raise ValueError(
+                "Invalid collected merge config: group reason values have invalid types."
+            )
+        key = key.strip()
+        description = description.strip()
+        evidence_relation = evidence_relation.strip()
+        if (
+            not key
+            or not description
+            or key in seen
+            or evidence_relation not in supported_relations
+            or (evidence_relation and supports_semantic_merge)
+        ):
+            raise ValueError(
+                "Invalid collected merge config: group reason definitions contain "
+                "an empty, duplicate or conflicting value."
+            )
+        seen.add(key)
+        definitions.append(
+            CollectedGroupReasonDefinition(
+                key=key,
+                description=description,
+                evidence_relation=evidence_relation,
+                supports_semantic_merge=supports_semantic_merge,
+            )
+        )
+    return tuple(definitions)
 
 
 def _load_conversation_window_overrides(
@@ -1009,6 +1130,9 @@ class RuntimeConfig:
     review_repaired_groups: bool = True
     review_workstream_conflicts: bool = True
     review_same_conversation_only_groups: bool = True
+    collected_group_reason_definitions: tuple[
+        CollectedGroupReasonDefinition, ...
+    ] = DEFAULT_COLLECTED_GROUP_REASON_DEFINITIONS
     slice_retry_limit: int = 3
     prompt_slice_message_limit: int = 40
     prompt_message_char_limit: int = 300
