@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from threading import local
 from time import perf_counter
 from typing import Any
 
@@ -93,7 +94,14 @@ class FailoverAnalyzer(Analyzer):
     fallback: Analyzer
     usage_recorder: LLMUsageRecorder
 
+    def __post_init__(self) -> None:
+        self._request_state = local()
+
+    def last_request_used_fallback(self) -> bool:
+        return bool(getattr(self._request_state, "used_fallback", False))
+
     def _call(self, method_name: str, *args: Any, **kwargs: Any) -> Any:
+        self._request_state.used_fallback = False
         started_at = perf_counter()
         function_spec = kwargs.get("function_spec")
         request_kind = (
@@ -104,6 +112,7 @@ class FailoverAnalyzer(Analyzer):
         try:
             return getattr(self.primary, method_name)(*args, **kwargs)
         except RetryableAnalyzerProtocolError as exc:
+            self._request_state.used_fallback = True
             self.usage_recorder.record(
                 request_kind,
                 {},
@@ -127,6 +136,26 @@ class FailoverAnalyzer(Analyzer):
                 **_input_metrics(exc),
             )
             raise
+
+    def fallback_current_request(
+        self,
+        method_name: str,
+        *args: Any,
+        failed_request_context_id: str,
+        error_category: str,
+        **kwargs: Any,
+    ) -> Any:
+        """Send one already-retried request to Codex without changing later routing."""
+        if method_name not in _REQUEST_KINDS:
+            raise ValueError(f"Unsupported fallback analyzer method: {method_name}.")
+        self._request_state.used_fallback = True
+        self.usage_recorder.mark_request_fallback(
+            failed_request_context_id,
+            fallback_from="online",
+            fallback_to="codex",
+            error_category=error_category,
+        )
+        return getattr(self.fallback, method_name)(*args, **kwargs)
 
     def request_function(
         self,

@@ -67,6 +67,63 @@ def test_failover_retries_only_the_current_online_request_with_codex() -> None:
     assert recorder.records()[0]["fallback_to"] == "codex"
 
 
+def test_explicit_current_request_fallback_does_not_change_the_next_route() -> None:
+    from src.worktrace.llm_usage import LLMUsageRecorder
+
+    class Online:
+        def __init__(self, recorder: LLMUsageRecorder) -> None:
+            self.calls = 0
+            self.recorder = recorder
+
+        def analyze_batch(self, target_date, batch_input):
+            self.calls += 1
+            self.recorder.record("batch_analysis", {}, backend="online")
+            return f"online-result-{self.calls}"
+
+    class Codex:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def analyze_batch(self, target_date, batch_input):
+            self.calls += 1
+            return "codex-result"
+
+    recorder = LLMUsageRecorder()
+    online = Online(recorder)
+    codex = Codex()
+    analyzer = FailoverAnalyzer(
+        primary=online,
+        fallback=codex,
+        usage_recorder=recorder,
+    )
+
+    with recorder.request_context("online-retry"):
+        assert analyzer.analyze_batch("2026-07-21", object()) == "online-result-1"
+    with recorder.request_context("codex-fallback"):
+        assert (
+            analyzer.fallback_current_request(
+                "analyze_batch",
+                "2026-07-21",
+                object(),
+                failed_request_context_id="online-retry",
+                error_category="python_validation_failed",
+            )
+            == "codex-result"
+        )
+
+    failed_online_record = recorder.records()[0]
+    assert failed_online_record["status"] == "failed"
+    assert failed_online_record["fallback_from"] == "online"
+    assert failed_online_record["fallback_to"] == "codex"
+    assert failed_online_record["error_category"] == "python_validation_failed"
+    assert analyzer.last_request_used_fallback() is True
+
+    assert analyzer.analyze_batch("2026-07-21", object()) == "online-result-2"
+    assert analyzer.last_request_used_fallback() is False
+    assert online.calls == 2
+    assert codex.calls == 1
+
+
 def test_failover_does_not_switch_permanent_online_errors() -> None:
     from src.worktrace.errors import AnalyzerProtocolError
     from src.worktrace.llm_usage import LLMUsageRecorder

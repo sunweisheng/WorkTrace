@@ -152,6 +152,32 @@ class LLMUsageRecorder:
         with self._lock:
             return [dict(record) for record in self._records]
 
+    def mark_request_fallback(
+        self,
+        request_context_id: str,
+        *,
+        fallback_from: str,
+        fallback_to: str,
+        error_category: str,
+    ) -> bool:
+        """Mark the latest matching request as the attempt that triggered fallback."""
+        with self._lock:
+            for record in reversed(self._records):
+                if record.get("request_context_id") != request_context_id:
+                    continue
+                if record.get("backend") != fallback_from:
+                    continue
+                record.update(
+                    {
+                        "status": "failed",
+                        "fallback_from": fallback_from,
+                        "fallback_to": fallback_to,
+                        "error_category": error_category,
+                    }
+                )
+                return True
+        return False
+
 
 def _summarize_records(
     records: list[tuple[str, dict[str, int | None]]],

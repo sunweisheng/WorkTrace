@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from src.worktrace.analyzers.failover import FailoverAnalyzer
 from src.worktrace.collected_merge import (
     CollectedMergeRunner,
     aggregate_collected_quality_summaries,
@@ -28,6 +29,7 @@ from src.worktrace.errors import (
     DeliveryError,
     RetryableAnalyzerProtocolError,
 )
+from src.worktrace.llm_usage import LLMUsageRecorder
 from src.worktrace.models import (
     CollectedFactItem,
     CollectedGroupingGroup,
@@ -3450,6 +3452,175 @@ def test_high_risk_review_runs_three_multi_groups_in_parallel(tmp_path: Path) ->
     assert [group.group_id for group in reviewed.groups] == ["g0", "g1", "g2"]
 
 
+def test_high_risk_review_cancels_pending_groups_after_codex_validation_failure(
+    tmp_path: Path,
+) -> None:
+    route: list[str] = []
+
+    class Online:
+        def review_collected_group(
+            self,
+            target_date,
+            events,
+            candidate_group,
+            *,
+            review_reasons=None,
+            validation_feedback="",
+        ):
+            route.append(f"online:{candidate_group.group_id}")
+            return CollectedGroupingResult(
+                groups=[CollectedGroupingGroup("invalid", [events[0].draft_id])]
+            )
+
+    class Codex:
+        def review_collected_group(
+            self,
+            target_date,
+            events,
+            candidate_group,
+            *,
+            review_reasons=None,
+            validation_feedback="",
+        ):
+            route.append(f"codex:{candidate_group.group_id}")
+            return CollectedGroupingResult(
+                groups=[CollectedGroupingGroup("invalid", [events[0].draft_id])]
+            )
+
+    events = [
+        CollectedSourceEvent(
+            f"d{index}",
+            f"人员{index}",
+            f"人员{index}.md",
+            _event(event_id=f"e{index}", title="事项", content=f"事实{index}"),
+        )
+        for index in range(6)
+    ]
+    groups = [
+        CollectedGroupingGroup(
+            f"g{index}",
+            [f"d{index * 2}", f"d{index * 2 + 1}"],
+            risk_flags=["cross_batch"],
+        )
+        for index in range(3)
+    ]
+    runner = _build_runner(
+        tmp_path,
+        analyzer=FailoverAnalyzer(Online(), Codex(), LLMUsageRecorder()),
+        config=RuntimeConfig(
+            data_root=tmp_path / "data",
+            collected_merge_missing_field_retry_limit=1,
+            max_concurrent_collected_merge_review_requests=1,
+        ),
+    )
+
+    with pytest.raises(AnalyzerProtocolError, match="after Codex fallback"):
+        runner._review_high_risk_groups(
+            "2026-07-21",
+            events,
+            CollectedGroupingResult(groups=groups),
+        )
+
+    assert route == ["online:g0", "online:g0", "codex:g0"]
+
+
+def test_high_risk_review_stops_in_flight_group_before_its_next_retry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from threading import Event as ThreadEvent
+
+    import src.worktrace.collected_merge as collected_merge_module
+
+    route: list[str] = []
+    cancellation_started = ThreadEvent()
+    second_group_started = ThreadEvent()
+    online_calls: dict[str, int] = {}
+
+    class TrackingEvent(ThreadEvent):
+        def set(self) -> None:
+            super().set()
+            cancellation_started.set()
+
+    monkeypatch.setattr(collected_merge_module, "Event", TrackingEvent)
+
+    class Online:
+        def review_collected_group(
+            self,
+            target_date,
+            events,
+            candidate_group,
+            *,
+            review_reasons=None,
+            validation_feedback="",
+        ):
+            route.append(f"online:{candidate_group.group_id}")
+            online_calls[candidate_group.group_id] = (
+                online_calls.get(candidate_group.group_id, 0) + 1
+            )
+            if (
+                candidate_group.group_id == "g0"
+                and online_calls[candidate_group.group_id] == 1
+            ):
+                assert second_group_started.wait(timeout=1)
+            if candidate_group.group_id == "g1":
+                second_group_started.set()
+                assert cancellation_started.wait(timeout=1)
+            return CollectedGroupingResult(
+                groups=[CollectedGroupingGroup("invalid", [events[0].draft_id])]
+            )
+
+    class Codex:
+        def review_collected_group(
+            self,
+            target_date,
+            events,
+            candidate_group,
+            *,
+            review_reasons=None,
+            validation_feedback="",
+        ):
+            route.append(f"codex:{candidate_group.group_id}")
+            return CollectedGroupingResult(
+                groups=[CollectedGroupingGroup("invalid", [events[0].draft_id])]
+            )
+
+    events = [
+        CollectedSourceEvent(
+            f"d{index}",
+            f"人员{index}",
+            f"人员{index}.md",
+            _event(event_id=f"e{index}", title="事项", content=f"事实{index}"),
+        )
+        for index in range(4)
+    ]
+    groups = [
+        CollectedGroupingGroup("g0", ["d0", "d1"], risk_flags=["cross_batch"]),
+        CollectedGroupingGroup("g1", ["d2", "d3"], risk_flags=["cross_batch"]),
+    ]
+    runner = _build_runner(
+        tmp_path,
+        analyzer=FailoverAnalyzer(Online(), Codex(), LLMUsageRecorder()),
+        config=RuntimeConfig(
+            data_root=tmp_path / "data",
+            collected_merge_missing_field_retry_limit=1,
+            max_concurrent_collected_merge_review_requests=2,
+        ),
+    )
+
+    with pytest.raises(AnalyzerProtocolError):
+        runner._review_high_risk_groups(
+            "2026-07-21",
+            events,
+            CollectedGroupingResult(groups=groups),
+        )
+
+    assert route.count("online:g0") == 2
+    assert route.count("codex:g0") == 1
+    assert route.count("online:g1") == 1
+    assert "codex:g1" not in route
+
+
 def test_high_risk_review_invalid_partition_retries_then_fails(
     tmp_path: Path,
 ) -> None:
@@ -3481,6 +3652,163 @@ def test_high_risk_review_invalid_partition_retries_then_fails(
         )
 
     assert len(analyzer.review_calls) == 2
+
+
+def test_candidate_grouping_uses_codex_after_online_local_retry_only(
+    tmp_path: Path,
+) -> None:
+    route: list[str] = []
+
+    class Online:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def group_collected_events(
+            self,
+            target_date,
+            events,
+            deterministic_groups,
+            *,
+            validation_feedback="",
+        ):
+            self.calls += 1
+            route.append("online")
+            draft_ids = [item.draft_id for item in events]
+            if self.calls <= 2:
+                draft_ids = draft_ids[:1]
+            return CollectedGroupingResult(
+                groups=[CollectedGroupingGroup("online", draft_ids)]
+            )
+
+    class Codex:
+        def group_collected_events(
+            self,
+            target_date,
+            events,
+            deterministic_groups,
+            *,
+            validation_feedback="",
+        ):
+            route.append("codex")
+            return CollectedGroupingResult(
+                groups=[
+                    CollectedGroupingGroup(
+                        "codex",
+                        [item.draft_id for item in events],
+                    )
+                ]
+            )
+
+    events = [
+        CollectedSourceEvent(
+            f"d{index}",
+            f"人员{index}",
+            f"人员{index}.md",
+            _event(event_id=f"e{index}", title="事项", content=f"事实{index}"),
+        )
+        for index in range(2)
+    ]
+    analyzer = FailoverAnalyzer(Online(), Codex(), LLMUsageRecorder())
+    runner = _build_runner(
+        tmp_path,
+        analyzer=analyzer,
+        config=RuntimeConfig(
+            data_root=tmp_path / "data",
+            collected_merge_missing_field_retry_limit=1,
+        ),
+    )
+
+    grouped, warnings = runner._invoke_collected_grouping_once(
+        "2026-07-21",
+        events,
+        [[item.draft_id for item in events]],
+        stage="candidate_grouping",
+    )
+    next_grouped, _ = runner._invoke_collected_grouping_once(
+        "2026-07-21",
+        events,
+        [[item.draft_id for item in events]],
+        stage="candidate_grouping",
+    )
+
+    assert grouped.groups[0].draft_ids == ["d0", "d1"]
+    assert next_grouped.groups[0].draft_ids == ["d0", "d1"]
+    assert route == ["online", "online", "codex", "online"]
+    assert any("with Codex" in warning for warning in warnings)
+
+
+def test_high_risk_review_uses_codex_after_online_local_retry(
+    tmp_path: Path,
+) -> None:
+    route: list[str] = []
+
+    class Online:
+        def review_collected_group(
+            self,
+            target_date,
+            events,
+            candidate_group,
+            *,
+            review_reasons=None,
+            validation_feedback="",
+        ):
+            route.append("online")
+            return CollectedGroupingResult(
+                groups=[CollectedGroupingGroup("invalid", [events[0].draft_id])]
+            )
+
+    class Codex:
+        def review_collected_group(
+            self,
+            target_date,
+            events,
+            candidate_group,
+            *,
+            review_reasons=None,
+            validation_feedback="",
+        ):
+            route.append("codex")
+            return CollectedGroupingResult(
+                groups=[
+                    CollectedGroupingGroup(
+                        "valid",
+                        [item.draft_id for item in events],
+                        summary_title="复核事项",
+                        summary_content="复核后确认属于同一事项。",
+                        summary_object_hint="复核事项",
+                        group_reason=["same_object"],
+                    )
+                ]
+            )
+
+    events = [
+        CollectedSourceEvent(
+            f"d{index}",
+            f"人员{index}",
+            f"人员{index}.md",
+            _event(event_id=f"e{index}", title="复核事项", content=f"事实{index}"),
+        )
+        for index in range(2)
+    ]
+    runner = _build_runner(
+        tmp_path,
+        analyzer=FailoverAnalyzer(Online(), Codex(), LLMUsageRecorder()),
+        config=RuntimeConfig(
+            data_root=tmp_path / "data",
+            collected_merge_missing_field_retry_limit=1,
+        ),
+    )
+
+    reviewed, warnings = runner._invoke_collected_review_with_retry(
+        "2026-07-21",
+        events,
+        CollectedGroupingGroup("candidate", ["d0", "d1"]),
+        reasons=["cross_batch"],
+    )
+
+    assert reviewed.groups[0].draft_ids == ["d0", "d1"]
+    assert route == ["online", "online", "codex"]
+    assert any("with Codex" in warning for warning in warnings)
 
 
 def test_high_risk_review_batches_large_group_within_token_limit(
@@ -3704,6 +4032,68 @@ def test_collected_content_coverage_terminal_failure_does_not_write_output(
     assert result.output_path is None
     assert not expected_output.exists()
     assert any("did not preserve source coverage" in item for item in result.warning_messages)
+
+
+def test_collected_content_stops_after_codex_validation_failure(
+    tmp_path: Path,
+) -> None:
+    route: list[str] = []
+
+    def invalid_result(events) -> CollectedMergeResult:
+        draft_ids = [item.draft_id for item in events]
+        return CollectedMergeResult(
+            groups=[
+                CollectedMergeGroup(
+                    group_id="invalid",
+                    draft_ids=draft_ids,
+                    title="覆盖事项",
+                    content="遗漏了来源。",
+                    object_hint="覆盖事项",
+                    retention_reason="decision_made",
+                    retention_detail="内容覆盖不完整。",
+                    covered_draft_ids=[],
+                    fact_items=[],
+                )
+            ]
+        )
+
+    class Online:
+        def merge_collected_events(self, target_date, events, deterministic_groups):
+            route.append("online")
+            return invalid_result(events)
+
+    class Codex:
+        def merge_collected_events(self, target_date, events, deterministic_groups):
+            route.append("codex")
+            return invalid_result(events)
+
+    events = [
+        CollectedSourceEvent(
+            f"d{index}",
+            f"人员{index}",
+            f"人员{index}.md",
+            _event(event_id=f"e{index}", title="覆盖事项", content=f"事实{index}"),
+        )
+        for index in range(2)
+    ]
+    runner = _build_runner(
+        tmp_path,
+        analyzer=FailoverAnalyzer(Online(), Codex(), LLMUsageRecorder()),
+        config=RuntimeConfig(
+            data_root=tmp_path / "data",
+            collected_merge_missing_field_retry_limit=1,
+        ),
+    )
+
+    with pytest.raises(AnalyzerProtocolError, match="after Codex fallback"):
+        runner._invoke_collected_merge_with_retry(
+            "2026-07-21",
+            events,
+            [[item.draft_id for item in events]],
+            rolling_step_index=1,
+        )
+
+    assert route == ["online", "online", "codex"]
 
 
 def test_collected_quality_summary_is_deterministic_and_trace_matches(

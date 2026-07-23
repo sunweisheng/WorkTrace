@@ -5,11 +5,11 @@ import inspect
 import re
 import subprocess
 from collections import Counter, defaultdict
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import nullcontext
 from dataclasses import dataclass, replace
 from pathlib import Path
-from threading import Lock
+from threading import Event, Lock
 from typing import Any, Sequence
 
 from .config import RetentionPolicyConfig, RuntimeConfig
@@ -116,6 +116,39 @@ class CollectedMergeRunner:
         if recorder is None:
             return nullcontext()
         return recorder.request_context(str(step_index))
+
+    def _supports_current_request_fallback(self) -> bool:
+        return callable(getattr(self.analyzer, "fallback_current_request", None))
+
+    def _last_analyzer_request_used_fallback(self) -> bool:
+        checker = getattr(self.analyzer, "last_request_used_fallback", None)
+        return bool(checker()) if callable(checker) else False
+
+    def _fallback_current_analyzer_request(
+        self,
+        method_name: str,
+        *args: Any,
+        failed_step_index: int,
+        error_category: str,
+        **kwargs: Any,
+    ) -> Any:
+        fallback = getattr(self.analyzer, "fallback_current_request", None)
+        if not callable(fallback):
+            raise AnalyzerProtocolError("Current-request Codex fallback is unavailable.")
+        return fallback(
+            method_name,
+            *args,
+            failed_request_context_id=str(failed_step_index),
+            error_category=error_category,
+            **kwargs,
+        )
+
+    def _refresh_collected_merge_trace_step(self, step_index: int) -> None:
+        step = self._collected_merge_trace_step(step_index)
+        if step is None:
+            return
+        self._attach_collected_merge_llm_calls(step)
+        self._write_collected_merge_trace_step(step)
 
     def run(self, target_date: str) -> CollectedMergeRunResult:
         input_dir = self.build_input_dir(target_date)
@@ -628,6 +661,7 @@ class CollectedMergeRunner:
             tuple[int, CollectedGroupingGroup, list[CollectedSourceEvent], list[str]]
         ] = []
         warnings: list[str] = []
+        cancel_event = Event()
         for index, group in enumerate(grouping_result.groups):
             if len(group.draft_ids) == 1:
                 reviewed_by_index[index] = [group]
@@ -665,6 +699,7 @@ class CollectedMergeRunner:
                 group,
                 reasons=reasons,
                 depth=0,
+                cancel_event=cancel_event,
             )
 
         if review_jobs:
@@ -672,14 +707,20 @@ class CollectedMergeRunner:
                 self.config.max_concurrent_collected_merge_review_requests,
                 len(review_jobs),
             )
-            with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                futures = {
-                    index: executor.submit(review_job, group, items, reasons)
-                    for index, group, items, reasons in review_jobs
-                }
-                for index, group, _items, reasons in review_jobs:
+            executor = ThreadPoolExecutor(max_workers=max_workers)
+            futures = {
+                executor.submit(review_job, group, items, reasons): (
+                    index,
+                    group,
+                    reasons,
+                )
+                for index, group, items, reasons in review_jobs
+            }
+            try:
+                for future in as_completed(futures):
+                    index, group, reasons = futures[future]
                     try:
-                        reviewed, review_warnings = futures[index].result()
+                        reviewed, review_warnings = future.result()
                     except NotImplementedError:
                         reviewed_by_index[index] = [group]
                         warnings.append(
@@ -694,6 +735,14 @@ class CollectedMergeRunner:
                     self._collected_quality_counters["review_split_group_count"] += int(
                         len(reviewed.groups) > 1
                     )
+            except BaseException:
+                cancel_event.set()
+                for future in futures:
+                    future.cancel()
+                executor.shutdown(wait=True, cancel_futures=True)
+                raise
+            else:
+                executor.shutdown(wait=True)
         return (
             CollectedGroupingResult(
                 groups=[
@@ -747,7 +796,9 @@ class CollectedMergeRunner:
         *,
         reasons: list[str],
         depth: int,
+        cancel_event: Event | None = None,
     ) -> tuple[CollectedGroupingResult, list[str]]:
+        self._raise_if_collected_review_cancelled(cancel_event)
         prompt = build_collected_review_prompt(
                 target_date,
                 source_events,
@@ -772,6 +823,7 @@ class CollectedMergeRunner:
                 source_events,
                 candidate_group,
                 reasons=reasons,
+                cancel_event=cancel_event,
             )
 
         batches = self._pack_collected_review_batches(
@@ -787,6 +839,7 @@ class CollectedMergeRunner:
                     source_events,
                     candidate_group,
                     reasons=reasons,
+                    cancel_event=cancel_event,
                 )
                 return reviewed, [
                     "Sent indivisible high-risk review above the model input batch target: "
@@ -823,6 +876,7 @@ class CollectedMergeRunner:
                 [summarized_event],
                 candidate_group,
                 reasons=reasons,
+                cancel_event=cancel_event,
             )
             return reviewed, [
                 "Used hierarchical content summary for oversized high-risk review: "
@@ -840,6 +894,7 @@ class CollectedMergeRunner:
         ]
         partial_groups: list[CollectedGroupingGroup] = []
         for batch_index, batch_events in enumerate(batches, start=1):
+            self._raise_if_collected_review_cancelled(cancel_event)
             batch_group = replace(
                 candidate_group,
                 group_id=f"{candidate_group.group_id}-batch-{batch_index}",
@@ -851,6 +906,7 @@ class CollectedMergeRunner:
                 batch_group,
                 reasons=reasons,
                 depth=depth + 1,
+                cancel_event=cancel_event,
             )
             partial_groups.extend(reviewed.groups)
             warnings.extend(batch_warnings)
@@ -880,6 +936,7 @@ class CollectedMergeRunner:
                 summary_group,
                 reasons=_dedupe([*reasons, "cross_batch"]),
                 depth=depth + 1,
+                cancel_event=cancel_event,
             )
         )
         warnings.extend(reconciliation_warnings)
@@ -909,6 +966,14 @@ class CollectedMergeRunner:
                 f"group={candidate_group.group_id} {partition_error}"
             )
         return expanded, warnings
+
+    @staticmethod
+    def _raise_if_collected_review_cancelled(cancel_event: Event | None) -> None:
+        if cancel_event is not None and cancel_event.is_set():
+            raise AnalyzerProtocolError(
+                "High-risk collected group review was cancelled after another group "
+                "failed Codex fallback validation."
+            )
 
     def _pack_collected_review_batches(
         self,
@@ -970,6 +1035,7 @@ class CollectedMergeRunner:
         candidate_group: CollectedGroupingGroup,
         *,
         reasons: list[str],
+        cancel_event: Event | None = None,
     ) -> tuple[CollectedGroupingResult, list[str]]:
         fitted_events, fit_warnings = self._fit_collected_review_events_to_limit(
             target_date,
@@ -982,7 +1048,10 @@ class CollectedMergeRunner:
         attempt_index = 0
         retry_reason = "initial"
         validation_feedback = ""
+        use_fallback = False
+        fallback_from_step_index = 0
         while True:
+            self._raise_if_collected_review_cancelled(cancel_event)
             attempt_index += 1
             prompt = build_collected_review_prompt(
                 target_date,
@@ -1017,11 +1086,27 @@ class CollectedMergeRunner:
                 extra_trace={
                     "candidate_group": candidate_group.to_dict(),
                     "review_reasons": list(reasons),
+                    **(
+                        {"fallback_from_step_index": fallback_from_step_index}
+                        if use_fallback
+                        else {}
+                    ),
                 },
             )
             try:
                 with self._llm_request_context(trace_step_index):
-                    if validation_feedback and _accepts_validation_feedback(
+                    if use_fallback:
+                        result = self._fallback_current_analyzer_request(
+                            "review_collected_group",
+                            target_date,
+                            fitted_events,
+                            candidate_group,
+                            failed_step_index=fallback_from_step_index,
+                            error_category="python_validation_failed",
+                            review_reasons=reasons,
+                            validation_feedback=validation_feedback,
+                        )
+                    elif validation_feedback and _accepts_validation_feedback(
                         self.analyzer.review_collected_group
                     ):
                         result = self.analyzer.review_collected_group(
@@ -1039,6 +1124,10 @@ class CollectedMergeRunner:
                             review_reasons=reasons,
                         )
             except RetryableAnalyzerProtocolError as exc:
+                if cancel_event is not None:
+                    cancel_event.set()
+                if use_fallback:
+                    self._refresh_collected_merge_trace_step(fallback_from_step_index)
                 self._record_collected_merge_trace_failure(
                     step_index=trace_step_index,
                     error=exc,
@@ -1046,12 +1135,21 @@ class CollectedMergeRunner:
                 )
                 raise
             except (AnalyzerProtocolError, ValueError) as exc:
+                if cancel_event is not None:
+                    cancel_event.set()
+                if use_fallback:
+                    self._refresh_collected_merge_trace_step(fallback_from_step_index)
                 self._record_collected_merge_trace_failure(
                     step_index=trace_step_index,
                     error=exc,
                     retryable=False,
                 )
                 raise
+            if use_fallback:
+                self._refresh_collected_merge_trace_step(fallback_from_step_index)
+            attempt_used_fallback = (
+                use_fallback or self._last_analyzer_request_used_fallback()
+            )
 
             partition_error = collected_grouping_partition_error(
                 result,
@@ -1090,10 +1188,31 @@ class CollectedMergeRunner:
                     [],
                 )
                 return repaired, [*warnings, *repair_warnings]
+            if attempt_used_fallback:
+                if cancel_event is not None:
+                    cancel_event.set()
+                raise AnalyzerProtocolError(
+                    "High-risk collected group review failed Python validation after "
+                    "Codex fallback: "
+                    f"group={candidate_group.group_id} {validation_error}"
+                )
             if (
                 invalid_result_count
                 >= self.config.collected_merge_missing_field_retry_limit
             ):
+                if self._supports_current_request_fallback():
+                    warning = (
+                        "Retrying current high-risk collected group review with Codex "
+                        "after Online Python validation retries were exhausted: "
+                        f"group={candidate_group.group_id} {validation_error}"
+                    )
+                    warnings.append(warning)
+                    self._collected_merge_failure_warnings.append(warning)
+                    validation_feedback = validation_error
+                    retry_reason = "python_validation_fallback"
+                    use_fallback = True
+                    fallback_from_step_index = trace_step_index
+                    continue
                 if split_reason_error:
                     warning = (
                         "High-risk collected group split was rejected after local retry "
@@ -2193,6 +2312,8 @@ class CollectedMergeRunner:
         retry_reason = "initial"
         validation_feedback = ""
         invalid_result_count = 0
+        use_fallback = False
+        fallback_from_step_index = 0
         while True:
             attempt_index += 1
             prompt = build_collected_grouping_prompt(
@@ -2217,10 +2338,25 @@ class CollectedMergeRunner:
                 retry_reason=retry_reason,
                 stage=stage,
                 prompt_override=prompt,
+                extra_trace=(
+                    {"fallback_from_step_index": fallback_from_step_index}
+                    if use_fallback
+                    else None
+                ),
             )
             try:
                 with self._llm_request_context(trace_step_index):
-                    if validation_feedback and _accepts_validation_feedback(
+                    if use_fallback:
+                        grouping_result = self._fallback_current_analyzer_request(
+                            "group_collected_events",
+                            target_date,
+                            source_events,
+                            deterministic_groups,
+                            failed_step_index=fallback_from_step_index,
+                            error_category="python_validation_failed",
+                            validation_feedback=validation_feedback,
+                        )
+                    elif validation_feedback and _accepts_validation_feedback(
                         self.analyzer.group_collected_events
                     ):
                         grouping_result = self.analyzer.group_collected_events(
@@ -2236,6 +2372,8 @@ class CollectedMergeRunner:
                             deterministic_groups,
                         )
             except RetryableAnalyzerProtocolError as exc:
+                if use_fallback:
+                    self._refresh_collected_merge_trace_step(fallback_from_step_index)
                 self._record_collected_merge_trace_failure(
                     step_index=trace_step_index,
                     error=exc,
@@ -2243,12 +2381,19 @@ class CollectedMergeRunner:
                 )
                 raise
             except (AnalyzerProtocolError, ValueError) as exc:
+                if use_fallback:
+                    self._refresh_collected_merge_trace_step(fallback_from_step_index)
                 self._record_collected_merge_trace_failure(
                     step_index=trace_step_index,
                     error=exc,
                     retryable=False,
                 )
                 raise
+            if use_fallback:
+                self._refresh_collected_merge_trace_step(fallback_from_step_index)
+            attempt_used_fallback = (
+                use_fallback or self._last_analyzer_request_used_fallback()
+            )
             partition_error = collected_grouping_partition_error(
                 grouping_result,
                 [item.draft_id for item in source_events],
@@ -2260,7 +2405,25 @@ class CollectedMergeRunner:
             )
             if not partition_error:
                 return grouping_result, warnings
+            if attempt_used_fallback:
+                raise AnalyzerProtocolError(
+                    "Collected candidate grouping failed Python validation after Codex "
+                    "fallback: " + partition_error
+                )
             if invalid_result_count >= self.config.collected_merge_missing_field_retry_limit:
+                if self._supports_current_request_fallback():
+                    warning = (
+                        "Retrying current collected candidate grouping with Codex after "
+                        "Online Python validation retries were exhausted: "
+                        + partition_error
+                    )
+                    warnings.append(warning)
+                    self._collected_merge_failure_warnings.append(warning)
+                    validation_feedback = partition_error
+                    retry_reason = "python_validation_fallback"
+                    use_fallback = True
+                    fallback_from_step_index = trace_step_index
+                    continue
                 raise AnalyzerProtocolError(
                     "Collected candidate grouping failed Python validation after local retry: "
                     + partition_error
@@ -2287,6 +2450,8 @@ class CollectedMergeRunner:
         missing_field_retry_count = 0
         attempt_index = 0
         retry_reason = "initial"
+        use_fallback = False
+        fallback_from_step_index = 0
         while True:
             attempt_index += 1
             prompt_tokens = self._estimate_collected_render_prompt_tokens(
@@ -2301,15 +2466,32 @@ class CollectedMergeRunner:
                 rolling_step_index=rolling_step_index,
                 attempt_index=attempt_index,
                 retry_reason=retry_reason,
+                extra_trace=(
+                    {"fallback_from_step_index": fallback_from_step_index}
+                    if use_fallback
+                    else None
+                ),
             )
             try:
                 with self._llm_request_context(trace_step_index):
-                    merge_result = self.analyzer.merge_collected_events(
-                        target_date,
-                        source_events,
-                        deterministic_groups,
-                    )
+                    if use_fallback:
+                        merge_result = self._fallback_current_analyzer_request(
+                            "merge_collected_events",
+                            target_date,
+                            source_events,
+                            deterministic_groups,
+                            failed_step_index=fallback_from_step_index,
+                            error_category="python_validation_failed",
+                        )
+                    else:
+                        merge_result = self.analyzer.merge_collected_events(
+                            target_date,
+                            source_events,
+                            deterministic_groups,
+                        )
             except RetryableAnalyzerProtocolError as exc:
+                if use_fallback:
+                    self._refresh_collected_merge_trace_step(fallback_from_step_index)
                 self._record_collected_merge_trace_failure(
                     step_index=trace_step_index,
                     error=exc,
@@ -2317,12 +2499,19 @@ class CollectedMergeRunner:
                 )
                 raise
             except (AnalyzerProtocolError, ValueError) as exc:
+                if use_fallback:
+                    self._refresh_collected_merge_trace_step(fallback_from_step_index)
                 self._record_collected_merge_trace_failure(
                     step_index=trace_step_index,
                     error=exc,
                     retryable=False,
                 )
                 raise
+            if use_fallback:
+                self._refresh_collected_merge_trace_step(fallback_from_step_index)
+            attempt_used_fallback = (
+                use_fallback or self._last_analyzer_request_used_fallback()
+            )
             missing_summary = collected_merge_missing_field_summary(merge_result)
             coverage_error = "; ".join(
                 value
@@ -2343,10 +2532,27 @@ class CollectedMergeRunner:
                 coverage_error=coverage_error,
             )
             if coverage_error:
+                if attempt_used_fallback:
+                    raise AnalyzerProtocolError(
+                        "Collected content failed source coverage validation after Codex "
+                        f"fallback: {coverage_error}"
+                    )
                 if (
                     missing_field_retry_count
                     >= self.config.collected_merge_missing_field_retry_limit
                 ):
+                    if self._supports_current_request_fallback():
+                        warning = (
+                            "Retrying current collected content with Codex after Online "
+                            "source coverage retries were exhausted: "
+                            f"{coverage_error}"
+                        )
+                        warnings.append(warning)
+                        self._collected_merge_failure_warnings.append(warning)
+                        retry_reason = "python_validation_fallback"
+                        use_fallback = True
+                        fallback_from_step_index = trace_step_index
+                        continue
                     raise AnalyzerProtocolError(
                         "Collected content did not preserve source coverage: "
                         f"{coverage_error}"
@@ -2366,10 +2572,28 @@ class CollectedMergeRunner:
                 missing_summary,
             ):
                 return merge_result, warnings
+            if attempt_used_fallback:
+                raise AnalyzerProtocolError(
+                    "Collected content failed required-field validation after Codex "
+                    "fallback: "
+                    f"{format_collected_merge_missing_field_summary(missing_summary)}"
+                )
             if (
                 missing_field_retry_count
                 >= self.config.collected_merge_missing_field_retry_limit
             ):
+                if self._supports_current_request_fallback():
+                    warning = (
+                        "Retrying current collected content with Codex after Online "
+                        "required-field retries were exhausted: "
+                        f"{format_collected_merge_missing_field_summary(missing_summary)}"
+                    )
+                    warnings.append(warning)
+                    self._collected_merge_failure_warnings.append(warning)
+                    retry_reason = "python_validation_fallback"
+                    use_fallback = True
+                    fallback_from_step_index = trace_step_index
+                    continue
                 if missing_summary.get("content", 0):
                     raise AnalyzerProtocolError(
                         "Collected content remained empty after retry: "
@@ -3116,11 +3340,11 @@ class CollectedMergeRunner:
         prompt_override: str | None = None,
         extra_trace: dict[str, Any] | None = None,
     ) -> int:
-        if self._collected_merge_trace_dir is None:
-            return 0
         with self._collected_merge_trace_lock:
             self._collected_merge_trace_call_index += 1
             step_index = self._collected_merge_trace_call_index
+        if self._collected_merge_trace_dir is None:
+            return step_index
         prompt = prompt_override or (
             build_collected_grouping_prompt(
                 target_date,
