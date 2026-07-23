@@ -14,6 +14,11 @@ from .config import RuntimeConfig, load_online_llm_settings
 from .errors import AnalyzerProtocolError
 from .logging_utils import log_timing
 from .llm_usage import LLMUsageRecorder, extract_usage
+from .analyzers.online import (
+    _build_http_client,
+    _extract_text_from_responses_stream_event,
+    _has_usage,
+)
 
 logger = logging.getLogger("worktrace")
 
@@ -55,10 +60,12 @@ class OnlineImageSummarizer:
         settings: ImageSummarySettings | None = None,
         client: OpenAI | None = None,
         usage_recorder: LLMUsageRecorder | None = None,
+        cwd: Path | None = None,
     ) -> None:
         self.config = config
         self.settings = settings or ImageSummarySettings.load(config)
         self._client = client
+        self.cwd = cwd or Path.cwd()
         self._count = 0
         self.usage_recorder = usage_recorder or LLMUsageRecorder()
 
@@ -70,7 +77,7 @@ class OnlineImageSummarizer:
         if not image_path.is_file() or image_path.stat().st_size > self.settings.max_image_bytes:
             return ""
 
-        online = load_online_llm_settings(self.config)
+        online = load_online_llm_settings(self.config, cwd=self.cwd)
         mime_type = mimetypes.guess_type(image_path.name)[0] or "image/png"
         encoded = base64.b64encode(image_path.read_bytes()).decode("ascii")
         content: list[dict[str, object]] = [
@@ -84,18 +91,40 @@ class OnlineImageSummarizer:
         body: dict[str, object] = {
             "model": online.model,
             "input": [{"role": "user", "content": content}],
-            "stream": False,
+            "stream": online.stream_enabled,
         }
         if online.reasoning_effort == "none":
             body["reasoning"] = {"effort": "none"}
-        client = self._client or OpenAI(
-            base_url=online.base_url,
-            api_key=online.api_key,
-            timeout=online.timeout_seconds,
-        )
+        http_client = None
+        client = self._client
+        if client is None:
+            http_client = _build_http_client(online)
+            client = OpenAI(
+                base_url=online.base_url,
+                api_key=online.api_key,
+                http_client=http_client,
+                max_retries=0,
+            )
         started_at = perf_counter()
         try:
             response = client.responses.create(**body)
+            if online.stream_enabled:
+                chunks: list[str] = []
+                payload: dict[str, object] = {}
+                try:
+                    for event in response:
+                        event_payload = event.model_dump()
+                        chunks.append(_extract_text_from_responses_stream_event(event_payload))
+                        if _has_usage(event_payload):
+                            payload = event_payload
+                finally:
+                    close_stream = getattr(response, "close", None)
+                    if callable(close_stream):
+                        close_stream()
+                text = "".join(chunks).strip()
+            else:
+                payload = response.model_dump() if hasattr(response, "model_dump") else {}
+                text = str(getattr(response, "output_text", "")).strip()
         except Exception as exc:
             log_timing(
                 logger,
@@ -105,10 +134,16 @@ class OnlineImageSummarizer:
                 required=required,
                 prompt_chars=len(self.settings.prompt),
                 image_bytes=image_path.stat().st_size,
-                stream_enabled=False,
+                stream_enabled=online.stream_enabled,
             )
             raise AnalyzerProtocolError(f"Image summary request failed: {exc}") from exc
-        payload = response.model_dump() if hasattr(response, "model_dump") else {}
+        finally:
+            if self._client is None:
+                close_client = getattr(client, "close", None)
+                if callable(close_client):
+                    close_client()
+                elif http_client is not None:
+                    http_client.close()
         usage = extract_usage(payload)
         duration_ms = log_timing(
             logger,
@@ -118,7 +153,7 @@ class OnlineImageSummarizer:
             required=required,
             prompt_chars=len(self.settings.prompt),
             image_bytes=image_path.stat().st_size,
-            stream_enabled=False,
+            stream_enabled=online.stream_enabled,
             input_tokens=usage["input_tokens"],
             output_tokens=usage["output_tokens"],
             total_tokens=usage["total_tokens"],
@@ -131,7 +166,6 @@ class OnlineImageSummarizer:
         )
         if not required:
             self._count += 1
-        text = str(getattr(response, "output_text", "")).strip()
         if not text:
             raise AnalyzerProtocolError("Image summary response did not contain text output.")
         return text

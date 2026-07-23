@@ -4,6 +4,7 @@ from dataclasses import replace
 from datetime import datetime, timezone
 
 from ..analyzers.output_schemas import segment_batch_output_schema
+from ..analyzers.function_calls import message_reference_ids, task_function_call_spec
 from ..analyzers.prompts import build_segment_batch_analysis_prompt
 from ..config import RuntimeConfig
 from ..models import (
@@ -19,7 +20,7 @@ from ..models import (
 )
 from ..reaction_catalog import ReactionCatalog
 from ..utils.text import clean_text
-from ..utils.token_estimation import estimate_model_input_tokens
+from ..utils.token_estimation import estimate_structured_input_tokens
 
 
 def build_response_signals(
@@ -514,11 +515,21 @@ def _estimate_segment_batch_tokens(
     batch: SegmentAnalysisBatch,
     config: RuntimeConfig,
 ) -> int:
-    return estimate_model_input_tokens(
-        build_segment_batch_analysis_prompt(batch, config=config),
-        output_schema=segment_batch_output_schema(config),
-        append_no_think=True,
+    references = message_reference_ids(
+        [message for item in batch.segments for message in item.messages]
     )
+    function_spec = task_function_call_spec(
+        "segment_batch_analysis",
+        segment_batch_output_schema(config),
+        segment_ids=[item.segment_id for item in batch.segments],
+        result_count=len(batch.segments),
+        **references,
+    )
+    return estimate_structured_input_tokens(
+        build_segment_batch_analysis_prompt(batch, config=config),
+        function_spec=function_spec,
+        append_no_think=True,
+    )["input_estimated_tokens"]
 
 
 def _normalize_action_time(value: str, fallback: str) -> str:

@@ -7,10 +7,7 @@ from pathlib import Path
 import pytest
 
 from src.worktrace.analyzers.codex import CodexAnalyzer, CodexRequestPacer
-from src.worktrace.analyzers.output_schemas import (
-    personal_fact_review_output_schema,
-    retention_review_output_schema,
-)
+from src.worktrace.analyzers.function_calls import FunctionCallSpec
 from src.worktrace.config import RuntimeConfig, load_runtime_config_overrides
 from src.worktrace.errors import AnalyzerProtocolError, ModelInputLimitError
 from src.worktrace.models import (
@@ -115,8 +112,19 @@ def test_codex_analyzer_uses_retention_review_protocol(
     analyzer = CodexAnalyzer(config=config, cwd=tmp_path)
     captured: dict[str, object] = {}
 
-    def fake_invoke(prompt, *, output_schema, request_kind="auxiliary_json"):
-        captured.update(prompt=prompt, output_schema=output_schema)
+    def fake_invoke(
+        prompt,
+        *,
+        output_schema,
+        request_kind="auxiliary_json",
+        **kwargs,
+    ):
+        captured.update(
+            prompt=prompt,
+            output_schema=output_schema,
+            request_kind=request_kind,
+            **kwargs,
+        )
         return {
             "results": [
                 {
@@ -133,7 +141,10 @@ def test_codex_analyzer_uses_retention_review_protocol(
 
     assert result.results[0].draft_id == "draft-1"
     assert "不要决定保留或删除" in str(captured["prompt"])
-    assert captured["output_schema"] == retention_review_output_schema(config)
+    assert captured["request_kind"] == "retention_review"
+    function_spec = captured["function_spec"]
+    assert isinstance(function_spec, FunctionCallSpec)
+    assert captured["output_schema"] == function_spec.parameters
 
 
 def test_codex_analyzer_uses_personal_fact_review_protocol(
@@ -147,8 +158,19 @@ def test_codex_analyzer_uses_personal_fact_review_protocol(
     analyzer = CodexAnalyzer(config=config, cwd=tmp_path)
     captured: dict[str, object] = {}
 
-    def fake_invoke(prompt, *, output_schema, request_kind="auxiliary_json"):
-        captured.update(prompt=prompt, output_schema=output_schema)
+    def fake_invoke(
+        prompt,
+        *,
+        output_schema,
+        request_kind="auxiliary_json",
+        **kwargs,
+    ):
+        captured.update(
+            prompt=prompt,
+            output_schema=output_schema,
+            request_kind=request_kind,
+            **kwargs,
+        )
         return {
             "results": [
                 {
@@ -173,9 +195,10 @@ def test_codex_analyzer_uses_personal_fact_review_protocol(
 
     assert result.results[0].supported is False
     assert "messages 才是事实来源" in str(captured["prompt"])
-    assert captured["output_schema"] == personal_fact_review_output_schema(
-        sample_personal_fact_review_batch()
-    )
+    assert captured["request_kind"] == "personal_fact_review"
+    function_spec = captured["function_spec"]
+    assert isinstance(function_spec, FunctionCallSpec)
+    assert captured["output_schema"] == function_spec.parameters
 
 
 def test_codex_analyzer_surfaces_stderr_tail_on_failure(tmp_path: Path) -> None:

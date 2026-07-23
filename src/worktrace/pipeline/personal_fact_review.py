@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import replace
 
 from ..analyzers.output_schemas import personal_fact_review_output_schema
+from ..analyzers.function_calls import message_reference_ids, task_function_call_spec
 from ..analyzers.prompts import build_personal_fact_review_prompt
 from ..config import RetentionPolicyConfig, RuntimeConfig
 from ..errors import AnalyzerProtocolError
@@ -17,7 +18,7 @@ from ..models import (
     SourceBackedEventDraft,
 )
 from ..utils.text import clean_text
-from ..utils.token_estimation import estimate_model_input_tokens
+from ..utils.token_estimation import estimate_structured_input_tokens
 from .validation import PERSONAL_FACT_FIELDS
 
 
@@ -426,8 +427,18 @@ def _estimate_personal_fact_review_tokens(
     batch: PersonalFactReviewBatch,
     config: RuntimeConfig,
 ) -> int:
-    return estimate_model_input_tokens(
-        build_personal_fact_review_prompt(batch, config=config),
-        output_schema=personal_fact_review_output_schema(batch),
-        append_no_think=True,
+    references = message_reference_ids(
+        [message for item in batch.candidates for message in item.messages]
     )
+    function_spec = task_function_call_spec(
+        "personal_fact_review",
+        personal_fact_review_output_schema(batch),
+        draft_ids=[item.candidate.draft_id for item in batch.candidates],
+        result_count=len(batch.candidates),
+        **references,
+    )
+    return estimate_structured_input_tokens(
+        build_personal_fact_review_prompt(batch, config=config),
+        function_spec=function_spec,
+        append_no_think=True,
+    )["input_estimated_tokens"]

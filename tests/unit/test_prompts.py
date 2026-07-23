@@ -2,6 +2,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from src.worktrace.analyzers.output_schemas import (
+    anchor_output_schema,
+    batch_output_schema,
+)
 from src.worktrace.analyzers.prompts import (
     build_anchor_analysis_prompt,
     build_anchor_batch_analysis_prompt,
@@ -188,7 +192,12 @@ def test_batch_prompt_uses_original_message_ids_and_slim_rules(tmp_path: Path) -
     assert "反例：他人之间讨论自己的工作、自己的承诺、自己的处理进度，即使本人在该会话里发过言，也不算与本人直接相关。" in prompt
     assert "如果当前消息是在纠正、澄清或替换前文对象" in prompt
     assert "reply_to 或 quote_to 里的内容只能作为背景" in prompt
-    assert "linked_file_text" in prompt
+    output_schema = batch_output_schema(config)
+    context_request_schema = output_schema["properties"]["context_requests"]
+    assert ContextRequestType.LINKED_FILE_TEXT.value in context_request_schema["items"][
+        "properties"
+    ]["request_type"]["enum"]
+    assert "required_output_schema" not in prompt
     assert '"id": "om_1"' in prompt
     assert '"id": "om_2"' in prompt
     assert "每条事项附上最相关的消息 id。" in prompt
@@ -199,7 +208,9 @@ def test_batch_prompt_uses_original_message_ids_and_slim_rules(tmp_path: Path) -
     assert "fact_items 必须覆盖 topic、content、action_label" in prompt
     assert "comparison_or_example" in prompt
     assert "对比案例、举例和历史背景不能写成当前实际处理对象" in prompt
-    assert '"fact_risk_flags"' in prompt
+    assert "fact_risk_flags" in output_schema["properties"]["candidate_events"][
+        "items"
+    ]["properties"]
     assert "如果有明确结果，直接融入 content，不要单独返回 result。" in prompt
     assert "请给我简洁的答案，不要推理，跳过思考步骤。" in prompt
     assert "直接作答，不要展示你的推理过程。" in prompt
@@ -298,8 +309,9 @@ def test_anchor_prompt_serialization_is_compact(tmp_path: Path) -> None:
     assert "anchor_unit_id" not in payload
     assert "base_message_ids" not in payload
     assert "reply_relation_ids" not in payload
-    assert '"anchor_status"' in prompt
-    assert AnchorStatus.NEEDS_MORE_CONTEXT.value in prompt
+    status_schema = anchor_output_schema(config)["properties"]["anchor_status"]
+    assert AnchorStatus.NEEDS_MORE_CONTEXT.value in status_schema["enum"]
+    assert '"anchor_status"' not in prompt
     assert "每个 candidate_event 只表示一个主要动作。" in prompt
     assert "具体对象 + 关键动作、进展、结果或风险" in prompt
     assert "例如：已同步给老板、老板未回复可视为已知悉" in prompt
@@ -314,7 +326,12 @@ def test_anchor_prompt_serialization_is_compact(tmp_path: Path) -> None:
     assert "不要写 message id、open_id、conversation_id 或 om_/ou_/oc_ 等内部标识。" in prompt
     assert "不要单独返回 result" in prompt
     assert "如果当前消息是在纠正、澄清或替换前文对象" in prompt
-    assert "linked_file_text" in prompt
+    context_request_schema = anchor_output_schema(config)["properties"][
+        "context_requests"
+    ]
+    assert ContextRequestType.LINKED_FILE_TEXT.value in context_request_schema["items"][
+        "properties"
+    ]["request_type"]["enum"]
     assert "请给我简洁的答案，不要推理，跳过思考步骤。" in prompt
     assert "直接作答，不要展示你的推理过程。" in prompt
 

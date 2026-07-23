@@ -1,6 +1,9 @@
 from __future__ import annotations
 
-from scripts.replay_collected_review_failures import evaluate_review_result
+from scripts.replay_collected_review_failures import (
+    evaluate_review_result,
+    evaluate_split_reason_compatibility,
+)
 from src.worktrace.config import RuntimeConfig
 from src.worktrace.models import (
     CollectedGroupingGroup,
@@ -50,6 +53,19 @@ def test_offline_review_accepts_one_legacy_split_reason() -> None:
 
     assert evaluation["valid"] is True
     assert evaluation["split_reason"] == "两组处理不同业务对象。"
+
+    compatibility = evaluate_split_reason_compatibility(
+        result=result,
+        source_events=events,
+        candidate_group=CollectedGroupingGroup("candidate", ["d1", "d2"]),
+        review_reasons=["same_conversation_only"],
+        config=RuntimeConfig(),
+    )
+    assert compatibility == {
+        "tested": True,
+        "top_level": {"accepted": True, "source": "top_level"},
+        "legacy_group": {"accepted": True, "source": "legacy_group"},
+    }
 
 
 def test_offline_review_rejects_false_shared_file_and_accepts_batch_reason() -> None:

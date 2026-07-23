@@ -33,6 +33,7 @@ from ..models import (
     SourceBackedEventDraft,
 )
 from .base import Analyzer
+from .function_calls import FunctionCallSpec
 
 
 _REQUEST_KINDS = {
@@ -94,11 +95,17 @@ class FailoverAnalyzer(Analyzer):
 
     def _call(self, method_name: str, *args: Any, **kwargs: Any) -> Any:
         started_at = perf_counter()
+        function_spec = kwargs.get("function_spec")
+        request_kind = (
+            function_spec.request_kind
+            if isinstance(function_spec, FunctionCallSpec)
+            else _REQUEST_KINDS[method_name]
+        )
         try:
             return getattr(self.primary, method_name)(*args, **kwargs)
         except RetryableAnalyzerProtocolError as exc:
             self.usage_recorder.record(
-                _REQUEST_KINDS[method_name],
+                request_kind,
                 {},
                 duration_ms=(perf_counter() - started_at) * 1000,
                 backend="online",
@@ -111,7 +118,7 @@ class FailoverAnalyzer(Analyzer):
             return getattr(self.fallback, method_name)(*args, **kwargs)
         except AnalyzerProtocolError as exc:
             self.usage_recorder.record(
-                _REQUEST_KINDS[method_name],
+                request_kind,
                 {},
                 duration_ms=(perf_counter() - started_at) * 1000,
                 backend="online",
@@ -120,6 +127,20 @@ class FailoverAnalyzer(Analyzer):
                 **_input_metrics(exc),
             )
             raise
+
+    def request_function(
+        self,
+        prompt: str,
+        *,
+        function_spec: FunctionCallSpec,
+        allow_oversized_input: bool = False,
+    ) -> object:
+        return self._call(
+            "request_function",
+            prompt,
+            function_spec=function_spec,
+            allow_oversized_input=allow_oversized_input,
+        )
 
     def build_segmentation_prompt(self, **kwargs: Any) -> str:
         return self.primary.build_segmentation_prompt(**kwargs)
@@ -212,9 +233,15 @@ class FailoverAnalyzer(Analyzer):
         target_date: str,
         events: list[CollectedSourceEvent],
         deterministic_groups: list[list[str]],
+        *,
+        validation_feedback: str = "",
     ) -> CollectedGroupingResult:
         return self._call(
-            "group_collected_events", target_date, events, deterministic_groups
+            "group_collected_events",
+            target_date,
+            events,
+            deterministic_groups,
+            validation_feedback=validation_feedback,
         )
 
     def review_collected_group(
@@ -224,6 +251,7 @@ class FailoverAnalyzer(Analyzer):
         candidate_group: CollectedGroupingGroup,
         *,
         review_reasons: list[str] | None = None,
+        validation_feedback: str = "",
     ) -> CollectedGroupingResult:
         return self._call(
             "review_collected_group",
@@ -231,4 +259,5 @@ class FailoverAnalyzer(Analyzer):
             events,
             candidate_group,
             review_reasons=review_reasons,
+            validation_feedback=validation_feedback,
         )

@@ -30,6 +30,7 @@ from ..utils.hashing import is_sha256_fingerprint
 from ..utils.json_io import dump_json
 from ..utils.link_refs import build_message_link_candidates
 from ..utils.text import clean_text
+from .collected_evidence import EvidenceRelation, build_evidence_relation_catalog
 
 _AUDIO_TAG_RE = re.compile(r"<audio\b[^>]*duration=\"([^\"]+)\"[^>]*/?>", re.IGNORECASE)
 _VIDEO_TAG_RE = re.compile(r"<video\b[^>]*duration=\"([^\"]+)\"[^>]*/?>", re.IGNORECASE)
@@ -104,39 +105,6 @@ def _build_personal_fact_rules(config: RuntimeConfig) -> list[str]:
     ]
 
 
-def _personal_fact_output_shape() -> dict[str, object]:
-    return {
-        "fact_items": [
-            {
-                "field": "topic | content | action_label | object_hint | retention_detail | workstream_key",
-                "text": "field text",
-                "evidence_message_ids": ["message_id"],
-            }
-        ],
-        "fact_risk_flags": ["configured fact risk key"],
-    }
-
-
-def _personal_fact_review_items_shape() -> dict[str, object]:
-    single_item = {
-        "text": "reviewed field text, or empty",
-        "evidence_message_ids": ["message_id"],
-    }
-    return {
-        "topic": single_item,
-        "content": [
-            {
-                "text": "ordered content fragment",
-                "evidence_message_ids": ["message_id"],
-            }
-        ],
-        "action_label": single_item,
-        "object_hint": single_item,
-        "retention_detail": single_item,
-        "workstream_key": single_item,
-    }
-
-
 def _build_self_relation_rule(config: RuntimeConfig) -> str:
     options = "、".join(
         f"{item.key}={item.label}" for item in config.self_relation_types
@@ -159,7 +127,7 @@ def build_batch_analysis_prompt(
     protocol = {
         "instruction": (
             "按会话切片提炼当天讨论过的工作事项摘要。"
-            "只返回一个 JSON 对象，包含 candidate_events 和 context_requests。"
+            "只调用指定 Function 一次，提交 candidate_events 和 context_requests。"
             "请给我简洁的答案，不要推理，跳过思考步骤。"
             "直接作答，不要展示你的推理过程。"
         ),
@@ -194,38 +162,6 @@ def build_batch_analysis_prompt(
             "如果 reply_to 或 quote_to 指向附件、文件消息、飞书文档或 wiki，且事件判断依赖其内容，必须返回 context_requests 请求补读，不要猜。",
             "拿不准就用 context_requests，不要猜。",
         ],
-        "required_output_schema": {
-            "candidate_events": [
-                {
-                    "topic": "string",
-                    "content": "string",
-                    "action_label": "string",
-                    "object_hint": "string",
-                    "retention_reason": "deliverable_updated | decision_made | issue_or_risk_found | follow_up_assigned | external_business_progress | substantive_approval",
-                    "retention_detail": "string",
-                    "referenced_link_ids": ["message_id#link1"],
-                    "referenced_attachment_ids": ["attachment_id"],
-                    "self_evidence_message_ids": ["message_id"],
-                    "self_relations": [
-                        {
-                            "relation": "configured relation key",
-                            "evidence_message_ids": ["message_id"],
-                        }
-                    ],
-                    "workstream_key": "string or empty string",
-                    "source_message_ids": ["message_id"],
-                    **_personal_fact_output_shape(),
-                }
-            ],
-            "context_requests": [
-                {
-                    "request_type": "earlier_messages | later_messages | attachment_text | linked_file_text",
-                    "target_message_ids": ["message_id"],
-                    "target_attachment_ids": ["attachment_id"],
-                    "target_link_ids": ["message_id#link1"],
-                }
-            ],
-        },
         "input": serialize_batch_for_prompt(batch, config=runtime_config),
     }
     return dump_json(protocol, pretty=True)
@@ -246,7 +182,7 @@ def build_conversation_segmentation_prompt(
 ) -> str:
     runtime_config = config or RuntimeConfig()
     message_lookup = {message.message_id: message for message in messages}
-    message_refs = _build_segmentation_message_refs(messages)
+    message_refs = build_conversation_segmentation_message_refs(messages)
     signal_refs = _build_segmentation_signal_refs(response_signals)
     attachment_texts_by_message: dict[str, list[AttachmentTextBlock]] = {}
     for block in attachment_texts or []:
@@ -276,7 +212,7 @@ def build_conversation_segmentation_prompt(
     protocol = {
         "instruction": (
             "按时间线判断一个会话中每个独立会话轮次的起点。"
-            "只返回 JSON 的 segment_start_message_ids，不要提炼或筛选工作事件。"
+            "只调用指定 Function 一次提交 segment_start_message_ids，不要提炼或筛选工作事件。"
             "请直接作答，不要推理、展示思考过程或添加解释。"
         ),
         "rules": [
@@ -308,9 +244,6 @@ def build_conversation_segmentation_prompt(
                 for item in response_signals
             ],
         },
-        "required_output_schema": {
-            "segment_start_message_ids": ["message_ref"]
-        },
     }
     return dump_json(protocol, pretty=True)
 
@@ -324,7 +257,9 @@ def restore_conversation_segmentation_references(
     """Restore internal prompt references before strict message ownership checks."""
     message_ref_to_id = {
         ref: message_id
-        for message_id, ref in _build_segmentation_message_refs(messages).items()
+        for message_id, ref in build_conversation_segmentation_message_refs(
+            messages
+        ).items()
     }
     return ConversationSegmentationResult(
         segment_start_message_ids=[
@@ -344,7 +279,7 @@ def restore_conversation_segmentation_references(
     )
 
 
-def _build_segmentation_message_refs(
+def build_conversation_segmentation_message_refs(
     messages: list[NormalizedMessage],
 ) -> dict[str, str]:
     return {
@@ -390,7 +325,7 @@ def build_segment_batch_analysis_prompt(
         "instruction": (
             "一次提炼多个彼此隔离的本人会话轮次。"
             "每个 result 只能使用同一 segment_id 的消息与上下文。"
-            "只返回 JSON results，不要推理、展示思考过程或添加解释。"
+            "只调用指定 Function 一次提交 results，不要推理、展示思考过程或添加解释。"
         ),
         "rules": [
             "每个 segment 独立判断，禁止从其它 segment 借用事实、对象、结论或来源。",
@@ -421,38 +356,6 @@ def build_segment_batch_analysis_prompt(
                 _serialize_segment_unit_for_prompt(item, runtime_config)
                 for item in batch.segments
             ],
-        },
-        "required_output_schema": {
-            "results": [
-                {
-                    "segment_id": "segment_id",
-                    "analysis": {
-                        "candidate_events": [
-                            {
-                                "topic": "string",
-                                "content": "string",
-                                "action_label": "string",
-                                "object_hint": "string",
-                                "retention_reason": "deliverable_updated | decision_made | issue_or_risk_found | follow_up_assigned | external_business_progress | substantive_approval",
-                                "retention_detail": "string",
-                                "referenced_link_ids": ["message_id#link1"],
-                                "referenced_attachment_ids": ["attachment_id"],
-                                "self_evidence_message_ids": ["message_id"],
-                                "self_relations": [
-                                    {
-                                        "relation": "configured relation key",
-                                        "evidence_message_ids": ["message_id"],
-                                    }
-                                ],
-                                "workstream_key": "string or empty string",
-                                "source_message_ids": ["primary_message_id"],
-                                **_personal_fact_output_shape(),
-                            }
-                        ],
-                        "context_requests": [],
-                    },
-                }
-            ]
         },
     }
     return dump_json(protocol, pretty=True)
@@ -488,25 +391,6 @@ def build_retention_review_prompt(
         "signal_definitions": {
             "routine_signals": routine_signal_types,
             "substantive_signals": substantive_signal_types,
-        },
-        "required_output_schema": {
-            "results": [
-                {
-                    "draft_id": "draft_id",
-                    "routine_signals": [
-                        {
-                            "type": "configured routine signal type",
-                            "evidence_message_ids": ["message_id"],
-                        }
-                    ],
-                    "substantive_signals": [
-                        {
-                            "type": "configured substantive signal type",
-                            "evidence_message_ids": ["message_id"],
-                        }
-                    ],
-                }
-            ]
         },
         "input": {
             "target_date": batch.target_date,
@@ -578,16 +462,6 @@ def build_personal_fact_review_prompt(
         ],
         "retry_feedback": batch.retry_feedback,
         "risk_signal_definitions": fact_risk_types,
-        "required_output_schema": {
-            "results": [
-                {
-                    "draft_id": "draft_id",
-                    "supported": "boolean",
-                    "fact_items": _personal_fact_review_items_shape(),
-                    "removed_claims": ["removed or revised claim"],
-                }
-            ]
-        },
         "input": {
             "target_date": batch.target_date,
             "batch_id": batch.batch_id,
@@ -637,7 +511,7 @@ def build_merge_prompt(target_date: str, candidates: list[SourceBackedEventDraft
     protocol = {
         "instruction": (
             "按是否描述同一真实工作事件，对同一天的候选事项做跨会话分组。"
-            "只返回一个 JSON 对象，包含 groups。"
+            "只调用指定 Function 一次提交 groups。"
             "请给我简洁的答案，不要推理，跳过思考步骤。"
             "直接作答，不要展示你的推理过程。"
         ),
@@ -655,15 +529,6 @@ def build_merge_prompt(target_date: str, candidates: list[SourceBackedEventDraft
             "错误示例：candidates 有 [d1, d2, d3]，但只返回 [['d1', 'd2']]，漏掉 d3，这是错误的。",
             "正确示例：candidates 有 [d1, d2, d3]，若 d3 无法与其他事项合并，也必须返回 [['d1', 'd2'], ['d3']]。",
         ],
-        "required_output_schema": {
-            "groups": [
-                {
-                    "group_id": "string",
-                    "draft_ids": ["draft_id"],
-                    "primary_draft_id": "draft_id",
-                }
-            ]
-        },
         "target_date": target_date,
         "candidates": [
             {
@@ -688,7 +553,7 @@ def build_workstream_assignment_prompt(
     protocol = {
         "instruction": (
             "判断当天候选事项是否属于某个明确命名的项目、产品或政策工作流。"
-            "只返回 JSON assignments，不展示推理过程。"
+            "只调用指定 Function 一次提交 assignments，不展示推理过程。"
         ),
         "rules": [
             "每个 draft_id 必须且只能返回一次。",
@@ -701,16 +566,6 @@ def build_workstream_assignment_prompt(
             "同一政策的适用范围指令与其直接执行/通知反馈，即使描述的是不同对象子集，只要输入没有明确命名不同政策，应归入同一政策工作流。",
             "不同写法是否为同一命名项目由消息语义判断，不能仅凭字符串相似度判断。",
         ],
-        "required_output_schema": {
-            "assignments": [
-                {
-                    "draft_id": "draft_id",
-                    "parent_draft_id": "draft_id or empty string",
-                    "root_workstream_name": "string or empty string",
-                    "evidence_message_ids": ["message_id"],
-                }
-            ]
-        },
         "target_date": target_date,
         "candidates": [
             {
@@ -738,7 +593,7 @@ def build_unassigned_workstream_assignment_prompt(
     protocol = {
         "instruction": (
             "复核尚未归属的候选事项是否属于已确认的项目、产品或政策工作流。"
-            "只返回 JSON assignments，不展示推理过程。"
+            "只调用指定 Function 一次提交 assignments，不展示推理过程。"
         ),
         "rules": [
             "只处理 unassigned_candidates 中的 draft_id；每个必须且只能返回一次。",
@@ -749,16 +604,6 @@ def build_unassigned_workstream_assignment_prompt(
             "城市、地点、部门、设备、工具、时间相近或文字相似都不是归属依据；不确定时必须独立。",
             "每个非独立归属必须在 evidence_message_ids 中引用至少一条子事项或直接父候选的 source_message_ids，不能使用输入外的消息 ID。",
         ],
-        "required_output_schema": {
-            "assignments": [
-                {
-                    "draft_id": "unassigned draft_id",
-                    "parent_draft_id": "known member draft_id or empty string",
-                    "root_workstream_name": "empty string",
-                    "evidence_message_ids": ["message_id"],
-                }
-            ]
-        },
         "target_date": target_date,
         "known_workstreams": known_workstreams,
         "unassigned_candidates": [
@@ -783,108 +628,12 @@ def build_collected_merge_prompt(
     *,
     config: RuntimeConfig | None = None,
 ) -> str:
-    runtime_config = config or RuntimeConfig()
-    deterministic_ids = {
-        draft_id for group in deterministic_groups for draft_id in group
-    }
-    merge_owner_person = next(
-        (
-            item.person_name
-            for item in events
-            if item.is_merge_owner_source and item.person_name.strip()
-        ),
-        "",
+    return build_collected_render_prompt(
+        target_date,
+        events,
+        deterministic_groups,
+        config=config,
     )
-    protocol = {
-        "instruction": (
-            "面向管理人员合并多人 WorkTrace 日报事件。"
-            "只返回一个 JSON 对象，包含 groups。"
-            "请给我简洁的答案，不要推理，跳过思考步骤。"
-            "直接作答，不要展示你的推理过程。"
-        ),
-        "rules": [
-            "每个输出 group 表示一个真实工作事件。",
-            "deterministic_groups 是 Python 已按相同原始 event_id 确定的合并组，必须原样保留，不要拆分，也不要把组内 draft_id 改到别的组。",
-            "remaining_events 中只有明显属于同一真实事件的事项才合并；拿不准就分开。",
-            "每个输入 draft_id 必须且只能出现在一个 group 里。",
-            "每个 group 必须返回管理人员可读的 title 和 content。",
-            EVENT_TITLE_RULE,
-            "content 要整合所有来源中不冲突的事实、动作、结果、风险和待办，不按人员逐条展示贡献。",
-            "不同员工可能从不同视角描述同一事件；不要编造输入中没有的信息，也不能丢失任何一方提供的有效补充。",
-            "是否属于同一真实事件仍由你判断，不要依赖 Python 预先给出同题结论。",
-            (
-                "只有不同来源对版本号、结论、进展、结果或待办指向存在明确冲突时，"
-                "才以 is_merge_owner_source=true 的来源为准，并将 merge_owner_conflict 设为 true，"
-                "conflict_detail 简要说明冲突；没有明确冲突时这两个字段分别返回 false 和空字符串。"
-            ),
-            (
-                "反例：普通员工写 WorkTrace 技能升级到 1.0.4，"
-                "合并人来源写升级到 1.0.5；如果你判断它们属于同一真实事件，"
-                "最终 group 必须以 1.0.5 为主事实，不能改回 1.0.4，并标记存在冲突。"
-            ),
-            "两条事件都有非空 workstream_name 且名称不同，禁止放入同一 group。",
-            "workstream_name 相同只表示可能属于同一工作范围，不能据此直接合并。",
-            (
-                "evidence_relations 由 Python 对待判断事件的消息指纹和文件指纹完成集合比较后生成；"
-                "shared_message_count、shared_file_count 是共同项数量，"
-                "message_sets_equal、file_sets_equal 仅在双方对应集合非空且完全相同时为 true。"
-            ),
-            (
-                "evidence_relations、相同具体对象或 action_labels 构成连续动作时，是同一事件的强证据，"
-                "仍需结合内容确认；即使指纹集合完全相同，也不能仅据此合并。"
-            ),
-            "workstream_name 为空的事件，只有 evidence_relations 中的共同消息/文件或明确相同业务对象支持时，才能并入已命名工作流。",
-            "只有标题相似、时间接近或部门相同，不能作为合并依据。",
-            (
-                "每个 group 必须返回 object_hint、retention_reason、retention_detail；"
-                "retention_reason 只能是 deliverable_updated、decision_made、issue_or_risk_found、"
-                "follow_up_assigned、external_business_progress、substantive_approval。"
-            ),
-            (
-                "retention_detail 不能为空，必须说明为什么这个事件值得保留；"
-                "不能只照抄 title、content 或 object_hint，也不能只写已确认、已同步、已处理。"
-            ),
-            "如果来源事件只是普通约时间、互通信息、泛泛完成审核/审批且无具体对象和结论，不要输出对应 group。",
-            _build_sensitive_rule(runtime_config),
-            "涉及上述敏感事项时，不要输出对应 group。",
-        ],
-        "required_output_schema": {
-            "groups": [
-                {
-                    "group_id": "string",
-                    "draft_ids": ["draft_id"],
-                    "title": "string",
-                    "content": "string",
-                    "object_hint": "string",
-                    "retention_reason": "deliverable_updated | decision_made | issue_or_risk_found | follow_up_assigned | external_business_progress | substantive_approval",
-                    "retention_detail": "string",
-                    "merge_owner_conflict": "boolean",
-                    "conflict_detail": "string or empty string",
-                }
-            ]
-        },
-        "target_date": target_date,
-        "merge_owner_person": merge_owner_person,
-        "deterministic_groups": deterministic_groups,
-        "evidence_relations": _build_collected_evidence_relations(
-            events,
-            excluded_draft_ids=deterministic_ids,
-        ),
-        "remaining_events": [
-            _serialize_collected_source_event_for_prompt(item, runtime_config)
-            for item in events
-            if item.draft_id not in deterministic_ids
-        ],
-        "deterministic_group_events": [
-            [
-                _serialize_collected_source_event_for_prompt(item, runtime_config)
-                for item in events
-                if item.draft_id in set(group)
-            ]
-            for group in deterministic_groups
-        ],
-    }
-    return dump_json(protocol, pretty=True)
 
 
 def build_collected_grouping_prompt(
@@ -893,6 +642,7 @@ def build_collected_grouping_prompt(
     deterministic_groups: list[list[str]],
     *,
     config: RuntimeConfig | None = None,
+    validation_feedback: str = "",
 ) -> str:
     runtime_config = config or RuntimeConfig()
     reason_definitions = runtime_config.collected_group_reason_definitions
@@ -902,62 +652,54 @@ def build_collected_grouping_prompt(
     protocol = {
         "instruction": (
             "先判断多人 WorkTrace 事件中哪些属于同一真实事项。"
-            "返回 groups、draft_ids 和供跨批判断使用的候选摘要，不生成正式汇总正文。"
-            "请直接返回 JSON，不要展示推理过程。"
+            "只调用一次当前指定的 Function，返回多事件组和单条事件，不生成正式汇总正文。"
+            "不要输出普通文本或推理过程。"
         ),
         "rules": [
-            "每个输入 draft_id 必须且只能出现在一个 group。",
+            "每个输入 draft_id 必须且只能出现在 merged_groups 或 singleton_draft_ids 中一次。",
             "deterministic_groups 必须原样保留，不能拆分或加入其他组。",
             "conversation_groups 表示事件来自同一天同一飞书会话，只是候选关系，不代表必须合并。",
             "同一大群中的不同真实事项必须分开。",
-            "共同消息、共同文件、相同具体对象、连续动作或内容明确一致可支持合并。",
+            "共同消息和共同文件只能通过 evidence_relation_catalog 中已有的编号引用；相同具体对象、连续动作或内容明确一致可作为语义依据。",
             "不同员工或部门从不同视角描述同一真实事项时可以合并。",
             "拿不准是否同一事项时必须分开。",
             "不同非空工作流名称通常应分开；只有共享会话或共同消息且内容明确一致时才可合并。",
             (
-                "多条记录组成的组必须返回非空 summary_title、summary_content 和 "
-                "summary_object_hint；摘要应整合具体对象、动作、进展、结果、风险、"
+                "merged_groups 中每组至少两条记录，必须返回非空 summary_title、summary_content、"
+                "summary_object_hint 和 reason_detail；摘要应整合具体对象、动作、进展、结果、风险、"
                 "待办和明确冲突，不得按人员逐条罗列或补充来源中没有的事实。"
             ),
-            "只有一条记录的组将三个 summary 字段返回空字符串，由 Python 保留原事件。",
+            "不合并的记录只放入 singleton_draft_ids，不要为它生成组对象。",
             (
-                "group_reason 只返回 group_reason_definitions 中实际成立的依据；"
-                "不得把不同但相似的文件当成同一个共同文件。"
+                "semantic_reasons 只选择实际成立的语义依据；不得直接返回 shared_message、"
+                "shared_file、same_conversation 或内部 group_reason。"
             ),
             "risk_flags 标记跨批、工作流冲突、对象过宽或来源很多等需要复核的风险。",
             "来源负责人相同不能单独作为合并依据。",
         ],
-        "required_output_schema": {
-            "split_reason": "empty because this is not a split review result",
-            "groups": [
-                {
-                    "group_id": "string",
-                    "draft_ids": ["draft_id"],
-                    "summary_title": "string or empty for singleton",
-                    "summary_content": "string or empty for singleton",
-                    "summary_object_hint": "string or empty for singleton",
-                    "group_reason": [
-                        " | ".join(item.key for item in reason_definitions)
-                    ],
-                    "risk_flags": [
-                        "cross_batch | workstream_conflict | broad_object | large_group"
-                    ],
-                }
-            ]
-        },
         "group_reason_definitions": {
-            item.key: item.description for item in reason_definitions
+            item.key: item.description
+            for item in reason_definitions
+            if item.supports_semantic_merge and not item.evidence_relation
         },
         "target_date": target_date,
+        **(
+            {"retry_validation_errors": validation_feedback}
+            if validation_feedback.strip()
+            else {}
+        ),
         "deterministic_groups": deterministic_groups,
         "conversation_groups": _build_collected_conversation_groups(
             events,
             excluded_draft_ids=deterministic_ids,
         ),
-        "evidence_relations": _build_collected_evidence_relations(
-            events,
-            excluded_draft_ids=deterministic_ids,
-        ),
+        "evidence_relation_catalog": [
+            item.to_dict()
+            for item in build_collected_evidence_relation_catalog(
+                events,
+                excluded_draft_ids=deterministic_ids,
+            )
+        ],
         "events": [
             {
                 "draft_id": item.draft_id,
@@ -990,6 +732,7 @@ def build_collected_review_prompt(
     *,
     config: RuntimeConfig | None = None,
     review_reasons: list[str] | None = None,
+    validation_feedback: str = "",
 ) -> str:
     runtime_config = config or RuntimeConfig()
     reason_definitions = runtime_config.collected_group_reason_definitions
@@ -1026,62 +769,50 @@ def build_collected_review_prompt(
     protocol = {
         "instruction": (
             "复核一个高风险多人事件候选组是否混入了不同真实事项。"
-            "可以保留原组，也可以拆成多个子组。返回 groups，不生成正式汇总正文。"
-            "请直接返回 JSON，不要展示推理过程。"
+            "可以保留原组，也可以拆成多个子组。只调用一次当前指定的 Function，"
+            "不生成正式汇总正文，不要输出普通文本或推理过程。"
         ),
         "rules": [
-            "所有输入 draft_id 必须且只能出现在一个输出 group。",
+            "所有输入 draft_id 必须且只能出现在 merged_groups 或 singleton_draft_ids 中一次。",
             "确认属于同一真实事项时保留在同一组；拿不准时拆开。",
             "同一会话、同一负责人、标题相似或部门相同都不能单独证明是同一事项。",
             "不同业务对象、不同主要动作或不同结果方向应拆开。",
             "不同非空工作流通常拆开，除非共享消息证据且内容明确一致。",
-            "多成员组返回非空候选摘要；单成员组三个摘要字段返回空字符串。",
+            "多成员组放入 merged_groups 并返回非空候选摘要和 reason_detail；单成员只放入 singleton_draft_ids。",
             (
                 "只有将输入的多成员候选拆成多个组时，返回一条非空的顶层 split_reason，"
                 "整体说明各组的具体业务差异；未拆开时返回空字符串。"
             ),
             (
-                "group_reason 只能返回 group_reason_definitions 中实际成立的依据；"
-                "共同消息和共同文件只能在 evidence_relations 明确支持时使用，"
-                "同一会话不能单独作为多成员组的合并依据。"
+                "semantic_reasons 只能返回配置允许的语义依据；共同消息和共同文件只能引用"
+                " evidence_relation_catalog 中已有编号，同一会话不能作为多成员组的合并依据。"
             ),
             *(
                 [
                     "本组的来源仅因同一会话跨越多个没有共同消息或共同文件的部分。"
                     "逐一核对这些部分：只有它们确属同一明确事项时才能保留原组；"
                     "否则必须拆开，并用一条顶层 split_reason 写明各组的具体业务差异。"
-                    "任何保留的多成员子组必须有共同消息、共同文件，或在 group_reason 中明确写配置允许的语义依据："
+                    "任何保留的多成员子组必须引用能够覆盖该组的共同消息、共同文件编号，或在 semantic_reasons 中明确写配置允许的语义依据："
                     + "、".join(semantic_reason_keys)
                     + "；"
-                    "只有 same_conversation 的子组会被判为无效。"
+                    "只有同一会话候选关系的子组会被判为无效。"
                 ]
                 if "same_conversation_only" in effective_review_reasons
                 else []
             ),
         ],
-        "required_output_schema": {
-            "split_reason": "nonempty only when this review splits the candidate group",
-            "groups": [
-                {
-                    "group_id": "string",
-                    "draft_ids": ["draft_id"],
-                    "summary_title": "string or empty for singleton",
-                    "summary_content": "string or empty for singleton",
-                    "summary_object_hint": "string or empty for singleton",
-                    "group_reason": [
-                        " | ".join(item.key for item in reason_definitions)
-                    ],
-                    "risk_flags": [
-                        "cross_batch | workstream_conflict | broad_object | large_group"
-                    ],
-                }
-            ]
-        },
         "group_reason_definitions": {
-            item.key: item.description for item in reason_definitions
+            item.key: item.description
+            for item in reason_definitions
+            if item.supports_semantic_merge and not item.evidence_relation
         },
         "target_date": target_date,
         "review_reasons": effective_review_reasons,
+        **(
+            {"retry_validation_errors": validation_feedback}
+            if validation_feedback.strip()
+            else {}
+        ),
         "candidate_group": {
             "group_id": candidate_group.group_id,
             "draft_ids": list(candidate_group.draft_ids),
@@ -1095,10 +826,13 @@ def build_collected_review_prompt(
             events,
             excluded_draft_ids=set(),
         ),
-        "evidence_relations": _build_collected_evidence_relations(
-            events,
-            excluded_draft_ids=set(),
-        ),
+        "evidence_relation_catalog": [
+            item.to_dict()
+            for item in build_collected_evidence_relation_catalog(
+                events,
+                excluded_draft_ids=set(),
+            )
+        ],
         "events": [
             {
                 "draft_id": item.draft_id,
@@ -1143,7 +877,7 @@ def build_collected_render_prompt(
     protocol = {
         "instruction": (
             "为已经确认属于同一真实事项的多人事件组生成正式汇总内容。"
-            "组成员已经锁定，不要重新分组。只返回 JSON groups。"
+            "组成员已经锁定，不要重新分组。只调用指定 Function 一次提交 groups。"
         ),
         "rules": [
             "每个 locked_group 必须原样返回为一个 group，draft_ids 不得增删或移动。",
@@ -1163,28 +897,6 @@ def build_collected_render_prompt(
             ),
             _build_sensitive_rule(runtime_config),
         ],
-        "required_output_schema": {
-            "groups": [
-                {
-                    "group_id": "string",
-                    "draft_ids": ["draft_id"],
-                    "title": "string",
-                    "content": "string",
-                    "object_hint": "string",
-                    "retention_reason": "deliverable_updated | decision_made | issue_or_risk_found | follow_up_assigned | external_business_progress | substantive_approval",
-                    "retention_detail": "string",
-                    "merge_owner_conflict": "boolean",
-                    "conflict_detail": "string or empty string",
-                    "covered_draft_ids": ["draft_id"],
-                    "fact_items": [
-                        {
-                            "text": "string",
-                            "source_draft_ids": ["draft_id"],
-                        }
-                    ],
-                }
-            ]
-        },
         "target_date": target_date,
         "locked_groups": [
             {
@@ -1226,7 +938,8 @@ def build_anchor_analysis_prompt(
     protocol = {
         "instruction": (
             "分析一个锚点聊天窗口。"
-            "只返回 JSON：anchor_status、candidate_events、context_requests、needs_cross_anchor_merge。"
+            "只调用指定 Function 一次提交 anchor_status、candidate_events、"
+            "context_requests 和 needs_cross_anchor_merge。"
             "请给我简洁的答案，不要推理，跳过思考步骤。"
             "直接作答，不要展示你的推理过程。"
         ),
@@ -1265,42 +978,6 @@ def build_anchor_analysis_prompt(
             "只有事件明显跨多个锚点窗口或会话时，needs_cross_anchor_merge 才设为 true。",
             "如果有明确结果，直接融入 content，不要单独返回 result。",
         ],
-        "required_output_schema": {
-            "anchor_status": [
-                AnchorStatus.COMPLETED.value,
-                AnchorStatus.NEEDS_MORE_CONTEXT.value,
-                AnchorStatus.NEEDS_ATTACHMENT_TEXT.value,
-                AnchorStatus.NOT_WORK_RELATED.value,
-                AnchorStatus.UNCERTAIN.value,
-            ],
-            "candidate_events_item": {
-                "topic": "string",
-                "content": "string",
-                "action_label": "string",
-                "object_hint": "string",
-                "retention_reason": "deliverable_updated | decision_made | issue_or_risk_found | follow_up_assigned | external_business_progress | substantive_approval",
-                "retention_detail": "string",
-                "referenced_link_ids": ["message_id#link1"],
-                "referenced_attachment_ids": ["attachment_id"],
-                "self_evidence_message_ids": ["message_id"],
-                "self_relations": [
-                    {
-                        "relation": "configured relation key",
-                        "evidence_message_ids": ["message_id"],
-                    }
-                ],
-                "workstream_key": "string or empty string",
-                "source_message_ids": ["message_id"],
-                **_personal_fact_output_shape(),
-            },
-            "context_requests_item": {
-                "request_type": "earlier_messages | later_messages | attachment_text | linked_file_text",
-                "target_message_ids": ["message_id"],
-                "target_attachment_ids": ["attachment_id"],
-                "target_link_ids": ["message_id#link1"],
-            },
-            "needs_cross_anchor_merge": "boolean",
-        },
         "input": {
             "target_date": target_date,
             "pass_index": pass_index,
@@ -1320,7 +997,7 @@ def build_anchor_batch_analysis_prompt(
     protocol = {
         "instruction": (
             "一次分析多个彼此独立的锚点聊天窗口。"
-            "只返回 JSON，顶层键为 results。每个 result 必须对应一个 anchor_unit_id。"
+            "只调用指定 Function 一次提交 results；每个 result 必须对应一个 anchor_unit_id。"
             "请给我简洁的答案，不要推理，跳过思考步骤。"
             "直接作答，不要展示你的推理过程。"
         ),
@@ -1354,49 +1031,6 @@ def build_anchor_batch_analysis_prompt(
             "只有事件明显跨多个锚点窗口或会话时，needs_cross_anchor_merge 才设为 true。",
             "如果有明确结果，直接融入 content，不要单独返回 result。",
         ],
-        "required_output_schema": {
-            "results": [
-                {
-                    "anchor_unit_id": "anchor_unit_id",
-                    "analysis": {
-                        "anchor_status": [
-                            AnchorStatus.COMPLETED.value,
-                            AnchorStatus.NEEDS_MORE_CONTEXT.value,
-                            AnchorStatus.NEEDS_ATTACHMENT_TEXT.value,
-                            AnchorStatus.NOT_WORK_RELATED.value,
-                            AnchorStatus.UNCERTAIN.value,
-                        ],
-                        "candidate_events_item": {
-                            "topic": "string",
-                            "content": "string",
-                            "action_label": "string",
-                            "object_hint": "string",
-                            "retention_reason": "deliverable_updated | decision_made | issue_or_risk_found | follow_up_assigned | external_business_progress | substantive_approval",
-                            "retention_detail": "string",
-                            "referenced_link_ids": ["message_id#link1"],
-                            "referenced_attachment_ids": ["attachment_id"],
-                            "self_evidence_message_ids": ["message_id"],
-                            "self_relations": [
-                                {
-                                    "relation": "configured relation key",
-                                    "evidence_message_ids": ["message_id"],
-                                }
-                            ],
-                            "workstream_key": "string or empty string",
-                            "source_message_ids": ["message_id"],
-                            **_personal_fact_output_shape(),
-                        },
-                        "context_requests_item": {
-                            "request_type": "earlier_messages | later_messages | attachment_text | linked_file_text",
-                            "target_message_ids": ["message_id"],
-                            "target_attachment_ids": ["attachment_id"],
-                            "target_link_ids": ["message_id#link1"],
-                        },
-                        "needs_cross_anchor_merge": "boolean",
-                    },
-                }
-            ]
-        },
         "input": {
             "target_date": target_date,
             "anchor_units": [
@@ -1425,9 +1059,8 @@ def build_anchor_expansion_prompt(
     protocol = {
         "instruction": (
             "在 Python 扩展上下文后，继续分析一个锚点聊天窗口。"
-            "只返回一个 JSON 对象，包含 anchor_status、candidate_events、"
-            "context_requests 和 needs_cross_anchor_merge。"
-            "不要返回 markdown、解释或额外字段。"
+            "只调用指定 Function 一次提交 anchor_status、candidate_events、"
+            "context_requests 和 needs_cross_anchor_merge。不要返回普通文字。"
             "请给我简洁的答案，不要推理，跳过思考步骤。"
             "直接作答，不要展示你的推理过程。"
         ),
@@ -1479,46 +1112,6 @@ def build_anchor_expansion_prompt(
             "只有事件可能跨其他锚点窗口或会话时，needs_cross_anchor_merge 才设为 true。",
             "如果有明确结果，直接融入 content，不要单独返回 result。",
         ],
-        "required_output_schema": {
-            "anchor_status": (
-                f"{AnchorStatus.COMPLETED.value} | "
-                f"{AnchorStatus.NEEDS_MORE_CONTEXT.value} | "
-                f"{AnchorStatus.NEEDS_ATTACHMENT_TEXT.value} | "
-                f"{AnchorStatus.NOT_WORK_RELATED.value} | "
-                f"{AnchorStatus.UNCERTAIN.value}"
-            ),
-            "candidate_events": [
-                {
-                    "topic": "string",
-                    "content": "string",
-                    "action_label": "string",
-                    "object_hint": "string",
-                    "retention_reason": "deliverable_updated | decision_made | issue_or_risk_found | follow_up_assigned | external_business_progress | substantive_approval",
-                    "retention_detail": "string",
-                    "referenced_link_ids": ["message_id#link1"],
-                    "referenced_attachment_ids": ["attachment_id"],
-                    "self_evidence_message_ids": ["message_id"],
-                    "self_relations": [
-                        {
-                            "relation": "configured relation key",
-                            "evidence_message_ids": ["message_id"],
-                        }
-                    ],
-                    "workstream_key": "string or empty string",
-                    "source_message_ids": ["message_id"],
-                    **_personal_fact_output_shape(),
-                }
-            ],
-            "context_requests": [
-                {
-                    "request_type": "earlier_messages | later_messages | attachment_text | linked_file_text",
-                    "target_message_ids": ["message_id"],
-                    "target_attachment_ids": ["attachment_id"],
-                    "target_link_ids": ["message_id#link1"],
-                }
-            ],
-            "needs_cross_anchor_merge": True,
-        },
         "input": {
             "target_date": target_date,
             "pass_index": pass_index,
@@ -1793,6 +1386,19 @@ def _build_collected_evidence_relations(
                 }
             )
     return relations
+
+
+def build_collected_evidence_relation_catalog(
+    events: list[CollectedSourceEvent],
+    *,
+    excluded_draft_ids: set[str],
+) -> list[EvidenceRelation]:
+    return build_evidence_relation_catalog(
+        _build_collected_evidence_relations(
+            events,
+            excluded_draft_ids=excluded_draft_ids,
+        )
+    )
 
 
 def _build_collected_conversation_groups(

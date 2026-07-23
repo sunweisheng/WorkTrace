@@ -18,7 +18,7 @@ def test_required_image_summary_bypasses_optional_image_limit(tmp_path, monkeypa
 
     monkeypatch.setattr(
         "src.worktrace.vision.load_online_llm_settings",
-        lambda config: OnlineLLMSettings(
+        lambda config, **kwargs: OnlineLLMSettings(
             base_url="https://example.test/v1",
             model="test-model",
             api_key="test-key",

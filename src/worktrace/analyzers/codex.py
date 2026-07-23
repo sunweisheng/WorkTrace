@@ -38,12 +38,22 @@ from ..models import (
     RetentionReviewResult,
 )
 from ..utils.json_io import load_json_object
-from ..utils.token_estimation import estimate_model_input_tokens
+from ..utils.token_estimation import (
+    estimate_model_input_tokens,
+    estimate_structured_input_tokens,
+    prepare_model_prompt,
+)
 from .base import Analyzer, is_indivisible_collected_request, oversized_input_kwargs
+from .function_calls import (
+    FunctionCallSpec,
+    collected_grouping_call_contract,
+    function_call_spec,
+    message_reference_ids,
+    task_function_call_spec,
+)
 from .output_schemas import (
     anchor_batch_output_schema,
     batch_output_schema,
-    collected_grouping_output_schema,
     collected_merge_output_schema,
     conversation_segmentation_output_schema,
     merge_output_schema,
@@ -55,9 +65,9 @@ from .prompts import (
     build_anchor_batch_analysis_prompt,
     build_batch_analysis_prompt,
     build_collected_grouping_prompt,
-    build_collected_merge_prompt,
     build_collected_review_prompt,
     build_collected_render_prompt,
+    build_conversation_segmentation_message_refs,
     build_conversation_segmentation_prompt,
     build_merge_prompt,
     build_personal_fact_review_prompt,
@@ -68,7 +78,7 @@ from .prompts import (
 from .protocol import (
     parse_anchor_batch_analysis_payload,
     parse_batch_analysis_payload,
-    parse_collected_grouping_payload,
+    parse_collected_grouping_function_payload,
     parse_collected_merge_payload,
     parse_conversation_segmentation_payload,
     parse_merge_payload,
@@ -136,15 +146,36 @@ class CodexAnalyzer(Analyzer):
                 self.config.codex_request_interval_max_seconds,
             )
 
+    def request_function(
+        self,
+        prompt: str,
+        *,
+        function_spec: FunctionCallSpec,
+        allow_oversized_input: bool = False,
+    ) -> object:
+        return self._invoke_codex(
+            prompt,
+            output_schema=function_spec.parameters,
+            request_kind=function_spec.request_kind,
+            allow_oversized_input=allow_oversized_input,
+            function_spec=function_spec,
+        )
+
     def analyze_batch(
         self,
         target_date: str,
         batch_input: AnalysisBatch,
     ) -> BatchAnalysisResult:
-        payload = self._invoke_codex(
+        references = message_reference_ids(
+            [message for item in batch_input.slices for message in item.messages]
+        )
+        payload = self.request_function(
             self.build_batch_prompt(batch_input),
-            output_schema=batch_output_schema(self.config),
-            request_kind="batch_analysis",
+            function_spec=task_function_call_spec(
+                "batch_analysis",
+                batch_output_schema(self.config),
+                **references,
+            ),
         )
         return parse_batch_analysis_payload(payload)
 
@@ -188,7 +219,8 @@ class CodexAnalyzer(Analyzer):
         attachment_texts: list[AttachmentTextBlock] | None = None,
         allow_oversized_input: bool = False,
     ) -> ConversationSegmentationResult:
-        payload = self._invoke_codex(
+        message_refs = build_conversation_segmentation_message_refs(messages)
+        payload = self.request_function(
             self.build_segmentation_prompt(
                 target_date=target_date,
                 conversation_id=conversation_id,
@@ -200,8 +232,13 @@ class CodexAnalyzer(Analyzer):
                 hard_boundary_before_ids=hard_boundary_before_ids,
                 attachment_texts=attachment_texts,
             ),
-            output_schema=conversation_segmentation_output_schema(),
-            request_kind="conversation_segmentation",
+            function_spec=task_function_call_spec(
+                "conversation_segmentation",
+                conversation_segmentation_output_schema(),
+                enum_values={
+                    "segment_start_message_ids": list(message_refs.values())
+                },
+            ),
             **oversized_input_kwargs(allow_oversized_input),
         )
         return restore_conversation_segmentation_references(
@@ -217,10 +254,18 @@ class CodexAnalyzer(Analyzer):
         self,
         batch: SegmentAnalysisBatch,
     ) -> BatchSegmentAnalysisResult:
-        payload = self._invoke_codex(
+        references = message_reference_ids(
+            [message for item in batch.segments for message in item.messages]
+        )
+        payload = self.request_function(
             self.build_segment_batch_prompt(batch),
-            output_schema=segment_batch_output_schema(self.config),
-            request_kind="segment_batch_analysis",
+            function_spec=task_function_call_spec(
+                "segment_batch_analysis",
+                segment_batch_output_schema(self.config),
+                segment_ids=[item.segment_id for item in batch.segments],
+                result_count=len(batch.segments),
+                **references,
+            ),
             **oversized_input_kwargs(batch.oversized_singleton),
         )
         return parse_segment_batch_analysis_payload(payload)
@@ -232,10 +277,18 @@ class CodexAnalyzer(Analyzer):
         self,
         batch: RetentionReviewBatch,
     ) -> RetentionReviewResult:
-        payload = self._invoke_codex(
+        references = message_reference_ids(
+            [message for item in batch.candidates for message in item.messages]
+        )
+        payload = self.request_function(
             self.build_retention_review_prompt(batch),
-            output_schema=retention_review_output_schema(self.config),
-            request_kind="retention_review",
+            function_spec=task_function_call_spec(
+                "retention_review",
+                retention_review_output_schema(self.config),
+                draft_ids=[item.candidate.draft_id for item in batch.candidates],
+                result_count=len(batch.candidates),
+                **references,
+            ),
             **oversized_input_kwargs(batch.oversized_singleton),
         )
         return parse_retention_review_payload(payload)
@@ -250,10 +303,18 @@ class CodexAnalyzer(Analyzer):
         self,
         batch: PersonalFactReviewBatch,
     ) -> PersonalFactReviewResult:
-        payload = self._invoke_codex(
+        references = message_reference_ids(
+            [message for item in batch.candidates for message in item.messages]
+        )
+        payload = self.request_function(
             self.build_personal_fact_review_prompt(batch),
-            output_schema=personal_fact_review_output_schema(batch),
-            request_kind="personal_fact_review",
+            function_spec=task_function_call_spec(
+                "personal_fact_review",
+                personal_fact_review_output_schema(batch),
+                draft_ids=[item.candidate.draft_id for item in batch.candidates],
+                result_count=len(batch.candidates),
+                **references,
+            ),
             **oversized_input_kwargs(batch.oversized_singleton),
         )
         return parse_personal_fact_review_payload(payload)
@@ -273,10 +334,18 @@ class CodexAnalyzer(Analyzer):
         target_date: str,
         anchor_units: list[AnchorUnit],
     ) -> BatchAnchorAnalysisResult:
-        payload = self._invoke_codex(
+        references = message_reference_ids(
+            [message for item in anchor_units for message in item.messages]
+        )
+        payload = self.request_function(
             build_anchor_batch_analysis_prompt(target_date, anchor_units, config=self.config),
-            output_schema=anchor_batch_output_schema(self.config),
-            request_kind="anchor_batch_analysis",
+            function_spec=task_function_call_spec(
+                "anchor_batch_analysis",
+                anchor_batch_output_schema(self.config),
+                anchor_unit_ids=[item.anchor_unit_id for item in anchor_units],
+                result_count=len(anchor_units),
+                **references,
+            ),
             **oversized_input_kwargs(
                 len(anchor_units) == 1 and anchor_units[0].oversized_singleton
             ),
@@ -288,10 +357,13 @@ class CodexAnalyzer(Analyzer):
         target_date: str,
         candidates: list[SourceBackedEventDraft],
     ) -> CrossConversationGroupResult:
-        payload = self._invoke_codex(
+        payload = self.request_function(
             build_merge_prompt(target_date, candidates),
-            output_schema=merge_output_schema(),
-            request_kind="day_candidate_merge",
+            function_spec=task_function_call_spec(
+                "day_candidate_merge",
+                merge_output_schema(),
+                draft_ids=[item.draft_id for item in candidates],
+            ),
             **oversized_input_kwargs(len(candidates) == 1),
         )
         return parse_merge_payload(payload)
@@ -302,15 +374,19 @@ class CodexAnalyzer(Analyzer):
         events: list[CollectedSourceEvent],
         deterministic_groups: list[list[str]],
     ) -> CollectedMergeResult:
-        payload = self._invoke_codex(
+        payload = self.request_function(
             build_collected_render_prompt(
                 target_date,
                 events,
                 deterministic_groups,
                 config=self.config,
             ),
-            output_schema=collected_merge_output_schema(),
-            request_kind="collected_event_merge",
+            function_spec=task_function_call_spec(
+                "collected_event_merge",
+                collected_merge_output_schema(),
+                draft_ids=[item.draft_id for item in events],
+                exact_array_lengths={"groups": len(deterministic_groups)},
+            ),
             **oversized_input_kwargs(
                 is_indivisible_collected_request(events, deterministic_groups)
             ),
@@ -322,21 +398,36 @@ class CodexAnalyzer(Analyzer):
         target_date: str,
         events: list[CollectedSourceEvent],
         deterministic_groups: list[list[str]],
+        *,
+        validation_feedback: str = "",
     ) -> CollectedGroupingResult:
-        payload = self._invoke_codex(
+        contract = collected_grouping_call_contract(
+            "collected_candidate_grouping",
+            config=self.config,
+            events=events,
+            deterministic_groups=deterministic_groups,
+            include_split_reason=False,
+        )
+        payload = self.request_function(
             build_collected_grouping_prompt(
                 target_date,
                 events,
                 deterministic_groups,
                 config=self.config,
+                validation_feedback=validation_feedback,
             ),
-            output_schema=collected_grouping_output_schema(self.config),
-            request_kind="collected_candidate_grouping",
+            function_spec=contract.function_spec,
             **oversized_input_kwargs(
                 is_indivisible_collected_request(events, deterministic_groups)
+                or bool(validation_feedback)
             ),
         )
-        return parse_collected_grouping_payload(payload)
+        result, _ = parse_collected_grouping_function_payload(
+            payload,
+            evidence_catalog=list(contract.evidence_catalog),
+            allowed_semantic_reasons=contract.semantic_reasons,
+        )
+        return result
 
     def review_collected_group(
         self,
@@ -345,20 +436,33 @@ class CodexAnalyzer(Analyzer):
         candidate_group: CollectedGroupingGroup,
         *,
         review_reasons: list[str] | None = None,
+        validation_feedback: str = "",
     ) -> CollectedGroupingResult:
-        payload = self._invoke_codex(
+        contract = collected_grouping_call_contract(
+            "collected_group_review",
+            config=self.config,
+            events=events,
+            deterministic_groups=[list(candidate_group.draft_ids)],
+            include_split_reason=True,
+        )
+        payload = self.request_function(
             build_collected_review_prompt(
                 target_date,
                 events,
                 candidate_group,
                 config=self.config,
                 review_reasons=review_reasons,
+                validation_feedback=validation_feedback,
             ),
-            output_schema=collected_grouping_output_schema(self.config),
-            request_kind="collected_group_review",
+            function_spec=contract.function_spec,
             **oversized_input_kwargs(True),
         )
-        return parse_collected_grouping_payload(payload)
+        result, _ = parse_collected_grouping_function_payload(
+            payload,
+            evidence_catalog=list(contract.evidence_catalog),
+            allowed_semantic_reasons=contract.semantic_reasons,
+        )
+        return result
 
     def _run_command(
         self,
@@ -385,12 +489,25 @@ class CodexAnalyzer(Analyzer):
         output_schema: dict[str, object] | None = None,
         request_kind: str = "auxiliary_json",
         allow_oversized_input: bool = False,
+        function_spec: FunctionCallSpec | None = None,
     ) -> object:
-        request_schema = output_schema if self.config.codex_stdin_mode else None
-        estimated_tokens = estimate_model_input_tokens(
-            prompt,
-            output_schema=request_schema,
-        )
+        if function_spec is not None:
+            estimated_tokens = estimate_structured_input_tokens(
+                prompt,
+                function_spec=function_spec,
+                append_no_think=True,
+            )["input_estimated_tokens"]
+            command_prompt = prepare_model_prompt(
+                function_spec.prompt_with_example(prompt),
+                append_no_think=True,
+            )
+        else:
+            request_schema = output_schema if self.config.codex_stdin_mode else None
+            estimated_tokens = estimate_model_input_tokens(
+                prompt,
+                output_schema=request_schema,
+            )
+            command_prompt = prompt
         target_tokens = self.config.model_input_batch_target_tokens
         oversized_singleton = estimated_tokens > target_tokens and allow_oversized_input
         if estimated_tokens > target_tokens and not allow_oversized_input:
@@ -458,7 +575,7 @@ class CodexAnalyzer(Analyzer):
                     tuple(args),
                     cwd=self.cwd,
                     timeout=self.config.analyzer_timeout_seconds,
-                    input_text=prompt,
+                    input_text=command_prompt,
                 )
             else:
                 result = self.command_runner(
@@ -473,7 +590,7 @@ class CodexAnalyzer(Analyzer):
                         "read-only",
                         "-o",
                         str(output_path),
-                        prompt,
+                        command_prompt,
                     ),
                     cwd=self.cwd,
                     timeout=self.config.analyzer_timeout_seconds,

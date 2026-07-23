@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+from typing import Sequence
+
 from ..errors import AnalyzerProtocolError
 from ..models import (
     AnchorAnalysisResult,
     BatchAnalysisResult,
     BatchAnchorAnalysisResult,
     BatchSegmentAnalysisResult,
+    CollectedGroupingGroup,
     CollectedGroupingResult,
     CollectedMergeResult,
     ConversationSegmentationResult,
@@ -229,6 +232,139 @@ def parse_collected_grouping_payload(payload: object) -> CollectedGroupingResult
         return CollectedGroupingResult.from_dict(data)
     except (KeyError, TypeError, ValueError) as exc:
         raise AnalyzerProtocolError("Invalid collected grouping payload.") from exc
+
+
+def parse_collected_grouping_function_payload(
+    payload: object,
+    *,
+    evidence_catalog: list[object],
+    allowed_semantic_reasons: Sequence[str] = (),
+) -> tuple[CollectedGroupingResult, list[str]]:
+    from .collected_evidence import EvidenceRelation, selected_relations_cover_group
+
+    data = expect_json_object(payload, "Collected grouping Function result")
+    catalog = {
+        item.relation_id: item
+        for item in evidence_catalog
+        if isinstance(item, EvidenceRelation)
+    }
+    allowed_semantic_reason_set = set(allowed_semantic_reasons)
+    raw_groups = data.get("merged_groups")
+    raw_singletons = data.get("singleton_draft_ids")
+    if not isinstance(raw_groups, list) or not isinstance(raw_singletons, list):
+        raise AnalyzerProtocolError(
+            "Collected grouping Function result must contain group and singleton arrays."
+        )
+
+    groups: list[CollectedGroupingGroup] = []
+    errors: list[str] = []
+    for index, raw_group in enumerate(raw_groups, start=1):
+        if not isinstance(raw_group, dict):
+            errors.append(f"invalid_group field=merged_groups[{index - 1}]")
+            continue
+        group_id = str(raw_group.get("group_id", "")).strip() or f"merged-{index:03d}"
+        draft_ids = [str(value) for value in raw_group.get("draft_ids", [])]
+        raw_semantic_reasons = [
+            str(value) for value in raw_group.get("semantic_reasons", [])
+        ]
+        semantic_reasons = [
+            value
+            for value in raw_semantic_reasons
+            if value in allowed_semantic_reason_set
+        ]
+        for reason in raw_semantic_reasons:
+            if reason not in allowed_semantic_reason_set:
+                errors.append(
+                    "unknown_semantic_reason "
+                    f"field=merged_groups[{index - 1}].semantic_reasons "
+                    f"group_id={group_id} reason={reason}"
+                )
+        relation_ids = [
+            str(value) for value in raw_group.get("evidence_relation_ids", [])
+        ]
+        duplicate_relation_ids = sorted(
+            {
+                relation_id
+                for relation_id in relation_ids
+                if relation_ids.count(relation_id) > 1
+            }
+        )
+        if duplicate_relation_ids:
+            errors.append(
+                "duplicate_evidence_relation "
+                f"field=merged_groups[{index - 1}].evidence_relation_ids "
+                f"group_id={group_id} relation_ids={duplicate_relation_ids}"
+            )
+        selected_relations: list[EvidenceRelation] = []
+        derived_reasons: list[str] = []
+        for relation_id in relation_ids:
+            relation = catalog.get(relation_id)
+            if relation is None:
+                errors.append(
+                    "unknown_evidence_relation "
+                    f"field=merged_groups[{index - 1}].evidence_relation_ids "
+                    f"group_id={group_id} relation_id={relation_id}"
+                )
+                continue
+            if not set(relation.draft_ids).issubset(set(draft_ids)):
+                errors.append(
+                    "evidence_outside_group "
+                    f"field=merged_groups[{index - 1}].evidence_relation_ids "
+                    f"group_id={group_id} relation_id={relation_id}"
+                )
+                continue
+            selected_relations.append(relation)
+            derived_reasons.append(relation.relation_type)
+        if not semantic_reasons and not selected_relations:
+            errors.append(
+                "merge_reason_missing "
+                f"field=merged_groups[{index - 1}] group_id={group_id}"
+            )
+        if (
+            not semantic_reasons
+            and selected_relations
+            and not selected_relations_cover_group(draft_ids, selected_relations)
+        ):
+            errors.append(
+                "evidence_does_not_cover_group "
+                f"field=merged_groups[{index - 1}].evidence_relation_ids "
+                f"group_id={group_id} relation_ids={relation_ids}"
+            )
+        reason_detail = str(raw_group.get("reason_detail", "")).strip()
+        if not reason_detail:
+            errors.append(
+                "reason_detail_missing "
+                f"field=merged_groups[{index - 1}].reason_detail group_id={group_id}"
+            )
+        groups.append(
+            CollectedGroupingGroup(
+                group_id=group_id,
+                draft_ids=draft_ids,
+                summary_title=str(raw_group.get("summary_title", "")),
+                summary_content=str(raw_group.get("summary_content", "")),
+                summary_object_hint=str(raw_group.get("summary_object_hint", "")),
+                group_reason=list(dict.fromkeys([*derived_reasons, *semantic_reasons])),
+                semantic_reasons=semantic_reasons,
+                evidence_relation_ids=relation_ids,
+                reason_detail=reason_detail,
+                risk_flags=[str(value) for value in raw_group.get("risk_flags", [])],
+            )
+        )
+    for index, draft_id in enumerate(raw_singletons, start=1):
+        groups.append(
+            CollectedGroupingGroup(
+                group_id=f"singleton-{index:03d}",
+                draft_ids=[str(draft_id)],
+            )
+        )
+    return (
+        CollectedGroupingResult(
+            groups=groups,
+            split_reason=str(data.get("split_reason", "")).strip(),
+            validation_errors=errors,
+        ),
+        errors,
+    )
 
 
 def parse_collected_merge_payload(payload: object) -> CollectedMergeResult:

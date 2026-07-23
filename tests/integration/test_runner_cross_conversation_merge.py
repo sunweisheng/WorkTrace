@@ -226,10 +226,10 @@ class SemanticResolutionMergeAnalyzer(MergeAnalyzer):
         super().__init__()
         self.workstream_resolution_calls = 0
 
-    def request_json(self, prompt, *, output_schema):
+    def request_function(self, prompt, *, function_spec, allow_oversized_input=False):
         self.workstream_resolution_calls += 1
         assert "parent_draft_id" in prompt
-        assert output_schema["required"] == ["assignments"]
+        assert function_spec.parameters["required"] == ["assignments"]
         if "unassigned_candidates" in prompt:
             return {
                 "assignments": [
@@ -545,7 +545,7 @@ def test_workstream_resolution_rebatches_complete_inputs_before_request(
             super().__init__()
             self.workstream_batches: list[list[str]] = []
 
-        def request_json(self, prompt, *, output_schema):
+        def request_function(self, prompt, *, function_spec, allow_oversized_input=False):
             payload = json.loads(prompt)
             draft_ids = [item["draft_id"] for item in payload["candidates"]]
             self.workstream_batches.append(draft_ids)

@@ -9,9 +9,11 @@ import httpx
 import pytest
 
 from src.worktrace.analyzers.output_schemas import (
+    batch_output_schema,
     personal_fact_review_output_schema,
     retention_review_output_schema,
 )
+from src.worktrace.analyzers.function_calls import function_call_spec
 from src.worktrace.analyzers.online import (
     OnlineLLMAnalyzer,
     _FirstStreamEventTimeoutError,
@@ -20,7 +22,8 @@ from src.worktrace.analyzers.online import (
     _build_responses_request_body,
     _extract_text_from_responses_payload,
     _extract_text_from_responses_stream_event,
-    _close_global_client,
+    _extract_function_arguments_from_responses_payload,
+    _extract_stream_function_arguments,
     _read_first_stream_event,
 )
 from src.worktrace.config import (
@@ -44,7 +47,35 @@ from src.worktrace.models import (
     RetentionReviewCandidate,
     SourceBackedEventDraft,
 )
-from src.worktrace.utils.token_estimation import estimate_model_input_tokens
+from src.worktrace.utils.token_estimation import (
+    estimate_model_input_tokens,
+    estimate_structured_input_tokens,
+)
+
+
+def sample_function_spec():
+    return function_call_spec(
+        "batch_analysis",
+        batch_output_schema(RuntimeConfig()),
+        typical_arguments={"candidate_events": [], "context_requests": []},
+    )
+
+
+def function_response(arguments: dict[str, object], *, usage=None) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "output": [
+            {
+                "type": "function_call",
+                "id": "fc_1",
+                "call_id": "call_1",
+                "name": "submit_batch_analysis",
+                "arguments": json.dumps(arguments),
+            }
+        ]
+    }
+    if usage is not None:
+        payload["usage"] = usage
+    return payload
 
 
 def sample_batch() -> AnalysisBatch:
@@ -136,11 +167,10 @@ def test_online_analyzer_uses_retention_review_protocol(
     analyzer = OnlineLLMAnalyzer(config=config, cwd=tmp_path)
     captured: dict[str, object] = {}
 
-    def fake_invoke(prompt, *, output_schema, request_kind):
+    def fake_invoke(prompt, *, function_spec, allow_oversized_input=False):
         captured.update(
             prompt=prompt,
-            output_schema=output_schema,
-            request_kind=request_kind,
+            function_spec=function_spec,
         )
         return {
             "results": [
@@ -162,9 +192,10 @@ def test_online_analyzer_uses_retention_review_protocol(
     result = analyzer.review_retention_candidates(sample_retention_review_batch())
 
     assert result.results[0].draft_id == "draft-1"
-    assert captured["request_kind"] == "retention_review"
+    assert captured["function_spec"].request_kind == "retention_review"
     assert "不要决定保留或删除" in str(captured["prompt"])
-    assert captured["output_schema"] == retention_review_output_schema(config)
+    assert captured["function_spec"].parameters != retention_review_output_schema(config)
+    assert captured["function_spec"].parameters["properties"]["results"]["minItems"] == 1
 
 
 def test_online_analyzer_uses_personal_fact_review_protocol(
@@ -178,11 +209,10 @@ def test_online_analyzer_uses_personal_fact_review_protocol(
     analyzer = OnlineLLMAnalyzer(config=config, cwd=tmp_path)
     captured: dict[str, object] = {}
 
-    def fake_invoke(prompt, *, output_schema, request_kind):
+    def fake_invoke(prompt, *, function_spec, allow_oversized_input=False):
         captured.update(
             prompt=prompt,
-            output_schema=output_schema,
-            request_kind=request_kind,
+            function_spec=function_spec,
         )
         return {
             "results": [
@@ -207,11 +237,9 @@ def test_online_analyzer_uses_personal_fact_review_protocol(
     result = analyzer.review_personal_event_facts(sample_personal_fact_review_batch())
 
     assert result.results[0].supported is False
-    assert captured["request_kind"] == "personal_fact_review"
+    assert captured["function_spec"].request_kind == "personal_fact_review"
     assert "messages 才是事实来源" in str(captured["prompt"])
-    assert captured["output_schema"] == personal_fact_review_output_schema(
-        sample_personal_fact_review_batch()
-    )
+    assert captured["function_spec"].parameters["properties"]["results"]["maxItems"] == 1
 
 
 def build_settings(**overrides: object) -> OnlineLLMSettings:
@@ -228,19 +256,25 @@ def build_settings(**overrides: object) -> OnlineLLMSettings:
     return OnlineLLMSettings(**(base.__dict__ | overrides))
 
 
-def test_build_responses_request_body_includes_stream_schema_and_reasoning() -> None:
+def test_build_responses_request_body_includes_function_and_reasoning() -> None:
+    function_spec = sample_function_spec()
     body = _build_responses_request_body(
         "prompt",
         settings=build_settings(stream_enabled=True, reasoning_effort="none"),
-        schema={"type": "object"},
+        function_spec=function_spec,
     )
 
     assert body["model"] == "provider-model"
-    assert body["input"] == "prompt\n/no_think"
+    assert body["input"].startswith("prompt\n\n典型 Function 参数示例：")
+    assert body["input"].endswith("/no_think")
     assert body["stream"] is True
     assert body["stream_options"] == {"include_usage": True}
     assert body["reasoning"] == {"effort": "none"}
-    assert body["text"]["format"]["schema"] == {"type": "object"}
+    assert body["tools"] == [function_spec.tool()]
+    assert body["tool_choice"] == function_spec.tool_choice()
+    assert body["parallel_tool_calls"] is False
+    assert body["tools"][0]["strict"] is True
+    assert "text" not in body
 
 
 def test_apply_soft_no_think_deduplicates_marker() -> None:
@@ -288,20 +322,25 @@ def test_online_analyzer_allows_marked_indivisible_input(
 
     assert analyzer._invoke_online(
         "oversized",
-        request_kind="segment_batch_analysis",
+        function_spec=sample_function_spec(),
         allow_oversized_input=True,
     ) == {}
     assert captured["oversized_singleton"] is True
     assert captured["estimated_input_tokens"] > captured["input_target_tokens"]
 
 
-def test_online_analyzer_counts_output_schema_before_request(tmp_path: Path) -> None:
+def test_online_analyzer_counts_function_contract_before_request(tmp_path: Path) -> None:
     prompt = "short prompt"
     output_schema = {
         "type": "object",
         "description": "x" * 600,
         "additionalProperties": False,
     }
+    function_spec = function_call_spec(
+        "batch_analysis",
+        output_schema,
+        typical_arguments={},
+    )
     prompt_only_tokens = estimate_model_input_tokens(
         prompt,
         append_no_think=True,
@@ -317,7 +356,7 @@ def test_online_analyzer_counts_output_schema_before_request(tmp_path: Path) -> 
     )
 
     with pytest.raises(ModelInputLimitError, match="model_input_batch_target_tokens"):
-        analyzer.request_json(prompt, output_schema=output_schema)
+        analyzer.request_function(prompt, function_spec=function_spec)
 
     assert settings_calls == []
 
@@ -390,24 +429,76 @@ def test_extract_text_from_responses_stream_event() -> None:
     ) == '{"candidate_events":[]'
 
 
-def test_online_analyzer_reuses_global_singleton_until_settings_change(
+def test_non_stream_response_rejects_multiple_function_calls() -> None:
+    response = function_response({"candidate_events": [], "context_requests": []})
+    response["output"].append(
+        {
+            "type": "function_call",
+            "id": "fc_2",
+            "name": "submit_batch_analysis",
+            "arguments": '{"candidate_events":[],"context_requests":[]}',
+        }
+    )
+
+    with pytest.raises(RetryableAnalyzerProtocolError, match="exactly one"):
+        _extract_function_arguments_from_responses_payload(
+            response,
+            expected_name="submit_batch_analysis",
+        )
+
+
+def test_stream_response_rejects_multiple_function_calls() -> None:
+    events = [
+        {
+            "type": "response.output_item.added",
+            "item": {
+                "type": "function_call",
+                "id": "fc_1",
+                "name": "submit_batch_analysis",
+            },
+        },
+        {
+            "type": "response.function_call_arguments.delta",
+            "item_id": "fc_1",
+            "delta": '{"candidate_events":[],"context_requests":[]}',
+        },
+        {
+            "type": "response.output_item.added",
+            "item": {
+                "type": "function_call",
+                "id": "fc_2",
+                "name": "submit_batch_analysis",
+            },
+        },
+    ]
+
+    with pytest.raises(RetryableAnalyzerProtocolError, match="exactly one"):
+        _extract_stream_function_arguments(
+            events,
+            expected_name="submit_batch_analysis",
+        )
+
+
+def test_online_analyzer_creates_and_closes_client_for_every_request(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _close_global_client()
     settings_queue = [
         build_settings(model="model-a"),
         build_settings(model="model-a"),
         build_settings(model="model-b"),
     ]
     created_clients: list[object] = []
+    closed_clients: list[object] = []
+    request_models: list[str] = []
 
     class FakeResponse:
         def model_dump(self):
-            return {"output_text": '{"candidate_events":[],"context_requests":[]}'}
+            return function_response({"candidate_events": [], "context_requests": []})
 
     class FakeResponses:
         def create(self, **kwargs):
+            request_models.append(kwargs["model"])
             return FakeResponse()
 
     class FakeClient:
@@ -415,7 +506,7 @@ def test_online_analyzer_reuses_global_singleton_until_settings_change(
             self.responses = FakeResponses()
 
         def close(self):
-            return None
+            closed_clients.append(self)
 
     class FakeHttpClient:
         def close(self):
@@ -439,19 +530,20 @@ def test_online_analyzer_reuses_global_singleton_until_settings_change(
     analyzer.analyze_batch("2026-06-23", sample_batch())
     analyzer.analyze_batch("2026-06-23", sample_batch())
 
-    assert len(created_clients) == 2
+    assert len(created_clients) == 3
+    assert closed_clients == created_clients
+    assert request_models == ["model-a", "model-a", "model-b"]
 
 
 def test_online_analyzer_parses_non_stream_response(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    _close_global_client()
     settings = build_settings()
 
     class FakeResponse:
         def model_dump(self):
-            return {
-                "output_text": '{"candidate_events":[],"context_requests":[]}',
-                "usage": {"input_tokens": 12, "output_tokens": 7, "total_tokens": 19},
-            }
+            return function_response(
+                {"candidate_events": [], "context_requests": []},
+                usage={"input_tokens": 12, "output_tokens": 7, "total_tokens": 19},
+            )
 
     class FakeResponses:
         def create(self, **kwargs):
@@ -460,6 +552,9 @@ def test_online_analyzer_parses_non_stream_response(tmp_path: Path, monkeypatch:
     class FakeClient:
         def __init__(self):
             self.responses = FakeResponses()
+
+        def close(self):
+            return None
 
     class FakeHttpClient:
         def __enter__(self):
@@ -486,31 +581,14 @@ def test_online_analyzer_parses_non_stream_response(tmp_path: Path, monkeypatch:
 
 
 def test_online_analyzer_parses_stream_response(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    _close_global_client()
     settings = build_settings(stream_enabled=True)
 
     class FakeEvent:
-        def __init__(self, content: str, usage: dict[str, int] | None = None):
-            self._content = content
-            self._usage = usage
+        def __init__(self, payload: dict[str, object]):
+            self._payload = payload
 
         def model_dump(self):
-            payload = {"type": "response.output_text.delta", "delta": self._content}
-            if self._usage is not None:
-                payload["response"] = {"usage": self._usage}
-            return payload
-
-    class FakeStream:
-        def __enter__(self):
-            return iter(
-                [
-                    FakeEvent('{"candidate_events":[],'),
-                    FakeEvent('"context_requests":[]}', {"output_tokens": 5}),
-                ]
-            )
-
-        def __exit__(self, exc_type, exc, tb):
-            return False
+            return self._payload
 
     class FakeResponses:
         def __init__(self):
@@ -519,14 +597,45 @@ def test_online_analyzer_parses_stream_response(tmp_path: Path, monkeypatch: pyt
         def create(self, **kwargs):
             return iter(
                 [
-                    FakeEvent('{"candidate_events":[],'),
-                    FakeEvent('"context_requests":[]}', {"output_tokens": 5}),
+                    FakeEvent(
+                        {
+                            "type": "response.output_item.added",
+                            "item": {
+                                "type": "function_call",
+                                "id": "fc_1",
+                                "name": "submit_batch_analysis",
+                            },
+                        }
+                    ),
+                    FakeEvent(
+                        {
+                            "type": "response.function_call_arguments.delta",
+                            "item_id": "fc_1",
+                            "delta": '{"candidate_events":[],',
+                        }
+                    ),
+                    FakeEvent(
+                        {
+                            "type": "response.function_call_arguments.delta",
+                            "item_id": "fc_1",
+                            "delta": '"context_requests":[]}',
+                        }
+                    ),
+                    FakeEvent(
+                        {
+                            "type": "response.completed",
+                            "response": {"usage": {"output_tokens": 5}},
+                        }
+                    ),
                 ]
             )
 
     class FakeClient:
         def __init__(self, **kwargs):
             self.responses = FakeResponses()
+
+        def close(self):
+            return None
 
     class FakeHttpClient:
         def __enter__(self):
@@ -556,7 +665,6 @@ def test_online_analyzer_does_not_reapply_first_event_timeout_after_stream_start
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _close_global_client()
     settings = build_settings(
         stream_enabled=True,
         timeout_seconds=1,
@@ -569,20 +677,35 @@ def test_online_analyzer_does_not_reapply_first_event_timeout_after_stream_start
     )
 
     class FakeEvent:
-        def __init__(self, content: str):
-            self.content = content
+        def __init__(self, payload: dict[str, object]):
+            self.payload = payload
 
         def model_dump(self):
-            return {"type": "response.output_text.delta", "delta": self.content}
+            return self.payload
 
     class DelayedSecondEventStream:
         response = httpx.Response(200, request=request)
 
         def __iter__(self):
             assert request.extensions["timeout"]["read"] == 1
-            yield FakeEvent('{"candidate_events":[],')
+            yield FakeEvent(
+                {
+                    "type": "response.output_item.added",
+                    "item": {
+                        "type": "function_call",
+                        "id": "fc_1",
+                        "name": "submit_batch_analysis",
+                    },
+                }
+            )
             Event().wait(timeout=0.15)
-            yield FakeEvent('"context_requests":[]}')
+            yield FakeEvent(
+                {
+                    "type": "response.function_call_arguments.delta",
+                    "item_id": "fc_1",
+                    "delta": '{"candidate_events":[],"context_requests":[]}',
+                }
+            )
 
         def close(self):
             return None
@@ -594,6 +717,9 @@ def test_online_analyzer_does_not_reapply_first_event_timeout_after_stream_start
     class FakeClient:
         def __init__(self, **kwargs):
             self.responses = FakeResponses()
+
+        def close(self):
+            return None
 
     class FakeHttpClient:
         def close(self):
@@ -624,7 +750,6 @@ def test_online_analyzer_wraps_invalid_stream_json(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _close_global_client()
     settings = build_settings(stream_enabled=True)
 
     class InvalidStream:
@@ -638,6 +763,9 @@ def test_online_analyzer_wraps_invalid_stream_json(
     class FakeClient:
         def __init__(self):
             self.responses = FakeResponses()
+
+        def close(self):
+            return None
 
     class FakeHttpClient:
         def __enter__(self):
@@ -668,7 +796,6 @@ def test_online_analyzer_wraps_invalid_stream_json(
 
 
 def test_online_analyzer_surfaces_timeout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    _close_global_client()
     settings = build_settings()
 
     class FakeClient:
@@ -681,6 +808,9 @@ def test_online_analyzer_surfaces_timeout(tmp_path: Path, monkeypatch: pytest.Mo
                     raise APITimeoutError(request=httpx.Request("POST", "https://llm.example/v1/responses"))
 
             self.responses = FakeResponses()
+
+        def close(self):
+            return None
 
     class FakeHttpClient:
         def __enter__(self):
@@ -715,7 +845,7 @@ def test_online_analyzer_surfaces_first_stream_event_timeout(
         settings_loader=lambda *args, **kwargs: settings,
     )
 
-    def raise_first_event_timeout(settings, body):
+    def raise_first_event_timeout(settings, body, *, function_spec):
         raise _FirstStreamEventTimeoutError("first event timed out")
 
     monkeypatch.setattr(analyzer, "_invoke_via_sdk", raise_first_event_timeout)
@@ -792,8 +922,6 @@ def test_online_analyzer_classifies_retryable_and_permanent_errors(
     )
 
     for raised_error, expected_type in cases:
-        _close_global_client()
-
         class FakeResponses:
             def create(self, **kwargs):
                 raise raised_error

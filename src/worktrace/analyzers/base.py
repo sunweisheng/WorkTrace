@@ -25,9 +25,19 @@ from ..models import (
     RetentionReviewBatch,
     RetentionReviewResult,
 )
+from .function_calls import FunctionCallSpec
 
 
 class Analyzer(ABC):
+    def request_function(
+        self,
+        prompt: str,
+        *,
+        function_spec: FunctionCallSpec,
+        allow_oversized_input: bool = False,
+    ) -> object:
+        raise NotImplementedError
+
     @abstractmethod
     def build_segmentation_prompt(
         self,
@@ -144,6 +154,8 @@ class Analyzer(ABC):
         target_date: str,
         events: list[CollectedSourceEvent],
         deterministic_groups: list[list[str]],
+        *,
+        validation_feedback: str = "",
     ) -> CollectedGroupingResult:
         raise NotImplementedError
 
@@ -154,6 +166,7 @@ class Analyzer(ABC):
         candidate_group: CollectedGroupingGroup,
         *,
         review_reasons: list[str] | None = None,
+        validation_feedback: str = "",
     ) -> CollectedGroupingResult:
         raise NotImplementedError
 

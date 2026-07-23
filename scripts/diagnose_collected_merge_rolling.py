@@ -16,7 +16,9 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from src.worktrace.analyzers.prompts import build_collected_merge_prompt
+from src.worktrace.analyzers.function_calls import task_function_call_spec
+from src.worktrace.analyzers.output_schemas import collected_merge_output_schema
+from src.worktrace.analyzers.prompts import build_collected_render_prompt
 from src.worktrace.collected_merge import (
     CollectedMergeRunner,
     build_synthetic_collected_source_events,
@@ -33,6 +35,7 @@ from src.worktrace.pipeline.retention_filter import (
     retention_rejection_reason_for_event,
 )
 from src.worktrace.utils.json_io import dump_json
+from src.worktrace.utils.token_estimation import estimate_structured_input_tokens
 
 
 SPECIFIC_TOKEN_RE = re.compile(
@@ -99,7 +102,14 @@ def main() -> None:
     )
     input_dir = runner.build_input_dir(args.date)
     output_path = input_dir / f"{args.date}-{args.owner}-merged.md"
-    source_events, source_file_count, skipped_file_count, read_warnings = (
+    (
+        source_events,
+        source_file_count,
+        skipped_file_count,
+        partial_file_count,
+        read_warnings,
+        _source_audit,
+    ) = (
         runner._read_source_events(
             args.date,
             input_dir,
@@ -126,6 +136,7 @@ def main() -> None:
         "input_dir": str(input_dir.resolve()),
         "source_file_count": source_file_count,
         "skipped_file_count": skipped_file_count,
+        "partial_file_count": partial_file_count,
         "source_event_count_after_source_filter": len(source_events),
         "final_event_count": len(merged_events),
         "final_source_id_count": len(_source_ids_from_events(merged_events)),
@@ -134,6 +145,7 @@ def main() -> None:
         "owner_warnings": owner_warnings,
         "merge_warnings": merge_warnings,
         "steps": runner.step_summaries,
+        "batch_decisions": runner._collected_merge_batch_decisions,
     }
     (trace_dir / "summary.json").write_text(dump_json(summary, pretty=True), encoding="utf-8")
     (trace_dir / "summary.md").write_text(_render_summary_markdown(summary), encoding="utf-8")
@@ -152,6 +164,7 @@ class TracingCollectedMergeRunner(CollectedMergeRunner):
         source_events: list[CollectedSourceEvent],
         *,
         deterministic_groups: list[list[str]] | None = None,
+        rolling_step_index: int = 1,
     ) -> tuple[list[WorkEvent], list[str]]:
         deterministic_groups = (
             deterministic_groups
@@ -159,11 +172,22 @@ class TracingCollectedMergeRunner(CollectedMergeRunner):
             else self._build_deterministic_groups(source_events)[0]
         )
         step_index = len(self.step_summaries) + 1
-        prompt = build_collected_merge_prompt(
+        prompt = build_collected_render_prompt(
             target_date,
             source_events,
             deterministic_groups,
             config=self.config,
+        )
+        function_spec = task_function_call_spec(
+            "collected_event_merge",
+            collected_merge_output_schema(),
+            draft_ids=[item.draft_id for item in source_events],
+            exact_array_lengths={"groups": len(deterministic_groups)},
+        )
+        input_estimates = estimate_structured_input_tokens(
+            prompt,
+            function_spec=function_spec,
+            append_no_think=True,
         )
         input_metrics = _metrics_for_source_events(source_events)
         step_path = self.trace_dir / f"step-{step_index:03d}.json"
@@ -176,6 +200,10 @@ class TracingCollectedMergeRunner(CollectedMergeRunner):
             "completed_at_utc": None,
             "elapsed_ms": None,
             "prompt_chars": len(prompt),
+            **input_estimates,
+            "input_target_tokens": self.config.model_input_batch_target_tokens,
+            "function_name": function_spec.name,
+            "function_definition": function_spec.tool(),
             "input": input_metrics,
         }
         _write_step_trace(step_path, step_payload)
@@ -190,6 +218,7 @@ class TracingCollectedMergeRunner(CollectedMergeRunner):
                 target_date,
                 source_events,
                 deterministic_groups,
+                rolling_step_index=rolling_step_index,
             )
             repaired_result, repair_warnings = repair_collected_merge_result(
                 raw_result,
@@ -414,8 +443,8 @@ def _render_summary_markdown(summary: dict[str, Any]) -> str:
         "",
         "## Step Metrics",
         "",
-        "| Step | Prompt chars | Input events | Synthetic inputs | Input source IDs | Raw groups | Retained events | Retained source IDs | Dropped by retention | missing_or_generic_retention_detail | Detail median in | Detail median raw | Detail median kept | Specific tokens/event raw | Specific tokens/event kept |",
-        "|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+        "| Step | Input estimate | Online estimate | Codex estimate | Target | Prompt chars | Input events | Synthetic inputs | Input source IDs | Raw groups | Retained events | Retained source IDs | Dropped by retention | missing_or_generic_retention_detail | Detail median in | Detail median raw | Detail median kept | Specific tokens/event raw | Specific tokens/event kept |",
+        "|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for step in summary["steps"]:
         retention_counts = Counter(
@@ -427,8 +456,12 @@ def _render_summary_markdown(summary: dict[str, Any]) -> str:
         raw_text = step["raw_group_metrics"]["text_metrics"]
         kept_text = step["retained_metrics"]["text_metrics"]
         lines.append(
-            "| {step} | {prompt} | {input_events} | {synthetic} | {input_ids} | {raw_groups} | {kept_events} | {kept_ids} | {dropped} | {missing_detail} | {detail_in} | {detail_raw} | {detail_kept} | {specific_raw} | {specific_kept} |".format(
+            "| {step} | {input_estimate} | {online_estimate} | {codex_estimate} | {target} | {prompt} | {input_events} | {synthetic} | {input_ids} | {raw_groups} | {kept_events} | {kept_ids} | {dropped} | {missing_detail} | {detail_in} | {detail_raw} | {detail_kept} | {specific_raw} | {specific_kept} |".format(
                 step=step["step_index"],
+                input_estimate=step["input_estimated_tokens"],
+                online_estimate=step["online_input_estimated_tokens"],
+                codex_estimate=step["codex_input_estimated_tokens"],
+                target=step["input_target_tokens"],
                 prompt=step["prompt_chars"],
                 input_events=step["input"]["event_count"],
                 synthetic=step["input"]["synthetic_event_count"],
@@ -444,6 +477,22 @@ def _render_summary_markdown(summary: dict[str, Any]) -> str:
                 specific_raw=raw_text["specific_token_per_event"],
                 specific_kept=kept_text["specific_token_per_event"],
             )
+        )
+    lines.extend(
+        [
+            "",
+            "## Candidate Batch Decisions",
+            "",
+            "| Decision | Level | Action | Estimated input tokens | Target | Added draft IDs |",
+            "|---:|---|---|---:|---:|---|",
+        ]
+    )
+    for decision in summary.get("batch_decisions", []):
+        lines.append(
+            f"| {decision['decision_index']} | {decision['level']} | "
+            f"{decision['action']} | {decision['input_estimated_tokens']} | "
+            f"{decision['input_target_tokens']} | "
+            f"{', '.join(decision['added_draft_ids'])} |"
         )
     lines.extend(["", "## Retention Drops", ""])
     for step in summary["steps"]:

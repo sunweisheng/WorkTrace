@@ -103,6 +103,12 @@ class LLMUsageRecorder:
                         else None
                     ),
                     "oversized_singleton": oversized_singleton,
+                    "input_estimate_difference_tokens": (
+                        usage["input_tokens"] - estimated_input_tokens
+                        if usage["input_tokens"] is not None
+                        and estimated_input_tokens is not None
+                        else None
+                    ),
                     "codex_wait_ms": (
                         round(codex_wait_ms, 3)
                         if codex_wait_ms is not None

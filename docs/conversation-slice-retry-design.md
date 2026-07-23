@@ -35,7 +35,7 @@ flowchart TD
     I --> J{"context_requests"}
     J -->|"有新信息"| K["补上下文并只重跑对应片段"]
     K --> I
-    J -->|"无/已收敛"| L["候选进入全日过滤与合并"]
+    J -->|"无/已满足停止条件"| L["候选进入全日过滤与合并"]
 
     E -. "连续失败" .-> M["会话分段熔断"]
     M --> N["直接从本人参与的聊天窗口提炼"]
@@ -62,7 +62,7 @@ flowchart TD
 - 已生成的图片摘要
 - reaction 的本地中文说明和语义
 
-进入分段模型前，Python 会按最终分段 prompt、`/no_think`、完整 JSON Schema 和结构化输出包装估算输入。超出 `model_input_batch_target_tokens` 时先按锚点拆分，再按连续消息拆分，并保留拆分窗口需要的直接 reply/quote 上下文；单条消息和必要协议字段组成的最小窗口仍超过目标时标记为 `oversized_singleton` 后发送，由模型服务决定是否接受。
+进入分段模型前，Python 会生成任务专用 Function、当前合法消息 ID 参数示例和最终分段 prompt。统一估算器分别计算“最终 prompt 与 `/no_think` 加完整 Function 定义和 `tool_choice`”以及“相同 prompt 加 Codex 完整 output-schema”，并取较大值。超出 `model_input_batch_target_tokens=5200` 时先按锚点拆分，再按连续消息拆分，并保留拆分窗口需要的直接 reply/quote 上下文；单条消息和必要协议字段组成的最小窗口仍超过目标时标记为 `oversized_singleton` 后发送，由模型服务决定是否接受。5200 是模型输入估算目标，不是 HTTP 字节数或服务端上下文上限。
 
 ## 5. 会话分段
 
@@ -103,7 +103,7 @@ flowchart TD
 
 ## 7. 片段组批
 
-校验后的 `ConversationSegmentUnit` 由 `pack_segment_units(...)` 按最终 prompt、`/no_think`、完整 JSON Schema 和结构化输出包装的合计估算分批。当前规则：
+校验后的 `ConversationSegmentUnit` 由 `pack_segment_units(...)` 调用同一生产估算器，按 Online/Codex 两种完整输入估算的较大值分批。当前规则：
 
 - 只在同一会话内组批
 - 保持片段顺序
@@ -111,6 +111,8 @@ flowchart TD
 - 每个批次都携带当前用户身份和 conversation 元数据
 
 analyzer 返回 `BatchSegmentAnalysisResult`，必须对每个输入 `segment_id` 给出一项结果。Python 校验缺失、重复和未知 `segment_id`。
+
+结果质量校验失败时只重试当前窗口或片段批次，并把错误码、字段位置和相关 ID 放入当前请求。错误反馈加入后重新估算；如果当前重试因此超过目标，标记 `oversized_retry` 后继续发送，其他已完成批次不重跑。
 
 ## 8. `context_requests`
 

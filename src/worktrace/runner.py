@@ -12,6 +12,10 @@ from urllib.parse import urlsplit
 
 from .config import RuntimeConfig
 from .analyzers.base import Analyzer
+from .analyzers.function_calls import (
+    message_reference_ids,
+    task_function_call_spec,
+)
 from .constants import DailyRunStatus
 from .errors import (
     AnalyzerProtocolError,
@@ -62,6 +66,7 @@ from .analyzers.prompts import (
     build_conversation_segmentation_prompt,
     build_merge_prompt,
     build_unassigned_workstream_assignment_prompt,
+    build_conversation_segmentation_message_refs,
     build_workstream_assignment_prompt,
 )
 from .reaction_catalog import ReactionCatalog, ReactionCatalogStore, enrich_message_reactions
@@ -130,7 +135,7 @@ from .utils.link_refs import build_message_link_id
 from .utils.hashing import file_key_from_attachment_id, file_key_from_url
 from .utils.json_io import dump_json
 from .utils.text import choose_preferred_text, clean_text, merge_content_texts
-from .utils.token_estimation import estimate_model_input_tokens
+from .utils.token_estimation import estimate_structured_input_tokens
 
 logger = logging.getLogger("worktrace")
 _LINK_TEXT_TOKEN_RE = re.compile(r"[A-Za-z0-9_]{2,}|[\u4e00-\u9fff]{2,}")
@@ -2945,8 +2950,8 @@ class DailyTraceRunner:
         model_groups: list[CrossConversationGroup],
         candidates: list[SourceBackedEventDraft],
     ) -> tuple[list[CrossConversationGroup], list[str]]:
-        request_json = getattr(self.dependencies.analyzer, "request_json", None)
-        if not callable(request_json):
+        request_function = getattr(self.dependencies.analyzer, "request_function", None)
+        if not callable(request_function):
             return consolidate_workstream_groups(model_groups, candidates)
 
         prompt = ""
@@ -2963,7 +2968,25 @@ class DailyTraceRunner:
                 assignment_prompts.append(batch_prompt)
                 prompt = "\n\n".join(assignment_prompts)
                 request_kwargs = {
-                    "output_schema": workstream_assignment_output_schema(),
+                    "function_spec": task_function_call_spec(
+                        "workstream_assignment",
+                        workstream_assignment_output_schema(),
+                        draft_ids=[item.draft_id for item in batch],
+                        enum_values={
+                            "parent_draft_id": [
+                                "",
+                                *[item.draft_id for item in batch],
+                            ]
+                        },
+                        message_ids=list(
+                            dict.fromkeys(
+                                message_id
+                                for item in batch
+                                for message_id in item.source_message_ids
+                            )
+                        ),
+                        result_count=len(batch),
+                    ),
                 }
                 if (
                     len(batch) == 1
@@ -2974,7 +2997,7 @@ class DailyTraceRunner:
                     > self.config.model_input_batch_target_tokens
                 ):
                     request_kwargs["allow_oversized_input"] = True
-                payload = request_json(batch_prompt, **request_kwargs)
+                payload = request_function(batch_prompt, **request_kwargs)
                 if not isinstance(payload, dict):
                     raise TypeError("Workstream assignment response must be an object.")
                 assignments.extend(
@@ -2987,7 +3010,7 @@ class DailyTraceRunner:
             )
             assignment_result, followup_warnings = self._resolve_unassigned_workstreams(
                 target_date=target_date,
-                request_json=request_json,
+                request_function=request_function,
                 initial_result=assignment_result,
                 initial_groups=groups,
                 candidates=candidates,
@@ -3030,7 +3053,7 @@ class DailyTraceRunner:
         self,
         *,
         target_date: str,
-        request_json,
+        request_function,
         initial_result: WorkstreamAssignmentResult,
         initial_groups: list[CrossConversationGroup],
         candidates: list[SourceBackedEventDraft],
@@ -3071,7 +3094,28 @@ class DailyTraceRunner:
                 review_prompts.append(batch_prompt)
                 prompt = "\n\n".join(review_prompts)
                 request_kwargs = {
-                    "output_schema": workstream_assignment_output_schema(),
+                    "function_spec": task_function_call_spec(
+                        "unassigned_workstream_assignment",
+                        workstream_assignment_output_schema(),
+                        draft_ids=[item.draft_id for item in batch],
+                        enum_values={
+                            "parent_draft_id": [
+                                "",
+                                *[
+                                str(item.get("root_draft_id", ""))
+                                for item in known_workstreams
+                                ],
+                            ]
+                        },
+                        message_ids=list(
+                            dict.fromkeys(
+                                message_id
+                                for item in batch
+                                for message_id in item.source_message_ids
+                            )
+                        ),
+                        result_count=len(batch),
+                    ),
                 }
                 if (
                     len(batch) == 1
@@ -3083,7 +3127,7 @@ class DailyTraceRunner:
                     > self.config.model_input_batch_target_tokens
                 ):
                     request_kwargs["allow_oversized_input"] = True
-                payload = request_json(batch_prompt, **request_kwargs)
+                payload = request_function(batch_prompt, **request_kwargs)
                 if not isinstance(payload, dict):
                     raise TypeError("Unassigned workstream response must be an object.")
                 followup_assignments.extend(
@@ -3536,11 +3580,21 @@ def _estimate_segmentation_input_tokens(
         attachment_texts=anchor_unit.attachment_texts,
         config=config,
     )
-    return estimate_model_input_tokens(
-        prompt,
-        output_schema=conversation_segmentation_output_schema(),
-        append_no_think=True,
+    message_refs = build_conversation_segmentation_message_refs(
+        anchor_unit.messages
     )
+    function_spec = task_function_call_spec(
+        "conversation_segmentation",
+        conversation_segmentation_output_schema(),
+        enum_values={
+            "segment_start_message_ids": list(message_refs.values())
+        },
+    )
+    return estimate_structured_input_tokens(
+        prompt,
+        function_spec=function_spec,
+        append_no_think=True,
+    )["input_estimated_tokens"]
 
 
 def _estimate_anchor_batch_input_tokens(
@@ -3548,15 +3602,26 @@ def _estimate_anchor_batch_input_tokens(
     anchor_units: list[AnchorUnit],
     config: RuntimeConfig,
 ) -> int:
-    return estimate_model_input_tokens(
-        build_anchor_batch_analysis_prompt(
+    prompt = build_anchor_batch_analysis_prompt(
             target_date,
             anchor_units,
             config=config,
-        ),
-        output_schema=anchor_batch_output_schema(config),
-        append_no_think=True,
+        )
+    references = message_reference_ids(
+        [message for item in anchor_units for message in item.messages]
     )
+    function_spec = task_function_call_spec(
+        "anchor_batch_analysis",
+        anchor_batch_output_schema(config),
+        anchor_unit_ids=[item.anchor_unit_id for item in anchor_units],
+        result_count=len(anchor_units),
+        **references,
+    )
+    return estimate_structured_input_tokens(
+        prompt,
+        function_spec=function_spec,
+        append_no_think=True,
+    )["input_estimated_tokens"]
 
 
 def _split_anchor_unit_to_model_limit(
@@ -3806,22 +3871,43 @@ def _estimate_day_merge_input_tokens(
     target_date: str,
     candidates: list[SourceBackedEventDraft],
 ) -> int:
-    return estimate_model_input_tokens(
-        build_merge_prompt(target_date, candidates),
-        output_schema=merge_output_schema(),
-        append_no_think=True,
+    function_spec = task_function_call_spec(
+        "day_candidate_merge",
+        merge_output_schema(),
+        draft_ids=[item.draft_id for item in candidates],
     )
+    return estimate_structured_input_tokens(
+        build_merge_prompt(target_date, candidates),
+        function_spec=function_spec,
+        append_no_think=True,
+    )["input_estimated_tokens"]
 
 
 def _estimate_workstream_assignment_input_tokens(
     target_date: str,
     candidates: list[SourceBackedEventDraft],
 ) -> int:
-    return estimate_model_input_tokens(
-        build_workstream_assignment_prompt(target_date, candidates),
-        output_schema=workstream_assignment_output_schema(),
-        append_no_think=True,
+    function_spec = task_function_call_spec(
+        "workstream_assignment",
+        workstream_assignment_output_schema(),
+        draft_ids=[item.draft_id for item in candidates],
+        enum_values={
+            "parent_draft_id": ["", *[item.draft_id for item in candidates]]
+        },
+        message_ids=list(
+            dict.fromkeys(
+                message_id
+                for item in candidates
+                for message_id in item.source_message_ids
+            )
+        ),
+        result_count=len(candidates),
     )
+    return estimate_structured_input_tokens(
+        build_workstream_assignment_prompt(target_date, candidates),
+        function_spec=function_spec,
+        append_no_think=True,
+    )["input_estimated_tokens"]
 
 
 def _pack_workstream_assignment_candidates(
@@ -3846,15 +3932,34 @@ def _estimate_unassigned_workstream_input_tokens(
     known_workstreams: list[dict[str, object]],
     candidates: list[SourceBackedEventDraft],
 ) -> int:
-    return estimate_model_input_tokens(
+    function_spec = task_function_call_spec(
+        "unassigned_workstream_assignment",
+        workstream_assignment_output_schema(),
+        draft_ids=[item.draft_id for item in candidates],
+        enum_values={
+            "parent_draft_id": [
+                "",
+                *[str(item.get("root_draft_id", "")) for item in known_workstreams],
+            ]
+        },
+        message_ids=list(
+            dict.fromkeys(
+                message_id
+                for item in candidates
+                for message_id in item.source_message_ids
+            )
+        ),
+        result_count=len(candidates),
+    )
+    return estimate_structured_input_tokens(
         build_unassigned_workstream_assignment_prompt(
             target_date,
             known_workstreams=known_workstreams,
             unassigned_candidates=candidates,
         ),
-        output_schema=workstream_assignment_output_schema(),
+        function_spec=function_spec,
         append_no_think=True,
-    )
+    )["input_estimated_tokens"]
 
 
 def _pack_unassigned_workstream_candidates(

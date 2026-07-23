@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from ..analyzers.output_schemas import retention_review_output_schema
+from ..analyzers.function_calls import message_reference_ids, task_function_call_spec
 from ..analyzers.prompts import build_retention_review_prompt
 from ..config import RetentionPolicyConfig, RuntimeConfig
 from ..errors import AnalyzerProtocolError
@@ -13,7 +14,7 @@ from ..models import (
     RetentionReviewResult,
     SourceBackedEventDraft,
 )
-from ..utils.token_estimation import estimate_model_input_tokens
+from ..utils.token_estimation import estimate_structured_input_tokens
 
 
 def select_retention_review_candidates(
@@ -222,8 +223,18 @@ def _estimate_review_prompt_tokens(
     batch: RetentionReviewBatch,
     config: RuntimeConfig,
 ) -> int:
-    return estimate_model_input_tokens(
-        build_retention_review_prompt(batch, config=config),
-        output_schema=retention_review_output_schema(config),
-        append_no_think=True,
+    references = message_reference_ids(
+        [message for item in batch.candidates for message in item.messages]
     )
+    function_spec = task_function_call_spec(
+        "retention_review",
+        retention_review_output_schema(config),
+        draft_ids=[item.candidate.draft_id for item in batch.candidates],
+        result_count=len(batch.candidates),
+        **references,
+    )
+    return estimate_structured_input_tokens(
+        build_retention_review_prompt(batch, config=config),
+        function_spec=function_spec,
+        append_no_think=True,
+    )["input_estimated_tokens"]

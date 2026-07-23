@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -10,9 +11,12 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from src.worktrace.analyzers.output_schemas import collected_grouping_output_schema
+from src.worktrace.analyzers.function_calls import collected_grouping_call_contract
 from src.worktrace.analyzers.prompts import build_collected_review_prompt
-from src.worktrace.analyzers.protocol import parse_collected_grouping_payload
+from src.worktrace.analyzers.protocol import (
+    parse_collected_grouping_function_payload,
+    parse_collected_grouping_payload,
+)
 from src.worktrace.collected_merge import (
     _collected_review_result_basis_error,
     collected_grouping_partition_error,
@@ -30,6 +34,7 @@ from src.worktrace.models import (
     CollectedSourceEvent,
     WorkEvent,
 )
+from src.worktrace.utils.token_estimation import estimate_structured_input_tokens
 
 DEFAULT_INVENTORY = Path(
     "data/debug/online_llm_failure_inventory/20260723/summary.json"
@@ -57,7 +62,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--output-dir",
         type=Path,
-        help="可选；写入最新 prompt、schema、summary.json 和 summary.md。",
+        help="可选；写入最新 prompt、Function 定义、summary.json 和 summary.md。",
     )
     parser.add_argument("--json", action="store_true", help="在终端输出 JSON。")
     return parser.parse_args()
@@ -167,6 +172,13 @@ def evaluate_review_result(
         [],
     )
     split_reason = effective_split_reason(repaired)
+    split_reason_source = (
+        "top_level"
+        if result.split_reason.strip()
+        else "legacy_group"
+        if any(group.split_reason.strip() for group in result.groups)
+        else ""
+    )
     split_reason_error = bool(
         len(candidate_group.draft_ids) > 1
         and len(repaired.groups) > 1
@@ -186,6 +198,7 @@ def evaluate_review_result(
         "errors": errors,
         "group_count": len(repaired.groups),
         "split_reason": split_reason,
+        "split_reason_source": split_reason_source,
         "repair_warnings": repair_warnings,
         "groups": [
             {
@@ -198,12 +211,65 @@ def evaluate_review_result(
     }
 
 
+def evaluate_split_reason_compatibility(
+    *,
+    result: CollectedGroupingResult,
+    source_events: list[CollectedSourceEvent],
+    candidate_group: CollectedGroupingGroup,
+    review_reasons: list[str],
+    config: RuntimeConfig,
+) -> dict[str, Any]:
+    split_reason = effective_split_reason(result)
+    if not split_reason or len(result.groups) <= 1:
+        return {"tested": False, "reason": "result_was_not_split_with_a_reason"}
+
+    groups_without_reasons = [
+        replace(group, split_reason="") for group in result.groups
+    ]
+    top_level = evaluate_review_result(
+        result=CollectedGroupingResult(
+            groups=groups_without_reasons,
+            split_reason=split_reason,
+            validation_errors=list(result.validation_errors),
+        ),
+        source_events=source_events,
+        candidate_group=candidate_group,
+        review_reasons=review_reasons,
+        config=config,
+    )
+    legacy_groups = list(groups_without_reasons)
+    legacy_groups[0] = replace(legacy_groups[0], split_reason=split_reason)
+    legacy_group = evaluate_review_result(
+        result=CollectedGroupingResult(
+            groups=legacy_groups,
+            split_reason="",
+            validation_errors=list(result.validation_errors),
+        ),
+        source_events=source_events,
+        candidate_group=candidate_group,
+        review_reasons=review_reasons,
+        config=config,
+    )
+
+    return {
+        "tested": True,
+        "top_level": {
+            "accepted": "missing_overall_split_reason" not in top_level["errors"],
+            "source": top_level["split_reason_source"],
+        },
+        "legacy_group": {
+            "accepted": "missing_overall_split_reason" not in legacy_group["errors"],
+            "source": legacy_group["split_reason_source"],
+        },
+    }
+
+
 def replay_case(
     item: dict[str, Any],
     *,
     config: RuntimeConfig,
     result_dir: Path | None = None,
-) -> tuple[dict[str, Any], str]:
+) -> tuple[dict[str, Any], str, dict[str, object]]:
     case_id = str(item["id"])
     original_prompt_path = resolve_repo_path(Path(str(item["prompt_path"])))
     trace_path = trace_path_from_prompt(original_prompt_path)
@@ -221,9 +287,32 @@ def replay_case(
     override_path = result_dir / f"{case_id}.json" if result_dir else None
     if override_path is not None and not override_path.exists():
         raise FileNotFoundError(override_path)
-    result = parse_collected_grouping_payload(
-        load_result_payload(trace, override_path)
+    current_prompt = build_collected_review_prompt(
+        str(item.get("target_date", "")),
+        source_events,
+        candidate_group,
+        config=config,
+        review_reasons=review_reasons,
     )
+    contract = collected_grouping_call_contract(
+        "collected_group_review",
+        config=config,
+        events=source_events,
+        deterministic_groups=[list(candidate_group.draft_ids)],
+        include_split_reason=True,
+    )
+    raw_payload = load_result_payload(trace, override_path)
+    if not isinstance(raw_payload, dict):
+        raise ValueError(f"{case_id} result is not an object.")
+    if "merged_groups" in raw_payload or "singleton_draft_ids" in raw_payload:
+        result, function_validation_errors = parse_collected_grouping_function_payload(
+            raw_payload,
+            evidence_catalog=list(contract.evidence_catalog),
+            allowed_semantic_reasons=contract.semantic_reasons,
+        )
+    else:
+        result = parse_collected_grouping_payload(raw_payload)
+        function_validation_errors = []
     evaluation = evaluate_review_result(
         result=result,
         source_events=source_events,
@@ -231,12 +320,17 @@ def replay_case(
         review_reasons=review_reasons,
         config=config,
     )
-    current_prompt = build_collected_review_prompt(
-        str(item.get("target_date", "")),
-        source_events,
-        candidate_group,
-        config=config,
+    split_reason_compatibility = evaluate_split_reason_compatibility(
+        result=result,
+        source_events=source_events,
+        candidate_group=candidate_group,
         review_reasons=review_reasons,
+        config=config,
+    )
+    estimates = estimate_structured_input_tokens(
+        current_prompt,
+        function_spec=contract.function_spec,
+        append_no_think=True,
     )
     evaluation.update(
         {
@@ -250,9 +344,27 @@ def replay_case(
                 if override_path is not None
                 else "recorded_raw_result"
             ),
+            "function_name": contract.function_spec.name,
+            "evidence_relation_catalog": [
+                relation.to_dict() for relation in contract.evidence_catalog
+            ],
+            "function_validation_errors": function_validation_errors,
+            "split_reason_compatibility": split_reason_compatibility,
+            "input_estimates": estimates,
+            "input_target_tokens": config.model_input_batch_target_tokens,
+            "input_overage_reason": (
+                "minimum_required_input"
+                if estimates["input_estimated_tokens"]
+                > config.model_input_batch_target_tokens
+                else ""
+            ),
         }
     )
-    return evaluation, current_prompt
+    return (
+        evaluation,
+        contract.function_spec.prompt_with_example(current_prompt),
+        contract.function_spec.tool(),
+    )
 
 
 def build_summary(results: list[dict[str, Any]]) -> dict[str, Any]:
@@ -272,14 +384,26 @@ def build_markdown(summary: dict[str, Any]) -> str:
         f"- 当前规则通过：{summary['valid_count']}",
         f"- 当前规则不通过：{summary['invalid_count']}",
         "",
-        "| 编号 | 当前规则 | 分组数 | 错误 |",
-        "|---|---|---:|---|",
+        "| 编号 | 当前规则 | 分组数 | 拆分理由来源 | 新旧理由兼容 | 输入估算 | 错误 |",
+        "|---|---|---:|---|---|---:|---|",
     ]
     for item in summary["results"]:
         errors = "；".join(item["errors"]) or "-"
+        compatibility = item.get("split_reason_compatibility", {})
+        top_level = compatibility.get("top_level", {})
+        legacy_group = compatibility.get("legacy_group", {})
+        compatibility_text = (
+            "通过"
+            if compatibility.get("tested")
+            and top_level.get("accepted")
+            and legacy_group.get("accepted")
+            else "未测试"
+        )
         lines.append(
             f"| {item['id']} | {'通过' if item['valid'] else '不通过'} | "
-            f"{item['group_count']} | {errors} |"
+            f"{item['group_count']} | {item['split_reason_source'] or '-'} | "
+            f"{compatibility_text} | "
+            f"{item['input_estimates']['input_estimated_tokens']} | {errors} |"
         )
     return "\n".join(lines) + "\n"
 
@@ -296,19 +420,20 @@ def main() -> int:
     items = load_inventory_cases(inventory_path, case_ids)
     results: list[dict[str, Any]] = []
     prompts: dict[str, str] = {}
+    functions: dict[str, dict[str, object]] = {}
     for item in items:
-        evaluation, prompt = replay_case(
+        evaluation, prompt, function_definition = replay_case(
             item,
             config=config,
             result_dir=result_dir,
         )
         results.append(evaluation)
         prompts[str(item["id"])] = prompt
+        functions[str(item["id"])] = function_definition
     summary = build_summary(results)
 
     if output_dir is not None:
         output_dir.mkdir(parents=True, exist_ok=True)
-        write_json(output_dir / "schema.json", collected_grouping_output_schema(config))
         write_json(output_dir / "summary.json", summary)
         (output_dir / "summary.md").write_text(
             build_markdown(summary),
@@ -319,6 +444,7 @@ def main() -> int:
                 prompt,
                 encoding="utf-8",
             )
+            write_json(output_dir / f"{case_id}-function.json", functions[case_id])
 
     if args.json:
         print(json.dumps(summary, ensure_ascii=False, indent=2, sort_keys=True))
@@ -327,7 +453,10 @@ def main() -> int:
             errors = "; ".join(item["errors"]) or "none"
             print(
                 f"{item['id']} valid={str(item['valid']).lower()} "
-                f"groups={item['group_count']} errors={errors}"
+                f"groups={item['group_count']} "
+                f"split_reason_source={item['split_reason_source'] or 'none'} "
+                f"input_estimated_tokens={item['input_estimates']['input_estimated_tokens']} "
+                f"errors={errors}"
             )
         print(
             f"SUMMARY cases={summary['case_count']} valid={summary['valid_count']} "

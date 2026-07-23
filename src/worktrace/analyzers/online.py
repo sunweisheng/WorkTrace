@@ -46,17 +46,18 @@ from ..models import (
     RetentionReviewBatch,
     RetentionReviewResult,
 )
-from ..utils.json_io import parse_json_value_from_text
-from ..utils.token_estimation import (
-    build_structured_output_text_config,
-    estimate_model_input_tokens,
-    prepare_model_prompt,
-)
+from ..utils.token_estimation import estimate_structured_input_tokens, prepare_model_prompt
 from .base import Analyzer, is_indivisible_collected_request, oversized_input_kwargs
+from .function_calls import (
+    FunctionCallSpec,
+    collected_grouping_call_contract,
+    function_call_spec,
+    message_reference_ids,
+    task_function_call_spec,
+)
 from .output_schemas import (
     anchor_batch_output_schema,
     batch_output_schema,
-    collected_grouping_output_schema,
     collected_merge_output_schema,
     conversation_segmentation_output_schema,
     merge_output_schema,
@@ -68,9 +69,9 @@ from .prompts import (
     build_anchor_batch_analysis_prompt,
     build_batch_analysis_prompt,
     build_collected_grouping_prompt,
-    build_collected_merge_prompt,
     build_collected_review_prompt,
     build_collected_render_prompt,
+    build_conversation_segmentation_message_refs,
     build_conversation_segmentation_prompt,
     build_merge_prompt,
     build_personal_fact_review_prompt,
@@ -81,7 +82,7 @@ from .prompts import (
 from .protocol import (
     parse_anchor_batch_analysis_payload,
     parse_batch_analysis_payload,
-    parse_collected_grouping_payload,
+    parse_collected_grouping_function_payload,
     parse_collected_merge_payload,
     parse_conversation_segmentation_payload,
     parse_merge_payload,
@@ -91,12 +92,6 @@ from .protocol import (
 )
 
 logger = logging.getLogger("worktrace")
-
-_GLOBAL_CLIENT_FINGERPRINT: tuple[object, ...] | None = None
-_GLOBAL_OPENAI_CLIENT: OpenAI | None = None
-_GLOBAL_HTTPX_CLIENT: httpx.Client | None = None
-_GLOBAL_CLIENT_LOCK = threading.Lock()
-
 
 class _FirstStreamEventTimeoutError(TimeoutError):
     pass
@@ -210,6 +205,131 @@ def _extract_text_from_responses_stream_event(event: object) -> str:
     return ""
 
 
+def _parse_function_arguments(value: object) -> object:
+    if isinstance(value, dict):
+        return value
+    if not isinstance(value, str) or not value.strip():
+        raise RetryableAnalyzerProtocolError(
+            "Online LLM Function call did not contain arguments."
+        )
+    try:
+        return json.loads(value)
+    except json.JSONDecodeError as exc:
+        raise RetryableAnalyzerProtocolError(
+            "Online LLM Function arguments were not valid JSON."
+        ) from exc
+
+
+def _extract_function_arguments_from_responses_payload(
+    payload: object,
+    *,
+    expected_name: str,
+) -> object:
+    if not isinstance(payload, dict):
+        raise RetryableAnalyzerProtocolError(
+            "Online LLM response did not contain a Function call."
+        )
+    output = payload.get("output")
+    if not isinstance(output, list):
+        response = payload.get("response")
+        output = response.get("output") if isinstance(response, dict) else None
+    calls = [
+        item
+        for item in output or []
+        if isinstance(item, dict) and item.get("type") == "function_call"
+    ]
+    if len(calls) != 1:
+        raise RetryableAnalyzerProtocolError(
+            "Online LLM response must contain exactly one Function call."
+        )
+    call = calls[0]
+    actual_name = str(call.get("name", ""))
+    if actual_name != expected_name:
+        raise RetryableAnalyzerProtocolError(
+            "Online LLM called an unexpected Function: "
+            f"expected={expected_name} actual={actual_name}"
+        )
+    return _parse_function_arguments(call.get("arguments"))
+
+
+def _extract_stream_function_arguments(
+    event_payloads: list[dict[str, object]],
+    *,
+    expected_name: str,
+) -> object:
+    chunks_by_call: dict[str, list[str]] = {}
+    names_by_call: dict[str, str] = {}
+    completed_payload: dict[str, object] | None = None
+    for event in event_payloads:
+        event_type = event.get("type")
+        if event_type == "response.completed":
+            completed_payload = event
+        item = event.get("item")
+        if isinstance(item, dict) and item.get("type") == "function_call":
+            call_key = str(
+                item.get("id")
+                or item.get("call_id")
+                or event.get("item_id")
+                or event.get("output_index")
+                or "0"
+            )
+            name = item.get("name")
+            if isinstance(name, str) and name:
+                names_by_call[call_key] = name
+            arguments = item.get("arguments")
+            if isinstance(arguments, str) and arguments:
+                chunks_by_call[call_key] = [arguments]
+        if event_type == "response.function_call_arguments.delta":
+            call_key = str(
+                event.get("item_id")
+                or event.get("call_id")
+                or event.get("output_index")
+                or "0"
+            )
+            delta = event.get("delta")
+            if isinstance(delta, str):
+                chunks_by_call.setdefault(call_key, []).append(delta)
+            name = event.get("name")
+            if isinstance(name, str) and name:
+                names_by_call[call_key] = name
+
+    call_keys = set(chunks_by_call) | set(names_by_call)
+    if len(call_keys) > 1:
+        raise RetryableAnalyzerProtocolError(
+            "Online LLM stream must contain exactly one Function call."
+        )
+    if call_keys:
+        call_key = next(iter(call_keys))
+        actual_name = names_by_call.get(call_key, "")
+        if actual_name and actual_name != expected_name:
+            raise RetryableAnalyzerProtocolError(
+                "Online LLM stream called an unexpected Function: "
+                f"expected={expected_name} actual={actual_name}"
+            )
+
+    if completed_payload is not None:
+        try:
+            return _extract_function_arguments_from_responses_payload(
+                completed_payload,
+                expected_name=expected_name,
+            )
+        except RetryableAnalyzerProtocolError:
+            if not chunks_by_call:
+                raise
+    if len(call_keys) != 1:
+        raise RetryableAnalyzerProtocolError(
+            "Online LLM stream must contain exactly one Function call."
+        )
+    call_key = next(iter(call_keys))
+    actual_name = names_by_call.get(call_key, "")
+    if actual_name != expected_name:
+        raise RetryableAnalyzerProtocolError(
+            "Online LLM stream called an unexpected Function: "
+            f"expected={expected_name} actual={actual_name or 'missing'}"
+        )
+    return _parse_function_arguments("".join(chunks_by_call.get(call_key, [])))
+
+
 def _has_usage(payload: dict[str, object]) -> bool:
     if isinstance(payload.get("usage"), dict):
         return True
@@ -221,19 +341,21 @@ def _build_responses_request_body(
     prompt: str,
     *,
     settings: OnlineLLMSettings,
-    schema: dict[str, object] | None,
+    function_spec: FunctionCallSpec,
 ) -> dict[str, object]:
-    prompt = _apply_soft_no_think(prompt)
+    prompt = _apply_soft_no_think(function_spec.prompt_with_example(prompt))
     body: dict[str, object] = {
         "model": settings.model,
         "input": prompt,
         "stream": settings.stream_enabled,
-        "stream_options": {"include_usage": True},
+        "tools": [function_spec.tool()],
+        "tool_choice": function_spec.tool_choice(),
+        "parallel_tool_calls": False,
     }
+    if settings.stream_enabled:
+        body["stream_options"] = {"include_usage": True}
     if settings.reasoning_effort == "none":
         body["reasoning"] = {"effort": "none"}
-    if schema is not None:
-        body["text"] = build_structured_output_text_config(schema)
     return body
 
 
@@ -349,76 +471,6 @@ def _read_first_stream_event(
     return result
 
 
-def _build_client_fingerprint(settings: OnlineLLMSettings) -> tuple[object, ...]:
-    return (
-        settings.base_url,
-        settings.api_key,
-        settings.model,
-        settings.timeout_seconds,
-        settings.stream_first_response_timeout_seconds,
-        settings.tls_verify,
-        settings.stream_enabled,
-        settings.reasoning_effort,
-    )
-
-
-def _close_global_client() -> None:
-    global _GLOBAL_OPENAI_CLIENT, _GLOBAL_HTTPX_CLIENT
-    if _GLOBAL_OPENAI_CLIENT is not None and hasattr(_GLOBAL_OPENAI_CLIENT, "close"):
-        _GLOBAL_OPENAI_CLIENT.close()
-    elif _GLOBAL_HTTPX_CLIENT is not None and hasattr(_GLOBAL_HTTPX_CLIENT, "close"):
-        _GLOBAL_HTTPX_CLIENT.close()
-    _GLOBAL_OPENAI_CLIENT = None
-    _GLOBAL_HTTPX_CLIENT = None
-
-
-def _get_or_create_global_client(settings: OnlineLLMSettings) -> OpenAI:
-    global _GLOBAL_CLIENT_FINGERPRINT, _GLOBAL_OPENAI_CLIENT, _GLOBAL_HTTPX_CLIENT
-
-    with _GLOBAL_CLIENT_LOCK:
-        return _get_or_create_global_client_locked(settings)
-
-
-def _get_or_create_global_client_locked(settings: OnlineLLMSettings) -> OpenAI:
-    global _GLOBAL_CLIENT_FINGERPRINT, _GLOBAL_OPENAI_CLIENT, _GLOBAL_HTTPX_CLIENT
-    fingerprint = _build_client_fingerprint(settings)
-    if _GLOBAL_OPENAI_CLIENT is not None and _GLOBAL_CLIENT_FINGERPRINT == fingerprint:
-        logger.info(
-            "online_llm.client_singleton state=%s base_url=%s model=%s stream_enabled=%s tls_verify=%s reasoning_effort=%s",
-            "reused",
-            settings.base_url,
-            settings.model,
-            settings.stream_enabled,
-            settings.tls_verify,
-            settings.reasoning_effort,
-        )
-        return _GLOBAL_OPENAI_CLIENT
-
-    if _GLOBAL_OPENAI_CLIENT is not None:
-        _close_global_client()
-
-    http_client = _build_http_client(settings)
-    client = OpenAI(
-        api_key=settings.api_key,
-        base_url=settings.base_url.strip(),
-        http_client=http_client,
-        max_retries=0,
-    )
-    _GLOBAL_HTTPX_CLIENT = http_client
-    _GLOBAL_OPENAI_CLIENT = client
-    _GLOBAL_CLIENT_FINGERPRINT = fingerprint
-    logger.info(
-        "online_llm.client_singleton state=%s base_url=%s model=%s stream_enabled=%s tls_verify=%s reasoning_effort=%s",
-        "created",
-        settings.base_url,
-        settings.model,
-        settings.stream_enabled,
-        settings.tls_verify,
-        settings.reasoning_effort,
-    )
-    return client
-
-
 @dataclass
 class OnlineLLMAnalyzer(Analyzer):
     config: RuntimeConfig
@@ -437,25 +489,29 @@ class OnlineLLMAnalyzer(Analyzer):
         target_date: str,
         batch_input: AnalysisBatch,
     ) -> BatchAnalysisResult:
+        references = message_reference_ids(
+            [message for item in batch_input.slices for message in item.messages]
+        )
         payload = self._invoke_online(
             self.build_batch_prompt(batch_input),
-            output_schema=batch_output_schema(self.config),
-            request_kind="batch_analysis",
+            function_spec=task_function_call_spec(
+                "batch_analysis",
+                batch_output_schema(self.config),
+                **references,
+            ),
         )
         return parse_batch_analysis_payload(payload)
 
-    def request_json(
+    def request_function(
         self,
         prompt: str,
         *,
-        output_schema: dict[str, object] | None = None,
+        function_spec: FunctionCallSpec,
         allow_oversized_input: bool = False,
     ) -> object:
-        """Run an explicit JSON request for auxiliary, non-daily workflows."""
         return self._invoke_online(
             prompt,
-            output_schema=output_schema,
-            request_kind="auxiliary_json",
+            function_spec=function_spec,
             allow_oversized_input=allow_oversized_input,
         )
 
@@ -499,6 +555,7 @@ class OnlineLLMAnalyzer(Analyzer):
         attachment_texts: list[AttachmentTextBlock] | None = None,
         allow_oversized_input: bool = False,
     ) -> ConversationSegmentationResult:
+        message_refs = build_conversation_segmentation_message_refs(messages)
         payload = self._invoke_online(
             self.build_segmentation_prompt(
                 target_date=target_date,
@@ -511,8 +568,13 @@ class OnlineLLMAnalyzer(Analyzer):
                 hard_boundary_before_ids=hard_boundary_before_ids,
                 attachment_texts=attachment_texts,
             ),
-            output_schema=conversation_segmentation_output_schema(),
-            request_kind="conversation_segmentation",
+            function_spec=task_function_call_spec(
+                "conversation_segmentation",
+                conversation_segmentation_output_schema(),
+                enum_values={
+                    "segment_start_message_ids": list(message_refs.values())
+                },
+            ),
             **oversized_input_kwargs(allow_oversized_input),
         )
         return restore_conversation_segmentation_references(
@@ -528,10 +590,18 @@ class OnlineLLMAnalyzer(Analyzer):
         self,
         batch: SegmentAnalysisBatch,
     ) -> BatchSegmentAnalysisResult:
+        references = message_reference_ids(
+            [message for item in batch.segments for message in item.messages]
+        )
         payload = self._invoke_online(
             self.build_segment_batch_prompt(batch),
-            output_schema=segment_batch_output_schema(self.config),
-            request_kind="segment_batch_analysis",
+            function_spec=task_function_call_spec(
+                "segment_batch_analysis",
+                segment_batch_output_schema(self.config),
+                segment_ids=[item.segment_id for item in batch.segments],
+                result_count=len(batch.segments),
+                **references,
+            ),
             **oversized_input_kwargs(batch.oversized_singleton),
         )
         return parse_segment_batch_analysis_payload(payload)
@@ -543,10 +613,18 @@ class OnlineLLMAnalyzer(Analyzer):
         self,
         batch: RetentionReviewBatch,
     ) -> RetentionReviewResult:
+        references = message_reference_ids(
+            [message for item in batch.candidates for message in item.messages]
+        )
         payload = self._invoke_online(
             self.build_retention_review_prompt(batch),
-            output_schema=retention_review_output_schema(self.config),
-            request_kind="retention_review",
+            function_spec=task_function_call_spec(
+                "retention_review",
+                retention_review_output_schema(self.config),
+                draft_ids=[item.candidate.draft_id for item in batch.candidates],
+                result_count=len(batch.candidates),
+                **references,
+            ),
             **oversized_input_kwargs(batch.oversized_singleton),
         )
         try:
@@ -564,10 +642,18 @@ class OnlineLLMAnalyzer(Analyzer):
         self,
         batch: PersonalFactReviewBatch,
     ) -> PersonalFactReviewResult:
+        references = message_reference_ids(
+            [message for item in batch.candidates for message in item.messages]
+        )
         payload = self._invoke_online(
             self.build_personal_fact_review_prompt(batch),
-            output_schema=personal_fact_review_output_schema(batch),
-            request_kind="personal_fact_review",
+            function_spec=task_function_call_spec(
+                "personal_fact_review",
+                personal_fact_review_output_schema(batch),
+                draft_ids=[item.candidate.draft_id for item in batch.candidates],
+                result_count=len(batch.candidates),
+                **references,
+            ),
             **oversized_input_kwargs(batch.oversized_singleton),
         )
         try:
@@ -590,10 +676,18 @@ class OnlineLLMAnalyzer(Analyzer):
         target_date: str,
         anchor_units: list[AnchorUnit],
     ) -> BatchAnchorAnalysisResult:
+        references = message_reference_ids(
+            [message for item in anchor_units for message in item.messages]
+        )
         payload = self._invoke_online(
             build_anchor_batch_analysis_prompt(target_date, anchor_units, config=self.config),
-            output_schema=anchor_batch_output_schema(self.config),
-            request_kind="anchor_batch_analysis",
+            function_spec=task_function_call_spec(
+                "anchor_batch_analysis",
+                anchor_batch_output_schema(self.config),
+                anchor_unit_ids=[item.anchor_unit_id for item in anchor_units],
+                result_count=len(anchor_units),
+                **references,
+            ),
             **oversized_input_kwargs(
                 len(anchor_units) == 1 and anchor_units[0].oversized_singleton
             ),
@@ -607,8 +701,11 @@ class OnlineLLMAnalyzer(Analyzer):
     ) -> CrossConversationGroupResult:
         payload = self._invoke_online(
             build_merge_prompt(target_date, candidates),
-            output_schema=merge_output_schema(),
-            request_kind="day_candidate_merge",
+            function_spec=task_function_call_spec(
+                "day_candidate_merge",
+                merge_output_schema(),
+                draft_ids=[item.draft_id for item in candidates],
+            ),
             **oversized_input_kwargs(len(candidates) == 1),
         )
         self.last_merge_payload = payload
@@ -627,8 +724,12 @@ class OnlineLLMAnalyzer(Analyzer):
                 deterministic_groups,
                 config=self.config,
             ),
-            output_schema=collected_merge_output_schema(),
-            request_kind="collected_event_merge",
+            function_spec=task_function_call_spec(
+                "collected_event_merge",
+                collected_merge_output_schema(),
+                draft_ids=[item.draft_id for item in events],
+                exact_array_lengths={"groups": len(deterministic_groups)},
+            ),
             **oversized_input_kwargs(
                 is_indivisible_collected_request(events, deterministic_groups)
             ),
@@ -644,22 +745,37 @@ class OnlineLLMAnalyzer(Analyzer):
         target_date: str,
         events: list[CollectedSourceEvent],
         deterministic_groups: list[list[str]],
+        *,
+        validation_feedback: str = "",
     ) -> CollectedGroupingResult:
+        contract = collected_grouping_call_contract(
+            "collected_candidate_grouping",
+            config=self.config,
+            events=events,
+            deterministic_groups=deterministic_groups,
+            include_split_reason=False,
+        )
         payload = self._invoke_online(
             build_collected_grouping_prompt(
                 target_date,
                 events,
                 deterministic_groups,
                 config=self.config,
+                validation_feedback=validation_feedback,
             ),
-            output_schema=collected_grouping_output_schema(self.config),
-            request_kind="collected_candidate_grouping",
+            function_spec=contract.function_spec,
             **oversized_input_kwargs(
                 is_indivisible_collected_request(events, deterministic_groups)
+                or bool(validation_feedback)
             ),
         )
         try:
-            return parse_collected_grouping_payload(payload)
+            result, _ = parse_collected_grouping_function_payload(
+                payload,
+                evidence_catalog=list(contract.evidence_catalog),
+                allowed_semantic_reasons=contract.semantic_reasons,
+            )
+            return result
         except AnalyzerProtocolError as exc:
             raise RetryableAnalyzerProtocolError(str(exc)) from exc
 
@@ -670,7 +786,15 @@ class OnlineLLMAnalyzer(Analyzer):
         candidate_group: CollectedGroupingGroup,
         *,
         review_reasons: list[str] | None = None,
+        validation_feedback: str = "",
     ) -> CollectedGroupingResult:
+        contract = collected_grouping_call_contract(
+            "collected_group_review",
+            config=self.config,
+            events=events,
+            deterministic_groups=[list(candidate_group.draft_ids)],
+            include_split_reason=True,
+        )
         payload = self._invoke_online(
             build_collected_review_prompt(
                 target_date,
@@ -678,13 +802,18 @@ class OnlineLLMAnalyzer(Analyzer):
                 candidate_group,
                 config=self.config,
                 review_reasons=review_reasons,
+                validation_feedback=validation_feedback,
             ),
-            output_schema=collected_grouping_output_schema(self.config),
-            request_kind="collected_group_review",
+            function_spec=contract.function_spec,
             **oversized_input_kwargs(True),
         )
         try:
-            return parse_collected_grouping_payload(payload)
+            result, _ = parse_collected_grouping_function_payload(
+                payload,
+                evidence_catalog=list(contract.evidence_catalog),
+                allowed_semantic_reasons=contract.semantic_reasons,
+            )
+            return result
         except AnalyzerProtocolError as exc:
             raise RetryableAnalyzerProtocolError(str(exc)) from exc
 
@@ -692,15 +821,16 @@ class OnlineLLMAnalyzer(Analyzer):
         self,
         prompt: str,
         *,
-        output_schema: dict[str, object] | None = None,
-        request_kind: str,
+        function_spec: FunctionCallSpec,
         allow_oversized_input: bool = False,
     ) -> object:
-        estimated_tokens = estimate_model_input_tokens(
+        estimates = estimate_structured_input_tokens(
             prompt,
-            output_schema=output_schema,
+            function_spec=function_spec,
             append_no_think=True,
         )
+        estimated_tokens = estimates["input_estimated_tokens"]
+        request_kind = function_spec.request_kind
         target_tokens = self.config.model_input_batch_target_tokens
         oversized_singleton = estimated_tokens > target_tokens and allow_oversized_input
         if estimated_tokens > target_tokens and not allow_oversized_input:
@@ -721,8 +851,7 @@ class OnlineLLMAnalyzer(Analyzer):
         try:
             return self._invoke_online_prepared(
                 prompt,
-                output_schema=output_schema,
-                request_kind=request_kind,
+                function_spec=function_spec,
                 estimated_input_tokens=estimated_tokens,
                 input_target_tokens=target_tokens,
                 oversized_singleton=oversized_singleton,
@@ -737,18 +866,26 @@ class OnlineLLMAnalyzer(Analyzer):
         self,
         prompt: str,
         *,
-        output_schema: dict[str, object] | None,
-        request_kind: str,
+        function_spec: FunctionCallSpec,
         estimated_input_tokens: int,
         input_target_tokens: int,
         oversized_singleton: bool,
     ) -> object:
         started_at = perf_counter()
         settings = self.settings_loader(self.config, cwd=self.cwd, environ=None)
-        body = _build_responses_request_body(prompt, settings=settings, schema=output_schema)
+        body = _build_responses_request_body(
+            prompt,
+            settings=settings,
+            function_spec=function_spec,
+        )
+        request_kind = function_spec.request_kind
 
         try:
-            text, usage_payload = self._invoke_via_sdk(settings, body)
+            payload, usage_payload = self._invoke_via_sdk(
+                settings,
+                body,
+                function_spec=function_spec,
+            )
         except AuthenticationError as exc:
             raise AnalyzerProtocolError("HTTP 401: invalid API key or authentication failed.") from exc
         except PermissionDeniedError as exc:
@@ -805,50 +942,64 @@ class OnlineLLMAnalyzer(Analyzer):
             input_target_tokens=input_target_tokens,
             oversized_singleton=oversized_singleton,
         )
-        if not text.strip():
-            raise RetryableAnalyzerProtocolError(
-                "Online LLM response did not contain text output."
-            )
-        try:
-            return parse_json_value_from_text(text)
-        except ValueError as exc:
-            raise RetryableAnalyzerProtocolError(
-                "Online LLM response did not contain valid JSON output."
-            ) from exc
+        return payload
 
     def _invoke_via_sdk(
         self,
         settings: OnlineLLMSettings,
         body: dict[str, object],
-    ) -> tuple[str, dict[str, object]]:
-        client = _get_or_create_global_client(settings)
-        if settings.stream_enabled:
-            first_event = _read_first_stream_event(
-                client,
-                body,
-                first_response_timeout_seconds=(
-                    settings.stream_first_response_timeout_seconds
-                ),
-                subsequent_read_timeout_seconds=settings.timeout_seconds,
-            )
-            chunks: list[str] = []
-            usage_payload: dict[str, object] = {}
-            try:
+        *,
+        function_spec: FunctionCallSpec,
+    ) -> tuple[object, dict[str, object]]:
+        http_client = _build_http_client(settings)
+        client = OpenAI(
+            api_key=settings.api_key,
+            base_url=settings.base_url.strip(),
+            http_client=http_client,
+            max_retries=0,
+        )
+        try:
+            if settings.stream_enabled:
+                first_event = _read_first_stream_event(
+                    client,
+                    body,
+                    first_response_timeout_seconds=(
+                        settings.stream_first_response_timeout_seconds
+                    ),
+                    subsequent_read_timeout_seconds=settings.timeout_seconds,
+                )
+                event_payloads: list[dict[str, object]] = []
+                usage_payload: dict[str, object] = {}
                 events: Iterator[object]
                 if first_event.event is None:
                     events = first_event.iterator
                 else:
                     events = chain((first_event.event,), first_event.iterator)
-                for event in events:
-                    event_payload = event.model_dump()
-                    chunk_text = _extract_text_from_responses_stream_event(event_payload)
-                    if chunk_text:
-                        chunks.append(chunk_text)
-                    if _has_usage(event_payload):
-                        usage_payload = event_payload
-                return "".join(chunks), usage_payload
-            finally:
-                _close_stream(first_event.stream)
-        response = client.responses.create(**body)
-        payload = response.model_dump()
-        return _extract_text_from_responses_payload(payload), payload
+                try:
+                    for event in events:
+                        event_payload = event.model_dump()
+                        event_payloads.append(event_payload)
+                        if _has_usage(event_payload):
+                            usage_payload = event_payload
+                finally:
+                    _close_stream(first_event.stream)
+                arguments = _extract_stream_function_arguments(
+                    event_payloads,
+                    expected_name=function_spec.name,
+                )
+                return arguments, usage_payload or (event_payloads[-1] if event_payloads else {})
+            response = client.responses.create(**body)
+            response_payload = response.model_dump()
+            return (
+                _extract_function_arguments_from_responses_payload(
+                    response_payload,
+                    expected_name=function_spec.name,
+                ),
+                response_payload,
+            )
+        finally:
+            close = getattr(client, "close", None)
+            if callable(close):
+                close()
+            else:
+                http_client.close()

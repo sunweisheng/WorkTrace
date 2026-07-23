@@ -36,7 +36,7 @@ def test_diagnostic_step_is_running_during_llm_call_and_success_afterward(
 ) -> None:
     step_path = tmp_path / "step-001.json"
 
-    def invoke(target_date, source_events, deterministic_groups):
+    def invoke(target_date, source_events, deterministic_groups, **kwargs):
         running = json.loads(step_path.read_text(encoding="utf-8"))
         assert running["status"] == "running"
         assert running["completed_at_utc"] is None
@@ -45,7 +45,7 @@ def test_diagnostic_step_is_running_during_llm_call_and_success_afterward(
     runner = _build_runner(tmp_path, invoke)
     monkeypatch.setattr(
         diagnostic,
-        "build_collected_merge_prompt",
+        "build_collected_render_prompt",
         lambda *args, **kwargs: "diagnostic prompt",
     )
     monkeypatch.setattr(
@@ -81,13 +81,13 @@ def test_diagnostic_step_records_failed_llm_call(
     capsys,
     monkeypatch,
 ) -> None:
-    def invoke(target_date, source_events, deterministic_groups):
+    def invoke(target_date, source_events, deterministic_groups, **kwargs):
         raise RuntimeError("simulated failure")
 
     runner = _build_runner(tmp_path, invoke)
     monkeypatch.setattr(
         diagnostic,
-        "build_collected_merge_prompt",
+        "build_collected_render_prompt",
         lambda *args, **kwargs: "diagnostic prompt",
     )
 

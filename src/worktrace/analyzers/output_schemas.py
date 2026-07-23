@@ -1,7 +1,18 @@
 from __future__ import annotations
 
 from ..config import RuntimeConfig
+from ..constants import AnchorStatus, ContextRequestType
 from ..models import PersonalFactReviewBatch
+
+
+_MODEL_ANCHOR_STATUSES = [
+    AnchorStatus.COMPLETED.value,
+    AnchorStatus.NEEDS_MORE_CONTEXT.value,
+    AnchorStatus.NEEDS_ATTACHMENT_TEXT.value,
+    AnchorStatus.NOT_WORK_RELATED.value,
+    AnchorStatus.UNCERTAIN.value,
+]
+_CONTEXT_REQUEST_TYPES = [item.value for item in ContextRequestType]
 
 
 def batch_output_schema(config: RuntimeConfig | None = None) -> dict[str, object]:
@@ -42,7 +53,7 @@ def batch_output_schema(config: RuntimeConfig | None = None) -> dict[str, object
                             "type": "array",
                             "items": {"type": "string"},
                         },
-                        "self_relations": _self_relations_schema(),
+                        "self_relations": _self_relations_schema(runtime_config),
                         "workstream_key": {"type": "string"},
                         "source_message_ids": {
                             "type": "array",
@@ -74,7 +85,10 @@ def batch_output_schema(config: RuntimeConfig | None = None) -> dict[str, object
                 "items": {
                     "type": "object",
                     "properties": {
-                        "request_type": {"type": "string"},
+                        "request_type": {
+                            "type": "string",
+                            "enum": _CONTEXT_REQUEST_TYPES,
+                        },
                         "target_message_ids": {
                             "type": "array",
                             "items": {"type": "string"},
@@ -83,11 +97,16 @@ def batch_output_schema(config: RuntimeConfig | None = None) -> dict[str, object
                             "type": "array",
                             "items": {"type": "string"},
                         },
+                        "target_link_ids": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                        },
                     },
                     "required": [
                         "request_type",
                         "target_message_ids",
                         "target_attachment_ids",
+                        "target_link_ids",
                     ],
                     "additionalProperties": False,
                 },
@@ -279,7 +298,7 @@ def _segment_candidate_schema(config: RuntimeConfig) -> dict[str, object]:
                 "type": "array",
                 "items": {"type": "string"},
             },
-            "self_relations": _self_relations_schema(),
+            "self_relations": _self_relations_schema(config),
             "workstream_key": {"type": "string"},
             "source_message_ids": {
                 "type": "array",
@@ -352,7 +371,10 @@ def _context_request_schema() -> dict[str, object]:
         "items": {
             "type": "object",
             "properties": {
-                "request_type": {"type": "string"},
+                "request_type": {
+                    "type": "string",
+                    "enum": _CONTEXT_REQUEST_TYPES,
+                },
                 "target_message_ids": {
                     "type": "array",
                     "items": {"type": "string"},
@@ -391,7 +413,10 @@ def anchor_batch_output_schema(config: RuntimeConfig | None = None) -> dict[str,
                         "analysis": {
                             "type": "object",
                             "properties": {
-                                "anchor_status": {"type": "string"},
+                                "anchor_status": {
+                                    "type": "string",
+                                    "enum": _MODEL_ANCHOR_STATUSES,
+                                },
                                 "candidate_events": {
                                     "type": "array",
                                     "items": {
@@ -425,7 +450,9 @@ def anchor_batch_output_schema(config: RuntimeConfig | None = None) -> dict[str,
                                                 "type": "array",
                                                 "items": {"type": "string"},
                                             },
-                                            "self_relations": _self_relations_schema(),
+                                            "self_relations": _self_relations_schema(
+                                                runtime_config
+                                            ),
                                             "workstream_key": {"type": "string"},
                                             "source_message_ids": {
                                                 "type": "array",
@@ -457,7 +484,10 @@ def anchor_batch_output_schema(config: RuntimeConfig | None = None) -> dict[str,
                                     "items": {
                                         "type": "object",
                                         "properties": {
-                                            "request_type": {"type": "string"},
+                                            "request_type": {
+                                                "type": "string",
+                                                "enum": _CONTEXT_REQUEST_TYPES,
+                                            },
                                             "target_message_ids": {
                                                 "type": "array",
                                                 "items": {"type": "string"},
@@ -466,11 +496,16 @@ def anchor_batch_output_schema(config: RuntimeConfig | None = None) -> dict[str,
                                                 "type": "array",
                                                 "items": {"type": "string"},
                                             },
+                                            "target_link_ids": {
+                                                "type": "array",
+                                                "items": {"type": "string"},
+                                            },
                                         },
                                         "required": [
                                             "request_type",
                                             "target_message_ids",
                                             "target_attachment_ids",
+                                            "target_link_ids",
                                         ],
                                         "additionalProperties": False,
                                     },
@@ -496,13 +531,25 @@ def anchor_batch_output_schema(config: RuntimeConfig | None = None) -> dict[str,
     }
 
 
-def _self_relations_schema() -> dict[str, object]:
+def anchor_output_schema(config: RuntimeConfig | None = None) -> dict[str, object]:
+    batch_schema = anchor_batch_output_schema(config)
+    return batch_schema["properties"]["results"]["items"]["properties"][
+        "analysis"
+    ]
+
+
+def _self_relations_schema(config: RuntimeConfig) -> dict[str, object]:
+    relation_keys = [item.key for item in config.self_relation_types]
+    relation_schema: dict[str, object] = {"type": "string"}
+    if relation_keys:
+        relation_schema["enum"] = relation_keys
     return {
         "type": "array",
+        "maxItems": len(relation_keys),
         "items": {
             "type": "object",
             "properties": {
-                "relation": {"type": "string"},
+                "relation": relation_schema,
                 "evidence_message_ids": {
                     "type": "array",
                     "items": {"type": "string"},
@@ -523,6 +570,8 @@ def _personal_fact_properties(config: RuntimeConfig) -> dict[str, object]:
         "fact_items": _personal_fact_items_schema(),
         "fact_risk_flags": {
             "type": "array",
+            "maxItems": len(risk_keys),
+            "uniqueItems": True,
             "items": risk_item,
         },
     }
@@ -677,6 +726,107 @@ def collected_grouping_output_schema(
             },
         },
         "required": ["split_reason", "groups"],
+        "additionalProperties": False,
+    }
+
+
+def collected_grouping_function_schema(
+    config: RuntimeConfig,
+    *,
+    draft_ids: list[str],
+    evidence_relation_ids: list[str],
+    include_split_reason: bool,
+) -> dict[str, object]:
+    unique_draft_ids = list(dict.fromkeys(draft_ids))
+    unique_relation_ids = list(dict.fromkeys(evidence_relation_ids))
+    semantic_reasons = [
+        item.key
+        for item in config.collected_group_reason_definitions
+        if item.supports_semantic_merge and not item.evidence_relation
+    ]
+    risk_flags = [
+        "cross_batch",
+        "workstream_conflict",
+        "broad_object",
+        "large_group",
+    ]
+    evidence_item_schema: dict[str, object] = {"type": "string"}
+    if unique_relation_ids:
+        evidence_item_schema["enum"] = unique_relation_ids
+    semantic_item_schema: dict[str, object] = {"type": "string"}
+    if semantic_reasons:
+        semantic_item_schema["enum"] = semantic_reasons
+
+    group_schema = {
+        "type": "object",
+        "properties": {
+            "group_id": {"type": "string", "minLength": 1},
+            "draft_ids": {
+                "type": "array",
+                "minItems": 2,
+                "maxItems": len(unique_draft_ids),
+                "uniqueItems": True,
+                "items": {"type": "string", "enum": unique_draft_ids},
+            },
+            "summary_title": {"type": "string", "minLength": 1},
+            "summary_content": {"type": "string", "minLength": 1},
+            "summary_object_hint": {"type": "string", "minLength": 1},
+            "semantic_reasons": {
+                "type": "array",
+                "maxItems": len(semantic_reasons),
+                "uniqueItems": True,
+                "items": semantic_item_schema,
+            },
+            "evidence_relation_ids": {
+                "type": "array",
+                "maxItems": len(unique_relation_ids),
+                "uniqueItems": True,
+                "items": evidence_item_schema,
+            },
+            "reason_detail": {"type": "string", "minLength": 1},
+            "risk_flags": {
+                "type": "array",
+                "maxItems": len(risk_flags),
+                "uniqueItems": True,
+                "items": {"type": "string", "enum": risk_flags},
+            },
+        },
+        "required": [
+            "group_id",
+            "draft_ids",
+            "summary_title",
+            "summary_content",
+            "summary_object_hint",
+            "semantic_reasons",
+            "evidence_relation_ids",
+            "reason_detail",
+            "risk_flags",
+        ],
+        "additionalProperties": False,
+    }
+    properties: dict[str, object] = {
+        "merged_groups": {
+            "type": "array",
+            "minItems": 0,
+            "maxItems": len(unique_draft_ids) // 2,
+            "items": group_schema,
+        },
+        "singleton_draft_ids": {
+            "type": "array",
+            "minItems": 0,
+            "maxItems": len(unique_draft_ids),
+            "uniqueItems": True,
+            "items": {"type": "string", "enum": unique_draft_ids},
+        },
+    }
+    required = ["merged_groups", "singleton_draft_ids"]
+    if include_split_reason:
+        properties = {"split_reason": {"type": "string"}, **properties}
+        required = ["split_reason", *required]
+    return {
+        "type": "object",
+        "properties": properties,
+        "required": required,
         "additionalProperties": False,
     }
 

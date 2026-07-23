@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import inspect
 import re
 import subprocess
 from collections import Counter, defaultdict
@@ -23,10 +24,12 @@ from .errors import (
 from .factories import AnalyzerFactory
 from .llm_usage import LLMUsageRecorder
 from .analyzers.base import Analyzer
-from .analyzers.output_schemas import (
-    collected_grouping_output_schema,
-    collected_merge_output_schema,
+from .analyzers.function_calls import (
+    FunctionCallSpec,
+    collected_grouping_call_contract,
+    task_function_call_spec,
 )
+from .analyzers.output_schemas import collected_merge_output_schema
 from .analyzers.prompts import (
     build_collected_grouping_prompt,
     build_collected_merge_prompt,
@@ -66,9 +69,7 @@ from .utils.hashing import file_key_from_url, stable_event_id
 from .utils.json_io import dump_json
 from .utils.text import choose_preferred_text, clean_text, merge_content_texts
 from .utils.token_estimation import (
-    estimate_model_input_tokens,
-    estimate_text_tokens,
-    prepare_model_prompt,
+    estimate_structured_input_tokens,
 )
 
 
@@ -99,6 +100,7 @@ class CollectedMergeRunner:
         self._collected_merge_trace_lock = Lock()
         self._collected_merge_trace_dir: Path | None = None
         self._collected_merge_trace_steps: list[dict[str, Any]] = []
+        self._collected_merge_batch_decisions: list[dict[str, Any]] = []
         self._collected_merge_trace_call_index = 0
         self._collected_merge_source_audit: list[dict[str, Any]] = []
         self._collected_merge_filter_diagnostics: list[dict[str, Any]] = []
@@ -746,15 +748,23 @@ class CollectedMergeRunner:
         reasons: list[str],
         depth: int,
     ) -> tuple[CollectedGroupingResult, list[str]]:
-        prompt_tokens = _estimate_prepared_model_prompt_tokens(
-            build_collected_review_prompt(
+        prompt = build_collected_review_prompt(
                 target_date,
                 source_events,
                 candidate_group,
                 config=self.config,
                 review_reasons=reasons,
-            ),
-            output_schema=collected_grouping_output_schema(self.config),
+            )
+        contract = collected_grouping_call_contract(
+            "collected_group_review",
+            config=self.config,
+            events=source_events,
+            deterministic_groups=[list(candidate_group.draft_ids)],
+            include_split_reason=True,
+        )
+        prompt_tokens = _estimate_prepared_model_prompt_tokens(
+            prompt,
+            function_spec=contract.function_spec,
         )
         if prompt_tokens <= self.config.model_input_batch_target_tokens:
             return self._invoke_collected_review_with_retry(
@@ -915,15 +925,23 @@ class CollectedMergeRunner:
                 candidate_group,
                 draft_ids=[item.draft_id for item in events],
             )
-            return _estimate_prepared_model_prompt_tokens(
-                build_collected_review_prompt(
+            prompt = build_collected_review_prompt(
                     target_date,
                     events,
                     batch_group,
                     config=self.config,
                     review_reasons=reasons,
-                ),
-                output_schema=collected_grouping_output_schema(self.config),
+                )
+            contract = collected_grouping_call_contract(
+                "collected_group_review",
+                config=self.config,
+                events=events,
+                deterministic_groups=[list(batch_group.draft_ids)],
+                include_split_reason=True,
+            )
+            return _estimate_prepared_model_prompt_tokens(
+                prompt,
+                function_spec=contract.function_spec,
             )
 
         components = build_collected_relation_components(source_events, [])
@@ -963,6 +981,7 @@ class CollectedMergeRunner:
         invalid_result_count = 0
         attempt_index = 0
         retry_reason = "initial"
+        validation_feedback = ""
         while True:
             attempt_index += 1
             prompt = build_collected_review_prompt(
@@ -971,11 +990,21 @@ class CollectedMergeRunner:
                 candidate_group,
                 config=self.config,
                 review_reasons=reasons,
+                validation_feedback=validation_feedback,
             )
-            prompt_tokens = _estimate_prepared_model_prompt_tokens(
+            contract = collected_grouping_call_contract(
+                "collected_group_review",
+                config=self.config,
+                events=fitted_events,
+                deterministic_groups=[list(candidate_group.draft_ids)],
+                include_split_reason=True,
+            )
+            prompt_estimates = estimate_structured_input_tokens(
                 prompt,
-                output_schema=collected_grouping_output_schema(self.config),
+                function_spec=contract.function_spec,
+                append_no_think=True,
             )
+            prompt_tokens = prompt_estimates["input_estimated_tokens"]
             trace_step_index = self._start_collected_merge_trace_attempt(
                 target_date=target_date,
                 source_events=fitted_events,
@@ -992,12 +1021,23 @@ class CollectedMergeRunner:
             )
             try:
                 with self._llm_request_context(trace_step_index):
-                    result = self.analyzer.review_collected_group(
-                        target_date,
-                        fitted_events,
-                        candidate_group,
-                        review_reasons=reasons,
-                    )
+                    if validation_feedback and _accepts_validation_feedback(
+                        self.analyzer.review_collected_group
+                    ):
+                        result = self.analyzer.review_collected_group(
+                            target_date,
+                            fitted_events,
+                            candidate_group,
+                            review_reasons=reasons,
+                            validation_feedback=validation_feedback,
+                        )
+                    else:
+                        result = self.analyzer.review_collected_group(
+                            target_date,
+                            fitted_events,
+                            candidate_group,
+                            review_reasons=reasons,
+                        )
             except RetryableAnalyzerProtocolError as exc:
                 self._record_collected_merge_trace_failure(
                     step_index=trace_step_index,
@@ -1023,38 +1063,46 @@ class CollectedMergeRunner:
                 reasons=reasons,
                 config=self.config,
             )
+            split_reason_error = ""
+            if (
+                len(candidate_group.draft_ids) > 1
+                and len(result.groups) > 1
+                and not _collected_grouping_split_reason(result)
+            ):
+                split_reason_error = (
+                    "missing_overall_split_reason field=split_reason "
+                    f"group_id={candidate_group.group_id}"
+                )
+            validation_error = "; ".join(
+                value
+                for value in (partition_error, relation_error, split_reason_error)
+                if value
+            )
             self._record_collected_grouping_trace_success(
                 step_index=trace_step_index,
                 grouping_result=result,
-                source_coverage_error=partition_error or relation_error,
+                source_coverage_error=validation_error,
             )
-            if not partition_error and not relation_error:
+            if not validation_error:
                 repaired, repair_warnings = repair_collected_grouping_result(
                     result,
                     source_events,
                     [],
                 )
-                if (
-                    len(candidate_group.draft_ids) > 1
-                    and len(repaired.groups) > 1
-                    and not _collected_grouping_split_reason(repaired)
-                ):
-                    warning = (
-                        "High-risk collected group split was rejected because the "
-                        "review returned no overall split reason: "
-                        f"group={candidate_group.group_id}."
-                    )
-                    warnings.append(warning)
-                    self._collected_merge_failure_warnings.append(warning)
-                    return (
-                        CollectedGroupingResult(groups=[candidate_group]),
-                        [*warnings, *repair_warnings],
-                    )
                 return repaired, [*warnings, *repair_warnings]
             if (
                 invalid_result_count
                 >= self.config.collected_merge_missing_field_retry_limit
             ):
+                if split_reason_error:
+                    warning = (
+                        "High-risk collected group split was rejected after local retry "
+                        "because no overall split reason was returned: "
+                        f"group={candidate_group.group_id}."
+                    )
+                    warnings.append(warning)
+                    self._collected_merge_failure_warnings.append(warning)
+                    return CollectedGroupingResult(groups=[candidate_group]), warnings
                 if relation_error:
                     raise AnalyzerProtocolError(
                         "High-risk collected group review returned an unsupported "
@@ -1066,7 +1114,14 @@ class CollectedMergeRunner:
                     f"coverage: group={candidate_group.group_id} {partition_error}"
                 )
             invalid_result_count += 1
-            if relation_error:
+            validation_feedback = validation_error
+            if split_reason_error:
+                warning = (
+                    "Retrying current high-risk review because the split had no overall "
+                    f"reason: group={candidate_group.group_id} {split_reason_error}"
+                )
+                retry_reason = "missing_overall_split_reason"
+            elif relation_error:
                 warning = (
                     "Retrying high-risk collected group review because a subgroup "
                     "had an unsupported merge basis: "
@@ -1093,15 +1148,23 @@ class CollectedMergeRunner:
         input_limit = self.config.model_input_batch_target_tokens
 
         def estimate(events: list[CollectedSourceEvent]) -> int:
-            return _estimate_prepared_model_prompt_tokens(
-                build_collected_review_prompt(
+            prompt = build_collected_review_prompt(
                     target_date,
                     events,
                     candidate_group,
                     config=self.config,
                     review_reasons=reasons,
-                ),
-                output_schema=collected_grouping_output_schema(self.config),
+                )
+            contract = collected_grouping_call_contract(
+                "collected_group_review",
+                config=self.config,
+                events=events,
+                deterministic_groups=[list(candidate_group.draft_ids)],
+                include_split_reason=True,
+            )
+            return _estimate_prepared_model_prompt_tokens(
+                prompt,
+                function_spec=contract.function_spec,
             )
 
         full_tokens = estimate(source_events)
@@ -1923,6 +1986,15 @@ class CollectedMergeRunner:
                 candidate_deterministic,
             )
             if current and candidate_tokens > input_limit_tokens:
+                self._record_collected_grouping_batch_decision(
+                    level="relation_component",
+                    action="start_new_batch",
+                    current_draft_ids=[item.draft_id for item in current],
+                    added_draft_ids=[item.draft_id for item in component],
+                    proposed_draft_ids=[item.draft_id for item in candidate],
+                    input_estimated_tokens=candidate_tokens,
+                    input_target_tokens=input_limit_tokens,
+                )
                 batches.append(current)
                 current = []
 
@@ -1938,8 +2010,32 @@ class CollectedMergeRunner:
                 ],
             )
             if component_tokens <= input_limit_tokens:
+                self._record_collected_grouping_batch_decision(
+                    level="relation_component",
+                    action="add_to_batch",
+                    current_draft_ids=[item.draft_id for item in current],
+                    added_draft_ids=[item.draft_id for item in component],
+                    proposed_draft_ids=[
+                        *[item.draft_id for item in current],
+                        *[item.draft_id for item in component],
+                    ],
+                    input_estimated_tokens=(
+                        candidate_tokens if current else component_tokens
+                    ),
+                    input_target_tokens=input_limit_tokens,
+                )
                 current.extend(component)
                 continue
+
+            self._record_collected_grouping_batch_decision(
+                level="relation_component",
+                action="split_component",
+                current_draft_ids=[item.draft_id for item in current],
+                added_draft_ids=[item.draft_id for item in component],
+                proposed_draft_ids=[item.draft_id for item in component],
+                input_estimated_tokens=component_tokens,
+                input_target_tokens=input_limit_tokens,
+            )
 
             atomic_units: list[list[CollectedSourceEvent]] = []
             consumed_locked_ids: set[str] = set()
@@ -1969,13 +2065,43 @@ class CollectedMergeRunner:
                     [],
                 )
                 if current and candidate_tokens > input_limit_tokens:
+                    self._record_collected_grouping_batch_decision(
+                        level="atomic_unit",
+                        action="start_new_batch",
+                        current_draft_ids=[item.draft_id for item in current],
+                        added_draft_ids=[item.draft_id for item in unit],
+                        proposed_draft_ids=[item.draft_id for item in candidate],
+                        input_estimated_tokens=candidate_tokens,
+                        input_target_tokens=input_limit_tokens,
+                    )
                     batches.append(current)
                     current = []
+                else:
+                    self._record_collected_grouping_batch_decision(
+                        level="atomic_unit",
+                        action="add_to_batch",
+                        current_draft_ids=[item.draft_id for item in current],
+                        added_draft_ids=[item.draft_id for item in unit],
+                        proposed_draft_ids=[item.draft_id for item in candidate],
+                        input_estimated_tokens=candidate_tokens,
+                        input_target_tokens=input_limit_tokens,
+                    )
                 current.extend(unit)
 
         if current:
             batches.append(current)
         return batches or [list(source_events)]
+
+    def _record_collected_grouping_batch_decision(
+        self,
+        **decision: Any,
+    ) -> None:
+        self._collected_merge_batch_decisions.append(
+            {
+                "decision_index": len(self._collected_merge_batch_decisions) + 1,
+                **decision,
+            }
+        )
 
     def _fit_collected_grouping_events_to_limit(
         self,
@@ -2065,12 +2191,22 @@ class CollectedMergeRunner:
         warnings: list[str] = []
         attempt_index = 0
         retry_reason = "initial"
+        validation_feedback = ""
+        invalid_result_count = 0
         while True:
             attempt_index += 1
+            prompt = build_collected_grouping_prompt(
+                target_date,
+                source_events,
+                deterministic_groups,
+                config=self.config,
+                validation_feedback=validation_feedback,
+            )
             prompt_tokens = self._estimate_collected_grouping_prompt_tokens(
                 target_date,
                 source_events,
                 deterministic_groups,
+                validation_feedback=validation_feedback,
             )
             trace_step_index = self._start_collected_merge_trace_attempt(
                 target_date=target_date,
@@ -2080,14 +2216,25 @@ class CollectedMergeRunner:
                 attempt_index=attempt_index,
                 retry_reason=retry_reason,
                 stage=stage,
+                prompt_override=prompt,
             )
             try:
                 with self._llm_request_context(trace_step_index):
-                    grouping_result = self.analyzer.group_collected_events(
-                        target_date,
-                        source_events,
-                        deterministic_groups,
-                    )
+                    if validation_feedback and _accepts_validation_feedback(
+                        self.analyzer.group_collected_events
+                    ):
+                        grouping_result = self.analyzer.group_collected_events(
+                            target_date,
+                            source_events,
+                            deterministic_groups,
+                            validation_feedback=validation_feedback,
+                        )
+                    else:
+                        grouping_result = self.analyzer.group_collected_events(
+                            target_date,
+                            source_events,
+                            deterministic_groups,
+                        )
             except RetryableAnalyzerProtocolError as exc:
                 self._record_collected_merge_trace_failure(
                     step_index=trace_step_index,
@@ -2102,11 +2249,31 @@ class CollectedMergeRunner:
                     retryable=False,
                 )
                 raise
+            partition_error = collected_grouping_partition_error(
+                grouping_result,
+                [item.draft_id for item in source_events],
+            )
             self._record_collected_grouping_trace_success(
                 step_index=trace_step_index,
                 grouping_result=grouping_result,
+                source_coverage_error=partition_error,
             )
-            return grouping_result, warnings
+            if not partition_error:
+                return grouping_result, warnings
+            if invalid_result_count >= self.config.collected_merge_missing_field_retry_limit:
+                raise AnalyzerProtocolError(
+                    "Collected candidate grouping failed Python validation after local retry: "
+                    + partition_error
+                )
+            invalid_result_count += 1
+            validation_feedback = partition_error
+            retry_reason = "python_validation_failed"
+            warning = (
+                "Retrying current collected candidate grouping after Python validation: "
+                + partition_error
+            )
+            warnings.append(warning)
+            self._collected_merge_failure_warnings.append(warning)
 
     def _invoke_collected_merge_with_retry(
         self,
@@ -2348,7 +2515,10 @@ class CollectedMergeRunner:
                 deterministic_groups,
                 config=self.config,
             ),
-            output_schema=collected_merge_output_schema(),
+            function_spec=_collected_render_function_spec(
+                source_events,
+                deterministic_groups,
+            ),
         )
 
     def _estimate_collected_render_prompt_tokens(
@@ -2364,7 +2534,10 @@ class CollectedMergeRunner:
                 deterministic_groups,
                 config=self.config,
             ),
-            output_schema=collected_merge_output_schema(),
+            function_spec=_collected_render_function_spec(
+                source_events,
+                deterministic_groups,
+            ),
         )
 
     def _estimate_collected_grouping_prompt_tokens(
@@ -2372,15 +2545,26 @@ class CollectedMergeRunner:
         target_date: str,
         source_events: list[CollectedSourceEvent],
         deterministic_groups: list[list[str]],
+        *,
+        validation_feedback: str = "",
     ) -> int:
+        prompt = build_collected_grouping_prompt(
+            target_date,
+            source_events,
+            deterministic_groups,
+            config=self.config,
+            validation_feedback=validation_feedback,
+        )
+        contract = collected_grouping_call_contract(
+            "collected_candidate_grouping",
+            config=self.config,
+            events=source_events,
+            deterministic_groups=deterministic_groups,
+            include_split_reason=False,
+        )
         return _estimate_prepared_model_prompt_tokens(
-            build_collected_grouping_prompt(
-                target_date,
-                source_events,
-                deterministic_groups,
-                config=self.config,
-            ),
-            output_schema=collected_grouping_output_schema(self.config),
+            prompt,
+            function_spec=contract.function_spec,
         )
 
     def _group_source_events_for_rolling(
@@ -2893,6 +3077,7 @@ class CollectedMergeRunner:
 
     def _start_collected_merge_trace(self, target_date: str, input_dir: Path) -> None:
         self._collected_merge_trace_steps = []
+        self._collected_merge_batch_decisions = []
         self._collected_merge_trace_call_index = 0
         self._collected_merge_source_audit = []
         self._collected_merge_filter_diagnostics = []
@@ -2951,12 +3136,36 @@ class CollectedMergeRunner:
                 config=self.config,
             )
         )
-        output_schema = (
-            collected_grouping_output_schema(self.config)
-            if stage.startswith("candidate_") or stage == "high_risk_review"
-            else collected_merge_output_schema()
+        if stage.startswith("candidate_"):
+            contract = collected_grouping_call_contract(
+                "collected_candidate_grouping",
+                config=self.config,
+                events=source_events,
+                deterministic_groups=deterministic_groups,
+                include_split_reason=False,
+            )
+        elif stage == "high_risk_review":
+            contract = collected_grouping_call_contract(
+                "collected_group_review",
+                config=self.config,
+                events=source_events,
+                deterministic_groups=deterministic_groups,
+                include_split_reason=True,
+            )
+        else:
+            contract = None
+        function_spec = (
+            contract.function_spec
+            if contract is not None
+            else _collected_render_function_spec(source_events, deterministic_groups)
         )
-        prepared_prompt = prepare_model_prompt(prompt, append_no_think=True)
+        estimates = estimate_structured_input_tokens(
+            prompt,
+            function_spec=function_spec,
+            append_no_think=True,
+        )
+        input_estimated_tokens = estimates["input_estimated_tokens"]
+        target_tokens = self.config.model_input_batch_target_tokens
         step = {
             "step_index": step_index,
             "status": "started",
@@ -2965,18 +3174,23 @@ class CollectedMergeRunner:
             "attempt_index": attempt_index,
             "retry_reason": retry_reason,
             "prompt_chars": len(prompt),
-            "prompt_estimated_tokens": estimate_text_tokens(prepared_prompt),
-            "input_estimated_tokens": _estimate_prepared_model_prompt_tokens(
-                prompt,
-                output_schema=output_schema,
+            **estimates,
+            "final_grouping_input_estimated_tokens": input_estimated_tokens,
+            "input_target_tokens": target_tokens,
+            "input_overage_reason": (
+                "oversized_retry"
+                if input_estimated_tokens > target_tokens and retry_reason != "initial"
+                else "minimum_required_input"
+                if input_estimated_tokens > target_tokens
+                else ""
             ),
-            "input_target_tokens": self.config.model_input_batch_target_tokens,
-            "oversized_singleton": (
-                _estimate_prepared_model_prompt_tokens(
-                    prompt,
-                    output_schema=output_schema,
-                )
-                > self.config.model_input_batch_target_tokens
+            "oversized_singleton": input_estimated_tokens > target_tokens,
+            "function_name": function_spec.name,
+            "function_definition": _sanitize_function_definition(function_spec.tool()),
+            "evidence_relation_catalog": (
+                [item.to_dict() for item in contract.evidence_catalog]
+                if contract is not None
+                else []
             ),
             "prompt_file": f"step-{step_index:03d}-prompt.txt",
             "input": collected_merge_source_metrics(source_events),
@@ -3031,12 +3245,29 @@ class CollectedMergeRunner:
         step = self._collected_merge_trace_step(step_index)
         if step is None:
             return
+        split_reason_source = ""
+        if grouping_result.split_reason.strip():
+            split_reason_source = "top_level"
+        elif any(group.split_reason.strip() for group in grouping_result.groups):
+            split_reason_source = "legacy_group"
         step.update(
             {
                 "status": "success",
                 "raw_group_count": len(grouping_result.groups),
                 "raw_result": grouping_result.to_dict(),
                 "source_coverage_error": source_coverage_error,
+                "effective_split_reason": _collected_grouping_split_reason(
+                    grouping_result
+                ),
+                "split_reason_source": split_reason_source,
+                "python_validation": {
+                    "valid": not source_coverage_error,
+                    "errors": (
+                        [item.strip() for item in source_coverage_error.split(";")]
+                        if source_coverage_error
+                        else []
+                    ),
+                },
             }
         )
         self._attach_collected_merge_llm_calls(step)
@@ -3100,6 +3331,20 @@ class CollectedMergeRunner:
             for record in recorder.records()
             if record.get("request_context_id") == request_context_id
         ]
+        actual_input_tokens = next(
+            (
+                record.get("input_tokens")
+                for record in reversed(step["llm_calls"])
+                if isinstance(record.get("input_tokens"), int)
+            ),
+            None,
+        )
+        step["actual_input_tokens"] = actual_input_tokens
+        step["input_estimate_difference_tokens"] = (
+            actual_input_tokens - int(step.get("input_estimated_tokens", 0))
+            if isinstance(actual_input_tokens, int)
+            else None
+        )
 
     def _collected_merge_trace_step(
         self,
@@ -3247,6 +3492,7 @@ class CollectedMergeRunner:
                 if step.get("status") == "failed"
             ],
             "warning_messages": warning_messages,
+            "batch_decisions": self._collected_merge_batch_decisions,
             "steps": self._collected_merge_trace_steps,
         }
         (self._collected_merge_trace_dir / "summary.json").write_text(
@@ -3803,6 +4049,25 @@ def render_collected_merge_trace_summary(summary: dict[str, Any]) -> str:
                 error=error_summary,
             )
         )
+    batch_decisions = summary.get("batch_decisions", [])
+    if batch_decisions:
+        lines.extend(
+            [
+                "",
+                "## Candidate Batch Decisions",
+                "",
+                "| Decision | Level | Action | Estimated input tokens | Input target | Added draft IDs |",
+                "|---:|---|---|---:|---:|---|",
+            ]
+        )
+        for decision in batch_decisions:
+            added_ids = ", ".join(decision.get("added_draft_ids", []))
+            lines.append(
+                f"| {decision.get('decision_index', '')} | "
+                f"{decision.get('level', '')} | {decision.get('action', '')} | "
+                f"{decision.get('input_estimated_tokens', '')} | "
+                f"{decision.get('input_target_tokens', '')} | {added_ids} |"
+            )
     lines.extend(["", "## Source Files", ""])
     lines.extend(
         [
@@ -4529,13 +4794,22 @@ def collected_grouping_partition_error(
     duplicates = sorted(
         draft_id for draft_id, count in counts.items() if count > 1
     )
-    details: list[str] = []
+    details: list[str] = list(grouping_result.validation_errors)
     if missing:
-        details.append(f"missing={missing}")
+        details.append(
+            "missing_draft_id field=groups.draft_ids "
+            f"draft_ids={missing}"
+        )
     if unknown:
-        details.append(f"unknown={unknown}")
+        details.append(
+            "unknown_draft_id field=groups.draft_ids "
+            f"draft_ids={unknown}"
+        )
     if duplicates:
-        details.append(f"duplicates={duplicates}")
+        details.append(
+            "duplicate_draft_id field=groups.draft_ids "
+            f"draft_ids={duplicates}"
+        )
     return "; ".join(details)
 
 
@@ -4862,12 +5136,49 @@ def _dedupe(values: list[str]) -> list[str]:
 def _estimate_prepared_model_prompt_tokens(
     prompt: str,
     *,
-    output_schema: dict[str, object],
+    function_spec: FunctionCallSpec,
 ) -> int:
-    return estimate_model_input_tokens(
+    return estimate_structured_input_tokens(
         prompt,
-        output_schema=output_schema,
+        function_spec=function_spec,
         append_no_think=True,
+    )["input_estimated_tokens"]
+
+
+def _collected_render_function_spec(
+    source_events: list[CollectedSourceEvent],
+    deterministic_groups: list[list[str]],
+) -> FunctionCallSpec:
+    return task_function_call_spec(
+        "collected_event_merge",
+        collected_merge_output_schema(),
+        draft_ids=[item.draft_id for item in source_events],
+        exact_array_lengths={"groups": len(deterministic_groups)},
+    )
+
+
+def _sanitize_function_definition(value: object) -> object:
+    if isinstance(value, list):
+        return [_sanitize_function_definition(item) for item in value]
+    if not isinstance(value, dict):
+        return value
+    sanitized: dict[str, object] = {}
+    for key, item in value.items():
+        if key == "enum" and isinstance(item, list):
+            sanitized["enum_count"] = len(item)
+            continue
+        sanitized[key] = _sanitize_function_definition(item)
+    return sanitized
+
+
+def _accepts_validation_feedback(method: object) -> bool:
+    try:
+        parameters = inspect.signature(method).parameters
+    except (TypeError, ValueError):
+        return False
+    return "validation_feedback" in parameters or any(
+        parameter.kind is inspect.Parameter.VAR_KEYWORD
+        for parameter in parameters.values()
     )
 
 

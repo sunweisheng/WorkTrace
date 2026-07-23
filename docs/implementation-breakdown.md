@@ -80,11 +80,12 @@ flowchart LR
 | 文件 | 当前职责 |
 | --- | --- |
 | `analyzers/base.py` | 分段、片段批处理、临时协作复核、个人事实复核、旧批处理、分段失败后直接提炼、日级合并和多人合并接口 |
-| `analyzers/online.py` | OpenAI Python SDK + Responses API 在线文字实现，支持流式接收且不等待 |
+| `analyzers/online.py` | OpenAI Python SDK + Responses API 在线文字实现；固定结构使用任务专用 Function Calling，每次请求独立创建和关闭客户端 |
 | `analyzers/codex.py` | Codex CLI 文字实现，使用线程安全的 0-1 秒调用间隔 |
 | `analyzers/failover.py` | 在线文字请求首次发生可切换错误时，仅把当前请求改由 Codex 执行 |
 | `analyzers/prompts.py` | 所有语义任务 prompt |
-| `analyzers/output_schemas.py` | Responses API JSON schema；事实复核按当前候选动态限制 `draft_id` 和合法证据 ID |
+| `analyzers/function_calls.py` | `FunctionCallSpec`、任务专用 Function、动态 ID 枚举、典型参数示例和多人证据编号合同 |
+| `analyzers/output_schemas.py` | Function 参数与 Codex output-schema 共用结构；事实复核按当前候选动态限制 `draft_id` 和合法证据 ID |
 | `analyzers/protocol.py` | 模型 JSON 到领域对象的解析与引用恢复；事实复核从唯一一份 `fact_items` 派生六个文字字段 |
 
 当前默认 `OnlineLLMAnalyzer` 实现 `segment_conversation(...)`、`analyze_segment_batch(...)`、`review_retention_candidates(...)` 和 `review_personal_event_facts(...)`，因此 `runner` 走分段及两类局部复核主链。是否支持分段和事实复核由能力检查决定，不通过配置字符串猜测。
@@ -138,7 +139,7 @@ flowchart LR
 - 个人日报：`--debug-output`，目录 `data/debug/conversations/<date>/`；失败轮次保存 `failure.json`，单片段回退使用 `fallback-01/`，直接提炼回退使用 `_anchor_fallback/`；`retention_review.json` 和 `personal_fact_review.json` 保存两类局部复核尝试及 Python 校验结果，`llm_usage.json` 保存按调用类型的 token 和耗时，`final_events.json` 保存最终草稿、事件和过滤 warning
 - 回放报告：`replay_day_with_trace.py` 在执行前写入 `run_status.json`，实时显示并保存子进程阶段日志，结束后更新 `success/failed`，同时把 `llm_usage.json` 汇总到 `llm_usage_summary`；`diagnose_collected_merge_rolling.py` 在每次模型调用前写入 `running` 步骤并在完成或异常后更新结果；`report_replay_timings.py` 分开输出事实复核候选累计耗时和 `personal_fact_review_all` 墙钟耗时；`report_replay_call_inputs.py` 分开统计文字调用与图片摘要
 - 多人汇总：`WORKTRACE_COLLECTED_MERGE_TRACE=true`，目录默认 `data/debug/collected_merge/<date>/`；`source-audit.json` 保存来源格式、v2 会话证据校验和过滤明细，step JSON/prompt 在请求前写入候选、复核、正文阶段与批次，`summary.json` 和 `summary.md` 保存 Python 质量统计，失败也生成 summary
-- 高风险复核离线回放：`scripts/replay_collected_review_failures.py` 默认检查 M07-M11，可输出当前 prompt、Schema 和 Python 校验汇总，也可读取后续 Function Calling 实验结果；不调用在线模型
+- 高风险复核离线回放：`scripts/replay_collected_review_failures.py` 默认检查 M07-M11，可输出当前 prompt、Function 定义、证据编号和 Python 校验汇总，也可读取后续 Function Calling 实验结果；不调用在线模型
 - 锚点独立实验：`python3 -m src.worktrace.anchor_experiment ...`
 
 独立锚点实验用于对比协议和缓存行为，不等同于正式日报；正式日报虽然已经使用本人参与的聊天窗口，并在分段失败后直接从这些窗口提炼，但不使用实验入口生成最终 Markdown。正式 `--resume` 只读取 `pipeline/llm_checkpoints.py` 保存的临时分段/提炼结果，不读取实验锚点缓存。

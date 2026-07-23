@@ -9,7 +9,7 @@
 当前 Online analyzer 路径包含两个不同任务：
 
 1. `merge_day_candidates(...)` 做初始语义分组
-2. `request_json(workstream assignment)` 对候选建立工作流权威分组
+2. `request_function(workstream assignment)` 使用工作流归属专用 Function 对候选建立权威分组
 
 初始语义分组会先经过覆盖校验，但在 workstream assignment 成功时不会直接用于物化；它主要保留为 assignment 不可用或失败时的回退依据。
 
@@ -48,8 +48,8 @@ flowchart TD
     F -->|"非法"| G["保守 singleton 修复"]
     F -->|"合法"| H["初始模型组"]
     G --> H
-    H --> I{"analyzer 支持 request_json?"}
-    I -->|"是"| J["按完整输入分批目标做 workstream assignment"]
+    H --> I{"analyzer 支持 request_function?"}
+    I -->|"是"| J["按统一输入估算做 workstream assignment"]
     J --> K["groups_from_workstream_assignments"]
     K --> L{"有未分配候选且已有工作流?"}
     L -->|"是"| M["在已知工作流上下文中 follow-up"]
@@ -81,7 +81,7 @@ flowchart TD
 
 模型只提出哪些候选可能属于同一真实事项，不生成最终正文。
 
-请求前按最终提示词、`/no_think`、完整 JSON Schema 和结构化输出包装估算输入。全部候选超过 `model_input_batch_target_tokens` 时，runner 按候选顺序组装到分批目标内；单候选批次直接形成单例组，其余批次分别调用 `merge_day_candidates(...)`。局部分组完成后，每组生成紧凑临时候选，再做一次跨批语义判断；临时候选只用于分组，最终结果必须映射回原始 draft ID。若摘要数量仍无法放入一次请求，则继续按相同目标分批；单个最小输入允许越过目标。
+请求前按统一生产函数估算输入：先生成含当前合法 ID 参数示例、重试错误反馈和 `/no_think` 的最终提示词，再分别估算 Online 完整 Function 定义与 `tool_choice`、Codex 完整 output-schema，取两者较大值。全部候选超过 `model_input_batch_target_tokens=5200` 时，runner 按候选顺序组装到分批目标内；单候选批次直接形成单例组，其余批次分别调用 `merge_day_candidates(...)`。局部分组完成后，每组生成紧凑临时候选，再做一次跨批语义判断；临时候选只用于分组，最终结果必须映射回原始 draft ID。若摘要数量仍无法放入一次请求，则继续按相同目标分批；单个最小输入允许越过目标。
 
 `validate_cross_conversation_groups(...)` 要求：
 
@@ -96,7 +96,7 @@ flowchart TD
 
 ### 5.1 首轮 assignment
 
-analyzer 支持 `request_json(...)` 时，runner 调用 `build_workstream_assignment_prompt(...)`。全部候选无法一次放入分批目标时，按候选顺序继续组装成多个批次，再合并各批 assignment；单个候选本身仍超过目标时标记后发送，模型服务拒绝时转入失败回退。每项 `WorkstreamAssignment` 包含：
+analyzer 支持 `request_function(...)` 时，runner 调用 `build_workstream_assignment_prompt(...)`，并以当前批次 draft ID、消息 ID 和工作流 ID 动态构造专用 `FunctionCallSpec`。全部候选无法一次放入分批目标时，按候选顺序继续组装成多个批次，再合并各批 assignment；单个候选本身仍超过目标时标记后发送，模型服务拒绝时转入失败回退。每项 `WorkstreamAssignment` 包含：
 
 - `draft_id`
 - `parent_draft_id`
@@ -120,7 +120,7 @@ follow-up 约束：
 
 以下情况会回退到 `consolidate_workstream_groups(model_groups, candidates)`：
 
-- analyzer 没有 `request_json`
+- analyzer 没有 `request_function`
 - 返回不是对象
 - assignment 解析/验证失败
 - 在线请求失败

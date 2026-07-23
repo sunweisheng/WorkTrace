@@ -1750,6 +1750,9 @@ class CollectedGroupingGroup:
     summary_source: str = ""
     split_reason: str = ""
     group_reason: list[str] = field(default_factory=list)
+    semantic_reasons: list[str] = field(default_factory=list)
+    evidence_relation_ids: list[str] = field(default_factory=list)
+    reason_detail: str = ""
     risk_flags: list[str] = field(default_factory=list)
     was_repaired: bool = False
 
@@ -1764,6 +1767,9 @@ class CollectedGroupingGroup:
             summary_source=str(data.get("summary_source", "")),
             split_reason=str(data.get("split_reason", "")),
             group_reason=_string_list(data.get("group_reason")),
+            semantic_reasons=_string_list(data.get("semantic_reasons")),
+            evidence_relation_ids=_string_list(data.get("evidence_relation_ids")),
+            reason_detail=str(data.get("reason_detail", "")),
             risk_flags=_string_list(data.get("risk_flags")),
             was_repaired=bool(data.get("was_repaired", False)),
         )
@@ -1778,6 +1784,9 @@ class CollectedGroupingGroup:
             "summary_source": self.summary_source,
             "split_reason": self.split_reason,
             "group_reason": list(self.group_reason),
+            "semantic_reasons": list(self.semantic_reasons),
+            "evidence_relation_ids": list(self.evidence_relation_ids),
+            "reason_detail": self.reason_detail,
             "risk_flags": list(self.risk_flags),
             "was_repaired": self.was_repaired,
         }
@@ -1787,6 +1796,7 @@ class CollectedGroupingGroup:
 class CollectedGroupingResult:
     groups: list[CollectedGroupingGroup] = field(default_factory=list)
     split_reason: str = ""
+    validation_errors: list[str] = field(default_factory=list)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "CollectedGroupingResult":
@@ -1795,20 +1805,17 @@ class CollectedGroupingResult:
             for item in _dict_list(data.get("groups"))
         ]
         split_reason = str(data.get("split_reason", "")).strip()
-        if not split_reason:
-            split_reason = next(
-                (group.split_reason.strip() for group in groups if group.split_reason.strip()),
-                "",
-            )
         return cls(
             groups=groups,
             split_reason=split_reason,
+            validation_errors=_string_list(data.get("validation_errors")),
         )
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "split_reason": self.split_reason,
             "groups": [item.to_dict() for item in self.groups],
+            "validation_errors": list(self.validation_errors),
         }
 
 

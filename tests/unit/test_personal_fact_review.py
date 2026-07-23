@@ -7,6 +7,8 @@ from pathlib import Path
 import pytest
 
 from src.worktrace.analyzers.prompts import build_personal_fact_review_prompt
+from src.worktrace.analyzers.function_calls import task_function_call_spec
+from src.worktrace.analyzers.output_schemas import personal_fact_review_output_schema
 from src.worktrace.config import RuntimeConfig, load_runtime_config_overrides
 from src.worktrace.errors import AnalyzerProtocolError
 from src.worktrace.models import (
@@ -353,15 +355,28 @@ def test_fact_review_prompt_states_exact_fact_item_coverage_contract() -> None:
     )
 
     prompt = build_personal_fact_review_prompt(batch, config=CONFIG)
-    payload = json.loads(prompt)
-    output_item = payload["required_output_schema"]["results"][0]
+    function_spec = task_function_call_spec(
+        "personal_fact_review",
+        personal_fact_review_output_schema(batch),
+        draft_ids=[review_candidate.candidate.draft_id],
+        message_ids=review_candidate.allowed_evidence_message_ids,
+        result_count=1,
+    )
+    output_item = function_spec.parameters["properties"]["results"]["items"]
 
-    assert set(output_item) == {
+    assert set(output_item["properties"]) == {
         "draft_id",
         "supported",
         "fact_items",
         "removed_claims",
     }
+    assert output_item["required"] == [
+        "draft_id",
+        "supported",
+        "fact_items",
+        "removed_claims",
+    ]
+    assert output_item["additionalProperties"] is False
     assert "不要在 fact_items 之外重复返回这些文字字段" in prompt
     assert "缺少任一必填字段的合法证据时必须返回 supported=false" in prompt
     assert "Python 会直接连接所有 content.text 生成正文" in prompt

@@ -4,7 +4,7 @@ import os
 import re
 import shutil
 import tempfile
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Protocol
 from urllib.parse import urljoin
@@ -12,7 +12,8 @@ from urllib.parse import urljoin
 import httpx
 
 from ..analyzers.online import OnlineLLMAnalyzer
-from ..config import OnlineLLMSettings, RuntimeConfig, load_online_llm_settings
+from ..analyzers.function_calls import function_call_spec
+from ..config import RuntimeConfig
 from ..reaction_catalog import (
     ReactionCatalog,
     ReactionCatalogError,
@@ -57,26 +58,15 @@ class OnlineReactionMetadataEnricher:
         analyzer = OnlineLLMAnalyzer(
             config=self.config,
             cwd=self.cwd,
-            settings_loader=_load_sync_llm_settings,
         )
-        payload = analyzer.request_json(
+        payload = analyzer.request_function(
             _build_metadata_prompt(emoji_types),
-            output_schema=_metadata_output_schema(),
+            function_spec=function_call_spec(
+                "reaction_metadata",
+                _metadata_output_schema(emoji_types),
+            ),
         )
         return _parse_enriched_metadata(payload, expected_types=emoji_types)
-
-
-def _load_sync_llm_settings(
-    config: RuntimeConfig,
-    *,
-    cwd: Path | None = None,
-    environ=None,
-) -> OnlineLLMSettings:
-    """Catalog updates need a complete structured response, not stream fragments."""
-    return replace(
-        load_online_llm_settings(config, cwd=cwd, environ=environ),
-        stream_enabled=False,
-    )
 
 
 @dataclass
@@ -212,14 +202,18 @@ def _download_bytes(url: str) -> bytes:
 
 def _build_metadata_prompt(emoji_types: list[str]) -> str:
     return (
-        "为飞书消息表情生成中文元数据。只返回符合 schema 的 JSON。"
+        "为飞书消息表情生成中文元数据。只调用指定 Function 一次。"
         "每个 emoji_type 恰好输出一次；name 为简短中文名称，description 为不超过 30 字的中文含义，"
         "semantic 为英文小写短语，描述工作沟通中的主要反应语义。\n"
         f"emoji_types: {emoji_types}\n/no_think"
     )
 
 
-def _metadata_output_schema() -> dict[str, object]:
+def _metadata_output_schema(emoji_types: list[str] | None = None) -> dict[str, object]:
+    allowed_types = list(dict.fromkeys(emoji_types or []))
+    emoji_type_schema: dict[str, object] = {"type": "string"}
+    if allowed_types:
+        emoji_type_schema["enum"] = allowed_types
     return {
         "type": "object",
         "additionalProperties": False,
@@ -227,12 +221,17 @@ def _metadata_output_schema() -> dict[str, object]:
         "properties": {
             "items": {
                 "type": "array",
+                **(
+                    {"minItems": len(allowed_types), "maxItems": len(allowed_types)}
+                    if allowed_types
+                    else {}
+                ),
                 "items": {
                     "type": "object",
                     "additionalProperties": False,
                     "required": ["emoji_type", "name", "description", "semantic"],
                     "properties": {
-                        "emoji_type": {"type": "string"},
+                        "emoji_type": emoji_type_schema,
                         "name": {"type": "string"},
                         "description": {"type": "string"},
                         "semantic": {"type": "string"},

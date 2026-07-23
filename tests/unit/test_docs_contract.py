@@ -14,6 +14,7 @@ def test_env_example_contains_required_online_llm_keys() -> None:
     assert "WORKTRACE_LLM_MODEL=" in content
     assert "WORKTRACE_LLM_API_KEY=" in content
     assert "WORKTRACE_LLM_REASONING_EFFORT=none" in content
+    assert "WORKTRACE_LLM_STREAM=false" in content
 
 
 def test_readme_mentions_local_online_llm_configuration() -> None:
@@ -305,7 +306,7 @@ def test_docs_describe_online_template_defaults_and_necessary_names() -> None:
 
     for content in (readme, online_usage, env_example):
         assert "WORKTRACE_LLM_TIMEOUT_SECONDS=1200" in content
-        assert "WORKTRACE_LLM_STREAM=true" in content
+        assert "WORKTRACE_LLM_STREAM=false" in content
         assert "WORKTRACE_LLM_REASONING_EFFORT=none" in content
     for content in (privacy, employee_guide):
         assert "参与人名单" in content
@@ -335,6 +336,71 @@ def test_docs_match_failover_and_collected_merge_optimizations() -> None:
     assert "WORKTRACE_LLM_" + "SLEEP_" not in content
     assert "WORKTRACE_COLLECTED_MERGE_" + "RETRYABLE_ERROR_LIMIT" not in content
     assert "WORKTRACE_COLLECTED_MERGE_" + "RETRY_DELAY_SECONDS" not in content
+
+
+def test_current_docs_describe_function_calling_and_input_estimation() -> None:
+    documents = [
+        Path("README.md"),
+        Path("SKILL.md"),
+        Path("docs/online-analyzer-usage.md"),
+        Path("docs/detailed-design.md"),
+        Path("docs/collected-people-merge-plan.md"),
+        Path("docs/cross-conversation-merge-design.md"),
+        Path("docs/conversation-slice-retry-design.md"),
+    ]
+    contents = [path.read_text(encoding="utf-8") for path in documents]
+    combined = "\n".join(contents)
+
+    assert "Function Calling" in combined
+    assert "FunctionCallSpec" in combined
+    assert "tool_choice" in combined
+    assert "strict:true" in combined
+    assert "online_estimate" in combined
+    assert "codex_estimate" in combined
+    assert "input_estimated_tokens = max(online_estimate, codex_estimate)" in combined
+    assert "HTTP 字节数" in combined
+    assert "oversized_retry" in combined
+    assert "每次请求" in combined and "关闭" in combined and "客户端" in combined
+
+
+def test_current_docs_describe_numbered_collected_evidence() -> None:
+    documents = [
+        Path("README.md").read_text(encoding="utf-8"),
+        Path("SKILL.md").read_text(encoding="utf-8"),
+        Path("docs/detailed-design.md").read_text(encoding="utf-8"),
+        Path("docs/collected-people-merge-plan.md").read_text(encoding="utf-8"),
+    ]
+
+    for content in documents:
+        assert "evidence_relation_ids" in content
+        assert "MSG-xxx" in content
+        assert "conversation_groups" in content
+        assert "不编号" in content
+        assert "Python" in content and "恢复" in content
+    combined = "\n".join(documents)
+    assert "不创建临时目录" in combined
+    assert "reason_detail" in combined
+    assert "旧记录" in combined or "旧结果" in combined
+
+
+def test_current_docs_do_not_describe_removed_online_protocol() -> None:
+    documents = [
+        Path("README.md"),
+        Path("SKILL.md"),
+        Path("docs/online-analyzer-usage.md"),
+        Path("docs/detailed-design.md"),
+        Path("docs/collected-people-merge-plan.md"),
+        Path("docs/cross-conversation-merge-design.md"),
+        Path("docs/conversation-slice-retry-design.md"),
+        Path("docs/implementation-breakdown.md"),
+        Path("docs/two-level-collected-merge-improvement-plan.md"),
+    ]
+    combined = "\n".join(path.read_text(encoding="utf-8") for path in documents)
+
+    assert "WORKTRACE_LLM_STREAM=" + "true" not in combined
+    assert "text" + ".format" not in combined
+    assert "request_" + "json" not in combined
+    assert "JSON Schema 和结构化输出包装" not in combined
 
 
 def test_preflight_docs_cover_codex_fallback_and_delivery_boundary() -> None:

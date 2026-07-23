@@ -5,6 +5,8 @@ from pathlib import Path
 import logging
 from time import perf_counter
 
+from .analyzers.function_calls import message_reference_ids, task_function_call_spec
+from .analyzers.output_schemas import anchor_output_schema
 from .analyzers.prompts import build_anchor_analysis_prompt, build_anchor_expansion_prompt
 from .analyzers.protocol import parse_anchor_analysis_payload
 from .cache import FileSystemAnchorCacheStore, build_anchor_input_fingerprint
@@ -373,7 +375,12 @@ def _analyze_anchor_unit(
                 expansion_attachment_texts=new_attachment_texts,
                 expansion_linked_file_texts=new_linked_file_texts,
             )
-        payload = _invoke_anchor_analyzer(analyzer, prompt)
+        payload = _invoke_anchor_analyzer(
+            analyzer,
+            prompt,
+            anchor_unit=current_anchor_unit,
+            config=config,
+        )
         parsed = parse_anchor_analysis_payload(payload)
         current_result = parsed
         cache_key = build_anchor_input_fingerprint(
@@ -685,7 +692,25 @@ def _write_anchor_cache_from_payload(
     )
 
 
-def _invoke_anchor_analyzer(analyzer, prompt: str) -> object:
+def _invoke_anchor_analyzer(
+    analyzer,
+    prompt: str,
+    *,
+    anchor_unit: AnchorUnit,
+    config: RuntimeConfig,
+) -> object:
+    request_function = getattr(analyzer, "request_function", None)
+    if callable(request_function):
+        references = message_reference_ids(anchor_unit.messages)
+        return request_function(
+            prompt,
+            function_spec=task_function_call_spec(
+                "anchor_analysis",
+                anchor_output_schema(config),
+                **references,
+            ),
+            allow_oversized_input=anchor_unit.oversized_singleton,
+        )
     for method_name in ("_invoke_codex", "_invoke_online"):
         method = getattr(analyzer, method_name, None)
         if callable(method):

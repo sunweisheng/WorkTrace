@@ -16,6 +16,7 @@ from src.worktrace.collected_merge import (
     repair_collected_grouping_result,
 )
 from src.worktrace.analyzers.prompts import (
+    build_collected_evidence_relation_catalog,
     build_collected_grouping_prompt,
     build_collected_merge_prompt,
     build_collected_render_prompt,
@@ -524,7 +525,7 @@ def test_collected_merge_over_threshold_rolls_sources_and_keeps_provenance(
         analyzer=analyzer,
         config=RuntimeConfig(
             data_root=tmp_path / "data",
-            model_input_batch_target_tokens=1000,
+            model_input_batch_target_tokens=1,
             self_relation_types=(
                 EventMetadataItem("collaboration", "协作参与", 10),
             ),
@@ -543,23 +544,23 @@ def test_collected_merge_over_threshold_rolls_sources_and_keeps_provenance(
     assert len(rolling_event.evidence_fingerprints) == 3
     assert len(rolling_event.file_keys) >= 3
     second_call = analyzer.calls[1]
-    second_prompt = json.loads(
-        build_collected_merge_prompt(
-            "2026-06-29",
-            second_call["events"],
-            second_call["deterministic_groups"],
-        )
+    relation_catalog = build_collected_evidence_relation_catalog(
+        second_call["events"],
+        excluded_draft_ids=set(),
     )
-    assert second_prompt["evidence_relations"] == [
+    assert [item.to_dict() for item in relation_catalog] == [
         {
-            "draft_ids": sorted(
-                event.draft_id for event in second_call["events"]
-            ),
-            "shared_message_count": 1,
-            "shared_file_count": 1,
-            "message_sets_equal": False,
-            "file_sets_equal": False,
-        }
+            "relation_id": "MSG-001",
+            "relation_type": "shared_message",
+            "draft_ids": sorted(event.draft_id for event in second_call["events"]),
+            "shared_count": 1,
+        },
+        {
+            "relation_id": "FILE-001",
+            "relation_type": "shared_file",
+            "draft_ids": sorted(event.draft_id for event in second_call["events"]),
+            "shared_count": 1,
+        },
     ]
     content = Path(result.output_path or "").read_text(encoding="utf-8")
     assert "- 来源人员: 张三、李四、王五" in content
@@ -635,7 +636,7 @@ def test_collected_merge_rolling_preserves_owner_signal_between_steps(
         analyzer=analyzer,
         config=RuntimeConfig(
             data_root=tmp_path / "data",
-            model_input_batch_target_tokens=1000,
+            model_input_batch_target_tokens=1,
         ),
     ).run("2026-06-29")
 
@@ -643,9 +644,8 @@ def test_collected_merge_rolling_preserves_owner_signal_between_steps(
     second_call_owner_events = [
         event for event in analyzer.calls[1]["events"] if event.is_merge_owner_source
     ]
-    assert [event.source_file for event in second_call_owner_events] == [
-        "__rolling_collected_merge_step_1.md"
-    ]
+    assert len(second_call_owner_events) == 1
+    assert "1.0.5" in second_call_owner_events[0].event.content
     assert "1.0.5" in Path(result.output_path or "").read_text(encoding="utf-8")
 
 
@@ -835,14 +835,26 @@ def test_collected_merge_does_not_lock_equal_fingerprint_sets(tmp_path: Path) ->
 
     assert analyzer.calls[0]["deterministic_groups"] == []
     prompt = json.loads(
-        build_collected_merge_prompt(
+        build_collected_grouping_prompt(
             "2026-06-29",
             analyzer.calls[0]["events"],
             analyzer.calls[0]["deterministic_groups"],
         )
     )
-    assert prompt["evidence_relations"][0]["message_sets_equal"] is True
-    assert prompt["evidence_relations"][0]["file_sets_equal"] is True
+    assert prompt["evidence_relation_catalog"] == [
+        {
+            "relation_id": "MSG-001",
+            "relation_type": "shared_message",
+            "draft_ids": sorted(event.draft_id for event in analyzer.calls[0]["events"]),
+            "shared_count": 1,
+        },
+        {
+            "relation_id": "FILE-001",
+            "relation_type": "shared_file",
+            "draft_ids": sorted(event.draft_id for event in analyzer.calls[0]["events"]),
+            "shared_count": 1,
+        },
+    ]
 
 
 def test_collected_merge_silently_uses_standard_merge_without_owner_source(
@@ -1022,7 +1034,7 @@ def test_collected_merge_delivery_failure_only_warns(tmp_path: Path) -> None:
 
 
 def test_collected_merge_prompt_contains_sensitive_rules() -> None:
-    prompt = build_collected_merge_prompt(
+    prompt = build_collected_render_prompt(
         "2026-06-29",
         [
             CollectedSourceEvent(
@@ -1041,7 +1053,7 @@ def test_collected_merge_prompt_contains_sensitive_rules() -> None:
                 ),
             )
         ],
-        [],
+        [["d1"]],
         config=RuntimeConfig(
             sensitive_event_keywords=("工资", "薪资", "薪酬", "吵架", "辱骂"),
         ),
@@ -1049,18 +1061,16 @@ def test_collected_merge_prompt_contains_sensitive_rules() -> None:
 
     payload = json.loads(prompt)
 
-    assert payload["merge_owner_person"] == "张三"
-    assert payload["remaining_events"][0]["is_merge_owner_source"] is True
-    assert payload["remaining_events"][0]["source_people"] == []
-    assert payload["remaining_events"][0]["source_event_ids"] == []
+    event_payload = payload["locked_groups"][0]["events"][0]
+    assert event_payload["is_merge_owner_source"] is True
+    assert event_payload["source_people"] == []
+    assert "source_event_ids" not in event_payload
     assert "涉及工资、薪资、薪酬、吵架、辱骂" in prompt
-    assert "不要输出对应 group" in prompt
+    assert "不要提炼为事项" in prompt
     assert "retention_reason" in prompt
-    assert "只有不同来源" in prompt
-    assert "存在明确冲突" in prompt
-    assert "最终 group 必须以 1.0.5 为主事实" in prompt
-    assert "workstream_name 相同只表示可能属于同一工作范围" in prompt
-    assert "只有标题相似、时间接近或部门相同，不能作为合并依据" in prompt
+    assert "版本号、结论、状态、结果或待办方向明确冲突" in prompt
+    assert "is_merge_owner_source=true" in prompt
+    assert "组成员已经锁定" in prompt
 
 
 def test_collected_merge_prompt_includes_python_evidence_relations() -> None:
@@ -1068,7 +1078,7 @@ def test_collected_merge_prompt_includes_python_evidence_relations() -> None:
     message_b = "sha256:" + "b" * 64
     message_c = "sha256:" + "c" * 64
     file_a = "sha256:" + "d" * 64
-    prompt = build_collected_merge_prompt(
+    prompt = build_collected_grouping_prompt(
         "2026-06-29",
         [
             CollectedSourceEvent(
@@ -1120,35 +1130,38 @@ def test_collected_merge_prompt_includes_python_evidence_relations() -> None:
 
     payload = json.loads(prompt)
     event_payload = next(
-        item for item in payload["remaining_events"] if item["draft_id"] == "d1"
+        item for item in payload["events"] if item["draft_id"] == "d1"
     )
 
     assert event_payload["workstream_name"] == "项目甲"
     assert event_payload["action_labels"] == ["方案确认"]
-    assert event_payload["self_relations"] == [{"key": "initiated", "label": "发起"}]
+    assert "self_relations" not in event_payload
     assert "evidence_fingerprints" not in event_payload
     assert "file_keys" not in event_payload
-    assert payload["evidence_relations"] == [
+    assert payload["evidence_relation_catalog"] == [
         {
+            "relation_id": "MSG-001",
+            "relation_type": "shared_message",
             "draft_ids": ["d1", "d2"],
-            "shared_message_count": 2,
-            "shared_file_count": 1,
-            "message_sets_equal": True,
-            "file_sets_equal": True,
+            "shared_count": 2,
         },
         {
+            "relation_id": "FILE-001",
+            "relation_type": "shared_file",
+            "draft_ids": ["d1", "d2"],
+            "shared_count": 1,
+        },
+        {
+            "relation_id": "MSG-002",
+            "relation_type": "shared_message",
             "draft_ids": ["d1", "d3"],
-            "shared_message_count": 1,
-            "shared_file_count": 0,
-            "message_sets_equal": False,
-            "file_sets_equal": False,
+            "shared_count": 1,
         },
         {
+            "relation_id": "MSG-003",
+            "relation_type": "shared_message",
             "draft_ids": ["d2", "d3"],
-            "shared_message_count": 1,
-            "shared_file_count": 0,
-            "message_sets_equal": False,
-            "file_sets_equal": False,
+            "shared_count": 1,
         },
     ]
     assert message_a not in prompt
@@ -1235,15 +1248,14 @@ def test_collected_merge_prompt_handles_file_only_and_empty_evidence() -> None:
         ),
     ]
 
-    payload = json.loads(build_collected_merge_prompt("2026-06-29", events, []))
+    payload = json.loads(build_collected_grouping_prompt("2026-06-29", events, []))
 
-    assert payload["evidence_relations"] == [
+    assert payload["evidence_relation_catalog"] == [
         {
+            "relation_id": "FILE-001",
+            "relation_type": "shared_file",
             "draft_ids": ["d1", "d2"],
-            "shared_message_count": 0,
-            "shared_file_count": 1,
-            "message_sets_equal": False,
-            "file_sets_equal": False,
+            "shared_count": 1,
         }
     ]
 
@@ -2069,14 +2081,13 @@ def test_collected_grouping_prompt_uses_same_day_conversation_candidates() -> No
     assert payload["conversation_groups"] == [
         {"group_id": "conversation-001", "draft_ids": ["d1", "d2"]}
     ]
-    assert payload["evidence_relations"] == []
+    assert payload["evidence_relation_catalog"] == []
     assert conversation not in prompt
     assert message_a not in prompt
     assert message_b not in prompt
     assert payload["events"][0]["content"] == long_content
-    assert payload["required_output_schema"]["split_reason"].startswith("empty")
     assert "same_deliverable_batch" in payload["group_reason_definitions"]
-    assert "不同文件" in payload["group_reason_definitions"]["shared_file"]
+    assert "shared_file" not in payload["group_reason_definitions"]
 
 
 def test_grouping_repair_preserves_only_matching_candidate_summary() -> None:
@@ -3251,8 +3262,10 @@ def test_other_high_risk_review_rejects_false_shared_file(tmp_path: Path) -> Non
         )
 
 
+@pytest.mark.parametrize("event_count", [2, 3, 4])
 def test_high_risk_review_can_split_group_without_losing_sources(
     tmp_path: Path,
+    event_count: int,
 ) -> None:
     events = [
         CollectedSourceEvent(
@@ -3261,7 +3274,7 @@ def test_high_risk_review_can_split_group_without_losing_sources(
             f"人员{index}.md",
             _event(event_id=f"e{index}", title=f"事项{index}", content=f"事实{index}"),
         )
-        for index in range(2)
+        for index in range(event_count)
     ]
     analyzer = ReviewAnalyzer(split=True)
     runner = _build_runner(tmp_path, analyzer=analyzer)
@@ -3273,14 +3286,16 @@ def test_high_risk_review_can_split_group_without_losing_sources(
             groups=[
                 CollectedGroupingGroup(
                     "g1",
-                    ["d0", "d1"],
+                    [f"d{index}" for index in range(event_count)],
                     risk_flags=["cross_batch"],
                 )
             ]
         ),
     )
 
-    assert [group.draft_ids for group in reviewed.groups] == [["d0"], ["d1"]]
+    assert [group.draft_ids for group in reviewed.groups] == [
+        [f"d{index}"] for index in range(event_count)
+    ]
     assert runner._collected_quality_counters["review_split_group_count"] == 1
 
 

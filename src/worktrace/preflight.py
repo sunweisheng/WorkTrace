@@ -16,8 +16,8 @@ import httpx
 
 from .config import OnlineLLMSettings, RuntimeConfig, load_online_llm_settings
 from .errors import PreflightError
-from .analyzers.online import _extract_text_from_responses_payload
-from .utils.json_io import parse_json_value_from_text
+from .analyzers.function_calls import function_call_spec
+from .analyzers.online import _extract_function_arguments_from_responses_payload
 
 
 MIN_PYTHON = (3, 11)
@@ -281,33 +281,40 @@ def probe_online_llm(config: RuntimeConfig, *, cwd: Path) -> dict[str, str]:
                 "required": ["probe"],
                 "additionalProperties": False,
             }
+            function_spec = function_call_spec(
+                "preflight",
+                probe_schema,
+                typical_arguments={"probe": "ok"},
+            )
             kwargs: dict[str, object] = {
                 "model": settings.model,
-                "input": '请严格输出 JSON：{"probe":"ok"}\n/no_think',
-                "text": {
-                    "format": {
-                        "type": "json_schema",
-                        "name": "worktrace_probe",
-                        "schema": probe_schema,
-                        "strict": True,
-                    }
-                },
+                "input": '请只调用指定 Function，并把 probe 设为 "ok"。\n/no_think',
+                "stream": False,
+                "tools": [function_spec.tool()],
+                "tool_choice": function_spec.tool_choice(),
+                "parallel_tool_calls": False,
             }
             if settings.reasoning_effort == "none":
                 kwargs["reasoning"] = {"effort": "none"}
-            response = client.responses.create(**kwargs)
-            payload = response.model_dump()
+            try:
+                response = client.responses.create(**kwargs)
+                payload = response.model_dump()
+            finally:
+                close_client = getattr(client, "close", None)
+                if callable(close_client):
+                    close_client()
     except Exception as exc:
         raise PreflightError(classify_online_failure(exc)) from exc
 
-    output_text = _extract_text_from_responses_payload(payload)
-    if not output_text.strip():
-        raise PreflightError("Online LLM probe returned invalid JSON.")
-
     try:
-        normalized = parse_json_value_from_text(output_text)
-    except ValueError as exc:
-        raise PreflightError("Online LLM probe returned invalid JSON.") from exc
+        normalized = _extract_function_arguments_from_responses_payload(
+            payload,
+            expected_name=function_spec.name,
+        )
+    except Exception as exc:
+        raise PreflightError(
+            "Online LLM does not support the required Function Calling contract."
+        ) from exc
     if not isinstance(normalized, dict) or normalized.get("probe") != "ok":
         raise PreflightError("Online LLM probe returned unexpected JSON content.")
 

@@ -10,10 +10,12 @@ from src.worktrace.analyzers.protocol import (
     parse_anchor_analysis_payload,
     parse_batch_analysis_payload,
     parse_collected_grouping_payload,
+    parse_collected_grouping_function_payload,
     parse_merge_payload,
     parse_personal_fact_review_payload,
     parse_retention_review_payload,
 )
+from src.worktrace.analyzers.collected_evidence import EvidenceRelation
 from src.worktrace.analyzers.output_schemas import (
     batch_output_schema,
     collected_grouping_output_schema,
@@ -285,7 +287,118 @@ def test_collected_grouping_protocol_reads_legacy_group_split_reason() -> None:
         }
     )
 
-    assert parsed.split_reason == "旧记录中的整体拆分理由。"
+    assert parsed.split_reason == ""
+    assert parsed.groups[0].split_reason == "旧记录中的整体拆分理由。"
+
+
+def test_collected_function_payload_restores_verified_internal_reasons() -> None:
+    result, errors = parse_collected_grouping_function_payload(
+        {
+            "merged_groups": [
+                {
+                    "group_id": "g1",
+                    "draft_ids": ["d1", "d2"],
+                    "summary_title": "同一事项",
+                    "summary_content": "两条记录描述同一事项。",
+                    "summary_object_hint": "同一事项",
+                    "semantic_reasons": ["same_object"],
+                    "evidence_relation_ids": ["MSG-001", "FILE-001"],
+                    "reason_detail": "具体对象和前后动作一致。",
+                    "risk_flags": [],
+                }
+            ],
+            "singleton_draft_ids": [],
+        },
+        evidence_catalog=[
+            EvidenceRelation("MSG-001", "shared_message", ("d1", "d2"), 2),
+            EvidenceRelation("FILE-001", "shared_file", ("d1", "d2"), 1),
+        ],
+        allowed_semantic_reasons=["same_object"],
+    )
+
+    assert errors == []
+    assert result.groups[0].group_reason == [
+        "shared_message",
+        "shared_file",
+        "same_object",
+    ]
+    assert result.groups[0].evidence_relation_ids == ["MSG-001", "FILE-001"]
+    assert result.groups[0].reason_detail == "具体对象和前后动作一致。"
+
+
+@pytest.mark.parametrize(
+    ("relation_ids", "catalog", "expected_error"),
+    [
+        (
+            ["MSG-999"],
+            [],
+            "unknown_evidence_relation",
+        ),
+        (
+            ["MSG-001"],
+            [EvidenceRelation("MSG-001", "shared_message", ("d1", "d4"), 1)],
+            "evidence_outside_group",
+        ),
+        (
+            ["MSG-001"],
+            [EvidenceRelation("MSG-001", "shared_message", ("d1", "d2"), 1)],
+            "evidence_does_not_cover_group",
+        ),
+    ],
+)
+def test_collected_function_payload_rejects_invalid_evidence_relations(
+    relation_ids: list[str],
+    catalog: list[EvidenceRelation],
+    expected_error: str,
+) -> None:
+    result, errors = parse_collected_grouping_function_payload(
+        {
+            "merged_groups": [
+                {
+                    "group_id": "g1",
+                    "draft_ids": ["d1", "d2", "d3"],
+                    "summary_title": "候选事项",
+                    "summary_content": "候选事项记录。",
+                    "summary_object_hint": "候选事项",
+                    "semantic_reasons": [],
+                    "evidence_relation_ids": relation_ids,
+                    "reason_detail": "依据共同证据尝试合并。",
+                    "risk_flags": [],
+                }
+            ],
+            "singleton_draft_ids": [],
+        },
+        evidence_catalog=catalog,
+    )
+
+    assert any(error.startswith(expected_error) for error in errors)
+    assert result.validation_errors == errors
+
+
+def test_collected_function_payload_requires_reason_detail_for_multi_group() -> None:
+    _result, errors = parse_collected_grouping_function_payload(
+        {
+            "split_reason": "第三条记录属于不同对象。",
+            "merged_groups": [
+                {
+                    "group_id": "g1",
+                    "draft_ids": ["d1", "d2"],
+                    "summary_title": "同一事项",
+                    "summary_content": "两条记录描述同一事项。",
+                    "summary_object_hint": "同一事项",
+                    "semantic_reasons": ["same_object"],
+                    "evidence_relation_ids": [],
+                    "reason_detail": "",
+                    "risk_flags": [],
+                }
+            ],
+            "singleton_draft_ids": ["d3"],
+        },
+        evidence_catalog=[],
+        allowed_semantic_reasons=["same_object"],
+    )
+
+    assert any(error.startswith("reason_detail_missing") for error in errors)
 
 
 def test_anchor_status_list_string_is_normalized_to_single_status() -> None:
