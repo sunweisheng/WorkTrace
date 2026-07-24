@@ -633,6 +633,108 @@ def merge_output_schema() -> dict[str, object]:
     }
 
 
+def personal_grouping_function_schema(
+    config: RuntimeConfig,
+    *,
+    draft_ids: list[str],
+    message_ids: list[str],
+) -> dict[str, object]:
+    unique_draft_ids = list(dict.fromkeys(draft_ids))
+    unique_message_ids = list(dict.fromkeys(message_ids))
+    semantic_reasons = [
+        item.key
+        for item in config.collected_group_reason_definitions
+        if item.supports_semantic_merge and not item.evidence_relation
+    ]
+    group_schema = {
+        "type": "object",
+        "properties": {
+            "draft_ids": {
+                "type": "array",
+                "minItems": 2,
+                "maxItems": len(unique_draft_ids),
+                "uniqueItems": True,
+                "items": {"type": "string", "enum": unique_draft_ids},
+            },
+            "primary_draft_id": {
+                "type": "string",
+                "enum": unique_draft_ids,
+            },
+            "common_object": {"type": "string", "minLength": 1},
+            "semantic_reasons": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": len(semantic_reasons),
+                "uniqueItems": True,
+                "items": {"type": "string", "enum": semantic_reasons},
+            },
+            "reason_detail": {"type": "string", "minLength": 1},
+            "member_connections": {
+                "type": "array",
+                "minItems": 2,
+                "maxItems": len(unique_draft_ids),
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "draft_id": {
+                            "type": "string",
+                            "enum": unique_draft_ids,
+                        },
+                        "connection_detail": {
+                            "type": "string",
+                            "minLength": 1,
+                        },
+                        "evidence_message_ids": {
+                            "type": "array",
+                            "minItems": 1,
+                            "uniqueItems": True,
+                            "items": {
+                                "type": "string",
+                                "enum": unique_message_ids,
+                            },
+                        },
+                    },
+                    "required": [
+                        "draft_id",
+                        "connection_detail",
+                        "evidence_message_ids",
+                    ],
+                    "additionalProperties": False,
+                },
+            },
+        },
+        "required": [
+            "draft_ids",
+            "primary_draft_id",
+            "common_object",
+            "semantic_reasons",
+            "reason_detail",
+            "member_connections",
+        ],
+        "additionalProperties": False,
+    }
+    return {
+        "type": "object",
+        "properties": {
+            "merged_groups": {
+                "type": "array",
+                "minItems": 0,
+                "maxItems": len(unique_draft_ids) // 2,
+                "items": group_schema,
+            },
+            "singleton_draft_ids": {
+                "type": "array",
+                "minItems": 0,
+                "maxItems": len(unique_draft_ids),
+                "uniqueItems": True,
+                "items": {"type": "string", "enum": unique_draft_ids},
+            },
+        },
+        "required": ["merged_groups", "singleton_draft_ids"],
+        "additionalProperties": False,
+    }
+
+
 def collected_grouping_output_schema(
     config: RuntimeConfig | None = None,
 ) -> dict[str, object]:

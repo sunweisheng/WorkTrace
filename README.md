@@ -189,7 +189,7 @@ input_estimated_tokens = max(online_estimate, codex_estimate)
 
 旧个人 MD 和已经生成的部门汇总不追溯处理；重新生成个人日报后，新规则才会体现在新文件中。多人汇总仍只读取已生成的 Markdown，不回头读取员工原聊天做这项复核。
 
-候选多于一条时，LLM 通过全日分组 Function 返回 `draft_ids`、`primary_draft_id`、`merge_reason` 和 `evidence_message_ids`，稳定 `group_id` 由 Python 生成。Python 检查候选无遗漏、无重复，主事件属于组内，证据属于组内来源；多事件组还必须有具体理由和合法证据，全部单例也是合法结果。完整输入超过 5200 时，Python 按候选顺序分批完成局部分组，再把每个局部组压缩成保留标题、对象和正文首尾的临时摘要，继续做跨批判断并映射回全部原始 draft ID。
+候选多于一条时，LLM 通过全日分组 Function 分别返回 `merged_groups` 和 `singleton_draft_ids`。每个多事件组必须给出 `primary_draft_id`、具体共同对象 `common_object`、配置允许的 `semantic_reasons`、具体理由，以及逐条覆盖全部成员的 `member_connections`；每条成员说明都必须引用该候选自己的来源消息。模型提示词不发送 `source_conversation_id` 和 `source_slice_id`，同一会话不能成为模型合并依据；成立条件、排除条件和同会话不同事项等反例统一来自 `config/event_grouping.json`。Python 检查候选无遗漏、无重复、主事件属于组内、每个成员恰好说明一次且证据属于该成员；全部单例也是合法结果。完整输入超过 5200 时，Python 按候选顺序分批完成局部分组，再把每个局部组压缩成保留标题、对象和正文首尾的临时摘要，继续做跨批判断并映射回全部原始 draft ID。
 
 Python 以同一来源片段、直接 reply/quote、共享来源消息和共享文件建立强关联；同一会话本身不触发复核。强关联跨越已有组时，最多三路并行请求模型判断完整现有组是否属于同一事项，不允许拆散已合法组。语义说明统一来自 `config/event_grouping.json`，Python 不读取聊天文字判断业务含义。全日结果非法时，Online 带具体错误重试一次，再把当前请求交给 Codex 一次；Codex 返回仍非法时保留完全合法组、其余候选拆成单例并写 warning，Codex 技术调用失败则终止生成。局部复核失败或持续非法时保留复核前分组并写 warning。
 
@@ -480,6 +480,7 @@ python3 -m pip install -r requirements.txt
 - [隐私说明](docs/privacy-note.md)：员工可直接阅读的短版隐私边界
 - [分段与扩窗设计](docs/conversation-slice-retry-design.md)：主链分段批处理、上下文重试和分段失败后直接提炼
 - [取消工作流概念并改进事件分组](docs/workstream-free-event-grouping-design.md)：当前个人与多人事件分组的唯一设计依据
+- [2026-07-22 个人分组提示词对照](docs/personal-grouping-prompt-comparison-2026-07-22.md)：删除旧提示词前完成的三次真实模型对照、耗时和语义核对
 - [跨会话合并历史设计](docs/cross-conversation-merge-design.md)：已被当前事件分组设计替代的历史方案
 - [多人汇总设计](docs/collected-people-merge-plan.md)：`merge-collected` 当前实现
 - [部门到中心两级汇总改造说明](docs/two-level-collected-merge-improvement-plan.md)：当前实现、历史样本结论和真实 V2 验收边界

@@ -518,29 +518,51 @@ def build_merge_prompt(
     validation_feedback: str = "",
 ) -> str:
     runtime_config = config or RuntimeConfig()
+    reason_definitions = runtime_config.collected_group_reason_definitions
+    semantic_reason_keys = [
+        item.key
+        for item in reason_definitions
+        if item.supports_semantic_merge and not item.evidence_relation
+    ]
     protocol = {
         "instruction": (
-            "按是否描述同一真实工作事件，对同一天的候选事项做跨会话分组。"
-            "只调用指定 Function 一次提交 groups。"
-            "请给我简洁的答案，不要推理，跳过思考步骤。"
-            "直接作答，不要展示你的推理过程。"
+            "按是否描述同一真实工作事件，对同一天的候选事项分组。"
+            "只调用指定 Function 一次，分别返回多事件组和单例编号。"
+            "不要输出普通文本或推理过程。"
         ),
         "rules": [
             *runtime_config.personal_grouping_rules,
-            "每个 draft_id 必须且只能出现在一个 group 里。",
-            "禁止漏掉任何 draft_id。输出前必须逐个核对 candidates 里的全部 draft_id 都已被返回一次且仅一次。",
-            "多事件组必须填写具体 merge_reason，并引用组内合法 evidence_message_ids。",
-            "单例组的 merge_reason 填写单条保留，evidence_message_ids 返回空数组。",
+            "判断每个多事件组时，必须逐项遵守 group_reason_definitions 中的成立条件和排除条件。",
+            "merged_groups 只放至少两条且已经确认属于同一明确事项的候选；拿不准时放入 singleton_draft_ids。",
+            "每个 draft_id 必须且只能出现在 merged_groups 或 singleton_draft_ids 中一次。",
+            "每个多事件组必须填写一个具体共同事项 common_object，不能使用部门、系统、业务类别或宽泛工作目标代替。",
+            "semantic_reasons 只能选择配置允许的语义依据：" + "、".join(semantic_reason_keys) + "。",
+            "member_connections 必须逐条覆盖组内全部 draft_id，每个编号恰好一次，并用一句话说明该候选与共同事项的直接关系。",
+            "每条 member_connections 说明必须引用该候选自己的合法 evidence_message_ids。",
+            "不允许把同一会话、相近时间、相似标题、相同人员或同类工作作为合并依据。",
         ],
+        "group_reason_definitions": {
+            item.key: {
+                "description": item.description,
+                "acceptance_rules": list(item.acceptance_rules),
+                "rejection_rules": list(item.rejection_rules),
+            }
+            for item in reason_definitions
+        },
+        "negative_examples": list(
+            runtime_config.personal_grouping_negative_examples
+        ),
         "target_date": target_date,
-        "validation_feedback": validation_feedback,
+        **(
+            {"retry_validation_errors": validation_feedback}
+            if validation_feedback.strip()
+            else {}
+        ),
         "candidates": [
             {
                 "draft_id": candidate.draft_id,
                 "action_label": candidate.action_label,
                 "object_hint": candidate.object_hint,
-                "source_conversation_id": candidate.source_conversation_id,
-                "source_slice_id": candidate.source_slice_id,
                 "source_message_ids": candidate.source_message_ids,
                 "referenced_link_ids": candidate.referenced_link_ids,
                 "referenced_attachment_ids": candidate.referenced_attachment_ids,

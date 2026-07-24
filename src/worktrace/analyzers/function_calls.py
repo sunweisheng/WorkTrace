@@ -111,6 +111,52 @@ class CollectedGroupingCallContract:
     semantic_reasons: tuple[str, ...]
 
 
+@dataclass(frozen=True)
+class PersonalGroupingCallContract:
+    function_spec: FunctionCallSpec
+    semantic_reasons: tuple[str, ...]
+
+
+def personal_grouping_call_contract(
+    *,
+    config: object,
+    candidates: Sequence[object],
+) -> PersonalGroupingCallContract:
+    from .output_schemas import personal_grouping_function_schema
+
+    draft_ids = [str(getattr(item, "draft_id")) for item in candidates]
+    message_ids = list(
+        dict.fromkeys(
+            str(message_id)
+            for item in candidates
+            for message_id in getattr(item, "source_message_ids", [])
+            if str(message_id).strip()
+        )
+    )
+    semantic_reasons = tuple(
+        str(getattr(item, "key"))
+        for item in getattr(config, "collected_group_reason_definitions", ())
+        if getattr(item, "supports_semantic_merge", False)
+        and not getattr(item, "evidence_relation", "")
+    )
+    function_spec = function_call_spec(
+        "day_candidate_merge",
+        personal_grouping_function_schema(
+            config,
+            draft_ids=draft_ids,
+            message_ids=message_ids,
+        ),
+        typical_arguments={
+            "merged_groups": [],
+            "singleton_draft_ids": draft_ids,
+        },
+    )
+    return PersonalGroupingCallContract(
+        function_spec=function_spec,
+        semantic_reasons=semantic_reasons,
+    )
+
+
 def collected_grouping_call_contract(
     request_kind: str,
     *,

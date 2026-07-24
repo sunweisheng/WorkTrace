@@ -382,6 +382,7 @@ def test_repo_collected_merge_config_matches_review_defaults() -> None:
     definitions = {
         item["key"]: item for item in grouping_payload["group_reason_definitions"]
     }
+    assert grouping_payload["personal_grouping_negative_examples"]
     assert definitions["same_object"]["acceptance_rules"]
     assert definitions["same_object"]["rejection_rules"]
     assert definitions["continuous_action"]["acceptance_rules"]

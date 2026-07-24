@@ -15,6 +15,7 @@ from .config import RuntimeConfig
 from .analyzers.base import Analyzer
 from .analyzers.function_calls import (
     message_reference_ids,
+    personal_grouping_call_contract,
     task_function_call_spec,
 )
 from .constants import DailyRunStatus
@@ -23,6 +24,7 @@ from .errors import (
     ChatSourceError,
     DeliveryError,
     ModelInputLimitError,
+    PersonalGroupingValidationError,
     StoreWriteError,
 )
 from .factories import RuntimeDependencies, build_runtime_dependencies
@@ -3114,12 +3116,36 @@ class DailyTraceRunner:
                 if callable(getattr(recorder, "request_context", None))
                 else nullcontext()
             )
-            with context:
-                result = analyzer.merge_day_candidates(
-                    target_date,
-                    candidates,
-                    validation_feedback=validation_feedback,
+            try:
+                with context:
+                    result = analyzer.merge_day_candidates(
+                        target_date,
+                        candidates,
+                        validation_feedback=validation_feedback,
+                    )
+            except PersonalGroupingValidationError as exc:
+                used_fallback = self._last_analyzer_request_used_fallback()
+                codex_fallback_count += int(used_fallback)
+                if isinstance(exc.partial_result, CrossConversationGroupResult):
+                    last_result = exc.partial_result
+                validation_feedback = str(exc)
+                attempts.append(
+                    {
+                        "request_label": request_label,
+                        "attempt": attempt_index + 1,
+                        "backend": "codex" if used_fallback else "online",
+                        "status": "invalid",
+                        "validation_feedback_input": attempt_feedback,
+                        "validation_error": validation_feedback,
+                        "result": {},
+                    }
                 )
+                if used_fallback:
+                    break
+                if attempt_index < self.config.day_group_validation_retry_limit:
+                    validation_retry_count += 1
+                    continue
+                break
             used_fallback = self._last_analyzer_request_used_fallback()
             codex_fallback_count += int(used_fallback)
             try:
@@ -3173,24 +3199,21 @@ class DailyTraceRunner:
                 if callable(getattr(recorder, "request_context", None))
                 else nullcontext()
             )
-            with context:
-                codex_result = fallback(
-                    "merge_day_candidates",
-                    target_date,
-                    candidates,
-                    failed_request_context_id=last_context_id,
-                    error_category="validation_error",
-                    validation_feedback=validation_feedback,
-                )
-            codex_fallback_count += 1
             try:
-                validated = validate_cross_conversation_groups(
-                    codex_result,
-                    candidates,
-                )
-            except AnalyzerProtocolError as exc:
-                last_result = codex_result
+                with context:
+                    codex_result = fallback(
+                        "merge_day_candidates",
+                        target_date,
+                        candidates,
+                        failed_request_context_id=last_context_id,
+                        error_category="validation_error",
+                        validation_feedback=validation_feedback,
+                    )
+            except PersonalGroupingValidationError as exc:
                 validation_feedback = str(exc)
+                codex_fallback_count += 1
+                if isinstance(exc.partial_result, CrossConversationGroupResult):
+                    last_result = exc.partial_result
                 attempts.append(
                     {
                         "request_label": request_label,
@@ -3198,28 +3221,50 @@ class DailyTraceRunner:
                         "backend": "codex",
                         "status": "invalid",
                         "validation_error": validation_feedback,
-                        "result": codex_result.to_dict(),
+                        "result": {},
                     }
                 )
+                codex_result = None
             else:
-                attempts.append(
-                    {
-                        "request_label": request_label,
-                        "attempt": len(attempts) + 1,
-                        "backend": "codex",
-                        "status": "success",
-                        "validation_error": "",
-                        "result": validated.to_dict(),
-                    }
-                )
-                return (
-                    validated,
-                    [],
-                    attempts,
-                    validation_retry_count,
-                    codex_fallback_count,
-                    0,
-                )
+                codex_fallback_count += 1
+            if codex_result is not None:
+                try:
+                    validated = validate_cross_conversation_groups(
+                        codex_result,
+                        candidates,
+                    )
+                except AnalyzerProtocolError as exc:
+                    last_result = codex_result
+                    validation_feedback = str(exc)
+                    attempts.append(
+                        {
+                            "request_label": request_label,
+                            "attempt": len(attempts) + 1,
+                            "backend": "codex",
+                            "status": "invalid",
+                            "validation_error": validation_feedback,
+                            "result": codex_result.to_dict(),
+                        }
+                    )
+                else:
+                    attempts.append(
+                        {
+                            "request_label": request_label,
+                            "attempt": len(attempts) + 1,
+                            "backend": "codex",
+                            "status": "success",
+                            "validation_error": "",
+                            "result": validated.to_dict(),
+                        }
+                    )
+                    return (
+                        validated,
+                        [],
+                        attempts,
+                        validation_retry_count,
+                        codex_fallback_count,
+                        0,
+                    )
 
         repaired, warnings = normalize_cross_conversation_groups_with_fallback(
             last_result,
@@ -4072,14 +4117,13 @@ def _estimate_day_merge_input_tokens(
     config: RuntimeConfig | None = None,
 ) -> int:
     runtime_config = config or RuntimeConfig()
-    function_spec = task_function_call_spec(
-        "day_candidate_merge",
-        merge_output_schema(),
-        draft_ids=[item.draft_id for item in candidates],
+    contract = personal_grouping_call_contract(
+        config=runtime_config,
+        candidates=candidates,
     )
     return estimate_structured_input_tokens(
         build_merge_prompt(target_date, candidates, config=runtime_config),
-        function_spec=function_spec,
+        function_spec=contract.function_spec,
         append_no_think=True,
     )["input_estimated_tokens"]
 

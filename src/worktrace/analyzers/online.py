@@ -53,6 +53,7 @@ from .function_calls import (
     collected_grouping_call_contract,
     function_call_spec,
     message_reference_ids,
+    personal_grouping_call_contract,
     task_function_call_spec,
 )
 from .output_schemas import (
@@ -86,6 +87,7 @@ from .protocol import (
     parse_collected_merge_payload,
     parse_conversation_segmentation_payload,
     parse_merge_payload,
+    parse_personal_grouping_function_payload,
     parse_personal_fact_review_payload,
     parse_retention_review_payload,
     parse_segment_batch_analysis_payload,
@@ -710,21 +712,25 @@ class OnlineLLMAnalyzer(Analyzer):
         *,
         validation_feedback: str = "",
     ) -> CrossConversationGroupResult:
+        contract = personal_grouping_call_contract(
+            config=self.config,
+            candidates=candidates,
+        )
         payload = self._invoke_online(
             self.build_merge_prompt(
                 target_date,
                 candidates,
                 validation_feedback=validation_feedback,
             ),
-            function_spec=task_function_call_spec(
-                "day_candidate_merge",
-                merge_output_schema(),
-                draft_ids=[item.draft_id for item in candidates],
-            ),
+            function_spec=contract.function_spec,
             **oversized_input_kwargs(len(candidates) == 1),
         )
         self.last_merge_payload = payload
-        return parse_merge_payload(payload)
+        return parse_personal_grouping_function_payload(
+            payload,
+            candidates=candidates,
+            allowed_semantic_reasons=contract.semantic_reasons,
+        )
 
     def merge_collected_events(
         self,

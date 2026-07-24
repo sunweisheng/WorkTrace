@@ -18,6 +18,14 @@ class AnalyzerProtocolError(WorkTraceError):
     """Raised when analyzer input/output violates protocol constraints."""
 
 
+class PersonalGroupingValidationError(AnalyzerProtocolError):
+    """Raised when a personal grouping result fails its task contract."""
+
+    def __init__(self, message: str, *, partial_result: object | None = None) -> None:
+        super().__init__(message)
+        self.partial_result = partial_result
+
+
 class RetryableAnalyzerProtocolError(AnalyzerProtocolError):
     """Raised when retrying the same analyzer request may succeed."""
 

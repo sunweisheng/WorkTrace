@@ -71,6 +71,7 @@ WORKTRACE_LLM_TLS_VERIFY=false
 - 个人事实复核每次只发送一个候选；参数结构固定唯一 `draft_id`，并枚举当前候选允许引用的证据消息 ID
 - 个人事实复核的六个文字字段只在 `fact_items` 返回一次，不在外层重复，由 Python 派生最终字段
 - `supported=true` 要求标题、正文、具体对象和保留依据都有合法证据；缺少任一必填字段时返回 `supported=false`
+- 个人全日分组分别返回 `merged_groups` 和 `singleton_draft_ids`；每个多事件组必须给出具体共同对象、配置允许的语义理由，并让 `member_connections` 逐条覆盖全部成员及其各自证据
 - `stream=false` 时响应必须且只能包含一次预期 Function 调用，Python 解析其 `arguments`
 - `stream=true` 时按调用 ID 拼接 `response.function_call_arguments.delta`，结束后同样要求且只允许一次预期 Function 调用
 - 显式开启流式时，从请求开始到首个流事件的上限为 60 秒；首个流事件返回后，后续读取改用 `WORKTRACE_LLM_TIMEOUT_SECONDS`

@@ -4,6 +4,7 @@ from pathlib import Path
 
 from src.worktrace.analyzers.function_calls import (
     collected_grouping_call_contract,
+    personal_grouping_call_contract,
     task_function_call_spec,
 )
 from src.worktrace.analyzers.output_schemas import (
@@ -159,6 +160,53 @@ def test_day_grouping_function_has_only_grouping_fields() -> None:
         "evidence_message_ids",
     }
     assert "group_id" not in group["properties"]
+
+
+def test_personal_grouping_contract_defaults_to_singletons_and_requires_connections() -> None:
+    candidates = [
+        SourceBackedEventDraft(
+            draft_id="d1",
+            date="2026-07-22",
+            topic="事项一",
+            content="处理事项一。",
+            source_message_ids=["m1"],
+            source_conversation_id="oc1",
+            source_slice_id="s1",
+            confidence=0.9,
+        ),
+        SourceBackedEventDraft(
+            draft_id="d2",
+            date="2026-07-22",
+            topic="事项二",
+            content="处理事项二。",
+            source_message_ids=["m2"],
+            source_conversation_id="oc2",
+            source_slice_id="s2",
+            confidence=0.9,
+        ),
+    ]
+
+    contract = personal_grouping_call_contract(
+        config=CONFIG,
+        candidates=candidates,
+    )
+    properties = contract.function_spec.parameters["properties"]
+    group = properties["merged_groups"]["items"]
+    connection = group["properties"]["member_connections"]["items"]
+
+    assert contract.function_spec.typical_arguments == {
+        "merged_groups": [],
+        "singleton_draft_ids": ["d1", "d2"],
+    }
+    assert group["properties"]["semantic_reasons"]["items"]["enum"] == [
+        "same_object",
+        "continuous_action",
+        "same_deliverable_batch",
+    ]
+    assert connection["properties"]["evidence_message_ids"]["items"]["enum"] == [
+        "m1",
+        "m2",
+    ]
 
 
 def _collected_event(

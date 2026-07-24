@@ -10,6 +10,7 @@ import pytest
 import src.worktrace.runner as runner_module
 from src.worktrace.config import RuntimeConfig
 from src.worktrace.errors import AnalyzerProtocolError
+from src.worktrace.errors import PersonalGroupingValidationError
 from src.worktrace.factories import RuntimeDependencies
 from src.worktrace.models import (
     CrossConversationGroup,
@@ -123,6 +124,45 @@ class QualityRetryAnalyzer:
         if isinstance(self.codex_result, Exception):
             raise self.codex_result
         return self.codex_result
+
+
+class ParsingRetryAnalyzer(QualityRetryAnalyzer):
+    def __init__(self, valid_result: CrossConversationGroupResult) -> None:
+        super().__init__([], valid_result)
+        self.calls = 0
+
+    def merge_day_candidates(
+        self,
+        target_date: str,
+        candidates: list[SourceBackedEventDraft],
+        *,
+        validation_feedback: str = "",
+    ) -> CrossConversationGroupResult:
+        self.validation_feedback.append(validation_feedback)
+        self.calls += 1
+        if self.calls == 1:
+            raise PersonalGroupingValidationError("missing_member_connection")
+        return self.codex_result  # type: ignore[return-value]
+
+
+def test_day_grouping_retries_personal_contract_parse_error(tmp_path: Path) -> None:
+    candidates = [_draft("d1", "m1"), _draft("d2", "m2")]
+    analyzer = ParsingRetryAnalyzer(_singletons(candidates))
+    runner = _runner(tmp_path, analyzer)
+
+    result, warnings, attempts, retry_count, codex_count, repair_count = (
+        runner._request_valid_day_groups(
+            "2026-07-22",
+            candidates,
+            request_label="full-day",
+        )
+    )
+
+    assert [group.draft_ids for group in result.groups] == [["d1"], ["d2"]]
+    assert analyzer.validation_feedback == ["", "missing_member_connection"]
+    assert [item["status"] for item in attempts] == ["invalid", "success"]
+    assert warnings == []
+    assert (retry_count, codex_count, repair_count) == (1, 0, 0)
 
 
 def test_day_grouping_retries_online_quality_once_then_uses_codex(

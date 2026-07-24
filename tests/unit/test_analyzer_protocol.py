@@ -5,13 +5,14 @@ from pathlib import Path
 
 import pytest
 
-from src.worktrace.errors import AnalyzerProtocolError
+from src.worktrace.errors import AnalyzerProtocolError, PersonalGroupingValidationError
 from src.worktrace.analyzers.protocol import (
     parse_anchor_analysis_payload,
     parse_batch_analysis_payload,
     parse_collected_grouping_payload,
     parse_collected_grouping_function_payload,
     parse_merge_payload,
+    parse_personal_grouping_function_payload,
     parse_personal_fact_review_payload,
     parse_retention_review_payload,
 )
@@ -27,6 +28,7 @@ from src.worktrace.analyzers.output_schemas import (
 )
 from src.worktrace.config import RuntimeConfig, load_runtime_config_overrides
 from src.worktrace.models import (
+    CrossConversationGroupResult,
     PersonalFactReviewBatch,
     PersonalFactReviewCandidate,
     SourceBackedEventDraft,
@@ -71,6 +73,90 @@ def test_protocol_parsers_accept_valid_payloads() -> None:
     assert anchor.anchor_status == "completed"
     assert batch.candidate_events == []
     assert merged.groups == []
+
+
+def test_personal_grouping_function_requires_exact_member_connections() -> None:
+    candidates = [
+        SourceBackedEventDraft(
+            draft_id=draft_id,
+            date="2026-07-22",
+            topic=f"事项 {draft_id}",
+            content=f"处理事项 {draft_id}。",
+            source_message_ids=[message_id],
+            source_conversation_id=f"oc-{draft_id}",
+            source_slice_id=f"slice-{draft_id}",
+            confidence=0.9,
+        )
+        for draft_id, message_id in (("d1", "m1"), ("d2", "m2"), ("d3", "m3"))
+    ]
+    payload = {
+        "merged_groups": [
+            {
+                "draft_ids": ["d1", "d2"],
+                "primary_draft_id": "d1",
+                "common_object": "同一明确事项",
+                "semantic_reasons": ["continuous_action"],
+                "reason_detail": "第一项结果是第二项的输入。",
+                "member_connections": [
+                    {
+                        "draft_id": "d1",
+                        "connection_detail": "形成第一步结果。",
+                        "evidence_message_ids": ["m1"],
+                    },
+                    {
+                        "draft_id": "d2",
+                        "connection_detail": "使用第一步结果继续处理。",
+                        "evidence_message_ids": ["m2"],
+                    },
+                ],
+            }
+        ],
+        "singleton_draft_ids": ["d3"],
+    }
+
+    result = parse_personal_grouping_function_payload(
+        payload,
+        candidates=candidates,
+        allowed_semantic_reasons=[
+            "same_object",
+            "continuous_action",
+            "same_deliverable_batch",
+        ],
+    )
+
+    assert [group.draft_ids for group in result.groups] == [["d1", "d2"], ["d3"]]
+    assert result.groups[0].evidence_message_ids == ["m1", "m2"]
+
+    payload["merged_groups"][0]["semantic_reasons"] = [
+        "continuous_action",
+        "continuous_action",
+    ]
+    with pytest.raises(
+        AnalyzerProtocolError,
+        match="duplicate_semantic_reason",
+    ):
+        parse_personal_grouping_function_payload(
+            payload,
+            candidates=candidates,
+            allowed_semantic_reasons=["continuous_action"],
+        )
+
+    payload["merged_groups"][0]["semantic_reasons"] = ["continuous_action"]
+    payload["merged_groups"][0]["member_connections"] = [
+        payload["merged_groups"][0]["member_connections"][0]
+    ]
+    with pytest.raises(
+        PersonalGroupingValidationError,
+        match="missing_member_connection",
+    ) as exc_info:
+        parse_personal_grouping_function_payload(
+            payload,
+            candidates=candidates,
+            allowed_semantic_reasons=["continuous_action"],
+        )
+    partial_result = exc_info.value.partial_result
+    assert isinstance(partial_result, CrossConversationGroupResult)
+    assert [group.draft_ids for group in partial_result.groups] == [["d3"]]
 
 
 def test_retention_review_protocol_and_schema_use_configured_signal_types() -> None:

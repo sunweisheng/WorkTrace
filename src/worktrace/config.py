@@ -719,6 +719,7 @@ def _load_event_grouping_overrides(
             f"Invalid event grouping config: {config_path} must contain a JSON object."
         )
     expected_keys = {
+        "personal_grouping_negative_examples",
         "personal_grouping_rules",
         "personal_review_rules",
         "group_reason_definitions",
@@ -741,9 +742,16 @@ def _load_event_grouping_overrides(
         file_path=config_path,
         error_prefix="Invalid event grouping config",
     )
-    if not grouping_rules or not review_rules:
+    negative_examples = _read_string_list(
+        payload,
+        key="personal_grouping_negative_examples",
+        fallback=(),
+        file_path=config_path,
+        error_prefix="Invalid event grouping config",
+    )
+    if not grouping_rules or not negative_examples or not review_rules:
         raise ValueError(
-            "Invalid event grouping config: personal rules must not be empty."
+            "Invalid event grouping config: personal rules and examples must not be empty."
         )
     definitions = _read_collected_group_reason_definitions(
         payload["group_reason_definitions"],
@@ -752,6 +760,7 @@ def _load_event_grouping_overrides(
     )
     return replace(
         config,
+        personal_grouping_negative_examples=negative_examples,
         personal_grouping_rules=grouping_rules,
         personal_group_review_rules=review_rules,
         collected_group_reason_definitions=definitions,
@@ -1240,6 +1249,7 @@ class RuntimeConfig:
         CollectedGroupReasonDefinition, ...
     ] = DEFAULT_COLLECTED_GROUP_REASON_DEFINITIONS
     personal_grouping_rules: tuple[str, ...] = ()
+    personal_grouping_negative_examples: tuple[str, ...] = ()
     personal_group_review_rules: tuple[str, ...] = ()
     slice_retry_limit: int = 3
     prompt_slice_message_limit: int = 40

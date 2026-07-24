@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Sequence
 
-from ..errors import AnalyzerProtocolError
+from ..errors import AnalyzerProtocolError, PersonalGroupingValidationError
 from ..models import (
     AnchorAnalysisResult,
     BatchAnalysisResult,
@@ -13,9 +13,11 @@ from ..models import (
     CollectedGroupingResult,
     CollectedMergeResult,
     ConversationSegmentationResult,
+    CrossConversationGroup,
     CrossConversationGroupResult,
     PersonalFactReviewResult,
     RetentionReviewResult,
+    SourceBackedEventDraft,
 )
 from ..pipeline.validation import expect_json_object
 
@@ -223,6 +225,286 @@ def parse_merge_payload(payload: object) -> CrossConversationGroupResult:
         return CrossConversationGroupResult.from_dict(data)
     except (KeyError, TypeError, ValueError) as exc:
         raise AnalyzerProtocolError("Invalid cross-conversation merge payload.") from exc
+
+
+def parse_personal_grouping_function_payload(
+    payload: object,
+    *,
+    candidates: Sequence[SourceBackedEventDraft],
+    allowed_semantic_reasons: Sequence[str],
+) -> CrossConversationGroupResult:
+    try:
+        data = expect_json_object(payload, "Personal grouping Function result")
+    except AnalyzerProtocolError as exc:
+        raise PersonalGroupingValidationError(str(exc)) from exc
+    raw_groups = data.get("merged_groups")
+    raw_singletons = data.get("singleton_draft_ids")
+    if not isinstance(raw_groups, list) or not isinstance(raw_singletons, list):
+        raise PersonalGroupingValidationError(
+            "Personal grouping Function result must contain merged_groups and singleton_draft_ids arrays.",
+            partial_result=CrossConversationGroupResult(),
+        )
+
+    expected = [candidate.draft_id for candidate in candidates]
+    expected_set = set(expected)
+    candidate_by_id = {candidate.draft_id: candidate for candidate in candidates}
+    candidate_order = {draft_id: index for index, draft_id in enumerate(expected)}
+    allowed_reason_set = set(allowed_semantic_reasons)
+    seen: set[str] = set()
+    errors: list[str] = []
+    groups: list[CrossConversationGroup] = []
+    unexpected_top_level_fields = sorted(
+        set(data).difference({"merged_groups", "singleton_draft_ids"})
+    )
+    if unexpected_top_level_fields:
+        errors.append(
+            "unexpected_fields field=personal_grouping fields="
+            f"{unexpected_top_level_fields}"
+        )
+
+    for group_index, raw_group in enumerate(raw_groups, start=1):
+        field_prefix = f"merged_groups[{group_index - 1}]"
+        if not isinstance(raw_group, dict):
+            errors.append(f"invalid_group field={field_prefix}")
+            continue
+        group_error_count = len(errors)
+        unexpected_group_fields = sorted(
+            set(raw_group).difference(
+                {
+                    "draft_ids",
+                    "primary_draft_id",
+                    "common_object",
+                    "semantic_reasons",
+                    "reason_detail",
+                    "member_connections",
+                }
+            )
+        )
+        if unexpected_group_fields:
+            errors.append(
+                f"unexpected_fields field={field_prefix} fields={unexpected_group_fields}"
+            )
+        raw_draft_ids = raw_group.get("draft_ids")
+        draft_ids = (
+            [str(value) for value in raw_draft_ids]
+            if isinstance(raw_draft_ids, list)
+            else []
+        )
+        if len(draft_ids) < 2:
+            errors.append(
+                f"merged_group_too_small field={field_prefix}.draft_ids draft_ids={draft_ids}"
+            )
+        local_duplicates = sorted(
+            {draft_id for draft_id in draft_ids if draft_ids.count(draft_id) > 1}
+        )
+        if local_duplicates:
+            errors.append(
+                f"duplicate_group_member field={field_prefix}.draft_ids draft_ids={local_duplicates}"
+            )
+        unknown_ids = [draft_id for draft_id in draft_ids if draft_id not in expected_set]
+        if unknown_ids:
+            errors.append(
+                f"unknown_group_member field={field_prefix}.draft_ids draft_ids={unknown_ids}"
+            )
+        for draft_id in draft_ids:
+            if draft_id in seen:
+                errors.append(
+                    f"duplicate_global_member field={field_prefix}.draft_ids draft_id={draft_id}"
+                )
+            seen.add(draft_id)
+
+        primary_draft_id = str(raw_group.get("primary_draft_id", ""))
+        if primary_draft_id not in draft_ids:
+            errors.append(
+                f"invalid_primary field={field_prefix}.primary_draft_id draft_id={primary_draft_id}"
+            )
+        raw_common_object = raw_group.get("common_object")
+        common_object = (
+            raw_common_object.strip()
+            if isinstance(raw_common_object, str)
+            else ""
+        )
+        if not common_object:
+            errors.append(f"common_object_missing field={field_prefix}.common_object")
+        raw_reason_detail = raw_group.get("reason_detail")
+        reason_detail = (
+            raw_reason_detail.strip()
+            if isinstance(raw_reason_detail, str)
+            else ""
+        )
+        if not reason_detail:
+            errors.append(f"reason_detail_missing field={field_prefix}.reason_detail")
+
+        raw_reasons = raw_group.get("semantic_reasons")
+        semantic_reasons = (
+            [str(value) for value in raw_reasons]
+            if isinstance(raw_reasons, list)
+            else []
+        )
+        if not semantic_reasons:
+            errors.append(
+                f"semantic_reason_missing field={field_prefix}.semantic_reasons"
+            )
+        invalid_reasons = [
+            reason for reason in semantic_reasons if reason not in allowed_reason_set
+        ]
+        duplicate_reasons = sorted(
+            {
+                reason
+                for reason in semantic_reasons
+                if semantic_reasons.count(reason) > 1
+            }
+        )
+        if duplicate_reasons:
+            errors.append(
+                f"duplicate_semantic_reason field={field_prefix}.semantic_reasons reasons={duplicate_reasons}"
+            )
+        if invalid_reasons:
+            errors.append(
+                f"unknown_semantic_reason field={field_prefix}.semantic_reasons reasons={invalid_reasons}"
+            )
+
+        raw_connections = raw_group.get("member_connections")
+        connections = raw_connections if isinstance(raw_connections, list) else []
+        connection_ids: list[str] = []
+        evidence_message_ids: list[str] = []
+        for connection_index, raw_connection in enumerate(connections):
+            connection_prefix = (
+                f"{field_prefix}.member_connections[{connection_index}]"
+            )
+            if not isinstance(raw_connection, dict):
+                errors.append(f"invalid_member_connection field={connection_prefix}")
+                continue
+            unexpected_connection_fields = sorted(
+                set(raw_connection).difference(
+                    {"draft_id", "connection_detail", "evidence_message_ids"}
+                )
+            )
+            if unexpected_connection_fields:
+                errors.append(
+                    f"unexpected_fields field={connection_prefix} fields={unexpected_connection_fields}"
+                )
+            draft_id = str(raw_connection.get("draft_id", ""))
+            connection_ids.append(draft_id)
+            if draft_id not in draft_ids:
+                errors.append(
+                    f"unknown_member_connection field={connection_prefix}.draft_id draft_id={draft_id}"
+                )
+            raw_connection_detail = raw_connection.get("connection_detail")
+            if not (
+                isinstance(raw_connection_detail, str)
+                and raw_connection_detail.strip()
+            ):
+                errors.append(
+                    f"member_connection_detail_missing field={connection_prefix}.connection_detail"
+                )
+            raw_evidence = raw_connection.get("evidence_message_ids")
+            connection_evidence = (
+                [str(value) for value in raw_evidence]
+                if isinstance(raw_evidence, list)
+                else []
+            )
+            if not connection_evidence:
+                errors.append(
+                    f"member_connection_evidence_missing field={connection_prefix}.evidence_message_ids"
+                )
+            duplicate_evidence = sorted(
+                {
+                    message_id
+                    for message_id in connection_evidence
+                    if connection_evidence.count(message_id) > 1
+                }
+            )
+            if duplicate_evidence:
+                errors.append(
+                    f"member_connection_evidence_duplicate field={connection_prefix}.evidence_message_ids "
+                    f"message_ids={duplicate_evidence}"
+                )
+            candidate = candidate_by_id.get(draft_id)
+            allowed_evidence = set(candidate.source_message_ids) if candidate else set()
+            invalid_evidence = [
+                message_id
+                for message_id in connection_evidence
+                if message_id not in allowed_evidence
+            ]
+            if invalid_evidence:
+                errors.append(
+                    f"member_connection_evidence_invalid field={connection_prefix}.evidence_message_ids "
+                    f"draft_id={draft_id} message_ids={invalid_evidence}"
+                )
+            evidence_message_ids.extend(connection_evidence)
+
+        duplicate_connections = sorted(
+            {
+                draft_id
+                for draft_id in connection_ids
+                if connection_ids.count(draft_id) > 1
+            }
+        )
+        if duplicate_connections:
+            errors.append(
+                f"duplicate_member_connection field={field_prefix}.member_connections draft_ids={duplicate_connections}"
+            )
+        missing_connections = [
+            draft_id for draft_id in draft_ids if draft_id not in connection_ids
+        ]
+        if missing_connections:
+            errors.append(
+                f"missing_member_connection field={field_prefix}.member_connections draft_ids={missing_connections}"
+            )
+
+        known_draft_ids = [draft_id for draft_id in draft_ids if draft_id in expected_set]
+        known_draft_ids.sort(key=candidate_order.__getitem__)
+        if known_draft_ids and len(errors) == group_error_count:
+            groups.append(
+                CrossConversationGroup(
+                    group_id=f"group-{len(groups) + 1:03d}",
+                    draft_ids=known_draft_ids,
+                    primary_draft_id=primary_draft_id,
+                    merge_reason=(
+                        f"共同事项：{common_object}。{reason_detail}"
+                        if common_object and reason_detail
+                        else reason_detail
+                    ),
+                    evidence_message_ids=list(dict.fromkeys(evidence_message_ids)),
+                )
+            )
+
+    for singleton_index, raw_draft_id in enumerate(raw_singletons):
+        draft_id = str(raw_draft_id)
+        if draft_id not in expected_set:
+            errors.append(
+                f"unknown_singleton field=singleton_draft_ids[{singleton_index}] draft_id={draft_id}"
+            )
+            continue
+        if draft_id in seen:
+            errors.append(
+                f"duplicate_global_member field=singleton_draft_ids[{singleton_index}] draft_id={draft_id}"
+            )
+            continue
+        seen.add(draft_id)
+        groups.append(
+            CrossConversationGroup(
+                group_id=f"group-{len(groups) + 1:03d}",
+                draft_ids=[draft_id],
+                primary_draft_id=draft_id,
+                merge_reason="单条保留",
+                evidence_message_ids=[],
+            )
+        )
+
+    missing_ids = [draft_id for draft_id in expected if draft_id not in seen]
+    if missing_ids:
+        errors.append(f"missing_global_members draft_ids={missing_ids}")
+    groups.sort(
+        key=lambda group: min(candidate_order[draft_id] for draft_id in group.draft_ids)
+    )
+    if errors:
+        raise PersonalGroupingValidationError(
+            "Personal grouping Function result is invalid: " + "; ".join(errors),
+            partial_result=CrossConversationGroupResult(groups=groups),
+        )
+    return CrossConversationGroupResult(groups=groups)
 
 
 def parse_collected_grouping_payload(payload: object) -> CollectedGroupingResult:
