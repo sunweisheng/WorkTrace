@@ -30,8 +30,10 @@ from scripts.report_event_grouping_comparison import _build_comparison
 from scripts.report_replay_timings import (
     _build_day_grouping_comparison,
     _collect_day_grouping_timing,
+    _collect_event_extraction_timing,
     _collect_online_llm_summary,
     _collect_personal_fact_review_timing,
+    _collect_stage_totals,
     _load_llm_usage_summary,
 )
 
@@ -326,6 +328,71 @@ def test_timing_report_uses_usage_types_and_separates_parallel_wall_clock() -> N
     assert fact_timing["batch_accumulated_ms"]["total"] == 9000.0
     assert fact_timing["wall_clock_ms"]["total"] == 5100.0
     assert fact_timing["accumulated_to_wall_clock_ratio"] == 1.765
+
+
+def test_timing_report_prefers_event_extraction_wall_clock_over_parallel_sum() -> None:
+    summary = {
+        "timing_summary": {
+            "totals_by_event_ms": {"runner.run.completed": 583743.0},
+            "events": [
+                {
+                    "event": "runner.stage.completed",
+                    "duration_ms": 700000.0,
+                    "raw_line": 'runner.stage.completed duration_ms=700000 stage="analyze_segment_batch"',
+                },
+                {
+                    "event": "runner.stage.completed",
+                    "duration_ms": 678350.7,
+                    "raw_line": 'runner.stage.completed duration_ms=678350.7 stage="analyze_segment_batch"',
+                },
+                {
+                    "event": "runner.stage.completed",
+                    "duration_ms": 275878.0,
+                    "raw_line": 'runner.stage.completed duration_ms=275878 stage="analyze_segment_batches_all"',
+                },
+            ],
+        }
+    }
+
+    stages = _collect_stage_totals(summary)
+    timing = _collect_event_extraction_timing(summary)
+    stage_by_name = {item["stage"]: item for item in stages}
+
+    wall_clock = stage_by_name["analyze_segment_batches_all"]
+    accumulated = stage_by_name["analyze_segment_batch"]
+    assert stages.index(wall_clock) < stages.index(accumulated)
+    assert wall_clock["timing_basis"] == "wall_clock"
+    assert wall_clock["share_of_runner_total_pct"] == 47.26
+    assert accumulated["timing_basis"] == "parallel_batch_accumulated"
+    assert accumulated["share_of_runner_total_pct"] is None
+    assert accumulated["elapsed_stage"] == "analyze_segment_batches_all"
+    assert timing == {
+        "batch_accumulated_ms": 1378350.7,
+        "wall_clock_ms": 275878.0,
+        "wall_clock_available": True,
+        "accumulated_to_wall_clock_ratio": 4.996,
+    }
+
+
+def test_timing_report_marks_missing_event_extraction_wall_clock_as_unavailable() -> None:
+    summary = {
+        "timing_summary": {
+            "events": [
+                {
+                    "event": "runner.stage.completed",
+                    "duration_ms": 1378350.7,
+                    "raw_line": 'runner.stage.completed duration_ms=1378350.7 stage="analyze_segment_batch"',
+                }
+            ]
+        }
+    }
+
+    assert _collect_event_extraction_timing(summary) == {
+        "batch_accumulated_ms": 1378350.7,
+        "wall_clock_ms": None,
+        "wall_clock_available": False,
+        "accumulated_to_wall_clock_ratio": None,
+    }
 
 
 def test_timing_report_loads_usage_for_older_replay_summary(tmp_path: Path) -> None:

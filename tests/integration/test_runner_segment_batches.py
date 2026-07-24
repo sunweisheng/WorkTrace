@@ -256,6 +256,38 @@ def test_runner_batches_multiple_self_turns_and_excludes_other_recipient_turn(
     assert result.batch_count == 2
 
 
+def test_runner_logs_segment_and_event_extraction_wall_clock(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    stages: list[str] = []
+
+    def capture_timing(logger, event, started_at, **fields):
+        stage = fields.get("stage")
+        if event == "runner.stage.completed" and isinstance(stage, str):
+            stages.append(stage)
+        return 0.0
+
+    monkeypatch.setattr("src.worktrace.runner.log_timing", capture_timing)
+    config = _config(data_root=tmp_path / "data")
+    runner = DailyTraceRunner(
+        config=config,
+        dependencies=RuntimeDependencies(
+            chat_source=SegmentSource(),
+            content_resolver=SegmentResolver(),
+            analyzer=SegmentBatchAnalyzer(),
+            delivery_channel=SegmentDelivery(),
+            event_store=MarkdownEventStore(config=config),
+        ),
+    )
+
+    result = runner.run("2026-07-10")
+
+    assert result.status == DailyRunStatus.SUCCESS.value
+    assert stages.count("segment_conversations_all") == 1
+    assert stages.count("analyze_segment_batches_all") == 1
+
+
 def test_runner_filters_segment_candidate_without_validated_self_relation(
     tmp_path: Path,
 ) -> None:

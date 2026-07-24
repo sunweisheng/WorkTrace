@@ -300,7 +300,7 @@ merge_inbox/2026/07/06/
 - 来源人员
 - 存在上游汇总时的来源负责人
 
-`event_id`、内部 `retention_reason` 枚举和 `merge_meta` 保存在 HTML 注释中。v2 `merge_meta` 保存参与方式英文键、消息证据/同日会话证据/稳定文件标识的 SHA-256 结果，以及可选的来源事件 ID 和上游来源负责人；不保存原始 `om_`、`oc_`、`ou_` 标识。主要动作或本人参与方式缺少可见值时显示“未明确”。原始指纹继续保留在 Markdown 和调试 trace 的 `input_events` 中用于追溯，但不会直接发送给模型。读取器兼容旧 Markdown 中重复的“事件标题”和可见的“来源事件 ID”；历史文件不会批量改写。缺少 v2 会话证据的旧文件不能参与多人汇总，必须重新生成。
+`event_id`、内部 `retention_reason` 枚举和 `merge_meta` 保存在 HTML 注释中。v2 `merge_meta` 保存参与方式英文键、消息证据/同日会话证据/稳定文件标识的 SHA-256 结果，以及可选的来源事件 ID 和上游来源负责人；不保存原始 `om_`、`oc_`、`ou_` 标识。主要动作中的已知内部英文键按 `config/event_metadata.json` 转为中文显示，模型直接返回的中文动作保持不变；主要动作或本人参与方式缺少可见值时显示“未明确”。原始指纹继续保留在 Markdown 和调试 trace 的 `input_events` 中用于追溯，但不会直接发送给模型。读取器兼容旧 Markdown 中重复的“事件标题”和可见的“来源事件 ID”；历史文件不会批量改写。缺少 v2 会话证据的旧文件不能参与多人汇总，必须重新生成。
 
 允许的保留理由枚举：
 
@@ -360,7 +360,7 @@ WORKTRACE_COLLECTED_MERGE_MISSING_FIELD_RETRY_LIMIT=1
 | 文件 | 当前作用 |
 | --- | --- |
 | `config/event_rules.json` | 敏感事件、普通事件排除和本人指派三类关键词 |
-| `config/event_metadata.json` | 本人参与方式的英文键、中文显示名和排序 |
+| `config/event_metadata.json` | 主要动作和本人参与方式的英文键、中文显示名和排序 |
 | `config/conversation_blacklist.json` | 在消息采集前排除整个会话 |
 | `config/conversation_window.json` | 群聊锚点聚合、初始上下文和按需扩窗轮数 |
 | `config/llm_retry.json` | Online 请求级重试、分段/提炼/全日分组结果质量重试、流式首次返回超时、Codex 调用间隔，以及切分、提炼、个人事实复核、强关联局部复核和多人高风险复核并发数 |
@@ -434,7 +434,7 @@ python3 -m src.worktrace.cli --date 2026-07-06 --debug-output
 
 `scripts/replay_day_with_trace.py` 启动后会立即写入 `run_status.json`，执行期间状态为 `running`，结束后按子进程返回结果更新为 `success` 或 `failed`；子进程阶段日志会实时显示在终端并同步追加到 `run_stderr.log`，不再等整次回放结束后统一输出。`summary.json` 会把两类复核文件的路径、统计、尝试次数和失败次数写入 `review_artifact_summary`，把新分组产物写入 `day_grouping_artifact_summary`，并把 CLI 或分组产物中的 Python 统计写入 `day_grouping_summary`；旧 trace 缺少这些文件时保持不可用，不补造数据。`llm_usage.json` 中准确的调用类型、次数、token 和耗时写入 `llm_usage_summary`。
 
-`scripts/report_replay_timings.py` 按 `request_kind` 汇总调用；个人事实复核同时显示各候选耗时之和与 `personal_fact_review_all` 整体墙钟耗时，并发效果应看后者。全日分组分别显示 `day_candidate_merge` 初始请求累计耗时、`day_group_review` 局部复核累计耗时、`day_group_review_all` 局部复核墙钟耗时和整个 `merge_day_candidates` 墙钟耗时。传入 `--baseline-trace-root` 可由 Python 计算前后差值；并发请求累计耗时只表示调用负载，不能作为实际耗时。
+`scripts/report_replay_timings.py` 按 `request_kind` 汇总调用；事件提炼同时显示 `analyze_segment_batch` 并发批次累计工作量和 `analyze_segment_batches_all` 整体墙钟耗时，个人事实复核同时显示各候选耗时之和与 `personal_fact_review_all` 整体墙钟耗时，并发效果均看对应的 `*_all`。`stage_totals` 不再为并发累计值计算运行时间占比，并把实际墙钟记录排在累计工作量之前；旧 trace 缺少事件提炼整体字段时显示为不可用，不补成 0 秒。全日分组分别显示 `day_candidate_merge` 初始请求累计耗时、`day_group_review` 局部复核累计耗时、`day_group_review_all` 局部复核墙钟耗时和整个 `merge_day_candidates` 墙钟耗时。传入 `--baseline-trace-root` 可由 Python 计算前后差值；并发请求累计耗时只表示调用负载，不能作为实际耗时。
 
 `scripts/report_replay_call_inputs.py` 会把分段、提炼、分段失败后的直接提炼、两类事实复核、全日初始分组和每次强关联局部复核列入 `call-input-report.md`；读取旧 trace 时把旧调用标记为“旧版工作流归属”，新 trace 不生成该类别。报告分别显示在线模型成功响应数和调试文件保存的文字调用尝试数，并把图片摘要单独计数；请求发送前或服务端失败时两种数量可以不同。`personal_fact_review_summary.review_retry_count=5` 表示 5 次事实复核返回未通过 Python 协议校验，系统只重试了对应候选且最终仍可能成功，不表示整次日报失败了 5 次。
 

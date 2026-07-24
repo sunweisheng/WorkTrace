@@ -1363,6 +1363,7 @@ class DailyTraceRunner:
                 retry_round=outcome.retry_round,
             )
 
+        segmentation_started_at = perf_counter()
         with ThreadPoolExecutor(
             max_workers=self.config.max_concurrent_llm_requests
         ) as executor:
@@ -1422,6 +1423,17 @@ class DailyTraceRunner:
                     if not state.circuit_open and state.next_anchor_index < len(state.anchors):
                         ready_states.append(state)
 
+        log_timing(
+            logger,
+            "runner.stage.completed",
+            segmentation_started_at,
+            stage="segment_conversations_all",
+            conversation_count=len(segmentation_states),
+            anchor_count=sum(len(state.anchors) for state in segmentation_states),
+            worker_count=self.config.max_concurrent_llm_requests,
+            call_count=model_call_count,
+        )
+
         for state in segmentation_states:
             if state.skipped_anchor_count:
                 warnings.append(
@@ -1469,6 +1481,8 @@ class DailyTraceRunner:
             self.config.max_concurrent_event_extraction_requests
             or self.config.max_concurrent_llm_requests
         )
+        analysis_started_at = perf_counter()
+        analysis_call_count_before = model_call_count
         with ThreadPoolExecutor(max_workers=event_extraction_workers) as executor:
             futures = [
                 executor.submit(
@@ -1505,6 +1519,18 @@ class DailyTraceRunner:
             warnings.extend(fallback_warnings)
             skipped_segment_count += fallback_skipped_count
             model_call_count += fallback_call_count
+
+        log_timing(
+            logger,
+            "runner.stage.completed",
+            analysis_started_at,
+            stage="analyze_segment_batches_all",
+            batch_count=len(analysis_jobs),
+            fallback_job_count=len(fallback_jobs),
+            worker_count=event_extraction_workers,
+            call_count=model_call_count - analysis_call_count_before,
+            candidate_event_count=len(candidates),
+        )
 
         candidates, self_relation_warnings = filter_candidates_with_valid_self_relations(
             candidates

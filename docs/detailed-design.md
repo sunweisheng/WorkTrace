@@ -449,7 +449,7 @@ OnlineLLMAnalyzer -> openai Python SDK -> Responses API provider
 ### 9.3 JSON 配置
 
 - `config/event_rules.json`：三类业务关键词
-- `config/event_metadata.json`：参与方式英文键、中文显示名和排序
+- `config/event_metadata.json`：主要动作和参与方式的英文键、中文显示名和排序
 - `config/conversation_blacklist.json`：整会话排除
 - `config/conversation_window.json`：初始窗口聚合和按需扩窗阈值
 - `config/llm_retry.json`：Online 请求级重试、分段/提炼/全日分组结果质量重试、流式首次返回超时、Codex 间隔，以及切分、提炼、个人事实复核、强关联局部复核和多人高风险复核并发数
@@ -462,7 +462,7 @@ OnlineLLMAnalyzer -> openai Python SDK -> Responses API provider
 
 ## 10. Markdown 契约
 
-个人事件先以 `### 序号. 事件标题` 显示标题，公开字段顺序为日期、主要动作、内容、具体对象、本人参与方式、保留理由、保留依据、涉及文件。
+个人事件先以 `### 序号. 事件标题` 显示标题，公开字段顺序为日期、主要动作、内容、具体对象、本人参与方式、保留理由、保留依据、涉及文件。主要动作中的已知内部英文键由 `config/event_metadata.json` 映射为中文，未配置的中文自由动作原样保留。
 
 机器字段：
 
@@ -512,7 +512,7 @@ segmentation 和 segment batch 的模型失败轮次保存输入、prompt 与 `f
 
 `scripts/replay_day_with_trace.py` 生成的 `summary.json` 通过 `review_artifact_summary` 汇总两类事实复核，通过 `day_grouping_artifact_summary` 汇总新分组文件，并优先从 CLI 结果、其次从 `resolved_groups.json` 读取 `day_grouping_summary`；旧 trace 缺少新文件时保持不可用，不补造数据。`llm_usage_summary` 从 `llm_usage.json` 汇总准确的调用类型、次数、token、累计耗时、平均耗时和最长单次耗时。
 
-`scripts/report_replay_timings.py` 按 `request_kind` 展示调用统计；`personal_fact_review` 是并发候选累计耗时，`personal_fact_review_all` 是真实墙钟耗时。全日分组分别报告 `day_candidate_merge` 初始请求累计耗时、`day_group_review` 局部复核累计耗时、`day_group_review_all` 局部复核墙钟耗时和 `merge_day_candidates` 总墙钟耗时；`--baseline-trace-root` 由 Python 计算差值，并发请求不能相加为实际耗时。
+`scripts/report_replay_timings.py` 按 `request_kind` 展示调用统计；`analyze_segment_batch` 是并发提炼批次累计工作量，`analyze_segment_batches_all` 是事件提炼真实墙钟耗时；`personal_fact_review` 是并发候选累计工作量，`personal_fact_review_all` 是事实复核真实墙钟耗时。`stage_totals` 只为真实墙钟或非并发阶段计算运行时间占比，并发累计记录不计算占比；旧 trace 缺少事件提炼整体字段时返回 `wall_clock_ms=null` 与 `wall_clock_available=false`。全日分组分别报告 `day_candidate_merge` 初始请求累计耗时、`day_group_review` 局部复核累计耗时、`day_group_review_all` 局部复核墙钟耗时和 `merge_day_candidates` 总墙钟耗时；`--baseline-trace-root` 由 Python 计算差值，并发请求不能相加为实际耗时。
 
 `scripts/report_replay_call_inputs.py` 会把分段、提炼、分段失败后的直接提炼、两类事实复核、全日初始分组和每次强关联局部复核写入 `call-input-report.md`；旧 trace 中的调用标为“旧版工作流归属”，新 trace 不生成该类别。在线模型成功响应数分为文字与图片摘要，调试文件保存的是文字调用尝试，两种口径不要求相等。`scripts/report_event_grouping_comparison.py` 读取基线与当前 trace，输出候选覆盖、分组数量、合并或拆分的候选关系、强关联复核结果、理由和证据；它只做结构与关系统计，不判断业务语义。
 
@@ -520,7 +520,7 @@ segmentation 和 segment batch 的模型失败轮次保存输入、prompt 与 `f
 
 `scripts/replay_collected_review_failures.py` 保留失败清单的 `--inventory`、`--ids`、`--result-dir` 和 `--output-dir`，并新增 `--trace-root`、`--steps`，可直接离线回放候选分组和高风险复核 step。旧 trace 使用 `legacy_audit` 展示原错误和新证据算法结果，不补造 `member_connections`；新实验结果使用 `current` 完整执行协议 v2 校验。汇总按阶段统计重复编号、单成员合并、理由缺失、证据越界、覆盖不足、逐事件说明缺失和新增复核触发次数，`summary.md` 显示“旧结果问题、新规则处理、是否仍需模型复核”。脚本明确记录 `model_call_count: 0`，不调用模型，也不生成正式 Markdown。
 
-所有主阶段同时通过 `logging_utils.log_timing(...)` 输出耗时和数量字段。在线和 Codex 记录都显式携带 `request_kind`；在线没有等待日志，Codex 等待单独进入调用记录；并发事实复核和强关联局部复核都同时记录请求累计口径和整体墙钟口径。
+所有主阶段同时通过 `logging_utils.log_timing(...)` 输出耗时和数量字段。在线和 Codex 记录都显式携带 `request_kind`；在线没有等待日志，Codex 等待单独进入调用记录；并发分段、事件提炼、事实复核和强关联局部复核都同时记录批次累计口径和整体墙钟口径。
 
 ## 13. 已知边界
 

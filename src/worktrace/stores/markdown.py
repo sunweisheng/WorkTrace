@@ -165,7 +165,7 @@ class MarkdownEventStore(EventStore):
         content = self._normalize_public_text(event.content)
         object_hint = self._normalize_public_text(event.object_hint)
         retention_detail = self._normalize_public_text(event.retention_detail)
-        action_labels = self._render_metadata_values(event.action_labels)
+        action_labels = self._render_action_labels(event.action_labels)
         relation_label = (
             "协作方式"
             if event.source_people or event.source_event_ids
@@ -210,6 +210,13 @@ class MarkdownEventStore(EventStore):
             item.key: item.label for item in self.config.self_relation_types
         }
         labels = [labels_by_key.get(relation, relation) for relation in relations]
+        return self._render_metadata_values(labels)
+
+    def _render_action_labels(self, actions: list[str]) -> str:
+        labels_by_key = {
+            item.key: item.label for item in self.config.action_label_types
+        }
+        labels = [labels_by_key.get(action, action) for action in actions]
         return self._render_metadata_values(labels)
 
     def _render_merge_meta(self, event: WorkEvent) -> str:

@@ -258,6 +258,10 @@ def test_load_runtime_config_overrides_reads_self_relation_metadata(
     (config_dir / "event_metadata.json").write_text(
         json.dumps(
             {
+                "action_labels": [
+                    {"key": "assigned", "label": "任务指派", "order": 20},
+                    {"key": "decision_made", "label": "作出决策", "order": 10},
+                ],
                 "self_relations": [
                     {"key": "collaboration", "label": "协作参与", "order": 20},
                     {"key": "initiated", "label": "发起", "order": 10},
@@ -275,6 +279,14 @@ def test_load_runtime_config_overrides_reads_self_relation_metadata(
         "collaboration",
     ]
     assert [item.label for item in config.self_relation_types] == ["发起", "协作参与"]
+    assert [item.key for item in config.action_label_types] == [
+        "decision_made",
+        "assigned",
+    ]
+    assert [item.label for item in config.action_label_types] == [
+        "作出决策",
+        "任务指派",
+    ]
 
 
 def test_repo_event_metadata_defines_self_relation_labels_and_order() -> None:
@@ -289,6 +301,11 @@ def test_repo_event_metadata_defines_self_relation_labels_and_order() -> None:
         "assigned",
         "response_only",
     ]
+    assert {item["key"] for item in payload["action_labels"]} >= {
+        "assigned",
+        "decision_made",
+        "follow_up_assigned",
+    }
 
 
 def test_load_runtime_config_overrides_reads_collected_merge_env_overrides(

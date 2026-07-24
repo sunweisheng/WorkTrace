@@ -1,4 +1,20 @@
 {
+  "action_labels": [
+    {"key": "deliverable_updated", "label": "交付更新", "order": 10},
+    {"key": "decision_made", "label": "作出决策", "order": 20},
+    {"key": "issue_or_risk_found", "label": "发现问题或风险", "order": 30},
+    {"key": "follow_up_assigned", "label": "安排后续跟进", "order": 40},
+    {"key": "external_business_progress", "label": "推进外部业务", "order": 50},
+    {"key": "substantive_approval", "label": "完成实质审批", "order": 60},
+    {"key": "initiated", "label": "发起", "order": 70},
+    {"key": "primary_execution", "label": "执行推进", "order": 80},
+    {"key": "collaboration", "label": "协作沟通", "order": 90},
+    {"key": "decision_confirmation", "label": "确认决策", "order": 100},
+    {"key": "feedback_acceptance", "label": "反馈验收", "order": 110},
+    {"key": "assigned", "label": "任务指派", "order": 120},
+    {"key": "response_only", "label": "参与回应", "order": 130},
+    {"key": "discussion", "label": "讨论", "order": 140}
+  ],
   "self_relations": [
     {
       "key": "initiated",

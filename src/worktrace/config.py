@@ -1008,17 +1008,48 @@ def _load_event_metadata_overrides(
         raise ValueError(
             f"Invalid event metadata config: {metadata_path} must contain a JSON object."
         )
-    unexpected_keys = sorted(set(payload).difference({"self_relations"}))
+    unexpected_keys = sorted(
+        set(payload).difference({"action_labels", "self_relations"})
+    )
     if unexpected_keys:
         raise ValueError(
             "Invalid event metadata config: unsupported keys "
             f"({', '.join(unexpected_keys)})."
         )
 
-    raw_items = payload.get("self_relations", [])
+    action_label_types = _read_event_metadata_items(
+        payload,
+        field_name="action_labels",
+        fallback=config.action_label_types,
+        metadata_path=metadata_path,
+    )
+    self_relation_types = _read_event_metadata_items(
+        payload,
+        field_name="self_relations",
+        fallback=config.self_relation_types,
+        metadata_path=metadata_path,
+    )
+
+    return replace(
+        config,
+        action_label_types=action_label_types,
+        self_relation_types=self_relation_types,
+    )
+
+
+def _read_event_metadata_items(
+    payload: dict[str, object],
+    *,
+    field_name: str,
+    fallback: tuple[EventMetadataItem, ...],
+    metadata_path: Path,
+) -> tuple[EventMetadataItem, ...]:
+    raw_items = payload.get(field_name)
+    if raw_items is None:
+        return fallback
     if not isinstance(raw_items, list):
         raise ValueError(
-            f"Invalid event metadata config: {metadata_path} field `self_relations` must be a list."
+            f"Invalid event metadata config: {metadata_path} field `{field_name}` must be a list."
         )
 
     items: list[EventMetadataItem] = []
@@ -1026,25 +1057,31 @@ def _load_event_metadata_overrides(
     for raw_item in raw_items:
         if not isinstance(raw_item, dict):
             raise ValueError(
-                f"Invalid event metadata config: {metadata_path} self relation entries must be objects."
+                f"Invalid event metadata config: {metadata_path} `{field_name}` entries must be objects."
             )
         if set(raw_item) != {"key", "label", "order"}:
             raise ValueError(
-                f"Invalid event metadata config: {metadata_path} self relation entries require key, label, and order."
+                f"Invalid event metadata config: {metadata_path} `{field_name}` entries require key, label, and order."
             )
         key = raw_item.get("key")
         label = raw_item.get("label")
         order = raw_item.get("order")
         if not isinstance(key, str) or not key.strip():
-            raise ValueError("Invalid event metadata config: self relation key must be non-empty.")
+            raise ValueError(
+                f"Invalid event metadata config: `{field_name}` key must be non-empty."
+            )
         if not isinstance(label, str) or not label.strip():
-            raise ValueError("Invalid event metadata config: self relation label must be non-empty.")
+            raise ValueError(
+                f"Invalid event metadata config: `{field_name}` label must be non-empty."
+            )
         if not isinstance(order, int) or isinstance(order, bool):
-            raise ValueError("Invalid event metadata config: self relation order must be an integer.")
+            raise ValueError(
+                f"Invalid event metadata config: `{field_name}` order must be an integer."
+            )
         cleaned_key = key.strip()
         if cleaned_key in seen_keys:
             raise ValueError(
-                f"Invalid event metadata config: duplicate self relation key `{cleaned_key}`."
+                f"Invalid event metadata config: duplicate `{field_name}` key `{cleaned_key}`."
             )
         seen_keys.add(cleaned_key)
         items.append(
@@ -1055,10 +1092,7 @@ def _load_event_metadata_overrides(
             )
         )
 
-    return replace(
-        config,
-        self_relation_types=tuple(sorted(items, key=lambda item: (item.order, item.key))),
-    )
+    return tuple(sorted(items, key=lambda item: (item.order, item.key)))
 
 
 def _apply_runtime_env_overrides(
@@ -1224,6 +1258,7 @@ class RuntimeConfig:
     sensitive_event_keywords: tuple[str, ...] = ()
     excluded_event_keywords: tuple[str, ...] = ()
     self_assignment_keywords: tuple[str, ...] = ()
+    action_label_types: tuple[EventMetadataItem, ...] = ()
     self_relation_types: tuple[EventMetadataItem, ...] = ()
     retention_policy: RetentionPolicyConfig = field(default_factory=RetentionPolicyConfig)
     reaction_catalogs_root: Path = DEFAULT_REACTION_CATALOGS_ROOT

@@ -100,6 +100,10 @@ def test_markdown_store_roundtrip_keeps_event_metadata_and_hidden_merge_keys(
 ) -> None:
     config = RuntimeConfig(
         data_root=tmp_path / "data",
+        action_label_types=(
+            EventMetadataItem("decision_made", "作出决策", 10),
+            EventMetadataItem("assigned", "任务指派", 20),
+        ),
         self_relation_types=(
             EventMetadataItem("initiated", "发起", 10),
             EventMetadataItem("primary_execution", "主责执行", 20),
@@ -115,7 +119,7 @@ def test_markdown_store_roundtrip_keeps_event_metadata_and_hidden_merge_keys(
                 title="项目方案确认",
                 content="确认方案并完成配置。",
                 source_message_ids=["om_secret_1"],
-                action_labels=["方案确认", "配置修改"],
+                action_labels=["decision_made", "assigned", "配置修改"],
                 self_relations=["initiated", "primary_execution"],
                 conversation_fingerprints=["sha256:" + "c" * 64],
                 object_hint="项目甲方案",
@@ -138,13 +142,13 @@ def test_markdown_store_roundtrip_keeps_event_metadata_and_hidden_merge_keys(
 
     assert loaded is not None
     event = loaded.events[0]
-    assert event.action_labels == ["方案确认", "配置修改"]
+    assert event.action_labels == ["作出决策", "任务指派", "配置修改"]
     assert event.self_relations == ["initiated", "primary_execution"]
     assert len(event.evidence_fingerprints) == 1
     assert event.conversation_fingerprints == ["sha256:" + "c" * 64]
     assert len(event.file_keys) == 2
     assert "- **工作流**:" not in content
-    assert "- **主要动作**: 方案确认、配置修改" in content
+    assert "- **主要动作**: 作出决策、任务指派、配置修改" in content
     assert "- **本人参与方式**: 发起、主责执行" in content
     assert content.index("- **主要动作**:") < content.index("- **内容**:")
     assert content.index("- **具体对象**:") < content.index("- **本人参与方式**:")

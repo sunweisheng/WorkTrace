@@ -8,6 +8,18 @@ from pathlib import Path
 
 
 CHAT_COMPLETIONS_TIMING_PREFIX = "chat_completions_http.timing "
+PARALLEL_ACCUMULATED_STAGES = {
+    "analyze_segment_batch": "analyze_segment_batches_all",
+    "day_group_review": "day_group_review_all",
+    "personal_fact_review": "personal_fact_review_all",
+    "segment_conversation": "segment_conversations_all",
+}
+WALL_CLOCK_STAGES = {
+    "analyze_segment_batches_all",
+    "day_group_review_all",
+    "personal_fact_review_all",
+    "segment_conversations_all",
+}
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -209,28 +221,70 @@ def _collect_stage_totals(summary: dict[str, object]) -> list[dict[str, object]]
         aggregate["count"] = int(aggregate["count"]) + 1
         aggregate["duration_ms"] = float(aggregate["duration_ms"]) + value
 
-    return [
-        {
-            "stage": stage,
-            "count": aggregate["count"],
-            "timing_basis": (
-                "wall_clock"
-                if stage == "personal_fact_review_all"
-                else "parallel_batch_accumulated"
-                if stage == "personal_fact_review"
-                else "stage_accumulated"
-            ),
-            "duration_ms": round(float(aggregate["duration_ms"]), 3),
-            "duration_s": round(float(aggregate["duration_ms"]) / 1000, 3),
-            "share_of_runner_total_pct": round(
-                (float(aggregate["duration_ms"]) / run_total * 100) if run_total else 0.0,
-                2,
-            ),
-        }
-        for stage, aggregate in sorted(
-            stages.items(), key=lambda item: float(item[1]["duration_ms"]), reverse=True
+    stage_totals: list[dict[str, object]] = []
+    for stage, aggregate in stages.items():
+        timing_basis = (
+            "parallel_batch_accumulated"
+            if stage in PARALLEL_ACCUMULATED_STAGES
+            else "wall_clock"
+            if stage in WALL_CLOCK_STAGES
+            else "stage_accumulated"
         )
-    ]
+        duration_ms = float(aggregate["duration_ms"])
+        stage_totals.append(
+            {
+                "stage": stage,
+                "count": aggregate["count"],
+                "timing_basis": timing_basis,
+                "duration_ms": round(duration_ms, 3),
+                "duration_s": round(duration_ms / 1000, 3),
+                "share_of_runner_total_pct": (
+                    None
+                    if timing_basis == "parallel_batch_accumulated"
+                    else round(
+                        (duration_ms / run_total * 100) if run_total else 0.0,
+                        2,
+                    )
+                ),
+                "elapsed_stage": PARALLEL_ACCUMULATED_STAGES.get(stage),
+            }
+        )
+
+    return sorted(
+        stage_totals,
+        key=lambda item: (
+            item["timing_basis"] == "parallel_batch_accumulated",
+            -float(item["duration_ms"]),
+        ),
+    )
+
+
+def _collect_event_extraction_timing(
+    summary: dict[str, object],
+) -> dict[str, object]:
+    stage_totals = {
+        item["stage"]: item
+        for item in _collect_stage_totals(summary)
+        if isinstance(item, dict)
+    }
+    batch_stage = stage_totals.get("analyze_segment_batch")
+    wall_clock_stage = stage_totals.get("analyze_segment_batches_all")
+    batch_ms = _to_float(batch_stage.get("duration_ms")) if batch_stage else None
+    wall_clock_ms = (
+        _to_float(wall_clock_stage.get("duration_ms")) if wall_clock_stage else None
+    )
+    return {
+        "batch_accumulated_ms": round(batch_ms, 3) if batch_ms is not None else None,
+        "wall_clock_ms": (
+            round(wall_clock_ms, 3) if wall_clock_ms is not None else None
+        ),
+        "wall_clock_available": wall_clock_ms is not None,
+        "accumulated_to_wall_clock_ratio": (
+            round(batch_ms / wall_clock_ms, 3)
+            if batch_ms is not None and wall_clock_ms
+            else None
+        ),
+    }
 
 
 def _collect_online_llm_summary(summary: dict[str, object]) -> dict[str, object]:
@@ -570,6 +624,7 @@ def main(argv: list[str] | None = None) -> int:
         "result": summary.get("result"),
         "stage_totals": _collect_stage_totals(summary),
         "online_llm": _collect_online_llm_summary(summary),
+        "event_extraction_timing": _collect_event_extraction_timing(summary),
         "personal_fact_review_timing": _collect_personal_fact_review_timing(summary),
         "day_grouping_timing": day_grouping_timing,
         "hook_exec": hook_exec,
