@@ -34,9 +34,9 @@
 flowchart LR
     A["采集消息"] --> B["本地过滤"] --> C["确定性初始窗口"] --> D["LLM 分段并保存中间结果"]
     D --> E["片段组批并提炼动作/参与方式"] --> F["上下文重试"] --> G["候选与证据校验"]
-    G --> H["临时协作局部复核"] --> I["个人事实局部复核"] --> J["跨会话初始分组"]
-    J --> K["工作流权威分组"] --> L["增强事件物化"]
-    L --> M["消息/会话指纹 + 文件标识"] --> N["Markdown + 自发送"]
+    G --> H["临时协作局部复核"] --> I["个人事实局部复核"] --> J["全日候选分组"]
+    J --> K["Python 完整性校验"] --> L["强关联局部复核"] --> L1["增强事件物化"]
+    L1 --> M["消息/会话指纹 + 文件标识"] --> N["Markdown + 自发送"]
 ```
 
 关键方法：
@@ -49,7 +49,8 @@ flowchart LR
 - `_review_retention_candidates(...)`：复核配置命中的临时协作边界候选，并由 Python 应用固定保留规则
 - `_review_personal_event_facts(...)`：把高风险个人事件拆成单候选请求，最多 3 路并发复核事实证据；每个候选内部重试保持顺序
 - `_review_personal_fact_batch_with_retry(...)`：执行单候选事实复核、协议校验和有限重试
-- `_resolve_workstream_groups(...)`：通过独立 assignment 生成工作流权威分组；失败时回退到初始模型组整合
+- `_merge_day_candidates_with_batching(...)`：全日分组、覆盖校验、Online 质量重试、Codex 备用和拆单修补
+- `_review_strongly_related_day_groups(...)`：最多三路并行复核跨组强关联，失败时保留原分组
 - `_attach_event_file_links(...)`：按显式引用或精确附件文件名证据附加文件
 
 ## 5. Pipeline 模块
@@ -69,8 +70,8 @@ flowchart LR
 | `pipeline/retention_filter.py` | 具体对象、保留理由、保留依据和低价值类型门槛 |
 | `pipeline/retention_review.py` | 临时协作边界候选选择、组批、模型结果校验和固定保留规则 |
 | `pipeline/personal_fact_review.py` | 个人事实风险选择、组批、事实证据校验和修订应用 |
-| `pipeline/cross_conversation_merge.py` | 分组归并、主草稿选择，以及工作流、动作、参与方式的 `MergedEventDraft` 物化 |
-| `pipeline/workstream_resolution.py` | 根据结构化工作流分配结果生成校正分组 |
+| `pipeline/day_event_grouping.py` | 强关联组件发现、完整已有组不可拆校验和复核结果替换 |
+| `pipeline/cross_conversation_merge.py` | 分组归并、主草稿选择，以及动作、参与方式的 `MergedEventDraft` 物化 |
 | `pipeline/event_merge.py` | 最终 `WorkEvent` 构建、稳定 ID 和消息证据指纹 |
 
 `pipeline/conversation_first_pass.py` 仍用于不支持分段批处理的 analyzer 兼容路径；它不是当前默认 Online analyzer 的主入口。
@@ -108,10 +109,10 @@ flowchart LR
 4. 全 scope 校验 v2 同日会话指纹，相同 `event_id` 建立确定性组
 5. Python 按共同消息、文件和同日会话建立关系集合，模型使用完整事件正文返回候选组、候选摘要、语义理由、`member_connections` 和 `risk_flags`；新模型输出不再返回 `evidence_relation_ids`
 6. Python 在模型分组后排除组外证据端点，并按稳定目录顺序计算连接全组的最小消息/文件证据集合；大 prompt 按关系集合优先分批，跨批只协调共享消息指纹或文件的候选
-7. 单条组直接保留；多条组达到配置阈值、跨批、分组修复、工作流冲突、无完整证据且对象不一致或标记 `broad_object` 时，最多三路高风险复核。复核使用独立的保守拆分 Function 示例
+7. 单条组直接保留；多条组达到配置阈值、跨批、分组修复、无完整证据且对象不一致或标记 `broad_object` 时，最多三路高风险复核。复核使用独立的保守拆分 Function 示例
 8. 正式内容按锁定候选组分批生成，并返回完整 `covered_draft_ids` 和带来源的 `fact_items`
 9. 可切换在线错误让当前请求额外再试 Online 1 次，仍失败才由 Codex 重做；结果质量错误按 Online 首次请求、Online 局部重试 1 次、Codex 当前请求备用 1 次执行，最后仍失败则终止本次合并且不写文件
-10. 聚合工作流、动作、协作方式、消息指纹、会话指纹、文件标识、来源人员、事件 ID 和上一级负责人
+10. 聚合动作、协作方式、消息指纹、会话指纹、文件标识、来源人员、事件 ID 和上一级负责人
 11. Python 计算 scope 和整次运行的 `quality_summary`，团队 `WorkEvent` 最终过滤、写入和自发送
 
 相关专题见 [collected-people-merge-plan.md](collected-people-merge-plan.md)。
@@ -126,9 +127,10 @@ flowchart LR
 | `config/event_metadata.json` | 本人参与方式英文键、中文显示名和排序 |
 | `config/conversation_blacklist.json` | 整会话排除 |
 | `config/conversation_window.json` | 群聊锚点聚合、初始上下文和按需扩窗阈值 |
-| `config/llm_retry.json` | Online 请求级重试、分段/提炼结果质量重试、流式首次返回超时、Codex 间隔，以及切分、提炼、个人事实复核和多人高风险复核并发数 |
+| `config/llm_retry.json` | Online 请求级重试、分段/提炼/全日分组结果质量重试、流式首次返回超时、Codex 间隔，以及切分、提炼、个人事实复核、强关联局部复核和多人高风险复核并发数 |
 | `config/retention_policy.json` | 个人事件保留提示、结构化业务词、临时协作复核、事实复核条件和模型信号定义 |
-| `config/collected_merge.json` | 多人汇总高风险复核开关、事件数/文件数阈值、对象冲突与宽泛对象复核条件，以及合并原因的描述、`acceptance_rules` 和 `rejection_rules` |
+| `config/event_grouping.json` | 个人与多人共同分组说明，以及合并原因的描述、`acceptance_rules` 和 `rejection_rules` |
+| `config/collected_merge.json` | 多人汇总高风险复核开关、事件数/文件数阈值、对象冲突与宽泛对象复核条件 |
 | `config/attachment_text.json` | 文本附件提取限制 |
 | `config/image_summary.json` | 图片摘要限制和提示词 |
 | `config/reaction_catalogs/*.json` | reaction 本地语义目录 |
@@ -137,8 +139,8 @@ flowchart LR
 
 ## 10. 调试入口
 
-- 个人日报：`--debug-output`，目录 `data/debug/conversations/<date>/`；失败轮次保存 `failure.json`，单片段回退使用 `fallback-01/`，直接提炼回退使用 `_anchor_fallback/`；`retention_review.json` 和 `personal_fact_review.json` 保存两类局部复核尝试及 Python 校验结果，`llm_usage.json` 保存按调用类型的 token 和耗时，`final_events.json` 保存最终草稿、事件和过滤 warning
-- 回放报告：`replay_day_with_trace.py` 在执行前写入 `run_status.json`，实时显示并保存子进程阶段日志，结束后更新 `success/failed`，同时把 `llm_usage.json` 汇总到 `llm_usage_summary`；`diagnose_collected_merge_rolling.py` 在每次模型调用前写入 `running` 步骤并在完成或异常后更新结果；`report_replay_timings.py` 分开输出事实复核候选累计耗时和 `personal_fact_review_all` 墙钟耗时；`report_replay_call_inputs.py` 分开统计文字调用与图片摘要
+- 个人日报：`--debug-output`，目录 `data/debug/conversations/<date>/`；失败轮次保存 `failure.json`，单片段回退使用 `fallback-01/`，直接提炼回退使用 `_anchor_fallback/`；`retention_review.json` 和 `personal_fact_review.json` 保存两类事实复核；`_merge_day_candidates/` 保存 `input.json`、`prompt.txt`、`grouping_attempts.json`、`day_group_review.json` 和 `resolved_groups.json`；`llm_usage.json` 保存按调用类型的 token 和耗时，`final_events.json` 保存最终草稿、事件和过滤 warning
+- 回放报告：`replay_day_with_trace.py` 在执行前写入 `run_status.json`，实时显示并保存子进程阶段日志，结束后更新 `success/failed`，同时汇总 `llm_usage_summary`、`day_grouping_summary` 和 `day_grouping_artifact_summary`；`report_replay_timings.py` 分开输出事实复核、初始分组、局部复核累计耗时和墙钟耗时，并支持 `--baseline-trace-root`；`report_replay_call_inputs.py` 展示全日分组和每次局部复核；`report_event_grouping_comparison.py` 输出新旧分组结构与关系差异
 - 多人汇总：`WORKTRACE_COLLECTED_MERGE_TRACE=true`，目录默认 `data/debug/collected_merge/<date>/`；候选和复核 step 写入 `grouping_protocol_version: 2`、`evidence_audit`、`semantic_audit`、`python_validation.errors`、输入、Function 与提示词，`summary.json` 和 `summary.md` 保存 Python 计算的校验错误、重试原因、复核触发和质量统计，失败也生成 summary
 - 候选/复核离线回放：`scripts/replay_collected_review_failures.py --trace-root <trace目录> --steps <编号列表> --output-dir <输出目录>` 可直接回放候选分组和高风险复核；旧 trace 使用 `legacy_audit` 且不补造 `member_connections`，新实验结果使用 `current` 完整校验。汇总按阶段列出旧结果问题、新规则处理和是否仍需模型复核，并明确 `model_call_count=0`；脚本不调用模型、不生成正式 Markdown
 - 锚点独立实验：`python3 -m src.worktrace.anchor_experiment ...`

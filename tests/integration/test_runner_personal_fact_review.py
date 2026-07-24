@@ -124,7 +124,7 @@ class FactReviewAnalyzer:
         self.review_feedback.append(batch.retry_feedback)
         return self.result
 
-    def merge_day_candidates(self, target_date, candidates):
+    def merge_day_candidates(self, target_date, candidates, *, validation_feedback=""):
         raise AssertionError("A single fact-reviewed candidate must not call merge")
 
 
@@ -196,7 +196,6 @@ def _corrected_result() -> PersonalFactReviewResult:
                 action_label=action,
                 object_hint=object_hint,
                 retention_detail=detail,
-                workstream_key="",
                 fact_items=[
                     PersonalFactItem("topic", topic, ["m1", "m5", "m7"]),
                     PersonalFactItem("content", content, ["m1", "m3", "m4", "m5", "m7", "m8"]),

@@ -29,6 +29,7 @@ DEFAULT_REACTION_CATALOGS_ROOT = Path("config") / "reaction_catalogs"
 DEFAULT_CONVERSATION_BLACKLIST_FILE_NAME = "config/conversation_blacklist.json"
 DEFAULT_CONVERSATION_WINDOW_FILE_NAME = "config/conversation_window.json"
 DEFAULT_LLM_RETRY_FILE_NAME = "config/llm_retry.json"
+DEFAULT_EVENT_GROUPING_FILE_NAME = "config/event_grouping.json"
 DEFAULT_COLLECTED_MERGE_FILE_NAME = "config/collected_merge.json"
 DEFAULT_RETENTION_POLICY_FILE_NAME = "config/retention_policy.json"
 
@@ -106,7 +107,6 @@ DEFAULT_COLLECTED_GROUP_REASON_DEFINITIONS = (
 class RetentionPolicyConfig:
     review_enabled: bool = False
     review_retention_reasons: tuple[str, ...] = ()
-    require_empty_workstream: bool = True
     require_no_referenced_files: bool = True
     uncertain_policy: str = "drop"
     prompt_rules: tuple[str, ...] = ()
@@ -366,6 +366,7 @@ def _load_supporting_config_overrides(
     config = _load_event_metadata_overrides(config, base_dir=base_dir)
     config = _load_conversation_window_overrides(config, base_dir=base_dir)
     config = _load_llm_retry_overrides(config, base_dir=base_dir)
+    config = _load_event_grouping_overrides(config, base_dir=base_dir)
     return _load_collected_merge_overrides(config, base_dir=base_dir)
 
 
@@ -427,7 +428,6 @@ def _load_retention_policy_overrides(
     review_keys = {
         "enabled",
         "retention_reasons",
-        "require_empty_workstream",
         "require_no_referenced_files",
         "uncertain_policy",
     }
@@ -439,7 +439,6 @@ def _load_retention_policy_overrides(
         )
     bool_keys = {
         "enabled",
-        "require_empty_workstream",
         "require_no_referenced_files",
     }
     if any(not isinstance(review[key], bool) for key in bool_keys):
@@ -499,7 +498,6 @@ def _load_retention_policy_overrides(
             file_path=config_path,
             error_prefix="Invalid retention policy config",
         ),
-        require_empty_workstream=review["require_empty_workstream"],
         require_no_referenced_files=review["require_no_referenced_files"],
         uncertain_policy=uncertain_policy,
         prompt_rules=_read_string_list(
@@ -663,7 +661,6 @@ def _load_collected_merge_overrides(
         "high_risk_review_enabled",
         "review_cross_batch_groups",
         "review_repaired_groups",
-        "review_workstream_conflicts",
         "review_same_conversation_only_groups",
         "review_semantic_only_object_conflicts",
         "review_broad_object_groups",
@@ -672,8 +669,7 @@ def _load_collected_merge_overrides(
         "high_risk_source_event_count",
         "high_risk_source_file_count",
     }
-    definition_key = "group_reason_definitions"
-    keys = bool_keys | int_keys | {definition_key}
+    keys = bool_keys | int_keys
     unexpected = sorted(set(payload).difference(keys))
     missing = sorted(keys.difference(payload))
     if unexpected or missing:
@@ -701,22 +697,76 @@ def _load_collected_merge_overrides(
                 "must be a positive integer."
             )
         values[key] = value
-    definitions = _read_collected_group_reason_definitions(
-        payload[definition_key],
-        config_path=config_path,
-    )
-    values["collected_group_reason_definitions"] = definitions
     return replace(config, **values)
+
+
+def _load_event_grouping_overrides(
+    config: RuntimeConfig,
+    *,
+    base_dir: Path,
+) -> RuntimeConfig:
+    config_path = base_dir / config.event_grouping_file_name
+    try:
+        payload = json.loads(config_path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return config
+    except json.JSONDecodeError as exc:
+        raise ValueError(
+            f"Invalid event grouping config: {config_path} is not valid JSON."
+        ) from exc
+    if not isinstance(payload, dict):
+        raise ValueError(
+            f"Invalid event grouping config: {config_path} must contain a JSON object."
+        )
+    expected_keys = {
+        "personal_grouping_rules",
+        "personal_review_rules",
+        "group_reason_definitions",
+    }
+    if set(payload) != expected_keys:
+        raise ValueError(
+            "Invalid event grouping config: fields do not match the contract."
+        )
+    grouping_rules = _read_string_list(
+        payload,
+        key="personal_grouping_rules",
+        fallback=(),
+        file_path=config_path,
+        error_prefix="Invalid event grouping config",
+    )
+    review_rules = _read_string_list(
+        payload,
+        key="personal_review_rules",
+        fallback=(),
+        file_path=config_path,
+        error_prefix="Invalid event grouping config",
+    )
+    if not grouping_rules or not review_rules:
+        raise ValueError(
+            "Invalid event grouping config: personal rules must not be empty."
+        )
+    definitions = _read_collected_group_reason_definitions(
+        payload["group_reason_definitions"],
+        config_path=config_path,
+        error_prefix="Invalid event grouping config",
+    )
+    return replace(
+        config,
+        personal_grouping_rules=grouping_rules,
+        personal_group_review_rules=review_rules,
+        collected_group_reason_definitions=definitions,
+    )
 
 
 def _read_collected_group_reason_definitions(
     raw_value: object,
     *,
     config_path: Path,
+    error_prefix: str = "Invalid collected merge config",
 ) -> tuple[CollectedGroupReasonDefinition, ...]:
     if not isinstance(raw_value, list) or not raw_value:
         raise ValueError(
-            "Invalid collected merge config: "
+            f"{error_prefix}: "
             f"{config_path} field `group_reason_definitions` must be a non-empty list."
         )
     definitions: list[CollectedGroupReasonDefinition] = []
@@ -733,7 +783,7 @@ def _read_collected_group_reason_definitions(
     for item in raw_value:
         if not isinstance(item, dict) or set(item) != expected_keys:
             raise ValueError(
-                "Invalid collected merge config: `group_reason_definitions` items "
+                f"{error_prefix}: `group_reason_definitions` items "
                 "must contain key, description, evidence_relation, "
                 "supports_semantic_merge, acceptance_rules and rejection_rules."
             )
@@ -748,7 +798,7 @@ def _read_collected_group_reason_definitions(
             for value in (key, description, evidence_relation)
         ) or not isinstance(supports_semantic_merge, bool):
             raise ValueError(
-                "Invalid collected merge config: group reason values have invalid types."
+                f"{error_prefix}: group reason values have invalid types."
             )
         if not all(
             isinstance(values, list)
@@ -848,12 +898,14 @@ def _load_llm_retry_overrides(
         raise ValueError(f"Invalid LLM retry config: {retry_path} must contain a JSON object.")
     keys = {
         "online_request_retry_limit",
+        "day_group_validation_retry_limit",
         "segmentation_retry_limit",
         "event_extraction_retry_limit",
         "stream_first_response_timeout_seconds",
         "max_concurrent_llm_requests",
         "max_concurrent_event_extraction_requests",
         "max_concurrent_personal_fact_review_requests",
+        "max_concurrent_day_group_review_requests",
         "codex_request_interval_min_seconds",
         "codex_request_interval_max_seconds",
         "max_concurrent_collected_merge_review_requests",
@@ -890,6 +942,7 @@ def _load_llm_retry_overrides(
             in {
                 "stream_first_response_timeout_seconds",
                 "max_concurrent_personal_fact_review_requests",
+                "max_concurrent_day_group_review_requests",
                 "max_concurrent_collected_merge_review_requests",
             }
             else 0
@@ -919,6 +972,10 @@ def _load_llm_retry_overrides(
         ],
         max_concurrent_personal_fact_review_requests=values[
             "max_concurrent_personal_fact_review_requests"
+        ],
+        day_group_validation_retry_limit=values["day_group_validation_retry_limit"],
+        max_concurrent_day_group_review_requests=values[
+            "max_concurrent_day_group_review_requests"
         ],
         codex_request_interval_min_seconds=values[
             "codex_request_interval_min_seconds"
@@ -1115,12 +1172,14 @@ class RuntimeConfig:
     timezone: str = "Asia/Shanghai"
     analyzer_backend: str = "online"
     online_request_retry_limit: int = 1
+    day_group_validation_retry_limit: int = 1
     anchor_retry_limit: int = 3
     analysis_batch_retry_limit: int = 3
     stream_first_response_timeout_seconds: int = 60
     max_concurrent_llm_requests: int = 1
     max_concurrent_event_extraction_requests: int | None = None
     max_concurrent_personal_fact_review_requests: int = 1
+    max_concurrent_day_group_review_requests: int = 3
     max_concurrent_collected_merge_review_requests: int = 3
     codex_request_interval_min_seconds: float = 0.0
     codex_request_interval_max_seconds: float = 1.0
@@ -1140,13 +1199,14 @@ class RuntimeConfig:
     high_risk_source_file_count: int = 4
     review_cross_batch_groups: bool = True
     review_repaired_groups: bool = True
-    review_workstream_conflicts: bool = True
     review_same_conversation_only_groups: bool = True
     review_semantic_only_object_conflicts: bool = True
     review_broad_object_groups: bool = True
     collected_group_reason_definitions: tuple[
         CollectedGroupReasonDefinition, ...
     ] = DEFAULT_COLLECTED_GROUP_REASON_DEFINITIONS
+    personal_grouping_rules: tuple[str, ...] = ()
+    personal_group_review_rules: tuple[str, ...] = ()
     slice_retry_limit: int = 3
     prompt_slice_message_limit: int = 40
     prompt_message_char_limit: int = 300
@@ -1189,6 +1249,7 @@ class RuntimeConfig:
     conversation_blacklist_file_name: str = DEFAULT_CONVERSATION_BLACKLIST_FILE_NAME
     conversation_window_file_name: str = DEFAULT_CONVERSATION_WINDOW_FILE_NAME
     llm_retry_file_name: str = DEFAULT_LLM_RETRY_FILE_NAME
+    event_grouping_file_name: str = DEFAULT_EVENT_GROUPING_FILE_NAME
     collected_merge_file_name: str = DEFAULT_COLLECTED_MERGE_FILE_NAME
     retention_policy_file_name: str = DEFAULT_RETENTION_POLICY_FILE_NAME
     llm_stream_enabled: bool = False

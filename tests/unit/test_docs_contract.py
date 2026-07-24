@@ -39,7 +39,9 @@ def test_readme_describes_current_segmented_personal_flow() -> None:
     assert "本人发言和本人 reaction" in content
     assert "segment_start_message_ids" in content
     assert "SegmentAnalysisBatch" in content
-    assert "workstream_key" in content
+    assert "day_grouping_summary" in content
+    assert "config/event_grouping.json" in content
+    assert "workstream_key" not in content
     assert "config/image_summary.json" in content
     assert "WORKTRACE_COLLECTED_MERGE_TRACE" in content
     assert "一个会话 = 一个 slice = 一次首轮 LLM" not in content
@@ -163,14 +165,13 @@ def test_docs_describe_event_metadata_and_markdown_compatibility() -> None:
     ).read_text(encoding="utf-8")
 
     for content in (readme, detailed, markdown_contract):
-        assert "工作流" in content
         assert "主要动作" in content
         assert "本人参与方式" in content
         assert "merge_meta" in content
         assert "SHA-256" in content
         assert "未明确" in content
     assert "config/event_metadata.json" in readme
-    assert "旧 Markdown" in detailed
+    assert "旧 Markdown 中的工作流字段允许读取但会丢弃" in detailed
     assert "不批量改写历史文件" in markdown_contract
     assert "来源负责人" in markdown_contract
     assert "source_report_owners" in markdown_contract
@@ -183,8 +184,8 @@ def test_docs_define_collected_merge_boundaries_and_conflict_priority() -> None:
     )
 
     for content in (readme, merge_design):
-        assert "工作流相同" in content
-        assert "不能单独" in content or "不能直接" in content
+        assert "config/event_grouping.json" in content
+        assert "不能单独" in content or "不能自动" in content
         assert "共同消息" in content
         assert "共同文件" in content
         assert "同日会话" in content
@@ -503,8 +504,58 @@ def test_detailed_design_is_the_current_code_source_of_truth() -> None:
     assert "reaction" in content
     assert "ConversationSegmentUnit" in content
     assert "_analyze_anchor_fallback" in content
-    assert "工作流 assignment" in content
+    assert "全日事件分组与强关联漏合并复核" in content
+    assert "day_group_review_all" in content
     assert "关系优先分批" in content
+
+
+def test_current_docs_do_not_restore_removed_workstream_protocol() -> None:
+    current_documents = [
+        Path("README.md"),
+        Path("SKILL.md"),
+        Path("docs/detailed-design.md"),
+        Path("docs/implementation-breakdown.md"),
+        Path("docs/employee-guide.md"),
+        Path("docs/privacy-note.md"),
+        Path("docs/online-analyzer-usage.md"),
+        Path("docs/collected-people-merge-plan.md"),
+    ]
+    removed_tokens = (
+        "workstream_key",
+        "workstream_name",
+        "root_workstream_name",
+        "parent_draft_id",
+        "WorkstreamAssignment",
+        "workstream_resolution.py",
+    )
+    for path in current_documents:
+        content = path.read_text(encoding="utf-8")
+        for token in removed_tokens:
+            assert token not in content, f"{path} still describes removed token {token}"
+        for line_number, line in enumerate(content.splitlines(), start=1):
+            if "工作流" not in line:
+                continue
+            assert any(
+                marker in line
+                for marker in ("旧", "兼容", "不再", "取消", "删除", "替代")
+            ), f"{path}:{line_number} treats 工作流 as a current field: {line}"
+
+
+def test_historical_grouping_docs_mark_replacement_without_rewriting_history() -> None:
+    historical_documents = [
+        Path("docs/cross-conversation-merge-design.md"),
+        Path("docs/anchor-analysis-protocol.md"),
+        Path("docs/anchor-experiment-usage.md"),
+        Path("docs/anchor-first-implementation-breakdown.md"),
+        Path("docs/anchor-first-multi-pass-design.md"),
+        Path("docs/markdown-output-simplification-design.md"),
+        Path("docs/two-level-collected-merge-improvement-plan.md"),
+    ]
+    for path in historical_documents:
+        opening = "\n".join(path.read_text(encoding="utf-8").splitlines()[:8])
+        assert "历史" in opening
+        assert "workstream-free-event-grouping-design.md" in opening
+        assert "替代" in opening
 
 
 def test_anchor_docs_separate_main_flow_from_experiment() -> None:

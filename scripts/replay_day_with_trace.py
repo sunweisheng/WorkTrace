@@ -357,6 +357,53 @@ def _collect_review_artifact_summary(
     return artifacts
 
 
+def _collect_day_grouping_artifact_summary(
+    conversation_debug_root: Path,
+    target_date: str,
+) -> dict[str, object]:
+    merge_root = conversation_debug_root / target_date / "_merge_day_candidates"
+    grouping_path = merge_root / "grouping_attempts.json"
+    review_path = merge_root / "day_group_review.json"
+    resolved_path = merge_root / "resolved_groups.json"
+
+    def read_attempts(path: Path) -> list[dict[str, object]]:
+        if not path.exists():
+            return []
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        raw_attempts = payload.get("attempts", []) if isinstance(payload, dict) else []
+        return [item for item in raw_attempts if isinstance(item, dict)]
+
+    grouping_attempts = read_attempts(grouping_path)
+    review_attempts = read_attempts(review_path)
+    resolved_payload: dict[str, object] = {}
+    if resolved_path.exists():
+        loaded = json.loads(resolved_path.read_text(encoding="utf-8"))
+        if isinstance(loaded, dict):
+            resolved_payload = loaded
+
+    return {
+        "path": str(merge_root.resolve()),
+        "exists": resolved_path.exists(),
+        "grouping_attempt_count": len(grouping_attempts),
+        "grouping_failed_attempt_count": sum(
+            item.get("status") == "invalid" for item in grouping_attempts
+        ),
+        "grouping_repair_count": sum(
+            item.get("status") == "repaired" for item in grouping_attempts
+        ),
+        "review_attempt_count": len(review_attempts),
+        "review_failed_attempt_count": sum(
+            item.get("status") == "failed" for item in review_attempts
+        ),
+        "resolved_group_count": len(resolved_payload.get("groups", []))
+        if isinstance(resolved_payload.get("groups", []), list)
+        else 0,
+        "summary": resolved_payload.get("summary"),
+        "warnings": resolved_payload.get("warnings", []),
+        "legacy_trace": resolved_path.exists() and "summary" not in resolved_payload,
+    }
+
+
 def _collect_checkpoint_summary(checkpoint_root: Path) -> dict[str, object]:
     stages = ("segmentation", "analysis")
     return {
@@ -505,6 +552,10 @@ def main(argv: list[str] | None = None) -> int:
         conversation_debug_root,
         args.date,
     )
+    day_grouping_artifact_summary = _collect_day_grouping_artifact_summary(
+        conversation_debug_root,
+        args.date,
+    )
 
     result_payload: object | None = None
     if completed.stdout.strip():
@@ -512,6 +563,21 @@ def main(argv: list[str] | None = None) -> int:
             result_payload = json.loads(completed.stdout)
         except json.JSONDecodeError:
             result_payload = {"raw_stdout": completed.stdout}
+
+    result_day_grouping_summary = (
+        result_payload.get("day_grouping_summary")
+        if isinstance(result_payload, dict)
+        and isinstance(result_payload.get("day_grouping_summary"), dict)
+        else None
+    )
+    artifact_day_grouping_summary = day_grouping_artifact_summary.get("summary")
+    day_grouping_summary = (
+        result_day_grouping_summary
+        if result_day_grouping_summary is not None
+        else artifact_day_grouping_summary
+        if isinstance(artifact_day_grouping_summary, dict)
+        else None
+    )
 
     summary = {
         "target_date": args.date,
@@ -526,6 +592,8 @@ def main(argv: list[str] | None = None) -> int:
         "result": result_payload,
         "first_pass_summary": first_pass_summary,
         "review_artifact_summary": review_artifact_summary,
+        "day_grouping_summary": day_grouping_summary,
+        "day_grouping_artifact_summary": day_grouping_artifact_summary,
         "llm_usage_summary": llm_usage_summary,
         "llm_summary": llm_summary,
         "timing_summary": timing_summary,

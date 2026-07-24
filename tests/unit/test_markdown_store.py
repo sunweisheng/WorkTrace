@@ -115,7 +115,6 @@ def test_markdown_store_roundtrip_keeps_event_metadata_and_hidden_merge_keys(
                 title="项目方案确认",
                 content="确认方案并完成配置。",
                 source_message_ids=["om_secret_1"],
-                workstream_name="项目甲",
                 action_labels=["方案确认", "配置修改"],
                 self_relations=["initiated", "primary_execution"],
                 conversation_fingerprints=["sha256:" + "c" * 64],
@@ -139,16 +138,14 @@ def test_markdown_store_roundtrip_keeps_event_metadata_and_hidden_merge_keys(
 
     assert loaded is not None
     event = loaded.events[0]
-    assert event.workstream_name == "项目甲"
     assert event.action_labels == ["方案确认", "配置修改"]
     assert event.self_relations == ["initiated", "primary_execution"]
     assert len(event.evidence_fingerprints) == 1
     assert event.conversation_fingerprints == ["sha256:" + "c" * 64]
     assert len(event.file_keys) == 2
-    assert "- **工作流**: 项目甲" in content
+    assert "- **工作流**:" not in content
     assert "- **主要动作**: 方案确认、配置修改" in content
     assert "- **本人参与方式**: 发起、主责执行" in content
-    assert content.index("- **工作流**:") < content.index("- **主要动作**:")
     assert content.index("- **主要动作**:") < content.index("- **内容**:")
     assert content.index("- **具体对象**:") < content.index("- **本人参与方式**:")
     assert "sha256:" in content
@@ -158,7 +155,7 @@ def test_markdown_store_roundtrip_keeps_event_metadata_and_hidden_merge_keys(
     assert "attachment-secret-1" not in content
 
 
-def test_markdown_store_omits_missing_workstream_but_renders_other_metadata(
+def test_markdown_store_omits_removed_workstream_field_but_renders_other_metadata(
     tmp_path: Path,
 ) -> None:
     store = MarkdownEventStore(config=RuntimeConfig(data_root=tmp_path / "data"))
@@ -179,6 +176,35 @@ def test_markdown_store_omits_missing_workstream_but_renders_other_metadata(
     assert "- **工作流**:" not in content
     assert "- **主要动作**: 未明确" in content
     assert "- **本人参与方式**: 未明确" in content
+
+
+def test_markdown_store_reads_legacy_workstream_line_but_discards_it() -> None:
+    store = MarkdownEventStore(config=RuntimeConfig())
+    current = store.render_day_document(
+        DayDocument(
+            date="2026-06-22",
+            generated_at="2026-06-22T18:00:00+08:00",
+            events=[
+                WorkEvent(
+                    date="2026-06-22",
+                    event_id="evt1",
+                    title="事项",
+                    content="处理事项。",
+                )
+            ],
+        )
+    )
+    legacy = current.replace(
+        "- **日期**: 2026-06-22\n",
+        "- **日期**: 2026-06-22\n- **工作流**: 旧项目\n",
+        1,
+    )
+
+    parsed = store.parse_day_document(legacy)
+
+    assert len(parsed.events) == 1
+    assert "workstream_name" not in parsed.events[0].to_dict()
+    assert "- **工作流**:" not in store.render_day_document(parsed)
 
 
 def test_markdown_store_ignores_damaged_merge_meta() -> None:
@@ -528,7 +554,6 @@ def test_markdown_store_roundtrip_keeps_collected_source_fields(tmp_path: Path) 
                 object_hint="客户合同",
                 retention_reason="substantive_approval",
                 retention_detail="反馈客户合同付款条款问题。",
-                workstream_name="客户合同",
                 action_labels=["条款核对", "反馈确认"],
                 self_relations=["collaboration", "feedback_acceptance"],
                 file_links=[],
@@ -544,7 +569,6 @@ def test_markdown_store_roundtrip_keeps_collected_source_fields(tmp_path: Path) 
     assert loaded.events[0].object_hint == "客户合同"
     assert loaded.events[0].retention_reason == "substantive_approval"
     assert loaded.events[0].retention_detail == "反馈客户合同付款条款问题。"
-    assert loaded.events[0].workstream_name == "客户合同"
     assert loaded.events[0].action_labels == ["条款核对", "反馈确认"]
     assert loaded.events[0].self_relations == ["collaboration", "feedback_acceptance"]
     content = store.build_output_path("2026-06-22").read_text(encoding="utf-8")

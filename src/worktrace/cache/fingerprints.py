@@ -12,7 +12,7 @@ def build_anchor_input_fingerprint(
     attachment_texts: list[AttachmentTextBlock] | None = None,
     linked_file_texts: list[LinkedFileTextBlock] | None = None,
     prompt_version: str = "v2",
-    schema_version: str = "v2",
+    schema_version: str = "v3",
 ) -> str:
     payload = {
         "anchor_unit_id": anchor_unit.anchor_unit_id,

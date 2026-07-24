@@ -14,7 +14,6 @@ from src.worktrace.collected_merge import (
     build_collected_quality_summary,
     build_grouping_summary_events,
     collected_grouping_validation_feedback,
-    enforce_collected_workstream_boundaries,
     extract_person_name_from_filename,
     repair_collected_grouping_result,
 )
@@ -169,7 +168,6 @@ def _event(
     object_hint: str | None = None,
     retention_reason: str = "decision_made",
     retention_detail: str | None = None,
-    workstream_name: str = "",
     action_labels: list[str] | None = None,
     self_relations: list[str] | None = None,
     evidence_fingerprints: list[str] | None = None,
@@ -184,7 +182,6 @@ def _event(
         object_hint=object_hint or title,
         retention_reason=retention_reason,
         retention_detail=retention_detail or f"确认{title}的具体结果。",
-        workstream_name=workstream_name,
         action_labels=action_labels or [],
         self_relations=self_relations or [],
         evidence_fingerprints=evidence_fingerprints or [],
@@ -517,7 +514,6 @@ def test_collected_merge_over_threshold_rolls_sources_and_keeps_provenance(
                     object_hint=f"{person}项目排期",
                     retention_reason="decision_made",
                     retention_detail=f"{person}形成项目排期确认结果。",
-                    workstream_name="项目排期工作流",
                     action_labels=[f"{person}确认"],
                     self_relations=["collaboration"],
                     evidence_fingerprints=[
@@ -556,7 +552,6 @@ def test_collected_merge_over_threshold_rolls_sources_and_keeps_provenance(
         == "__rolling_collected_merge_step_1.md"
     )
     rolling_event = analyzer.calls[1]["events"][0].event
-    assert rolling_event.workstream_name == "项目排期工作流"
     assert rolling_event.action_labels
     assert rolling_event.self_relations == ["collaboration"]
     assert len(rolling_event.evidence_fingerprints) == 3
@@ -587,7 +582,7 @@ def test_collected_merge_over_threshold_rolls_sources_and_keeps_provenance(
     assert "张三文档" in content
     assert "李四文档" in content
     assert "王五文档" in content
-    assert "- **工作流**: 项目排期工作流" in content
+    assert "- **工作流**:" not in content
     assert "- **协作方式**: 协作参与" in content
     assert any(
         warning.startswith("Using rolling collected merge:")
@@ -1107,7 +1102,6 @@ def test_collected_merge_prompt_includes_python_evidence_relations() -> None:
                     event_id="evt2",
                     title="项目甲方案补充",
                     content="补充确认项目甲方案。",
-                    workstream_name="项目甲",
                     evidence_fingerprints=[message_a, message_b],
                     file_keys=[file_a],
                 ),
@@ -1120,7 +1114,6 @@ def test_collected_merge_prompt_includes_python_evidence_relations() -> None:
                     event_id="evt1",
                     title="项目甲方案",
                     content="确认项目甲方案。",
-                    workstream_name="项目甲",
                     action_labels=["方案确认"],
                     self_relations=["initiated"],
                     evidence_fingerprints=[message_a, message_b, message_b],
@@ -1135,7 +1128,6 @@ def test_collected_merge_prompt_includes_python_evidence_relations() -> None:
                     event_id="evt3",
                     title="项目甲排期",
                     content="确认项目甲上线排期。",
-                    workstream_name="项目甲",
                     evidence_fingerprints=[message_a, message_c],
                 ),
             )
@@ -1151,7 +1143,7 @@ def test_collected_merge_prompt_includes_python_evidence_relations() -> None:
         item for item in payload["events"] if item["draft_id"] == "d1"
     )
 
-    assert event_payload["workstream_name"] == "项目甲"
+    assert "workstream_name" not in event_payload
     assert event_payload["action_labels"] == ["方案确认"]
     assert "self_relations" not in event_payload
     assert "evidence_fingerprints" not in event_payload
@@ -1276,39 +1268,6 @@ def test_collected_merge_prompt_handles_file_only_and_empty_evidence() -> None:
             "shared_count": 1,
         }
     ]
-
-
-def test_collected_merge_splits_different_named_workstreams() -> None:
-    source_events = [
-        CollectedSourceEvent("d1", "张三", "a.md", _event(
-            event_id="e1",
-            title="项目甲",
-            content="推进项目甲。",
-            workstream_name="项目甲",
-        )),
-        CollectedSourceEvent("d2", "李四", "b.md", _event(
-            event_id="e2",
-            title="项目乙",
-            content="推进项目乙。",
-            workstream_name="项目乙",
-        )),
-    ]
-    result, warnings = enforce_collected_workstream_boundaries(
-        CollectedMergeResult(
-            groups=[
-                CollectedMergeGroup(
-                    group_id="bad-group",
-                    draft_ids=["d1", "d2"],
-                    title="错误合并",
-                    content="错误合并内容。",
-                )
-            ]
-        ),
-        source_events,
-    )
-
-    assert [group.draft_ids for group in result.groups] == [["d1"], ["d2"]]
-    assert len(warnings) == 1
 
 
 def test_collected_merge_does_not_append_source_bodies_to_model_content(
@@ -1850,7 +1809,6 @@ def test_collected_merge_mixes_enhanced_legacy_and_upstream_sources(
                 event_id="evt-new",
                 title="新流程事项",
                 content="确认新流程事项。",
-                workstream_name="项目工作流",
                 self_relations=["collaboration"],
                 evidence_fingerprints=["sha256:" + "a" * 64],
             )
@@ -1923,7 +1881,6 @@ def test_collected_merge_trace_writes_step_summary(tmp_path: Path) -> None:
                 content="确认需求变更范围和上线排期。",
                 object_hint="需求变更范围和上线排期",
                 retention_detail="评审形成需求变更范围和上线排期结论。",
-                workstream_name="需求评审工作流",
                 action_labels=["范围确认"],
                 self_relations=["decision_confirmation"],
                 evidence_fingerprints=["sha256:" + "a" * 64],
@@ -1957,63 +1914,13 @@ def test_collected_merge_trace_writes_step_summary(tmp_path: Path) -> None:
     assert step["retained_metrics"]["event_count"] == 1
     assert len(step["input_events"]) == 1
     input_event = step["input_events"][0]["event"]
-    assert input_event["workstream_name"] == "需求评审工作流"
+    assert "workstream_name" not in input_event
     assert input_event["action_labels"] == ["范围确认"]
     assert input_event["self_relations"] == ["decision_confirmation"]
     assert input_event["evidence_fingerprints"] == ["sha256:" + "a" * 64]
     assert input_event["file_keys"] == ["sha256:" + "b" * 64]
     assert "sha256:" not in prompt_path.read_text(encoding="utf-8")
     assert step["deterministic_groups"] == []
-    assert step["boundary_warnings"] == []
-
-
-def test_collected_merge_trace_records_workstream_boundary_warnings(
-    tmp_path: Path,
-) -> None:
-    inbox = tmp_path / "merge_inbox" / "2026" / "06" / "29"
-    _write_day_doc(
-        inbox / "2026-06-29-张三.md",
-        [
-            _event(
-                event_id="evt-a",
-                title="项目甲推进",
-                content="推进项目甲。",
-                workstream_name="项目甲",
-            )
-        ],
-        tmp_path,
-    )
-    _write_day_doc(
-        inbox / "2026-06-29-李四.md",
-        [
-            _event(
-                event_id="evt-b",
-                title="项目乙推进",
-                content="推进项目乙。",
-                workstream_name="项目乙",
-            )
-        ],
-        tmp_path,
-    )
-    trace_root = tmp_path / "trace"
-
-    result = _build_runner(
-        tmp_path,
-        config=RuntimeConfig(
-            data_root=tmp_path / "data",
-            collected_merge_trace_enabled=True,
-            collected_merge_trace_root=trace_root,
-        ),
-    ).run("2026-06-29")
-
-    assert result.merged_event_count == 2
-    step = json.loads(
-        (trace_root / "2026-06-29" / "step-001.json").read_text(encoding="utf-8")
-    )
-    assert len(step["input_events"]) == 2
-    assert step["boundary_warnings"] == [
-        "Split collected merge group because different named workstreams cannot merge: g1."
-    ]
 
 
 def test_collected_merge_run_result_round_trips_outputs(tmp_path: Path) -> None:
@@ -2283,7 +2190,7 @@ def test_single_oversized_render_event_is_split_below_limit(tmp_path: Path) -> N
     assert all(item.event.source_event_ids == ["e1"] for item in shards)
 
 
-def test_two_stage_merge_combines_same_conversation_across_workstreams(
+def test_two_stage_merge_combines_same_conversation_when_model_confirms(
     tmp_path: Path,
 ) -> None:
     inbox = tmp_path / "merge_inbox" / "2026" / "06" / "29"
@@ -2295,7 +2202,6 @@ def test_two_stage_merge_combines_same_conversation_across_workstreams(
                 event_id="e1",
                 title="价格方案确认",
                 content="张三确认价格调整方案。",
-                workstream_name="经营策略",
                 evidence_fingerprints=["sha256:" + "a" * 64],
                 conversation_fingerprints=[conversation],
             )
@@ -2309,7 +2215,6 @@ def test_two_stage_merge_combines_same_conversation_across_workstreams(
                 event_id="e2",
                 title="客服执行反馈",
                 content="李四确认客服执行口径。",
-                workstream_name="客服运营",
                 evidence_fingerprints=["sha256:" + "b" * 64],
                 conversation_fingerprints=[conversation],
             )
@@ -2328,11 +2233,7 @@ def test_two_stage_merge_combines_same_conversation_across_workstreams(
     )
     assert set(output.events[0].source_people) == {"张三", "李四"}
     assert output.events[0].conversation_fingerprints == [conversation]
-    assert output.events[0].workstream_name == ""
-    assert any(
-        "Allowed collected merge across different named workstreams" in warning
-        for warning in result.warning_messages
-    )
+    assert "workstream_name" not in output.events[0].to_dict()
 
 
 def test_same_conversation_is_not_automatically_merged(tmp_path: Path) -> None:
@@ -2361,37 +2262,6 @@ def test_same_conversation_is_not_automatically_merged(tmp_path: Path) -> None:
     assert result.merged_event_count == 2
     assert len(analyzer.grouping_calls) == 1
     assert analyzer.merge_calls == []
-
-
-def test_workstream_conflict_without_thread_evidence_is_still_split(
-    tmp_path: Path,
-) -> None:
-    inbox = tmp_path / "merge_inbox" / "2026" / "06" / "29"
-    for index, (person, workstream) in enumerate(
-        (("张三", "项目甲"), ("李四", "项目乙")),
-        start=1,
-    ):
-        _write_day_doc(
-            inbox / f"2026-06-29-{person}.md",
-            [
-                _event(
-                    event_id=f"e{index}",
-                    title="共同标题",
-                    content=f"{person}处理事项。",
-                    workstream_name=workstream,
-                )
-            ],
-            tmp_path,
-        )
-    analyzer = TwoStageAnalyzer("all")
-
-    result = _build_runner(tmp_path, analyzer=analyzer).run("2026-06-29")
-
-    assert result.merged_event_count == 2
-    assert any(
-        "different named workstreams cannot merge" in warning
-        for warning in result.warning_messages
-    )
 
 
 def test_merge_collected_stops_before_analyzer_for_missing_conversation_evidence(
@@ -2905,41 +2775,30 @@ def test_high_risk_review_triggers_at_four_source_files(tmp_path: Path) -> None:
 
 def test_high_risk_review_reasons_follow_configured_conditions(tmp_path: Path) -> None:
     runner = _build_runner(tmp_path, analyzer=ReviewAnalyzer())
-    same_workstream = [
+    source_events = [
         CollectedSourceEvent("d1", "张三", "a.md", _event(
-            event_id="e1", title="事项", content="事实", workstream_name="项目A"
+            event_id="e1", title="事项", content="事实"
         )),
         CollectedSourceEvent("d2", "李四", "b.md", _event(
-            event_id="e2", title="事项", content="事实", workstream_name="项目A"
+            event_id="e2", title="事项", content="事实"
         )),
-    ]
-    conflict_workstream = [
-        same_workstream[0],
-        replace(
-            same_workstream[1],
-            event=replace(same_workstream[1].event, workstream_name="项目B"),
-        ),
     ]
 
     assert runner._collected_group_review_reasons(
         CollectedGroupingGroup("g1", ["d1", "d2"], risk_flags=["cross_batch"]),
-        same_workstream,
+        source_events,
     ) == ["cross_batch"]
     assert runner._collected_group_review_reasons(
         CollectedGroupingGroup("g2", ["d1", "d2"], was_repaired=True),
-        same_workstream,
+        source_events,
     ) == ["repaired_group"]
-    assert runner._collected_group_review_reasons(
-        CollectedGroupingGroup("g3", ["d1", "d2"]),
-        conflict_workstream,
-    ) == ["workstream_conflict"]
     assert runner._collected_group_review_reasons(
         CollectedGroupingGroup(
             "g4",
             ["d1", "d2"],
             risk_flags=["broad_object", "large_group"],
         ),
-        same_workstream,
+        source_events,
     ) == ["broad_object"]
     cross_batch_disabled = _build_runner(
         tmp_path,
@@ -2960,7 +2819,7 @@ def test_high_risk_review_reasons_follow_configured_conditions(tmp_path: Path) -
             risk_flags=["cross_batch"],
             was_repaired=False,
         ),
-        same_workstream,
+        source_events,
     ) == []
 
 

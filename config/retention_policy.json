@@ -4,7 +4,6 @@
     "retention_reasons": [
       "follow_up_assigned"
     ],
-    "require_empty_workstream": true,
     "require_no_referenced_files": true,
     "uncertain_policy": "drop"
   },
@@ -16,7 +15,7 @@
     "unsupported_policy": "drop"
   },
   "fact_review_rules": [
-    "标题、正文、主要动作、具体对象、保留依据和非空工作流中的每项事实都必须由原聊天中的真实消息直接支持。",
+    "标题、正文、主要动作、具体对象和保留依据中的每项事实都必须由原聊天中的真实消息直接支持。",
     "正文中可以分别核对的动作、对象、原因和结果应拆成不同 fact_items，再按正文顺序直接连接，不能用一个笼统证据项代替多项事实。",
     "对比案例、举例和历史背景不能写成当前实际处理对象，除非原聊天明确说明本次也对其进行了处理。",
     "地点、设备、人员、数量和处理结果必须保持原聊天中的对应关系，不能把不同消息里的信息互换或拼接。",

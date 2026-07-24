@@ -125,7 +125,6 @@ def _review_result() -> PersonalFactReviewResult:
                 action_label=candidate.action_label,
                 object_hint=candidate.object_hint,
                 retention_detail=candidate.retention_detail,
-                workstream_key="",
                 fact_items=candidate.fact_items,
                 removed_claims=[
                     "将对比地区写成实际处理对象",

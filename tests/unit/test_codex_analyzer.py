@@ -182,7 +182,6 @@ def test_codex_analyzer_uses_personal_fact_review_protocol(
                         "action_label": {"text": "", "evidence_message_ids": []},
                         "object_hint": {"text": "", "evidence_message_ids": []},
                         "retention_detail": {"text": "", "evidence_message_ids": []},
-                        "workstream_key": {"text": "", "evidence_message_ids": []},
                     },
                     "removed_claims": ["原候选没有消息证据"],
                 }

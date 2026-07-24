@@ -54,7 +54,6 @@ def batch_output_schema(config: RuntimeConfig | None = None) -> dict[str, object
                             "items": {"type": "string"},
                         },
                         "self_relations": _self_relations_schema(runtime_config),
-                        "workstream_key": {"type": "string"},
                         "source_message_ids": {
                             "type": "array",
                             "items": {"type": "string"},
@@ -72,7 +71,6 @@ def batch_output_schema(config: RuntimeConfig | None = None) -> dict[str, object
                         "referenced_attachment_ids",
                         "self_evidence_message_ids",
                         "self_relations",
-                        "workstream_key",
                         "source_message_ids",
                         "fact_items",
                         "fact_risk_flags",
@@ -299,7 +297,6 @@ def _segment_candidate_schema(config: RuntimeConfig) -> dict[str, object]:
                 "items": {"type": "string"},
             },
             "self_relations": _self_relations_schema(config),
-            "workstream_key": {"type": "string"},
             "source_message_ids": {
                 "type": "array",
                 "items": {"type": "string"},
@@ -317,7 +314,6 @@ def _segment_candidate_schema(config: RuntimeConfig) -> dict[str, object]:
             "referenced_attachment_ids",
             "self_evidence_message_ids",
             "self_relations",
-            "workstream_key",
             "source_message_ids",
             "fact_items",
             "fact_risk_flags",
@@ -349,7 +345,6 @@ def _personal_fact_review_items_schema(
         "action_label",
         "object_hint",
         "retention_detail",
-        "workstream_key",
     )
     return {
         "type": "object",
@@ -453,7 +448,6 @@ def anchor_batch_output_schema(config: RuntimeConfig | None = None) -> dict[str,
                                             "self_relations": _self_relations_schema(
                                                 runtime_config
                                             ),
-                                            "workstream_key": {"type": "string"},
                                             "source_message_ids": {
                                                 "type": "array",
                                                 "items": {"type": "string"},
@@ -471,7 +465,6 @@ def anchor_batch_output_schema(config: RuntimeConfig | None = None) -> dict[str,
                                             "referenced_attachment_ids",
                                             "self_evidence_message_ids",
                                             "self_relations",
-                                            "workstream_key",
                                             "source_message_ids",
                                             "fact_items",
                                             "fact_risk_flags",
@@ -591,7 +584,6 @@ def _personal_fact_items_schema() -> dict[str, object]:
                         "action_label",
                         "object_hint",
                         "retention_detail",
-                        "workstream_key",
                     ],
                 },
                 "text": {"type": "string"},
@@ -615,51 +607,28 @@ def merge_output_schema() -> dict[str, object]:
                 "items": {
                     "type": "object",
                     "properties": {
-                        "group_id": {"type": "string"},
                         "draft_ids": {
                             "type": "array",
                             "items": {"type": "string"},
                         },
                         "primary_draft_id": {"type": "string"},
-                    },
-                    "required": ["group_id", "draft_ids", "primary_draft_id"],
-                    "additionalProperties": False,
-                },
-            },
-        },
-        "required": ["groups"],
-        "additionalProperties": False,
-    }
-
-
-def workstream_assignment_output_schema() -> dict[str, object]:
-    return {
-        "type": "object",
-        "properties": {
-            "assignments": {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "draft_id": {"type": "string"},
-                        "parent_draft_id": {"type": "string"},
-                        "root_workstream_name": {"type": "string"},
+                        "merge_reason": {"type": "string"},
                         "evidence_message_ids": {
                             "type": "array",
                             "items": {"type": "string"},
                         },
                     },
                     "required": [
-                        "draft_id",
-                        "parent_draft_id",
-                        "root_workstream_name",
+                        "draft_ids",
+                        "primary_draft_id",
+                        "merge_reason",
                         "evidence_message_ids",
                     ],
                     "additionalProperties": False,
                 },
             },
         },
-        "required": ["assignments"],
+        "required": ["groups"],
         "additionalProperties": False,
     }
 
@@ -705,7 +674,6 @@ def collected_grouping_output_schema(
                                 "type": "string",
                                 "enum": [
                                     "cross_batch",
-                                    "workstream_conflict",
                                     "broad_object",
                                     "large_group",
                                 ],
@@ -744,7 +712,6 @@ def collected_grouping_function_schema(
     ]
     risk_flags = [
         "cross_batch",
-        "workstream_conflict",
         "broad_object",
         "large_group",
     ]

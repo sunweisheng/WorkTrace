@@ -214,10 +214,14 @@ class SegmentBatchAnalyzer:
             ]
         )
 
-    def merge_day_candidates(self, target_date, candidates):
+    def merge_day_candidates(self, target_date, candidates, *, validation_feedback=""):
         return CrossConversationGroupResult(
             groups=[
-                CrossConversationGroup(group_id=item.draft_id, draft_ids=[item.draft_id])
+                CrossConversationGroup(
+                    group_id=item.draft_id,
+                    draft_ids=[item.draft_id],
+                    primary_draft_id=item.draft_id,
+                )
                 for item in candidates
             ]
         )
@@ -614,10 +618,14 @@ def test_runner_limits_parallel_segmentation_and_waits_for_its_phase(
                 ]
             )
 
-        def merge_day_candidates(self, target_date, candidates):
+        def merge_day_candidates(self, target_date, candidates, *, validation_feedback=""):
             return CrossConversationGroupResult(
                 groups=[
-                    CrossConversationGroup(group_id=item.draft_id, draft_ids=[item.draft_id])
+                        CrossConversationGroup(
+                            group_id=item.draft_id,
+                            draft_ids=[item.draft_id],
+                            primary_draft_id=item.draft_id,
+                        )
                     for item in candidates
                 ]
             )
@@ -709,10 +717,14 @@ def test_runner_prioritizes_larger_inputs_for_segmentation_and_event_extraction(
                 ]
             )
 
-        def merge_day_candidates(self, target_date, candidates):
+        def merge_day_candidates(self, target_date, candidates, *, validation_feedback=""):
             return CrossConversationGroupResult(
                 groups=[
-                    CrossConversationGroup(group_id=item.draft_id, draft_ids=[item.draft_id])
+                        CrossConversationGroup(
+                            group_id=item.draft_id,
+                            draft_ids=[item.draft_id],
+                            primary_draft_id=item.draft_id,
+                        )
                     for item in candidates
                 ]
             )
@@ -833,7 +845,7 @@ def test_runner_resegments_only_the_context_requesting_turn(tmp_path: Path) -> N
                 ]
             )
 
-        def merge_day_candidates(self, target_date, candidates):
+        def merge_day_candidates(self, target_date, candidates, *, validation_feedback=""):
             raise AssertionError("One candidate should not need day merge.")
 
     config = _config(data_root=tmp_path / "data")
@@ -1074,7 +1086,7 @@ def test_cross_conversation_merge_reconciles_token_limited_batches(
         def __init__(self) -> None:
             self.calls: list[list[SourceBackedEventDraft]] = []
 
-        def merge_day_candidates(self, target_date, batch):
+        def merge_day_candidates(self, target_date, batch, *, validation_feedback=""):
             self.calls.append(list(batch))
             if all(item.draft_id.startswith("__cross_batch_summary_") for item in batch):
                 return CrossConversationGroupResult(
@@ -1083,6 +1095,8 @@ def test_cross_conversation_merge_reconciles_token_limited_batches(
                             group_id="summary-group",
                             draft_ids=[item.draft_id for item in batch],
                             primary_draft_id=batch[0].draft_id,
+                            merge_reason="同一事项的跨批连续记录。",
+                            evidence_message_ids=[batch[0].source_message_ids[0]],
                         )
                     ]
                 )
@@ -1113,7 +1127,14 @@ def test_cross_conversation_merge_reconciles_token_limited_batches(
         ),
     )
 
-    result, warnings = runner._merge_day_candidates_with_batching(
+    (
+        result,
+        warnings,
+        attempts,
+        retries,
+        codex_count,
+        repair_count,
+    ) = runner._merge_day_candidates_with_batching(
         "2026-07-10",
         candidates,
     )
@@ -1125,6 +1146,8 @@ def test_cross_conversation_merge_reconciles_token_limited_batches(
     )
     assert result.groups[0].draft_ids == [item.draft_id for item in candidates]
     assert warnings == []
+    assert attempts
+    assert (retries, codex_count, repair_count) == (0, 0, 0)
 
 
 def test_runner_retries_failed_batch_then_degrades_to_individual_segments(
@@ -1910,7 +1933,7 @@ def test_anchor_fallback_retries_only_context_requesting_anchor(tmp_path: Path) 
                 results=[BatchAnchorAnalysisItem(unit.anchor_unit_id, analysis)]
             )
 
-        def merge_day_candidates(self, target_date, candidates):
+        def merge_day_candidates(self, target_date, candidates, *, validation_feedback=""):
             raise AssertionError("One fallback candidate does not need day merge.")
 
     config = _config(data_root=tmp_path / "data", anchor_retry_limit=1)

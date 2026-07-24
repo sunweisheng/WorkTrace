@@ -271,10 +271,8 @@ def test_event_models_default_referenced_link_ids_are_empty() -> None:
     assert draft.self_relations == []
     assert draft.fact_items == []
     assert draft.fact_risk_flags == []
-    assert merged.workstream_name == ""
     assert merged.action_labels == []
     assert merged.self_relations == []
-    assert event.workstream_name == ""
     assert event.action_labels == []
     assert event.self_relations == []
     assert event.evidence_fingerprints == []

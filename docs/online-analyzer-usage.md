@@ -19,9 +19,8 @@ runner / collected_merge
 - 个人事实局部复核
 - 旧批处理兼容
 - 锚点批量回退
-- 全日跨会话分组
+- 全日候选分组与强关联局部复核
 - 多人 Markdown 合并
-- 辅助的结构化工作流归属请求
 
 图片摘要复用同一套模型地址、模型名、API Key、timeout、stream 和 reasoning effort，但由 `OnlineImageSummarizer` 单独发起普通文字/图片理解请求，不强制 Function Calling。`WORKTRACE_LLM_TLS_VERIFY` 只控制 preflight 和文本 analyzer；图片请求保持 OpenAI SDK 自身的证书校验默认行为。
 
@@ -57,16 +56,16 @@ WORKTRACE_LLM_TLS_VERIFY=false
 
 在线文字请求不等待。可切换的在线失败按 `online_request_retry_limit=1` 只对当前请求再试 Online 1 次，仍失败才切到 Codex；下一请求仍先使用在线线路。Codex 的 `0-1` 秒调用间隔在 `config/llm_retry.json` 配置。图片摘要不使用 Codex 备用线路。
 
-模型调用的请求级重试、结果质量重试、流式首次返回超时、Codex 间隔和并发数不在 `.env` 中配置，而由 `config/llm_retry.json` 管理。当前 Online 请求级配置值 `1` 表示首次失败后最多再试 1 次；话题切分允许 3 个并发请求，事件提炼允许 5 个，个人事实复核和多人高风险复核各允许 3 个；同一会话的话题切分和同一事实复核候选的重试仍保持顺序。分段和提炼的配置值 `3` 均表示首次调用之外最多再重试 3 次。
+模型调用的请求级重试、结果质量重试、流式首次返回超时、Codex 间隔和并发数不在 `.env` 中配置，而由 `config/llm_retry.json` 管理。当前 Online 请求级配置值 `1` 表示首次失败后最多再试 1 次；话题切分允许 3 个并发请求，事件提炼允许 5 个，个人事实复核、强关联局部复核和多人高风险复核各允许 3 个；同一会话的话题切分、同一事实复核候选和同一分组复核组件的重试仍保持顺序。分段和提炼的配置值 `3` 均表示首次调用之外最多再重试 3 次；`day_group_validation_retry_limit=1` 表示全日分组或局部复核结果非法时带具体错误再试 Online 1 次。
 
 ## 3. 请求规则
 
-固定结构的正式文本请求统一使用任务专用 `FunctionCallSpec`。会话分段、事件提炼、保留复核、事实复核、跨会话分组、工作流归属、多人候选分组、高风险复核、正式内容生成、表情元数据补全和 preflight 分别使用自己的函数名与参数结构。每个参数结构都会：
+固定结构的正式文本请求统一使用任务专用 `FunctionCallSpec`。会话分段、事件提炼、保留复核、事实复核、全日分组、强关联局部复核、多人候选分组、高风险复核、正式内容生成、表情元数据补全和 preflight 分别使用自己的函数名与参数结构。每个参数结构都会：
 
 - prompt 追加 `/no_think`
 - 当 reasoning 配置为 `none` 时发送 `reasoning={"effort":"none"}`
 - 使用 `strict:true`，通过 `tool_choice` 强制调用当前预期 Function，并关闭并行 Function 调用
-- 按当前请求动态枚举 `draft_id`、`segment_id`、消息 ID、附件 ID、链接 ID、工作流 ID 和证据编号
+- 按当前请求动态枚举 `draft_id`、`segment_id`、消息 ID、附件 ID、链接 ID 和证据编号
 - 完整声明 `required`、`additionalProperties:false`、数组最小/最大数量和去重约束
 - 在 prompt 中提供基于当前合法 ID 的典型 Function 参数示例，不再重复嵌入输出结构说明
 - 个人事实复核每次只发送一个候选；参数结构固定唯一 `draft_id`，并枚举当前候选允许引用的证据消息 ID
@@ -95,6 +94,8 @@ input_estimated_tokens = max(online_estimate, codex_estimate)
 Online 固定结构解析器只接受预期 Function 的 `arguments`。非流式响应缺少 Function、调用错误 Function 或包含多个 Function 调用都会作为协议错误；流式响应按调用 ID 聚合参数后执行相同检查。参数 JSON 解析完成后，Python 继续校验遗漏、重复、枚举、跨字段关系、证据合法性和来源覆盖。
 
 结果质量校验失败时，只重试当前批次或候选，并在当前 prompt 中加入具体错误码、字段位置、组 ID 和相关编号。加入错误反馈后重新估算；因此超出 5200 时标记为 `oversized_retry` 后仍发送当前请求。达到重试上限后才执行该阶段既有的失败或安全保留策略，不能先静默修补非法证据或来源遗漏。
+
+全日分组的结果质量边界单独处理：Online 非法结果带 Python 具体错误重试 1 次，再交给 Codex 当前请求备用 1 次。Codex 技术调用失败时终止生成；Codex 成功返回但仍非法时，Python 保留完全合法组，其余候选拆成单例并记录 warning。强关联局部复核失败或持续非法时保留复核前分组并记录 warning。下一请求仍优先 Online。
 
 ## 5. Preflight
 
@@ -136,3 +137,5 @@ runner 通过 analyzer 是否具备分段接口选择执行路径：当前 Onlin
 `--debug-output` 生成的 `llm_usage.json` 按 `request_kind` 保存每次成功响应的耗时、输入字符数、输入估算、分批目标、超限标记和 provider 返回的 token。多人 trace 进一步保存 Online/Codex/最终估算、Function 名、去敏定义、证据编号、Python 校验结果、实际输入 token 和估算差值。`scripts/replay_day_with_trace.py` 将调用数据汇总到 `summary.json` 的 `llm_usage_summary`，`scripts/report_replay_timings.py` 优先读取该结构，不再从日志顺序猜测调用类型。
 
 个人事实复核并发时，`personal_fact_review` 表示各候选从首次调用到内部重试结束的耗时，求和后会大于实际运行时间；`personal_fact_review_all` 表示整个并发阶段的墙钟耗时。分析主要耗时时应使用 `personal_fact_review_all`，各候选累计值只用于判断模型调用总负载。
+
+全日分组中，`day_candidate_merge` 和 `day_group_review` 分别表示初始分组和局部复核的请求累计耗时；并发局部复核的实际耗时看 `day_group_review_all`，整个分组阶段看 `merge_day_candidates`。`scripts/report_replay_timings.py --baseline-trace-root <旧 trace>` 会由 Python 计算前后差值，不把并发请求耗时相加成实际运行时间。

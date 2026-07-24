@@ -163,7 +163,6 @@ def _personal_fact_review_text_fields(
         "action_label",
         "object_hint",
         "retention_detail",
-        "workstream_key",
     )
     values: dict[str, str] = {}
     for field_name in field_names:
@@ -185,7 +184,6 @@ def _normalize_personal_fact_review_items(
         "action_label",
         "object_hint",
         "retention_detail",
-        "workstream_key",
     )
     if set(payload) != set(field_names):
         raise ValueError("Personal fact review fields do not match the contract.")

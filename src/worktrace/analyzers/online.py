@@ -668,8 +668,15 @@ class OnlineLLMAnalyzer(Analyzer):
         self,
         target_date: str,
         candidates: list[SourceBackedEventDraft],
+        *,
+        validation_feedback: str = "",
     ) -> str:
-        return build_merge_prompt(target_date, candidates)
+        return build_merge_prompt(
+            target_date,
+            candidates,
+            config=self.config,
+            validation_feedback=validation_feedback,
+        )
 
     def analyze_anchor_batch(
         self,
@@ -698,9 +705,15 @@ class OnlineLLMAnalyzer(Analyzer):
         self,
         target_date: str,
         candidates: list[SourceBackedEventDraft],
+        *,
+        validation_feedback: str = "",
     ) -> CrossConversationGroupResult:
         payload = self._invoke_online(
-            build_merge_prompt(target_date, candidates),
+            self.build_merge_prompt(
+                target_date,
+                candidates,
+                validation_feedback=validation_feedback,
+            ),
             function_spec=task_function_call_spec(
                 "day_candidate_merge",
                 merge_output_schema(),

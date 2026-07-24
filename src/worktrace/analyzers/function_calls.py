@@ -41,13 +41,9 @@ _FUNCTION_METADATA = {
         "submit_day_candidate_groups",
         "提交同一天候选事件的跨会话分组结果。",
     ),
-    "workstream_assignment": (
-        "submit_workstream_assignments",
-        "提交候选事件的工作流归属结果。",
-    ),
-    "unassigned_workstream_assignment": (
-        "submit_unassigned_workstream_assignments",
-        "提交未归属候选的工作流复核结果。",
+    "day_group_review": (
+        "submit_day_group_review",
+        "提交存在强关联的个人事件组局部复核结果。",
     ),
     "collected_candidate_grouping": (
         "submit_collected_grouping_result",
@@ -243,7 +239,6 @@ def task_function_call_spec(
     message_ids: Sequence[str] = (),
     attachment_ids: Sequence[str] = (),
     link_ids: Sequence[str] = (),
-    workflow_ids: Sequence[str] = (),
     result_count: int | None = None,
     exact_array_lengths: Mapping[str, int] | None = None,
     enum_values: Mapping[str, Sequence[str]] | None = None,
@@ -255,7 +250,6 @@ def task_function_call_spec(
         "covered_draft_ids": draft_ids,
         "source_draft_ids": draft_ids,
         "primary_draft_id": draft_ids,
-        "parent_draft_id": draft_ids,
         "segment_id": segment_ids,
         "anchor_unit_id": anchor_unit_ids,
         "segment_start_message_ids": message_ids,
@@ -267,7 +261,6 @@ def task_function_call_spec(
         "target_attachment_ids": attachment_ids,
         "referenced_link_ids": link_ids,
         "target_link_ids": link_ids,
-        "workflow_id": workflow_ids,
         **dict(enum_values or {}),
     }
     lengths = dict(exact_array_lengths or {})

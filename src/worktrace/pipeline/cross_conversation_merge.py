@@ -3,66 +3,7 @@ from __future__ import annotations
 from ..models import CrossConversationGroup, MergedEventDraft, SourceBackedEventDraft
 from .retention_filter import derive_retention_metadata_from_sources
 from ..utils.link_refs import sort_referenced_link_ids
-from ..utils.text import choose_preferred_text, clean_text, merge_content_texts
-
-
-def consolidate_workstream_groups(
-    groups: list[CrossConversationGroup],
-    candidates: list[SourceBackedEventDraft],
-) -> tuple[list[CrossConversationGroup], list[str]]:
-    candidate_by_id = {candidate.draft_id: candidate for candidate in candidates}
-    groups_by_key: dict[str, list[str]] = {}
-    standalone_ids: list[str] = []
-
-    for candidate in candidates:
-        key = "".join(clean_text(candidate.workstream_key).casefold().split())
-        if key:
-            groups_by_key.setdefault(key, []).append(candidate.draft_id)
-        else:
-            standalone_ids.append(candidate.draft_id)
-
-    consolidated = [
-        CrossConversationGroup(
-            group_id=f"workstream-{key}",
-            draft_ids=draft_ids,
-            primary_draft_id=_select_primary_draft_id(
-                draft_ids,
-                candidate_by_id,
-            ),
-            workstream_name=next(
-                (
-                    candidate_by_id[draft_id].workstream_key.strip()
-                    for draft_id in draft_ids
-                    if candidate_by_id[draft_id].workstream_key.strip()
-                ),
-                "",
-            ),
-        )
-        for key, draft_ids in groups_by_key.items()
-    ]
-    consolidated.extend(
-        CrossConversationGroup(
-            group_id=f"standalone-{draft_id}",
-            draft_ids=[draft_id],
-            primary_draft_id=draft_id,
-            workstream_name=candidate_by_id[draft_id].workstream_key.strip(),
-        )
-        for draft_id in standalone_ids
-    )
-    return consolidated, []
-
-
-def _select_primary_draft_id(
-    draft_ids: list[str],
-    candidate_by_id: dict[str, SourceBackedEventDraft],
-) -> str:
-    for draft_id in draft_ids:
-        candidate = candidate_by_id[draft_id]
-        if candidate.workstream_key and candidate.workstream_key.casefold() in (
-            f"{candidate.topic} {candidate.object_hint}".casefold()
-        ):
-            return draft_id
-    return draft_ids[0] if draft_ids else ""
+from ..utils.text import choose_preferred_text, merge_content_texts
 
 
 def materialize_grouped_merged_drafts(
@@ -108,7 +49,6 @@ def materialize_grouped_merged_drafts(
                 object_hint=primary.object_hint or object_hint,
                 retention_reason=retention_reason,
                 retention_detail=retention_detail,
-                workstream_name=group.workstream_name.strip(),
                 action_labels=list(
                     dict.fromkeys(
                         item.action_label.strip()

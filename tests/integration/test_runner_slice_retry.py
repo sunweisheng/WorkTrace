@@ -126,7 +126,7 @@ class RetryAnalyzer:
             context_requests=[],
         )
 
-    def merge_day_candidates(self, target_date, candidates):
+    def merge_day_candidates(self, target_date, candidates, *, validation_feedback=""):
         return CrossConversationGroupResult(
             groups=[CrossConversationGroup(group_id="g1", draft_ids=["d1"])]
         )

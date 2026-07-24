@@ -1,13 +1,11 @@
 from __future__ import annotations
 
 import json
-from dataclasses import asdict
 from pathlib import Path
 
 import pytest
 
 from src.worktrace.config import (
-    DEFAULT_COLLECTED_GROUP_REASON_DEFINITIONS,
     RuntimeConfig,
     load_conversation_blacklist_overrides,
     load_runtime_config_overrides,
@@ -220,12 +218,14 @@ def test_load_runtime_config_overrides_reads_llm_retry_settings(tmp_path: Path) 
         json.dumps(
             {
                 "online_request_retry_limit": 2,
+                "day_group_validation_retry_limit": 1,
                 "segmentation_retry_limit": 5,
                 "event_extraction_retry_limit": 6,
                 "stream_first_response_timeout_seconds": 61,
                 "max_concurrent_llm_requests": 3,
                 "max_concurrent_event_extraction_requests": 5,
                 "max_concurrent_personal_fact_review_requests": 3,
+                "max_concurrent_day_group_review_requests": 2,
                 "codex_request_interval_min_seconds": 0,
                 "codex_request_interval_max_seconds": 1,
                 "max_concurrent_collected_merge_review_requests": 3,
@@ -237,12 +237,14 @@ def test_load_runtime_config_overrides_reads_llm_retry_settings(tmp_path: Path) 
     config = load_runtime_config_overrides(RuntimeConfig(), cwd=tmp_path)
 
     assert config.online_request_retry_limit == 2
+    assert config.day_group_validation_retry_limit == 1
     assert config.anchor_retry_limit == 5
     assert config.analysis_batch_retry_limit == 6
     assert config.stream_first_response_timeout_seconds == 61
     assert config.max_concurrent_llm_requests == 3
     assert config.max_concurrent_event_extraction_requests == 5
     assert config.max_concurrent_personal_fact_review_requests == 3
+    assert config.max_concurrent_day_group_review_requests == 2
     assert config.codex_request_interval_min_seconds == 0
     assert config.codex_request_interval_max_seconds == 1
     assert config.max_concurrent_collected_merge_review_requests == 3
@@ -321,14 +323,9 @@ def test_load_runtime_config_overrides_reads_collected_merge_review_config(
                 "high_risk_source_file_count": 5,
                 "review_cross_batch_groups": False,
                 "review_repaired_groups": True,
-                "review_workstream_conflicts": False,
                 "review_same_conversation_only_groups": True,
                 "review_semantic_only_object_conflicts": False,
                 "review_broad_object_groups": False,
-                "group_reason_definitions": [
-                    asdict(item)
-                    for item in DEFAULT_COLLECTED_GROUP_REASON_DEFINITIONS
-                ],
             }
         ),
         encoding="utf-8",
@@ -341,7 +338,6 @@ def test_load_runtime_config_overrides_reads_collected_merge_review_config(
     assert config.high_risk_source_file_count == 5
     assert config.review_cross_batch_groups is False
     assert config.review_repaired_groups is True
-    assert config.review_workstream_conflicts is False
     assert config.review_same_conversation_only_groups is True
     assert config.review_semantic_only_object_conflicts is False
     assert config.review_broad_object_groups is False
@@ -360,11 +356,15 @@ def test_repo_collected_merge_config_matches_review_defaults() -> None:
     assert payload["high_risk_source_file_count"] == 4
     assert payload["review_cross_batch_groups"] is True
     assert payload["review_repaired_groups"] is True
-    assert payload["review_workstream_conflicts"] is True
     assert payload["review_same_conversation_only_groups"] is True
     assert payload["review_semantic_only_object_conflicts"] is True
     assert payload["review_broad_object_groups"] is True
-    definitions = {item["key"]: item for item in payload["group_reason_definitions"]}
+    grouping_payload = json.loads(
+        Path("config/event_grouping.json").read_text(encoding="utf-8")
+    )
+    definitions = {
+        item["key"]: item for item in grouping_payload["group_reason_definitions"]
+    }
     assert definitions["same_object"]["acceptance_rules"]
     assert definitions["same_object"]["rejection_rules"]
     assert definitions["continuous_action"]["acceptance_rules"]
@@ -381,8 +381,9 @@ def test_repo_collected_merge_config_matches_review_defaults() -> None:
             "high_risk_source_file_count": 4,
             "review_cross_batch_groups": True,
             "review_repaired_groups": True,
-            "review_workstream_conflicts": True,
             "review_same_conversation_only_groups": True,
+            "review_semantic_only_object_conflicts": True,
+            "review_broad_object_groups": True,
         },
         {
             "high_risk_review_enabled": "yes",
@@ -390,7 +391,9 @@ def test_repo_collected_merge_config_matches_review_defaults() -> None:
             "high_risk_source_file_count": 4,
             "review_cross_batch_groups": True,
             "review_repaired_groups": True,
-            "review_workstream_conflicts": True,
+            "review_same_conversation_only_groups": True,
+            "review_semantic_only_object_conflicts": True,
+            "review_broad_object_groups": True,
         },
     ],
 )
@@ -445,7 +448,6 @@ def test_repo_retention_policy_is_loaded_from_config() -> None:
 
     assert policy.review_enabled is True
     assert policy.review_retention_reasons == ("follow_up_assigned",)
-    assert policy.require_empty_workstream is True
     assert policy.require_no_referenced_files is True
     assert policy.uncertain_policy == "drop"
     assert policy.fact_review_enabled is True
@@ -557,12 +559,14 @@ def test_load_runtime_config_overrides_rejects_invalid_codex_interval(tmp_path: 
         json.dumps(
             {
                 "online_request_retry_limit": 1,
+                "day_group_validation_retry_limit": 1,
                 "segmentation_retry_limit": 3,
                 "event_extraction_retry_limit": 3,
                 "stream_first_response_timeout_seconds": 60,
                 "max_concurrent_llm_requests": 3,
                 "max_concurrent_event_extraction_requests": 5,
                 "max_concurrent_personal_fact_review_requests": 3,
+                "max_concurrent_day_group_review_requests": 3,
                 "codex_request_interval_min_seconds": 2,
                 "codex_request_interval_max_seconds": 1,
                 "max_concurrent_collected_merge_review_requests": 3,
@@ -584,12 +588,14 @@ def test_load_runtime_config_overrides_rejects_invalid_online_retry_limit(
         json.dumps(
             {
                 "online_request_retry_limit": -1,
+                "day_group_validation_retry_limit": 1,
                 "segmentation_retry_limit": 3,
                 "event_extraction_retry_limit": 3,
                 "stream_first_response_timeout_seconds": 60,
                 "max_concurrent_llm_requests": 3,
                 "max_concurrent_event_extraction_requests": 5,
                 "max_concurrent_personal_fact_review_requests": 3,
+                "max_concurrent_day_group_review_requests": 3,
                 "codex_request_interval_min_seconds": 0,
                 "codex_request_interval_max_seconds": 1,
                 "max_concurrent_collected_merge_review_requests": 3,

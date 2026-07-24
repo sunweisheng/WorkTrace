@@ -294,9 +294,9 @@ def _merge_records(
 ) -> list[CallInputRecord]:
     merge_root = debug_root / "_merge_day_candidates"
     definitions = [
-        ("input.json", "全日事件合并", "将不同会话的候选事件合并为同一工作事项。"),
-        ("workstream_resolution_input.json", "工作流归属", "为候选事件确定所属工作流和父子关系。"),
-        ("workstream_resolution_followup_input.json", "未归属事项复核", "为第一次未归属的候选事件补充既有工作流归属。"),
+        ("input.json", "全日初始分组", "将全天候选事件按实际事项分组。"),
+        ("workstream_resolution_input.json", "旧版工作流归属", "读取旧 trace 中的工作流归属调用输入。"),
+        ("workstream_resolution_followup_input.json", "旧版工作流归属（未归属复核）", "读取旧 trace 中的未归属事项复核输入。"),
     ]
     records: list[CallInputRecord] = []
     for filename, category, purpose in definitions:
@@ -315,6 +315,83 @@ def _merge_records(
                 source_path=path,
                 item_count=count,
                 time_range="全天候选事项",
+                content_summary=content_summary,
+            )
+        )
+    return records
+
+
+def _day_group_review_records(
+    debug_root: Path,
+    *,
+    max_excerpts: int,
+    max_chars: int,
+) -> list[CallInputRecord]:
+    merge_root = debug_root / "_merge_day_candidates"
+    review_path = merge_root / "day_group_review.json"
+    input_path = merge_root / "input.json"
+    if not review_path.exists():
+        return []
+
+    input_payload = _load_json(input_path) if input_path.exists() else {}
+    raw_candidates = input_payload.get("candidates", [])
+    candidates = (
+        [item for item in raw_candidates if isinstance(item, dict)]
+        if isinstance(raw_candidates, list)
+        else []
+    )
+    candidate_by_id = {
+        str(item.get("draft_id", "")): item
+        for item in candidates
+        if str(item.get("draft_id", ""))
+    }
+    payload = _load_json(review_path)
+    raw_attempts = payload.get("attempts", [])
+    attempts = (
+        [item for item in raw_attempts if isinstance(item, dict)]
+        if isinstance(raw_attempts, list)
+        else []
+    )
+    records: list[CallInputRecord] = []
+    for attempt in attempts:
+        attempt_input = attempt.get("input", {})
+        candidate_ids = (
+            [str(item) for item in attempt_input.get("candidate_draft_ids", [])]
+            if isinstance(attempt_input, dict)
+            and isinstance(attempt_input.get("candidate_draft_ids"), list)
+            else []
+        )
+        selected_candidates = [
+            candidate_by_id[draft_id]
+            for draft_id in candidate_ids
+            if draft_id in candidate_by_id
+        ]
+        count, content_summary = _candidate_summary(
+            {"candidates": selected_candidates},
+            max_excerpts=max_excerpts,
+            max_chars=max_chars,
+        )
+        if not selected_candidates:
+            count = len(candidate_ids)
+            content_summary = (
+                f"候选 ID：{', '.join(candidate_ids)}"
+                if candidate_ids
+                else "旧版或不完整 trace 未记录复核候选。"
+            )
+        component_id = str(attempt.get("component_id", "unknown"))
+        attempt_number = int(attempt.get("attempt", 0) or 0)
+        status = str(attempt.get("status", "unknown"))
+        backend = str(attempt.get("backend", "unknown"))
+        records.append(
+            CallInputRecord(
+                category=(
+                    f"强关联局部复核（{component_id}，第 {attempt_number} 次，"
+                    f"{backend}/{status}）"
+                ),
+                purpose="判断强关联跨组候选是否属于同一实际事项，且不拆散已有合法组。",
+                source_path=review_path,
+                item_count=count,
+                time_range="当前强关联组件",
                 content_summary=content_summary,
             )
         )
@@ -411,6 +488,11 @@ def main(argv: list[str] | None = None) -> int:
             max_chars=args.max_excerpt_chars,
         ),
         *_merge_records(
+            debug_root,
+            max_excerpts=args.max_message_excerpts,
+            max_chars=args.max_excerpt_chars,
+        ),
+        *_day_group_review_records(
             debug_root,
             max_excerpts=args.max_message_excerpts,
             max_chars=args.max_excerpt_chars,

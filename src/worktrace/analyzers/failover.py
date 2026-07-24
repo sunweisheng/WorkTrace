@@ -237,9 +237,17 @@ class FailoverAnalyzer(Analyzer):
         return self.primary.build_batch_prompt(batch_input)
 
     def build_merge_prompt(
-        self, target_date: str, candidates: list[SourceBackedEventDraft]
+        self,
+        target_date: str,
+        candidates: list[SourceBackedEventDraft],
+        *,
+        validation_feedback: str = "",
     ) -> str:
-        return self.primary.build_merge_prompt(target_date, candidates)
+        return self.primary.build_merge_prompt(
+            target_date,
+            candidates,
+            validation_feedback=validation_feedback,
+        )
 
     def analyze_batch(
         self, target_date: str, batch_input: AnalysisBatch
@@ -252,9 +260,18 @@ class FailoverAnalyzer(Analyzer):
         return self._call("analyze_anchor_batch", target_date, anchor_units)
 
     def merge_day_candidates(
-        self, target_date: str, candidates: list[SourceBackedEventDraft]
+        self,
+        target_date: str,
+        candidates: list[SourceBackedEventDraft],
+        *,
+        validation_feedback: str = "",
     ) -> CrossConversationGroupResult:
-        return self._call("merge_day_candidates", target_date, candidates)
+        return self._call(
+            "merge_day_candidates",
+            target_date,
+            candidates,
+            validation_feedback=validation_feedback,
+        )
 
     def merge_collected_events(
         self,

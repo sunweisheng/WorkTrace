@@ -2,638 +2,423 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from threading import Lock
+from time import sleep
 
+import pytest
+
+import src.worktrace.runner as runner_module
 from src.worktrace.config import RuntimeConfig
-from src.worktrace.constants import DailyRunStatus
+from src.worktrace.errors import AnalyzerProtocolError
 from src.worktrace.factories import RuntimeDependencies
 from src.worktrace.models import (
-    BatchAnalysisResult,
     CrossConversationGroup,
     CrossConversationGroupResult,
-    ConversationRef,
+    DayGroupingSummary,
     NormalizedMessage,
-    SelfRelationEvidence,
-    SelfIdentity,
     SourceBackedEventDraft,
 )
 from src.worktrace.pipeline.cross_conversation_merge import (
-    consolidate_workstream_groups,
     materialize_grouped_merged_drafts,
 )
-from src.worktrace.runner import (
-    DailyTraceRunner,
-    _estimate_workstream_assignment_input_tokens,
-)
+from src.worktrace.runner import DailyTraceRunner
 from src.worktrace.stores.markdown import MarkdownEventStore
+from tests.helpers import NullDelivery
 
 
 def _draft(
-    *,
     draft_id: str,
-    topic: str,
-    content: str,
-    source_message_ids: list[str],
-    source_conversation_id: str,
-    source_slice_id: str,
-    object_hint: str,
-    retention_reason: str = "decision_made",
-    retention_detail: str,
-    workstream_key: str = "",
-    action_label: str = "确认",
-    self_relations: list[SelfRelationEvidence] | None = None,
+    message_id: str,
+    *,
+    slice_id: str | None = None,
 ) -> SourceBackedEventDraft:
     return SourceBackedEventDraft(
         draft_id=draft_id,
-        date="2026-06-22",
-        topic=topic,
-        content=content,
-        source_message_ids=source_message_ids,
-        source_conversation_id=source_conversation_id,
-        source_slice_id=source_slice_id,
+        date="2026-07-22",
+        topic=f"事项 {draft_id}",
+        content=f"处理事项 {draft_id}。",
+        source_message_ids=[message_id],
+        source_conversation_id=f"oc_{draft_id}",
+        source_slice_id=slice_id or f"slice-{draft_id}",
         confidence=0.9,
-        action_label=action_label,
-        self_relations=self_relations or [],
-        object_hint=object_hint,
-        retention_reason=retention_reason,
-        retention_detail=retention_detail,
-        workstream_key=workstream_key,
+        action_label="确认",
+        object_hint=f"对象 {draft_id}",
+        retention_reason="decision_made",
+        retention_detail=f"形成事项 {draft_id} 的结论。",
     )
 
 
-class MergeSource:
-    def get_self_identity(self):
-        return SelfIdentity(open_id="ou_self", display_name="Me", source="fake")
-
-    def list_target_conversations(self, target_date, self_identity):
-        return [
-            ConversationRef(conversation_id="oc_1", conversation_name="项目群1"),
-            ConversationRef(conversation_id="oc_2", conversation_name="项目群2"),
-            ConversationRef(conversation_id="oc_3", conversation_name="项目群3"),
-        ]
-
-    def fetch_conversation_messages(self, target_date, conversation_ids):
-        return [
-            NormalizedMessage(
-                conversation_id="oc_1",
-                conversation_name="项目群1",
-                message_id="om_1",
-                sender_open_id="ou_self",
-                sender_name="Me",
-                send_time="2026-06-22T10:00:00+08:00",
-                message_type="text",
-                text="release-123 排期确认",
-                reply_to_message_id=None,
-                quote_message_id=None,
-                links=[],
-                attachments=[],
-                is_system=False,
-            ),
-            NormalizedMessage(
-                conversation_id="oc_2",
-                conversation_name="项目群2",
-                message_id="om_2",
-                sender_open_id="ou_self",
-                sender_name="Me",
-                send_time="2026-06-22T11:00:00+08:00",
-                message_type="text",
-                text="release-123 继续沟通",
-                reply_to_message_id=None,
-                quote_message_id=None,
-                links=[],
-                attachments=[],
-                is_system=False,
-            ),
-            NormalizedMessage(
-                conversation_id="oc_3",
-                conversation_name="项目群3",
-                message_id="om_3",
-                sender_open_id="ou_self",
-                sender_name="Me",
-                send_time="2026-06-22T12:00:00+08:00",
-                message_type="text",
-                text="contract-888 合同沟通",
-                reply_to_message_id=None,
-                quote_message_id=None,
-                links=[],
-                attachments=[],
-                is_system=False,
-            ),
-        ]
-
-    def fetch_related_messages(self, conversation_id, target_message_ids, direction, limit):
-        return []
+def _message(message_id: str) -> NormalizedMessage:
+    return NormalizedMessage(
+        conversation_id="oc_shared",
+        conversation_name="项目群",
+        message_id=message_id,
+        sender_open_id="ou_self",
+        sender_name="本人",
+        send_time="2026-07-22T10:00:00+08:00",
+        message_type="text",
+        text=message_id,
+        reply_to_message_id=None,
+        quote_message_id=None,
+    )
 
 
-class MergeResolver:
-    def to_text(self, message):
-        return message.text
-
-    def extract_links(self, message):
-        return list(message.links)
-
-    def load_attachment_text_if_needed(self, message, attachment_ids, hint):
-        return None
-
-
-class MergeAnalyzer:
-    def __init__(self):
-        self.group_calls: list[list[str]] = []
-
-    def analyze_batch(self, target_date, batch_input):
-        message_id = batch_input.slices[0].messages[0].message_id
-        if message_id == "om_1":
-            return BatchAnalysisResult(
-                candidate_events=[
-                    _draft(
-                        draft_id="d1",
-                        topic="发布排期确认",
-                        content="同步 release-123",
-                        source_message_ids=["om_1"],
-                        source_conversation_id="oc_1",
-                        source_slice_id=batch_input.slices[0].slice_id,
-                        object_hint="release-123排期",
-                        retention_detail="同步 release-123 的排期确认信息。",
-                        workstream_key="release-123",
-                    )
-                ],
-                context_requests=[],
+def _singletons(candidates: list[SourceBackedEventDraft]) -> CrossConversationGroupResult:
+    return CrossConversationGroupResult(
+        groups=[
+            CrossConversationGroup(
+                group_id=f"model-{index}",
+                draft_ids=[candidate.draft_id],
+                primary_draft_id=candidate.draft_id,
+                merge_reason="单条保留",
             )
-        if message_id == "om_2":
-            return BatchAnalysisResult(
-                candidate_events=[
-                    _draft(
-                        draft_id="d2",
-                        topic="发布排期确认",
-                        content="继续确认 release-123，已确认",
-                        source_message_ids=["om_2"],
-                        source_conversation_id="oc_2",
-                        source_slice_id=batch_input.slices[0].slice_id,
-                        object_hint="release-123排期",
-                        retention_detail="继续确认 release-123 排期并形成已确认结果。",
-                        workstream_key="release-123",
-                    )
-                ],
-                context_requests=[],
+            for index, candidate in enumerate(candidates, start=1)
+        ]
+    )
+
+
+def _runner(tmp_path: Path, analyzer: object, **config_values: object) -> DailyTraceRunner:
+    config = RuntimeConfig(
+        data_root=tmp_path / "data",
+        **config_values,
+    )
+    return DailyTraceRunner(
+        config=config,
+        dependencies=RuntimeDependencies(
+            chat_source=object(),
+            content_resolver=object(),
+            analyzer=analyzer,
+            delivery_channel=NullDelivery(),
+            event_store=MarkdownEventStore(config=config),
+        ),
+    )
+
+
+class QualityRetryAnalyzer:
+    def __init__(
+        self,
+        online_results: list[CrossConversationGroupResult],
+        codex_result: CrossConversationGroupResult | Exception,
+    ) -> None:
+        self.online_results = list(online_results)
+        self.codex_result = codex_result
+        self.validation_feedback: list[str] = []
+        self.fallback_calls = 0
+
+    def merge_day_candidates(
+        self,
+        target_date: str,
+        candidates: list[SourceBackedEventDraft],
+        *,
+        validation_feedback: str = "",
+    ) -> CrossConversationGroupResult:
+        self.validation_feedback.append(validation_feedback)
+        return self.online_results.pop(0)
+
+    def last_request_used_fallback(self) -> bool:
+        return False
+
+    def fallback_current_request(self, method_name: str, *args, **kwargs):
+        self.fallback_calls += 1
+        if isinstance(self.codex_result, Exception):
+            raise self.codex_result
+        return self.codex_result
+
+
+def test_day_grouping_retries_online_quality_once_then_uses_codex(
+    tmp_path: Path,
+) -> None:
+    candidates = [_draft("d1", "m1"), _draft("d2", "m2")]
+    analyzer = QualityRetryAnalyzer(
+        [CrossConversationGroupResult(), CrossConversationGroupResult()],
+        _singletons(candidates),
+    )
+    runner = _runner(tmp_path, analyzer)
+
+    result, warnings, attempts, retry_count, codex_count, repair_count = (
+        runner._request_valid_day_groups(
+            "2026-07-22",
+            candidates,
+            request_label="full-day",
+        )
+    )
+
+    assert [group.draft_ids for group in result.groups] == [["d1"], ["d2"]]
+    assert analyzer.validation_feedback[0] == ""
+    assert "missing=['d1', 'd2']" in analyzer.validation_feedback[1]
+    assert analyzer.fallback_calls == 1
+    assert [item["backend"] for item in attempts] == ["online", "online", "codex"]
+    assert warnings == []
+    assert (retry_count, codex_count, repair_count) == (1, 1, 0)
+
+
+def test_invalid_codex_result_keeps_legal_groups_and_repairs_rest_as_singletons(
+    tmp_path: Path,
+) -> None:
+    candidates = [_draft("d1", "m1"), _draft("d2", "m2"), _draft("d3", "m3")]
+    legal_partial_group = CrossConversationGroupResult(
+        groups=[
+            CrossConversationGroup(
+                group_id="ignored",
+                draft_ids=["d1", "d2"],
+                primary_draft_id="d1",
+                merge_reason="同一事项的方案与执行反馈。",
+                evidence_message_ids=["m1", "m2"],
             )
-        return BatchAnalysisResult(
-            candidate_events=[
-                _draft(
-                    draft_id="d3",
-                    topic="合同沟通",
-                    content="跟进 contract-888",
-                    source_message_ids=["om_3"],
-                    source_conversation_id="oc_3",
-                    source_slice_id=batch_input.slices[0].slice_id,
-                    object_hint="contract-888合同",
-                    retention_reason="external_business_progress",
-                    retention_detail="跟进 contract-888 合同事项。",
-                )
-            ],
-            context_requests=[],
+        ]
+    )
+    analyzer = QualityRetryAnalyzer(
+        [CrossConversationGroupResult(), CrossConversationGroupResult()],
+        legal_partial_group,
+    )
+    runner = _runner(tmp_path, analyzer)
+
+    result, warnings, attempts, retry_count, codex_count, repair_count = (
+        runner._request_valid_day_groups(
+            "2026-07-22",
+            candidates,
+            request_label="full-day",
+        )
+    )
+
+    assert [group.draft_ids for group in result.groups] == [["d1", "d2"], ["d3"]]
+    assert attempts[-1]["backend"] == "python"
+    assert attempts[-1]["status"] == "repaired"
+    assert warnings and "singleton_candidates=['d3']" in warnings[0]
+    assert (retry_count, codex_count, repair_count) == (1, 1, 1)
+
+
+def test_codex_technical_failure_stops_day_grouping(tmp_path: Path) -> None:
+    candidates = [_draft("d1", "m1"), _draft("d2", "m2")]
+    analyzer = QualityRetryAnalyzer(
+        [CrossConversationGroupResult(), CrossConversationGroupResult()],
+        AnalyzerProtocolError("Codex unavailable"),
+    )
+    runner = _runner(tmp_path, analyzer)
+
+    with pytest.raises(AnalyzerProtocolError, match="Codex unavailable"):
+        runner._request_valid_day_groups(
+            "2026-07-22",
+            candidates,
+            request_label="full-day",
         )
 
-    def merge_day_candidates(self, target_date, candidates):
-        self.group_calls.append([item.draft_id for item in candidates])
-        return CrossConversationGroupResult(
-            groups=[
-                CrossConversationGroup(
-                    group_id="g1",
-                    draft_ids=["d1", "d2"],
-                    primary_draft_id="d1",
-                ),
-                CrossConversationGroup(
-                    group_id="g2",
-                    draft_ids=["d3"],
-                    primary_draft_id="d3",
-                ),
-            ]
-        )
 
-    def build_batch_prompt(self, batch_input):
-        return "prompt"
+class ConcurrentReviewAnalyzer:
+    def __init__(self, *, split_existing_groups: bool = False) -> None:
+        self.split_existing_groups = split_existing_groups
+        self.lock = Lock()
+        self.active = 0
+        self.max_active = 0
+        self.calls = 0
 
-    def build_merge_prompt(self, target_date, candidates):
-        return "merge prompt"
-
-
-class MergeDelivery:
-    def deliver_to_self(self, *, self_identity, markdown_path):
-        return ("success", self_identity.open_id)
-
-
-class SemanticResolutionMergeAnalyzer(MergeAnalyzer):
-    def __init__(self):
-        super().__init__()
-        self.workstream_resolution_calls = 0
-
-    def request_function(self, prompt, *, function_spec, allow_oversized_input=False):
-        self.workstream_resolution_calls += 1
-        assert "parent_draft_id" in prompt
-        assert function_spec.parameters["required"] == ["assignments"]
-        if "unassigned_candidates" in prompt:
+    def request_function(self, prompt: str, *, function_spec, allow_oversized_input=False):
+        payload = json.loads(prompt)
+        with self.lock:
+            self.active += 1
+            self.max_active = max(self.max_active, self.active)
+            self.calls += 1
+        sleep(0.03)
+        with self.lock:
+            self.active -= 1
+        candidates = payload["candidates"]
+        if self.split_existing_groups:
             return {
-                "assignments": [
+                "groups": [
                     {
-                        "draft_id": "d3",
-                        "parent_draft_id": "",
-                        "root_workstream_name": "",
+                        "draft_ids": [item["draft_id"]],
+                        "primary_draft_id": item["draft_id"],
+                        "merge_reason": "单条保留",
                         "evidence_message_ids": [],
                     }
+                    for item in candidates
                 ]
             }
         return {
-            "assignments": [
+            "groups": [
                 {
-                    "draft_id": "d1",
-                    "parent_draft_id": "d1",
-                    "root_workstream_name": "release-123",
-                    "evidence_message_ids": [],
-                },
-                {
-                    "draft_id": "d2",
-                    "parent_draft_id": "d1",
-                    "root_workstream_name": "",
-                    "evidence_message_ids": ["om_1", "om_2"],
-                },
-                {
-                    "draft_id": "d3",
-                    "parent_draft_id": "",
-                    "root_workstream_name": "",
-                    "evidence_message_ids": [],
-                },
+                    "draft_ids": list(group["draft_ids"]),
+                    "primary_draft_id": group["primary_draft_id"],
+                    "merge_reason": group["merge_reason"],
+                    "evidence_message_ids": list(group["evidence_message_ids"]),
+                }
+                for group in payload["existing_groups"]
             ]
         }
 
-
-def test_materialized_project_lifecycle_uses_primary_title_and_message_order() -> None:
-    root = _draft(
-        draft_id="root",
-        topic="换电项目启动",
-        content="项目启动并分配摄像头安装任务。",
-        source_message_ids=["om_later"],
-        source_conversation_id="oc_1",
-        source_slice_id="slice-root",
-        object_hint="换电项目",
-        retention_detail="明确项目启动和分支任务。",
-        action_label="项目启动",
-        self_relations=[SelfRelationEvidence("initiated", ["om_later"])],
-    )
-    task = _draft(
-        draft_id="task",
-        topic="摄像头验收",
-        content="确认摄像头验收标准。",
-        source_message_ids=["om_earlier"],
-        source_conversation_id="oc_2",
-        source_slice_id="slice-task",
-        object_hint="摄像头验收",
-        retention_detail="明确验收标准。",
-        action_label="验收确认",
-        self_relations=[
-            SelfRelationEvidence("feedback_acceptance", ["om_earlier"])
-        ],
-    )
-
-    drafts = materialize_grouped_merged_drafts(
-        [root, task],
-        [
-            CrossConversationGroup(
-                group_id="project",
-                draft_ids=["root", "task"],
-                primary_draft_id="root",
-                workstream_name="换电项目",
-            )
-        ],
-        target_date="2026-06-22",
-        message_order=["om_earlier", "om_later"],
-        self_relation_order=("initiated", "feedback_acceptance"),
-    )
-
-    assert drafts[0].topic == "换电项目启动"
-    assert drafts[0].source_message_ids == ["om_earlier", "om_later"]
-    assert drafts[0].content == "确认摄像头验收标准。\n\n项目启动并分配摄像头安装任务。"
-    assert drafts[0].workstream_name == "换电项目"
-    assert drafts[0].action_labels == ["验收确认", "项目启动"]
-    assert drafts[0].self_relations == ["initiated", "feedback_acceptance"]
+    def last_request_used_fallback(self) -> bool:
+        return False
 
 
-def test_consolidate_workstream_groups_safely_groups_exact_named_workstreams() -> None:
-    project_root = _draft(
-        draft_id="project-root",
-        topic="项目甲启动",
-        content="启动项目甲，并安排现场摄像头安装。",
-        source_message_ids=["om_1"],
-        source_conversation_id="oc_1",
-        source_slice_id="slice-1",
-        object_hint="项目甲、现场摄像头安装",
-        retention_detail="项目甲启动。",
-        workstream_key="项目甲",
-    )
-    camera_task = _draft(
-        draft_id="camera-task",
-        topic="现场摄像头安装任务",
-        content="明确现场摄像头安装验收标准。",
-        source_message_ids=["om_2"],
-        source_conversation_id="oc_2",
-        source_slice_id="slice-2",
-        object_hint="现场摄像头安装",
-        retention_detail="明确现场摄像头安装任务。",
-    )
-    project_monitoring = _draft(
-        draft_id="project-monitoring",
-        topic="项目甲监控",
-        content="建立项目甲的监控统计。",
-        source_message_ids=["om_3"],
-        source_conversation_id="oc_3",
-        source_slice_id="slice-3",
-        object_hint="项目甲监控",
-        retention_detail="建立项目甲监控。",
-        workstream_key="项目甲",
-    )
-    policy_notice = _draft(
-        draft_id="policy-notice",
-        topic="特殊奖励政策通知",
-        content="下发特殊奖励政策并明确发送范围。",
-        source_message_ids=["om_4"],
-        source_conversation_id="oc_4",
-        source_slice_id="slice-4",
-        object_hint="特殊奖励政策",
-        retention_detail="下发特殊奖励政策。",
-        workstream_key="特殊奖励政策",
-    )
-    policy_feedback = _draft(
-        draft_id="policy-feedback",
-        topic="特殊奖励短信执行反馈",
-        content="确认特殊奖励短信已发送。",
-        source_message_ids=["om_5"],
-        source_conversation_id="oc_5",
-        source_slice_id="slice-5",
-        object_hint="特殊奖励短信通知",
-        retention_detail="特殊奖励政策已执行。",
-    )
-    unrelated = _draft(
-        draft_id="unrelated",
-        topic="经营数据汇报",
-        content="汇报六月经营数据，并提及现场摄像头安装统计。",
-        source_message_ids=["om_6"],
-        source_conversation_id="oc_6",
-        source_slice_id="slice-6",
-        object_hint="六月经营数据",
-        retention_detail="汇报经营数据。",
-    )
-    tool_one = _draft(
-        draft_id="tool-one",
-        topic="产品丙配置",
-        content="配置产品丙。",
-        source_message_ids=["om_7"],
-        source_conversation_id="oc_7",
-        source_slice_id="slice-7",
-        object_hint="产品丙",
-        retention_detail="配置产品丙。",
-        workstream_key="产品丙",
-    )
-    tool_two = _draft(
-        draft_id="tool-two",
-        topic="产品丁开通",
-        content="开通产品丁。",
-        source_message_ids=["om_8"],
-        source_conversation_id="oc_8",
-        source_slice_id="slice-8",
-        object_hint="产品丁",
-        retention_detail="开通产品丁。",
-        workstream_key="产品丁",
-    )
-
-    groups, warnings = consolidate_workstream_groups(
-        [
-            CrossConversationGroup(
-                group_id="project-task",
-                draft_ids=["camera-task", "unrelated"],
-                primary_draft_id="camera-task",
-            ),
-                CrossConversationGroup(
-                    group_id="project-root",
-                    draft_ids=["project-root"],
-                    primary_draft_id="project-root",
-                ),
-                CrossConversationGroup(
-                    group_id="project-monitoring",
-                    draft_ids=["project-monitoring"],
-                    primary_draft_id="project-monitoring",
-                ),
-            CrossConversationGroup(
-                group_id="policy-notice",
-                draft_ids=["policy-notice"],
-                primary_draft_id="policy-notice",
-            ),
-            CrossConversationGroup(
-                group_id="policy-feedback",
-                draft_ids=["policy-feedback"],
-                primary_draft_id="policy-feedback",
-            ),
-            CrossConversationGroup(
-                group_id="mixed-products",
-                draft_ids=["tool-one", "tool-two"],
-                primary_draft_id="tool-one",
-            ),
-        ],
-        [
-            project_root,
-            camera_task,
-            project_monitoring,
-            policy_notice,
-            policy_feedback,
-            unrelated,
-            tool_one,
-            tool_two,
-        ],
-    )
-
-    group_by_ids = {frozenset(item.draft_ids): item for item in groups}
-
-    assert frozenset({"project-root", "project-monitoring"}) in group_by_ids
-    assert group_by_ids[frozenset({"project-root", "project-monitoring"})].primary_draft_id == "project-root"
-    assert frozenset({"camera-task"}) in group_by_ids
-    assert frozenset({"policy-notice"}) in group_by_ids
-    assert frozenset({"policy-feedback"}) in group_by_ids
-    assert frozenset({"unrelated"}) in group_by_ids
-    assert frozenset({"tool-one"}) in group_by_ids
-    assert frozenset({"tool-two"}) in group_by_ids
-    assert warnings == []
-
-
-def test_runner_groups_candidates_across_conversations_once(tmp_path: Path) -> None:
-    analyzer = MergeAnalyzer()
-    config = RuntimeConfig(
-        data_root=tmp_path / "data",
-        conversation_debug_root=tmp_path / "debug",
-    )
-    runner = DailyTraceRunner(
-        config=config,
-        dependencies=RuntimeDependencies(
-            chat_source=MergeSource(),
-            content_resolver=MergeResolver(),
-            analyzer=analyzer,
-            delivery_channel=MergeDelivery(),
-            event_store=MarkdownEventStore(config=config),
-        ),
-    )
-
-    result = runner.run("2026-06-22")
-
-    assert result.status == DailyRunStatus.SUCCESS.value
-    assert result.event_count == 2
-    assert analyzer.group_calls == [["d1", "d2", "d3"]]
-    merge_dir = tmp_path / "debug" / "2026-06-22" / "_merge_day_candidates"
-    assert (merge_dir / "input.json").exists()
-    assert (merge_dir / "prompt.txt").read_text(encoding="utf-8") == "merge prompt"
-
-
-def test_runner_uses_llm_workstream_resolution_and_dumps_evidence(tmp_path: Path) -> None:
-    analyzer = SemanticResolutionMergeAnalyzer()
-    config = RuntimeConfig(
-        data_root=tmp_path / "data",
-        conversation_debug_root=tmp_path / "debug",
-    )
-    runner = DailyTraceRunner(
-        config=config,
-        dependencies=RuntimeDependencies(
-            chat_source=MergeSource(),
-            content_resolver=MergeResolver(),
-            analyzer=analyzer,
-            delivery_channel=MergeDelivery(),
-            event_store=MarkdownEventStore(config=config),
-        ),
-    )
-
-    result = runner.run("2026-06-22")
-
-    assert result.status == DailyRunStatus.SUCCESS.value
-    assert result.event_count == 2
-    assert analyzer.workstream_resolution_calls == 2
-    merge_dir = tmp_path / "debug" / "2026-06-22" / "_merge_day_candidates"
-    assert (merge_dir / "workstream_resolution_input.json").exists()
-    assert (merge_dir / "workstream_resolution_prompt.txt").exists()
-    assert (merge_dir / "workstream_resolution_output.json").exists()
-    assert (merge_dir / "workstream_resolution_validated.json").exists()
-    assert (merge_dir / "workstream_resolution_followup_input.json").exists()
-    assert (merge_dir / "workstream_resolution_followup_output.json").exists()
-
-
-def test_workstream_resolution_rebatches_complete_inputs_before_request(
+def test_independent_day_group_reviews_run_with_configured_parallel_limit(
     tmp_path: Path,
 ) -> None:
     candidates = [
-        _draft(
-            draft_id=f"draft-{index}",
-            topic=f"事项 {index}",
-            content=f"内容 {index} " + ("x" * 900),
-            source_message_ids=[f"om_{index}"],
-            source_conversation_id=f"oc_{index}",
-            source_slice_id=f"slice-{index}",
-            object_hint=f"对象 {index}",
-            retention_detail=f"依据 {index}",
-        )
-        for index in range(1, 5)
+        _draft("d1", "m1", slice_id="slice-a"),
+        _draft("d2", "m2", slice_id="slice-a"),
+        _draft("d3", "m3", slice_id="slice-b"),
+        _draft("d4", "m4", slice_id="slice-b"),
     ]
-    pair_limit = _estimate_workstream_assignment_input_tokens(
-        "2026-06-22",
-        candidates[:2],
+    groups = _singletons(candidates).groups
+    analyzer = ConcurrentReviewAnalyzer()
+    runner = _runner(
+        tmp_path,
+        analyzer,
+        max_concurrent_day_group_review_requests=2,
     )
 
-    class BatchedWorkstreamAnalyzer(MergeAnalyzer):
-        def __init__(self) -> None:
-            super().__init__()
-            self.workstream_batches: list[list[str]] = []
-
-        def request_function(self, prompt, *, function_spec, allow_oversized_input=False):
-            payload = json.loads(prompt)
-            draft_ids = [item["draft_id"] for item in payload["candidates"]]
-            self.workstream_batches.append(draft_ids)
-            return {
-                "assignments": [
-                    {
-                        "draft_id": draft_id,
-                        "parent_draft_id": draft_id,
-                        "root_workstream_name": f"workstream-{draft_id}",
-                        "evidence_message_ids": [],
-                    }
-                    for draft_id in draft_ids
-                ]
-            }
-
-    analyzer = BatchedWorkstreamAnalyzer()
-    config = RuntimeConfig(
-        data_root=tmp_path / "data",
-        model_input_batch_target_tokens=pair_limit,
-    )
-    runner = DailyTraceRunner(
-        config=config,
-        dependencies=RuntimeDependencies(
-            chat_source=MergeSource(),
-            content_resolver=MergeResolver(),
-            analyzer=analyzer,
-            delivery_channel=MergeDelivery(),
-            event_store=MarkdownEventStore(config=config),
-        ),
-    )
-
-    groups, warnings = runner._resolve_workstream_groups(
-        target_date="2026-06-22",
-        model_groups=[
-            CrossConversationGroup(
-                group_id=f"group-{index}",
-                draft_ids=[candidate.draft_id],
-                primary_draft_id=candidate.draft_id,
-            )
-            for index, candidate in enumerate(candidates, start=1)
-        ],
+    result = runner._review_strongly_related_day_groups(
+        target_date="2026-07-22",
+        groups=groups,
         candidates=candidates,
+        messages=[_message(f"m{index}") for index in range(1, 5)],
     )
 
-    candidate_by_id = {candidate.draft_id: candidate for candidate in candidates}
-    assert analyzer.workstream_batches == [
-        ["draft-1", "draft-2"],
-        ["draft-3", "draft-4"],
-    ]
-    assert all(
-        _estimate_workstream_assignment_input_tokens(
-            "2026-06-22",
-            [candidate_by_id[draft_id] for draft_id in batch],
-        )
-        <= pair_limit
-        for batch in analyzer.workstream_batches
-    )
-    assert {group.primary_draft_id for group in groups} == set(candidate_by_id)
+    reviewed, warnings, attempts, component_count, request_count, retries, codex = result
+    assert [group.draft_ids for group in reviewed] == [["d1"], ["d2"], ["d3"], ["d4"]]
+    assert analyzer.max_active == 2
+    assert (component_count, request_count, retries, codex) == (2, 2, 0, 0)
     assert warnings == []
+    assert len(attempts) == 2
 
 
-class MissingDraftMergeAnalyzer(MergeAnalyzer):
-    def merge_day_candidates(self, target_date, candidates):
-        self.group_calls.append([item.draft_id for item in candidates])
-        return CrossConversationGroupResult(
-            groups=[
-                CrossConversationGroup(group_id="g1", draft_ids=["d1", "d2"]),
-            ]
+def test_invalid_local_review_keeps_previous_groups_with_warning(tmp_path: Path) -> None:
+    candidates = [
+        _draft("d1", "m1", slice_id="slice-a"),
+        _draft("d2", "m2", slice_id="slice-a"),
+        _draft("d3", "m3", slice_id="slice-a"),
+    ]
+    groups = [
+        CrossConversationGroup(
+            group_id="group-001",
+            draft_ids=["d1", "d2"],
+            primary_draft_id="d1",
+            merge_reason="同一事项的连续动作。",
+            evidence_message_ids=["m1"],
+        ),
+        CrossConversationGroup(
+            group_id="group-002",
+            draft_ids=["d3"],
+            primary_draft_id="d3",
+            merge_reason="单条保留",
+        ),
+    ]
+    analyzer = ConcurrentReviewAnalyzer(split_existing_groups=True)
+    runner = _runner(tmp_path, analyzer, day_group_validation_retry_limit=1)
+
+    reviewed, warnings, attempts, components, requests, retries, codex = (
+        runner._review_strongly_related_day_groups(
+            target_date="2026-07-22",
+            groups=groups,
+            candidates=candidates,
+            messages=[_message("m1"), _message("m2"), _message("m3")],
+        )
+    )
+
+    assert [group.draft_ids for group in reviewed] == [["d1", "d2"], ["d3"]]
+    assert warnings and "Kept existing day groups" in warnings[0]
+    assert (components, requests, retries, codex) == (1, 2, 1, 0)
+    assert all(item["status"] == "failed" for item in attempts)
+
+
+def test_materialization_uses_primary_candidate_without_workstream_metadata() -> None:
+    candidates = [_draft("d1", "m1"), _draft("d2", "m2")]
+    groups = [
+        CrossConversationGroup(
+            group_id="group-001",
+            draft_ids=["d1", "d2"],
+            primary_draft_id="d2",
+            merge_reason="同一事项的连续动作。",
+            evidence_message_ids=["m1", "m2"],
+        )
+    ]
+
+    drafts = materialize_grouped_merged_drafts(
+        candidates,
+        groups,
+        target_date="2026-07-22",
+        message_order=["m1", "m2"],
+    )
+
+    assert drafts[0].topic == "事项 d2"
+    assert "workstream" not in drafts[0].to_dict()
+
+
+def test_cross_batch_summary_keeps_existing_multi_event_evidence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidates = [_draft("d1", "m1"), _draft("d2", "m2")]
+    source_group = CrossConversationGroup(
+        group_id="local-001",
+        draft_ids=["d1", "d2"],
+        primary_draft_id="d1",
+        merge_reason="同一事项的方案和执行反馈。",
+        evidence_message_ids=["m1", "m2"],
+    )
+    analyzer = QualityRetryAnalyzer(
+        [CrossConversationGroupResult(groups=[source_group])],
+        AnalyzerProtocolError("Codex should not be called"),
+    )
+    runner = _runner(tmp_path, analyzer, model_input_batch_target_tokens=1)
+    monkeypatch.setattr(
+        runner_module,
+        "_estimate_day_merge_input_tokens",
+        lambda *args, **kwargs: 2,
+    )
+    monkeypatch.setattr(
+        runner_module,
+        "_pack_day_merge_candidates",
+        lambda **kwargs: [kwargs["candidates"]],
+    )
+
+    result, warnings, attempts, retries, codex, repairs = (
+        runner._merge_day_candidates_with_batching("2026-07-22", candidates)
+    )
+
+    assert [group.draft_ids for group in result.groups] == [["d1", "d2"]]
+    assert result.groups[0].merge_reason == source_group.merge_reason
+    assert result.groups[0].evidence_message_ids == ["m1", "m2"]
+    assert warnings == []
+    assert len(attempts) == 1
+    assert (retries, codex, repairs) == (0, 0, 0)
+
+
+class DebugAnalyzer:
+    def build_merge_prompt(self, target_date, candidates):
+        return json.dumps(
+            {"target_date": target_date, "draft_ids": [item.draft_id for item in candidates]},
+            ensure_ascii=False,
         )
 
 
-def test_runner_recovers_when_merge_result_drops_candidate_draft(tmp_path: Path) -> None:
-    analyzer = MissingDraftMergeAnalyzer()
-    config = RuntimeConfig(data_root=tmp_path / "data")
-    runner = DailyTraceRunner(
-        config=config,
-        dependencies=RuntimeDependencies(
-            chat_source=MergeSource(),
-            content_resolver=MergeResolver(),
-            analyzer=analyzer,
-            delivery_channel=MergeDelivery(),
-            event_store=MarkdownEventStore(config=config),
-        ),
+def test_new_day_grouping_trace_contains_only_new_artifacts(tmp_path: Path) -> None:
+    candidate = _draft("d1", "m1")
+    runner = _runner(
+        tmp_path,
+        DebugAnalyzer(),
+        conversation_debug_root=tmp_path / "debug",
+    )
+    summary = DayGroupingSummary(candidate_count=1, initial_group_count=1, final_group_count=1)
+
+    runner._dump_merge_debug_artifacts(
+        target_date="2026-07-22",
+        candidates=[candidate],
+        grouping_attempts=[],
+        review_attempts=[],
+        groups=_singletons([candidate]).groups,
+        warnings=[],
+        summary=summary,
     )
 
-    result = runner.run("2026-06-22")
-
-    assert result.status == DailyRunStatus.SUCCESS_WITH_WARNINGS.value
-    assert result.event_count == 2
-    assert "Cross-conversation merge groups were repaired" in result.error_summary
-    assert "missing=['d3']" in result.error_summary
+    directory = tmp_path / "debug" / "2026-07-22" / "_merge_day_candidates"
+    assert {path.name for path in directory.iterdir()} == {
+        "input.json",
+        "prompt.txt",
+        "grouping_attempts.json",
+        "day_group_review.json",
+        "resolved_groups.json",
+    }
+    assert "workstream" not in "\n".join(
+        path.read_text(encoding="utf-8") for path in directory.iterdir()
+    ).lower()

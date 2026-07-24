@@ -59,7 +59,7 @@ class FailingAnalyzer:
     def analyze_batch(self, target_date, batch_input):
         raise AnalyzerProtocolError("bad json")
 
-    def merge_day_candidates(self, target_date, candidates):
+    def merge_day_candidates(self, target_date, candidates, *, validation_feedback=""):
         raise AssertionError("Should not merge")
 
 
@@ -152,7 +152,7 @@ def test_runner_returns_warning_when_self_delivery_fails(tmp_path: Path) -> None
                 context_requests=[],
             )
 
-        def merge_day_candidates(self, target_date, candidates):
+        def merge_day_candidates(self, target_date, candidates, *, validation_feedback=""):
             raise AssertionError("Should not merge")
 
     config = RuntimeConfig(data_root=tmp_path / "data")

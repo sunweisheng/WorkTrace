@@ -40,7 +40,7 @@ class EmptyAnalyzer:
     def analyze_batch(self, target_date, batch_input):
         raise AssertionError("Should not analyze empty day")
 
-    def merge_day_candidates(self, target_date, candidates):
+    def merge_day_candidates(self, target_date, candidates, *, validation_feedback=""):
         raise AssertionError("Should not merge empty day")
 
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import nullcontext
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field, replace
 from hashlib import sha1
@@ -36,6 +37,7 @@ from .models import (
     ConversationSegmentUnit,
     CrossConversationGroup,
     CrossConversationGroupResult,
+    DayGroupingSummary,
     DailyRunResult,
     EventFileLink,
     WorkEvent,
@@ -52,22 +54,18 @@ from .models import (
     SourceBackedEventDraft,
     ConversationSlice,
     SelfIdentity,
-    WorkstreamAssignment,
-    WorkstreamAssignmentResult,
 )
 from .analyzers.output_schemas import (
     anchor_batch_output_schema,
     conversation_segmentation_output_schema,
     merge_output_schema,
-    workstream_assignment_output_schema,
 )
 from .analyzers.prompts import (
     build_anchor_batch_analysis_prompt,
     build_conversation_segmentation_prompt,
+    build_day_group_review_prompt,
     build_merge_prompt,
-    build_unassigned_workstream_assignment_prompt,
     build_conversation_segmentation_message_refs,
-    build_workstream_assignment_prompt,
 )
 from .reaction_catalog import ReactionCatalog, ReactionCatalogStore, enrich_message_reactions
 from .pipeline.conversation_first_pass import build_conversation_level_slices
@@ -92,10 +90,14 @@ from .pipeline.context_expansion import (
     expand_slice_context,
 )
 from .pipeline.cross_conversation_merge import (
-    consolidate_workstream_groups,
     materialize_grouped_merged_drafts,
 )
-from .pipeline.workstream_resolution import groups_from_workstream_assignments
+from .pipeline.day_event_grouping import (
+    DayGroupReviewComponent,
+    build_day_group_review_components,
+    replace_reviewed_day_group_components,
+    validate_day_group_review_result,
+)
 from .pipeline.direct_relation_filter import (
     filter_candidates_with_valid_self_relations,
     filter_self_related_candidate_drafts,
@@ -222,6 +224,7 @@ class DailyTraceRunner:
         skipped_slice_count = 0
         retention_review_summary = RetentionReviewSummary()
         personal_fact_review_summary = PersonalFactReviewSummary()
+        day_grouping_summary = DayGroupingSummary()
 
         try:
             stage_started_at = perf_counter()
@@ -408,10 +411,16 @@ class DailyTraceRunner:
                             skipped_slice_count=skipped_slice_count,
                             retention_review_summary=retention_review_summary,
                             personal_fact_review_summary=personal_fact_review_summary,
+                            day_grouping_summary=day_grouping_summary,
                         ),
                     )
 
                 if len(all_candidates) == 1:
+                    day_grouping_summary = DayGroupingSummary(
+                        candidate_count=1,
+                        initial_group_count=1,
+                        final_group_count=1,
+                    )
                     merged_drafts = materialize_grouped_merged_drafts(
                         all_candidates,
                         [
@@ -419,7 +428,8 @@ class DailyTraceRunner:
                                 group_id="single",
                                 draft_ids=[all_candidates[0].draft_id],
                                 primary_draft_id=all_candidates[0].draft_id,
-                                workstream_name=all_candidates[0].workstream_key.strip(),
+                                merge_reason="单条保留",
+                                evidence_message_ids=[],
                             )
                         ],
                         target_date=target_date,
@@ -430,46 +440,64 @@ class DailyTraceRunner:
                     )
                 else:
                     merge_started_at = perf_counter()
-                    group_result, merge_batch_warnings = (
+                    (
+                        group_result,
+                        merge_batch_warnings,
+                        grouping_attempts,
+                        validation_retry_count,
+                        codex_fallback_count,
+                        singleton_repair_count,
+                    ) = (
                         self._merge_day_candidates_with_batching(
                             target_date,
                             all_candidates,
                         )
                     )
                     warning_messages.extend(merge_batch_warnings)
+                    initial_group_count = len(group_result.groups)
+                    (
+                        reviewed_groups,
+                        review_warnings,
+                        review_attempts,
+                        review_component_count,
+                        review_request_count,
+                        review_retry_count,
+                        review_codex_fallback_count,
+                    ) = self._review_strongly_related_day_groups(
+                        target_date=target_date,
+                        groups=group_result.groups,
+                        candidates=all_candidates,
+                        messages=filtered_messages,
+                    )
+                    warning_messages.extend(review_warnings)
+                    group_result = replace(group_result, groups=reviewed_groups)
+                    day_grouping_warnings = [
+                        *merge_batch_warnings,
+                        *review_warnings,
+                    ]
+                    day_grouping_summary = DayGroupingSummary(
+                        candidate_count=len(all_candidates),
+                        initial_group_count=initial_group_count,
+                        final_group_count=len(group_result.groups),
+                        review_component_count=review_component_count,
+                        review_request_count=review_request_count,
+                        validation_retry_count=(
+                            validation_retry_count + review_retry_count
+                        ),
+                        codex_fallback_count=(
+                            codex_fallback_count + review_codex_fallback_count
+                        ),
+                        singleton_repair_candidate_count=singleton_repair_count,
+                        warning_count=len(day_grouping_warnings),
+                    )
                     self._dump_merge_debug_artifacts(
                         target_date=target_date,
                         candidates=all_candidates,
-                        output_payload=getattr(
-                            self.dependencies.analyzer,
-                            "last_merge_payload",
-                            None,
-                        ),
-                    )
-                    try:
-                        group_result = validate_cross_conversation_groups(
-                            group_result,
-                            all_candidates,
-                        )
-                    except AnalyzerProtocolError:
-                        group_result, merge_repair_warnings = (
-                            normalize_cross_conversation_groups_with_fallback(
-                                group_result,
-                                all_candidates,
-                            )
-                        )
-                        warning_messages.extend(merge_repair_warnings)
-                    corrected_groups, workstream_warnings = self._resolve_workstream_groups(
-                        target_date=target_date,
-                        model_groups=group_result.groups,
-                        candidates=all_candidates,
-                    )
-                    warning_messages.extend(workstream_warnings)
-                    group_result = replace(group_result, groups=corrected_groups)
-                    self._dump_resolved_merge_groups(
-                        target_date=target_date,
+                        grouping_attempts=grouping_attempts,
+                        review_attempts=review_attempts,
                         groups=group_result.groups,
-                        warnings=workstream_warnings,
+                        warnings=day_grouping_warnings,
+                        summary=day_grouping_summary,
                     )
                     merged_drafts = materialize_grouped_merged_drafts(
                         all_candidates,
@@ -512,6 +540,7 @@ class DailyTraceRunner:
                     skipped_slice_count=skipped_slice_count,
                     retention_review_summary=retention_review_summary,
                     personal_fact_review_summary=personal_fact_review_summary,
+                    day_grouping_summary=day_grouping_summary,
                 ),
             )
 
@@ -548,6 +577,7 @@ class DailyTraceRunner:
                 event_build_warnings=merge_warnings,
                 final_filter_warnings=final_event_filter_warnings,
                 retention_warnings=retention_event_warnings,
+                day_grouping_summary=day_grouping_summary,
             )
             log_timing(
                 logger,
@@ -611,6 +641,7 @@ class DailyTraceRunner:
                 self_delivery_error=delivery_error,
                 retention_review_summary=retention_review_summary,
                 personal_fact_review_summary=personal_fact_review_summary,
+                day_grouping_summary=day_grouping_summary,
             ),
         )
 
@@ -1027,6 +1058,7 @@ class DailyTraceRunner:
         skipped_slice_count: int = 0,
         retention_review_summary: RetentionReviewSummary | None = None,
         personal_fact_review_summary: PersonalFactReviewSummary | None = None,
+        day_grouping_summary: DayGroupingSummary | None = None,
     ) -> DailyRunResult:
         warning_messages = warning_messages or []
         write_result = self.dependencies.event_store.replace_day(
@@ -1069,6 +1101,7 @@ class DailyTraceRunner:
             personal_fact_review_summary=(
                 personal_fact_review_summary or PersonalFactReviewSummary()
             ),
+            day_grouping_summary=day_grouping_summary or DayGroupingSummary(),
         )
 
     def _failed_result(self, target_date: str, error_summary: str) -> DailyRunResult:
@@ -1089,6 +1122,7 @@ class DailyTraceRunner:
             self_delivery_error="",
             retention_review_summary=RetentionReviewSummary(),
             personal_fact_review_summary=PersonalFactReviewSummary(),
+            day_grouping_summary=DayGroupingSummary(),
         )
 
     def _finish_run(
@@ -2821,23 +2855,36 @@ class DailyTraceRunner:
         self,
         target_date: str,
         candidates: list[SourceBackedEventDraft],
-    ) -> tuple[CrossConversationGroupResult, list[str]]:
+    ) -> tuple[
+        CrossConversationGroupResult,
+        list[str],
+        list[dict[str, object]],
+        int,
+        int,
+        int,
+    ]:
         if (
-            _estimate_day_merge_input_tokens(target_date, candidates)
+            _estimate_day_merge_input_tokens(target_date, candidates, self.config)
             <= self.config.model_input_batch_target_tokens
         ):
-            return self.dependencies.analyzer.merge_day_candidates(
+            return self._request_valid_day_groups(
                 target_date,
                 candidates,
-            ), []
+                request_label="full-day",
+            )
 
         batches = _pack_day_merge_candidates(
             target_date=target_date,
             candidates=candidates,
             input_limit=self.config.model_input_batch_target_tokens,
+            config=self.config,
         )
         local_groups: list[CrossConversationGroup] = []
         warnings: list[str] = []
+        attempts: list[dict[str, object]] = []
+        validation_retry_count = 0
+        codex_fallback_count = 0
+        singleton_repair_count = 0
         for batch_index, batch in enumerate(batches, start=1):
             if len(batch) == 1:
                 candidate = batch[0]
@@ -2846,25 +2893,36 @@ class DailyTraceRunner:
                         group_id=f"cross-batch-{batch_index:03d}-single",
                         draft_ids=[candidate.draft_id],
                         primary_draft_id=candidate.draft_id,
-                        workstream_name=candidate.workstream_key.strip(),
+                        merge_reason="单条保留",
+                        evidence_message_ids=[],
                     )
                 )
                 continue
-            result = self.dependencies.analyzer.merge_day_candidates(
+            (
+                result,
+                batch_warnings,
+                batch_attempts,
+                batch_retry_count,
+                batch_codex_count,
+                batch_repair_count,
+            ) = self._request_valid_day_groups(
                 target_date,
                 batch,
+                request_label=f"batch-{batch_index:03d}",
             )
-            try:
-                result = validate_cross_conversation_groups(result, batch)
-            except AnalyzerProtocolError:
-                result, repair_warnings = normalize_cross_conversation_groups_with_fallback(
-                    result,
-                    batch,
-                )
-                warnings.extend(repair_warnings)
+            warnings.extend(batch_warnings)
+            attempts.extend(batch_attempts)
+            validation_retry_count += batch_retry_count
+            codex_fallback_count += batch_codex_count
+            singleton_repair_count += batch_repair_count
             local_groups.extend(result.groups)
 
-        summaries, original_ids_by_summary, primary_id_by_summary = (
+        (
+            summaries,
+            original_ids_by_summary,
+            primary_id_by_summary,
+            source_group_by_summary,
+        ) = (
             _build_cross_batch_summary_candidates(
                 target_date=target_date,
                 candidates=candidates,
@@ -2878,7 +2936,8 @@ class DailyTraceRunner:
                     group_id="cross-summary-single",
                     draft_ids=[summaries[0].draft_id],
                     primary_draft_id=summaries[0].draft_id,
-                    workstream_name=summaries[0].workstream_key.strip(),
+                    merge_reason="单条保留",
+                    evidence_message_ids=[],
                 )
             ]
         else:
@@ -2886,6 +2945,7 @@ class DailyTraceRunner:
                 target_date=target_date,
                 candidates=summaries,
                 input_limit=self.config.model_input_batch_target_tokens,
+                config=self.config,
             )
             summary_groups: list[CrossConversationGroup] = []
             for batch_index, batch in enumerate(summary_batches, start=1):
@@ -2896,28 +2956,37 @@ class DailyTraceRunner:
                             group_id=f"cross-summary-{batch_index:03d}-single",
                             draft_ids=[summary.draft_id],
                             primary_draft_id=summary.draft_id,
-                            workstream_name=summary.workstream_key.strip(),
+                            merge_reason="单条保留",
+                            evidence_message_ids=[],
                         )
                     )
                     continue
-                result = self.dependencies.analyzer.merge_day_candidates(
+                (
+                    result,
+                    batch_warnings,
+                    batch_attempts,
+                    batch_retry_count,
+                    batch_codex_count,
+                    batch_repair_count,
+                ) = self._request_valid_day_groups(
                     target_date,
                     batch,
+                    request_label=f"summary-{batch_index:03d}",
                 )
-                try:
-                    result = validate_cross_conversation_groups(result, batch)
-                except AnalyzerProtocolError:
-                    result, repair_warnings = (
-                        normalize_cross_conversation_groups_with_fallback(
-                            result,
-                            batch,
-                        )
-                    )
-                    warnings.extend(repair_warnings)
+                warnings.extend(batch_warnings)
+                attempts.extend(batch_attempts)
+                validation_retry_count += batch_retry_count
+                codex_fallback_count += batch_codex_count
+                singleton_repair_count += batch_repair_count
                 summary_groups.extend(result.groups)
 
         mapped_groups: list[CrossConversationGroup] = []
         for group_index, group in enumerate(summary_groups, start=1):
+            source_groups = [
+                source_group_by_summary[summary_id]
+                for summary_id in group.draft_ids
+                if summary_id in source_group_by_summary
+            ]
             draft_ids = list(
                 dict.fromkeys(
                     draft_id
@@ -2933,263 +3002,476 @@ class DailyTraceRunner:
             )
             if primary_draft_id not in draft_ids:
                 primary_draft_id = draft_ids[0]
+            if len(source_groups) == 1:
+                merge_reason = source_groups[0].merge_reason
+                evidence_message_ids = list(
+                    source_groups[0].evidence_message_ids
+                )
+            else:
+                merge_reason = group.merge_reason
+                evidence_message_ids = list(
+                    dict.fromkeys(
+                        [
+                            *group.evidence_message_ids,
+                            *(
+                                message_id
+                                for source_group in source_groups
+                                for message_id in source_group.evidence_message_ids
+                            ),
+                        ]
+                    )
+                )
             mapped_groups.append(
                 CrossConversationGroup(
                     group_id=f"cross-reconciled-{group_index:03d}",
                     draft_ids=draft_ids,
                     primary_draft_id=primary_draft_id,
-                    workstream_name=group.workstream_name,
+                    merge_reason=merge_reason,
+                    evidence_message_ids=evidence_message_ids,
                 )
             )
-        return CrossConversationGroupResult(groups=mapped_groups), warnings
-
-    def _resolve_workstream_groups(
-        self,
-        *,
-        target_date: str,
-        model_groups: list[CrossConversationGroup],
-        candidates: list[SourceBackedEventDraft],
-    ) -> tuple[list[CrossConversationGroup], list[str]]:
-        request_function = getattr(self.dependencies.analyzer, "request_function", None)
-        if not callable(request_function):
-            return consolidate_workstream_groups(model_groups, candidates)
-
-        prompt = ""
-        try:
-            assignment_batches = _pack_workstream_assignment_candidates(
-                target_date=target_date,
-                candidates=candidates,
-                input_limit=self.config.model_input_batch_target_tokens,
-            )
-            assignment_prompts: list[str] = []
-            assignments: list[WorkstreamAssignment] = []
-            for batch in assignment_batches:
-                batch_prompt = build_workstream_assignment_prompt(target_date, batch)
-                assignment_prompts.append(batch_prompt)
-                prompt = "\n\n".join(assignment_prompts)
-                request_kwargs = {
-                    "function_spec": task_function_call_spec(
-                        "workstream_assignment",
-                        workstream_assignment_output_schema(),
-                        draft_ids=[item.draft_id for item in batch],
-                        enum_values={
-                            "parent_draft_id": [
-                                "",
-                                *[item.draft_id for item in batch],
-                            ]
-                        },
-                        message_ids=list(
-                            dict.fromkeys(
-                                message_id
-                                for item in batch
-                                for message_id in item.source_message_ids
-                            )
-                        ),
-                        result_count=len(batch),
-                    ),
-                }
-                if (
-                    len(batch) == 1
-                    and _estimate_workstream_assignment_input_tokens(
-                        target_date,
-                        batch,
-                    )
-                    > self.config.model_input_batch_target_tokens
-                ):
-                    request_kwargs["allow_oversized_input"] = True
-                payload = request_function(batch_prompt, **request_kwargs)
-                if not isinstance(payload, dict):
-                    raise TypeError("Workstream assignment response must be an object.")
-                assignments.extend(
-                    WorkstreamAssignmentResult.from_dict(payload).assignments
-                )
-            assignment_result = WorkstreamAssignmentResult(assignments=assignments)
-            groups, warnings = groups_from_workstream_assignments(
-                assignment_result,
-                candidates,
-            )
-            assignment_result, followup_warnings = self._resolve_unassigned_workstreams(
-                target_date=target_date,
-                request_function=request_function,
-                initial_result=assignment_result,
-                initial_groups=groups,
-                candidates=candidates,
-            )
-            groups, assignment_warnings = groups_from_workstream_assignments(
-                assignment_result,
-                candidates,
-            )
-            warnings.extend([*followup_warnings, *assignment_warnings])
-        except (AnalyzerProtocolError, TypeError, ValueError) as exc:
-            fallback_groups, fallback_warnings = consolidate_workstream_groups(
-                model_groups,
-                candidates,
-            )
-            warnings = [
-                f"Skipped LLM workstream resolution: {exc}",
-                *fallback_warnings,
-            ]
-            self._dump_workstream_resolution_debug_artifacts(
-                target_date=target_date,
-                prompt=prompt,
-                candidates=candidates,
-                output_payload=None,
-                groups=fallback_groups,
-                warnings=warnings,
-            )
-            return fallback_groups, warnings
-
-        self._dump_workstream_resolution_debug_artifacts(
-            target_date=target_date,
-            prompt=prompt,
-            candidates=candidates,
-            output_payload=assignment_result.to_dict(),
-            groups=groups,
-            warnings=warnings,
-        )
-        return groups, warnings
-
-    def _resolve_unassigned_workstreams(
-        self,
-        *,
-        target_date: str,
-        request_function,
-        initial_result: WorkstreamAssignmentResult,
-        initial_groups: list[CrossConversationGroup],
-        candidates: list[SourceBackedEventDraft],
-    ) -> tuple[WorkstreamAssignmentResult, list[str]]:
-        assignments_by_id = {
-            assignment.draft_id: assignment
-            for assignment in initial_result.assignments
-        }
-        unassigned_candidates = [
-            candidate
-            for candidate in candidates
-            if not assignments_by_id.get(candidate.draft_id, WorkstreamAssignment("", "")).parent_draft_id
-        ]
-        known_workstreams = _build_known_workstream_context(
-            initial_result,
-            initial_groups,
+        mapped_result = validate_cross_conversation_groups(
+            CrossConversationGroupResult(groups=mapped_groups),
             candidates,
         )
-        if not unassigned_candidates or not known_workstreams:
-            return initial_result, []
+        return (
+            mapped_result,
+            warnings,
+            attempts,
+            validation_retry_count,
+            codex_fallback_count,
+            singleton_repair_count,
+        )
 
-        prompt = ""
-        try:
-            review_batches = _pack_unassigned_workstream_candidates(
-                target_date=target_date,
-                known_workstreams=known_workstreams,
-                candidates=unassigned_candidates,
-                input_limit=self.config.model_input_batch_target_tokens,
+    def _request_valid_day_groups(
+        self,
+        target_date: str,
+        candidates: list[SourceBackedEventDraft],
+        *,
+        request_label: str,
+    ) -> tuple[
+        CrossConversationGroupResult,
+        list[str],
+        list[dict[str, object]],
+        int,
+        int,
+        int,
+    ]:
+        analyzer = self.dependencies.analyzer
+        attempts: list[dict[str, object]] = []
+        validation_feedback = ""
+        validation_retry_count = 0
+        codex_fallback_count = 0
+        last_context_id = ""
+        last_result = CrossConversationGroupResult()
+
+        for attempt_index in range(self.config.day_group_validation_retry_limit + 1):
+            last_context_id = f"day-group:{request_label}:{attempt_index + 1}"
+            attempt_feedback = validation_feedback
+            recorder = getattr(analyzer, "usage_recorder", None)
+            context = (
+                recorder.request_context(last_context_id)
+                if callable(getattr(recorder, "request_context", None))
+                else nullcontext()
             )
-            review_prompts: list[str] = []
-            followup_assignments: list[WorkstreamAssignment] = []
-            for batch in review_batches:
-                batch_prompt = build_unassigned_workstream_assignment_prompt(
+            with context:
+                result = analyzer.merge_day_candidates(
                     target_date,
-                    known_workstreams=known_workstreams,
-                    unassigned_candidates=batch,
+                    candidates,
+                    validation_feedback=validation_feedback,
                 )
-                review_prompts.append(batch_prompt)
-                prompt = "\n\n".join(review_prompts)
-                request_kwargs = {
-                    "function_spec": task_function_call_spec(
-                        "unassigned_workstream_assignment",
-                        workstream_assignment_output_schema(),
-                        draft_ids=[item.draft_id for item in batch],
-                        enum_values={
-                            "parent_draft_id": [
-                                "",
-                                *[
-                                str(item.get("root_draft_id", ""))
-                                for item in known_workstreams
-                                ],
-                            ]
-                        },
-                        message_ids=list(
-                            dict.fromkeys(
-                                message_id
-                                for item in batch
-                                for message_id in item.source_message_ids
-                            )
-                        ),
-                        result_count=len(batch),
-                    ),
+            used_fallback = self._last_analyzer_request_used_fallback()
+            codex_fallback_count += int(used_fallback)
+            try:
+                validated = validate_cross_conversation_groups(result, candidates)
+            except AnalyzerProtocolError as exc:
+                last_result = result
+                validation_feedback = str(exc)
+                attempts.append(
+                    {
+                        "request_label": request_label,
+                        "attempt": attempt_index + 1,
+                        "backend": "codex" if used_fallback else "online",
+                        "status": "invalid",
+                        "validation_feedback_input": attempt_feedback,
+                        "validation_error": validation_feedback,
+                        "result": result.to_dict(),
+                    }
+                )
+                if used_fallback:
+                    break
+                if attempt_index < self.config.day_group_validation_retry_limit:
+                    validation_retry_count += 1
+                    continue
+                break
+            attempts.append(
+                {
+                    "request_label": request_label,
+                    "attempt": attempt_index + 1,
+                    "backend": "codex" if used_fallback else "online",
+                    "status": "success",
+                    "validation_feedback_input": validation_feedback,
+                    "validation_error": "",
+                    "result": validated.to_dict(),
                 }
-                if (
-                    len(batch) == 1
-                    and _estimate_unassigned_workstream_input_tokens(
-                        target_date,
-                        known_workstreams=known_workstreams,
-                        candidates=batch,
+            )
+            return (
+                validated,
+                [],
+                attempts,
+                validation_retry_count,
+                codex_fallback_count,
+                0,
+            )
+
+        fallback = getattr(analyzer, "fallback_current_request", None)
+        if callable(fallback) and not self._last_analyzer_request_used_fallback():
+            recorder = getattr(analyzer, "usage_recorder", None)
+            context_id = f"day-group:{request_label}:codex"
+            context = (
+                recorder.request_context(context_id)
+                if callable(getattr(recorder, "request_context", None))
+                else nullcontext()
+            )
+            with context:
+                codex_result = fallback(
+                    "merge_day_candidates",
+                    target_date,
+                    candidates,
+                    failed_request_context_id=last_context_id,
+                    error_category="validation_error",
+                    validation_feedback=validation_feedback,
+                )
+            codex_fallback_count += 1
+            try:
+                validated = validate_cross_conversation_groups(
+                    codex_result,
+                    candidates,
+                )
+            except AnalyzerProtocolError as exc:
+                last_result = codex_result
+                validation_feedback = str(exc)
+                attempts.append(
+                    {
+                        "request_label": request_label,
+                        "attempt": len(attempts) + 1,
+                        "backend": "codex",
+                        "status": "invalid",
+                        "validation_error": validation_feedback,
+                        "result": codex_result.to_dict(),
+                    }
+                )
+            else:
+                attempts.append(
+                    {
+                        "request_label": request_label,
+                        "attempt": len(attempts) + 1,
+                        "backend": "codex",
+                        "status": "success",
+                        "validation_error": "",
+                        "result": validated.to_dict(),
+                    }
+                )
+                return (
+                    validated,
+                    [],
+                    attempts,
+                    validation_retry_count,
+                    codex_fallback_count,
+                    0,
+                )
+
+        repaired, warnings = normalize_cross_conversation_groups_with_fallback(
+            last_result,
+            candidates,
+        )
+        original_valid_singletons = {
+            group.draft_ids[0]
+            for group in last_result.groups
+            if len(group.draft_ids) == 1
+            and group.primary_draft_id == group.draft_ids[0]
+            and group.draft_ids[0] in {item.draft_id for item in candidates}
+        }
+        repaired_singletons = {
+            group.draft_ids[0]
+            for group in repaired.groups
+            if len(group.draft_ids) == 1
+        }
+        repair_count = len(repaired_singletons - original_valid_singletons)
+        attempts.append(
+            {
+                "request_label": request_label,
+                "attempt": len(attempts) + 1,
+                "backend": "python",
+                "status": "repaired",
+                "validation_error": validation_feedback,
+                "result": repaired.to_dict(),
+                "warnings": list(warnings),
+                "singleton_repair_candidate_count": repair_count,
+            }
+        )
+        return (
+            repaired,
+            warnings,
+            attempts,
+            validation_retry_count,
+            codex_fallback_count,
+            repair_count,
+        )
+
+    def _last_analyzer_request_used_fallback(self) -> bool:
+        checker = getattr(
+            self.dependencies.analyzer,
+            "last_request_used_fallback",
+            None,
+        )
+        return bool(checker()) if callable(checker) else False
+
+    def _review_strongly_related_day_groups(
+        self,
+        *,
+        target_date: str,
+        groups: list[CrossConversationGroup],
+        candidates: list[SourceBackedEventDraft],
+        messages: list[NormalizedMessage],
+    ) -> tuple[
+        list[CrossConversationGroup],
+        list[str],
+        list[dict[str, object]],
+        int,
+        int,
+        int,
+        int,
+    ]:
+        components = build_day_group_review_components(groups, candidates, messages)
+        if not components:
+            return groups, [], [], 0, 0, 0, 0
+        request_function = getattr(self.dependencies.analyzer, "request_function", None)
+        if not callable(request_function):
+            return groups, [], [], len(components), 0, 0, 0
+
+        all_started_at = perf_counter()
+        worker_count = min(
+            len(components),
+            self.config.max_concurrent_day_group_review_requests,
+        )
+
+        def review_component(
+            component: DayGroupReviewComponent,
+        ) -> tuple[
+            str,
+            CrossConversationGroupResult | None,
+            list[dict[str, object]],
+            list[str],
+            int,
+            int,
+        ]:
+            attempts: list[dict[str, object]] = []
+            validation_feedback = ""
+            retry_count = 0
+            codex_fallback_count = 0
+            review_input = {
+                "candidate_draft_ids": [
+                    item.draft_id for item in component.candidates
+                ],
+                "groups": [item.to_dict() for item in component.groups],
+                "relation_reasons": list(component.relation_reasons),
+            }
+            for attempt_index in range(
+                self.config.day_group_validation_retry_limit + 1
+            ):
+                prompt = build_day_group_review_prompt(
+                    target_date,
+                    candidates=component.candidates,
+                    groups=component.groups,
+                    relation_reasons=component.relation_reasons,
+                    config=self.config,
+                    validation_feedback=validation_feedback,
+                )
+                function_spec = task_function_call_spec(
+                    "day_group_review",
+                    merge_output_schema(),
+                    draft_ids=[item.draft_id for item in component.candidates],
+                    message_ids=list(
+                        dict.fromkeys(
+                            message_id
+                            for item in component.candidates
+                            for message_id in item.source_message_ids
                     )
-                    > self.config.model_input_batch_target_tokens
-                ):
-                    request_kwargs["allow_oversized_input"] = True
-                payload = request_function(batch_prompt, **request_kwargs)
-                if not isinstance(payload, dict):
-                    raise TypeError("Unassigned workstream response must be an object.")
-                followup_assignments.extend(
-                    WorkstreamAssignmentResult.from_dict(payload).assignments
+                    ),
                 )
-            followup_result = WorkstreamAssignmentResult(
-                assignments=followup_assignments
-            )
-        except (AnalyzerProtocolError, TypeError, ValueError) as exc:
-            self._dump_workstream_followup_debug_artifacts(
-                target_date=target_date,
-                known_workstreams=known_workstreams,
-                unassigned_candidates=unassigned_candidates,
-                prompt=prompt,
-                output_payload=None,
-                warnings=[f"Skipped LLM unassigned workstream review: {exc}"],
-            )
-            return initial_result, [f"Skipped LLM unassigned workstream review: {exc}"]
+                estimated_tokens = estimate_structured_input_tokens(
+                    prompt,
+                    function_spec=function_spec,
+                    append_no_think=True,
+                )["input_estimated_tokens"]
+                started_at = perf_counter()
+                fallback_counted = False
+                raw_result: CrossConversationGroupResult | None = None
+                try:
+                    payload = request_function(
+                        prompt,
+                        function_spec=function_spec,
+                        allow_oversized_input=(
+                            estimated_tokens
+                            > self.config.model_input_batch_target_tokens
+                        ),
+                    )
+                    used_fallback = self._last_analyzer_request_used_fallback()
+                    codex_fallback_count += int(used_fallback)
+                    fallback_counted = used_fallback
+                    if not isinstance(payload, dict):
+                        raise AnalyzerProtocolError(
+                            "Day group review response must be an object."
+                        )
+                    raw_result = CrossConversationGroupResult.from_dict(payload)
+                    validated = validate_day_group_review_result(
+                        raw_result,
+                        component,
+                    )
+                except (AnalyzerProtocolError, TypeError, ValueError) as exc:
+                    used_fallback = self._last_analyzer_request_used_fallback()
+                    if used_fallback and not fallback_counted:
+                        codex_fallback_count += 1
+                    validation_feedback = str(exc)
+                    attempts.append(
+                        {
+                            "component_id": component.component_id,
+                            "attempt": attempt_index + 1,
+                            "backend": "codex" if used_fallback else "online",
+                            "status": "failed",
+                            "validation_error": validation_feedback,
+                            "input": review_input,
+                            "prompt": prompt,
+                            **(
+                                {"result": raw_result.to_dict()}
+                                if raw_result is not None
+                                else {}
+                            ),
+                        }
+                    )
+                    log_timing(
+                        logger,
+                        "runner.stage.completed",
+                        started_at,
+                        stage="day_group_review",
+                        component_id=component.component_id,
+                        retry_round=attempt_index,
+                        status="failed",
+                    )
+                    if attempt_index < self.config.day_group_validation_retry_limit:
+                        retry_count += 1
+                        continue
+                    return (
+                        component.component_id,
+                        None,
+                        attempts,
+                        [
+                            "Kept existing day groups because local review failed: "
+                            f"{component.component_id}: {exc}"
+                        ],
+                        retry_count,
+                        codex_fallback_count,
+                    )
+                attempts.append(
+                    {
+                        "component_id": component.component_id,
+                        "attempt": attempt_index + 1,
+                        "backend": "codex" if used_fallback else "online",
+                        "status": "success",
+                        "validation_error": "",
+                        "input": review_input,
+                        "prompt": prompt,
+                        "result": validated.to_dict(),
+                    }
+                )
+                log_timing(
+                    logger,
+                    "runner.stage.completed",
+                    started_at,
+                    stage="day_group_review",
+                    component_id=component.component_id,
+                    retry_round=attempt_index,
+                    status="success",
+                )
+                return (
+                    component.component_id,
+                    validated,
+                    attempts,
+                    [],
+                    retry_count,
+                    codex_fallback_count,
+                )
+            raise AssertionError("Day group review retry loop ended unexpectedly.")
 
-        unassigned_ids = {candidate.draft_id for candidate in unassigned_candidates}
-        followup_by_id: dict[str, WorkstreamAssignment] = {}
-        warnings: list[str] = []
-        for assignment in followup_result.assignments:
-            if assignment.draft_id not in unassigned_ids:
-                warnings.append(
-                    f"Ignored follow-up assignment outside unresolved candidates: {assignment.draft_id}."
-                )
-                continue
-            if assignment.draft_id in followup_by_id:
-                warnings.append(
-                    f"Ignored duplicate follow-up assignment: {assignment.draft_id}."
-                )
-                continue
-            if assignment.root_workstream_name.strip():
-                warnings.append(
-                    f"Ignored follow-up attempt to create a workstream root: {assignment.draft_id}."
-                )
-                continue
-            followup_by_id[assignment.draft_id] = assignment
-
-        merged_result = WorkstreamAssignmentResult(
-            assignments=[
-                followup_by_id.get(candidate.draft_id, assignments_by_id.get(candidate.draft_id, WorkstreamAssignment(candidate.draft_id, "")))
-                for candidate in candidates
+        results: list[
+            tuple[
+                str,
+                CrossConversationGroupResult | None,
+                list[dict[str, object]],
+                list[str],
+                int,
+                int,
             ]
+        ] = []
+        with ThreadPoolExecutor(max_workers=worker_count) as executor:
+            futures = [executor.submit(review_component, item) for item in components]
+            for future in futures:
+                results.append(future.result())
+
+        replacements = {
+            component_id: result
+            for component_id, result, _attempts, _warnings, _retry_count, _codex_count in results
+            if result is not None
+        }
+        attempts = [
+            attempt
+            for _component_id, _result, component_attempts, _warnings, _retry_count, _codex_count in results
+            for attempt in component_attempts
+        ]
+        warnings = [
+            warning
+            for _component_id, _result, _attempts, component_warnings, _retry_count, _codex_count in results
+            for warning in component_warnings
+        ]
+        retry_count = sum(item[4] for item in results)
+        codex_fallback_count = sum(item[5] for item in results)
+        reviewed_groups = replace_reviewed_day_group_components(
+            groups,
+            replacements,
+            components,
+            candidates,
         )
-        self._dump_workstream_followup_debug_artifacts(
-            target_date=target_date,
-            known_workstreams=known_workstreams,
-            unassigned_candidates=unassigned_candidates,
-            prompt=prompt,
-            output_payload=followup_result.to_dict(),
-            warnings=warnings,
+        log_timing(
+            logger,
+            "runner.stage.completed",
+            all_started_at,
+            stage="day_group_review_all",
+            component_count=len(components),
+            worker_count=worker_count,
+            request_count=len(attempts),
+            retry_count=retry_count,
         )
-        return merged_result, warnings
+        return (
+            reviewed_groups,
+            warnings,
+            attempts,
+            len(components),
+            len(attempts),
+            retry_count,
+            codex_fallback_count,
+        )
 
     def _dump_merge_debug_artifacts(
         self,
         *,
         target_date: str,
         candidates: list[SourceBackedEventDraft],
-        output_payload: dict[str, object] | None = None,
+        grouping_attempts: list[dict[str, object]],
+        review_attempts: list[dict[str, object]],
+        groups: list[CrossConversationGroup],
+        warnings: list[str],
+        summary: DayGroupingSummary,
     ) -> None:
         debug_root = self.config.conversation_debug_root
         if debug_root is None:
@@ -3208,117 +3490,20 @@ class DailyTraceRunner:
         if hasattr(self.dependencies.analyzer, "build_merge_prompt"):
             prompt = self.dependencies.analyzer.build_merge_prompt(target_date, candidates)
             (merge_dir / "prompt.txt").write_text(prompt, encoding="utf-8")
-        if output_payload is not None:
-            (merge_dir / "output.json").write_text(
-                dump_json(output_payload, pretty=True) + "\n",
-                encoding="utf-8",
-            )
-
-    def _dump_workstream_followup_debug_artifacts(
-        self,
-        *,
-        target_date: str,
-        known_workstreams: list[dict[str, object]],
-        unassigned_candidates: list[SourceBackedEventDraft],
-        prompt: str,
-        output_payload: dict[str, object] | None,
-        warnings: list[str],
-    ) -> None:
-        debug_root = self.config.conversation_debug_root
-        if debug_root is None:
-            return
-        merge_dir = debug_root / target_date / "_merge_day_candidates"
-        merge_dir.mkdir(parents=True, exist_ok=True)
-        (merge_dir / "workstream_resolution_followup_input.json").write_text(
-            dump_json(
-                {
-                    "known_workstreams": known_workstreams,
-                    "unassigned_candidates": [
-                        candidate.to_dict() for candidate in unassigned_candidates
-                    ],
-                },
-                pretty=True,
-            )
-            + "\n",
+        (merge_dir / "grouping_attempts.json").write_text(
+            dump_json({"attempts": grouping_attempts}, pretty=True) + "\n",
             encoding="utf-8",
         )
-        (merge_dir / "workstream_resolution_followup_prompt.txt").write_text(
-            prompt,
+        (merge_dir / "day_group_review.json").write_text(
+            dump_json({"attempts": review_attempts}, pretty=True) + "\n",
             encoding="utf-8",
         )
-        if output_payload is not None:
-            (merge_dir / "workstream_resolution_followup_output.json").write_text(
-                dump_json(output_payload, pretty=True) + "\n",
-                encoding="utf-8",
-            )
-        (merge_dir / "workstream_resolution_followup_validation.json").write_text(
-            dump_json({"warnings": list(warnings)}, pretty=True) + "\n",
-            encoding="utf-8",
-        )
-
-    def _dump_workstream_resolution_debug_artifacts(
-        self,
-        *,
-        target_date: str,
-        prompt: str,
-        candidates: list[SourceBackedEventDraft],
-        output_payload: dict[str, object] | None,
-        groups: list[CrossConversationGroup],
-        warnings: list[str],
-    ) -> None:
-        debug_root = self.config.conversation_debug_root
-        if debug_root is None:
-            return
-        merge_dir = debug_root / target_date / "_merge_day_candidates"
-        merge_dir.mkdir(parents=True, exist_ok=True)
-        (merge_dir / "workstream_resolution_input.json").write_text(
-            dump_json(
-                {
-                    "candidates": [candidate.to_dict() for candidate in candidates],
-                },
-                pretty=True,
-            )
-            + "\n",
-            encoding="utf-8",
-        )
-        (merge_dir / "workstream_resolution_prompt.txt").write_text(
-            prompt,
-            encoding="utf-8",
-        )
-        if output_payload is not None:
-            (merge_dir / "workstream_resolution_output.json").write_text(
-                dump_json(output_payload, pretty=True) + "\n",
-                encoding="utf-8",
-            )
-        (merge_dir / "workstream_resolution_validated.json").write_text(
-            dump_json(
-                {
-                    "groups": [group.to_dict() for group in groups],
-                    "warnings": list(warnings),
-                },
-                pretty=True,
-            )
-            + "\n",
-            encoding="utf-8",
-        )
-
-    def _dump_resolved_merge_groups(
-        self,
-        *,
-        target_date: str,
-        groups: list[CrossConversationGroup],
-        warnings: list[str],
-    ) -> None:
-        debug_root = self.config.conversation_debug_root
-        if debug_root is None:
-            return
-        merge_dir = debug_root / target_date / "_merge_day_candidates"
-        merge_dir.mkdir(parents=True, exist_ok=True)
         (merge_dir / "resolved_groups.json").write_text(
             dump_json(
                 {
                     "groups": [group.to_dict() for group in groups],
                     "warnings": list(warnings),
+                    "summary": summary.to_dict(),
                 },
                 pretty=True,
             )
@@ -3335,6 +3520,7 @@ class DailyTraceRunner:
         event_build_warnings: list[str],
         final_filter_warnings: list[str],
         retention_warnings: list[str],
+        day_grouping_summary: DayGroupingSummary,
     ) -> None:
         debug_root = self.config.conversation_debug_root
         if debug_root is None:
@@ -3352,6 +3538,7 @@ class DailyTraceRunner:
                         "final_filter": list(final_filter_warnings),
                         "retention": list(retention_warnings),
                     },
+                    "day_grouping_summary": day_grouping_summary.to_dict(),
                 },
                 pretty=True,
             )
@@ -3442,7 +3629,6 @@ def _source_backed_event_debug_summary(
         "object_hint": candidate.object_hint,
         "retention_reason": candidate.retention_reason,
         "retention_detail": candidate.retention_detail,
-        "workstream_key": candidate.workstream_key,
         "fact_items": [item.to_dict() for item in candidate.fact_items],
         "fact_risk_flags": list(candidate.fact_risk_flags),
     }
@@ -3507,49 +3693,6 @@ def _supports_personal_fact_review(analyzer: object) -> bool:
         callable(method)
         and implementation is not Analyzer.review_personal_event_facts
     )
-
-
-def _build_known_workstream_context(
-    result: WorkstreamAssignmentResult,
-    groups: list[CrossConversationGroup],
-    candidates: list[SourceBackedEventDraft],
-) -> list[dict[str, object]]:
-    candidate_by_id = {candidate.draft_id: candidate for candidate in candidates}
-    root_names = {
-        assignment.draft_id: assignment.root_workstream_name
-        for assignment in result.assignments
-        if (
-            assignment.draft_id == assignment.parent_draft_id
-            and assignment.root_workstream_name.strip()
-        )
-    }
-    context: list[dict[str, object]] = []
-    for group in groups:
-        root_name = root_names.get(group.primary_draft_id, "")
-        if not root_name:
-            continue
-        members = [
-            candidate_by_id[draft_id]
-            for draft_id in group.draft_ids
-            if draft_id in candidate_by_id
-        ]
-        context.append(
-            {
-                "root_draft_id": group.primary_draft_id,
-                "root_workstream_name": root_name,
-                "members": [
-                    {
-                        "draft_id": member.draft_id,
-                        "topic": member.topic,
-                        "content": member.content,
-                        "object_hint": member.object_hint,
-                        "source_message_ids": member.source_message_ids,
-                    }
-                    for member in members
-                ],
-            }
-        )
-    return context
 
 
 def _estimate_segmentation_input_tokens(
@@ -3870,114 +4013,19 @@ def _pack_anchor_units_by_model_input(
 def _estimate_day_merge_input_tokens(
     target_date: str,
     candidates: list[SourceBackedEventDraft],
+    config: RuntimeConfig | None = None,
 ) -> int:
+    runtime_config = config or RuntimeConfig()
     function_spec = task_function_call_spec(
         "day_candidate_merge",
         merge_output_schema(),
         draft_ids=[item.draft_id for item in candidates],
     )
     return estimate_structured_input_tokens(
-        build_merge_prompt(target_date, candidates),
+        build_merge_prompt(target_date, candidates, config=runtime_config),
         function_spec=function_spec,
         append_no_think=True,
     )["input_estimated_tokens"]
-
-
-def _estimate_workstream_assignment_input_tokens(
-    target_date: str,
-    candidates: list[SourceBackedEventDraft],
-) -> int:
-    function_spec = task_function_call_spec(
-        "workstream_assignment",
-        workstream_assignment_output_schema(),
-        draft_ids=[item.draft_id for item in candidates],
-        enum_values={
-            "parent_draft_id": ["", *[item.draft_id for item in candidates]]
-        },
-        message_ids=list(
-            dict.fromkeys(
-                message_id
-                for item in candidates
-                for message_id in item.source_message_ids
-            )
-        ),
-        result_count=len(candidates),
-    )
-    return estimate_structured_input_tokens(
-        build_workstream_assignment_prompt(target_date, candidates),
-        function_spec=function_spec,
-        append_no_think=True,
-    )["input_estimated_tokens"]
-
-
-def _pack_workstream_assignment_candidates(
-    *,
-    target_date: str,
-    candidates: list[SourceBackedEventDraft],
-    input_limit: int,
-) -> list[list[SourceBackedEventDraft]]:
-    return _pack_candidates_by_input_limit(
-        candidates=candidates,
-        estimate=lambda batch: _estimate_workstream_assignment_input_tokens(
-            target_date,
-            batch,
-        ),
-        input_limit=input_limit,
-    )
-
-
-def _estimate_unassigned_workstream_input_tokens(
-    target_date: str,
-    *,
-    known_workstreams: list[dict[str, object]],
-    candidates: list[SourceBackedEventDraft],
-) -> int:
-    function_spec = task_function_call_spec(
-        "unassigned_workstream_assignment",
-        workstream_assignment_output_schema(),
-        draft_ids=[item.draft_id for item in candidates],
-        enum_values={
-            "parent_draft_id": [
-                "",
-                *[str(item.get("root_draft_id", "")) for item in known_workstreams],
-            ]
-        },
-        message_ids=list(
-            dict.fromkeys(
-                message_id
-                for item in candidates
-                for message_id in item.source_message_ids
-            )
-        ),
-        result_count=len(candidates),
-    )
-    return estimate_structured_input_tokens(
-        build_unassigned_workstream_assignment_prompt(
-            target_date,
-            known_workstreams=known_workstreams,
-            unassigned_candidates=candidates,
-        ),
-        function_spec=function_spec,
-        append_no_think=True,
-    )["input_estimated_tokens"]
-
-
-def _pack_unassigned_workstream_candidates(
-    *,
-    target_date: str,
-    known_workstreams: list[dict[str, object]],
-    candidates: list[SourceBackedEventDraft],
-    input_limit: int,
-) -> list[list[SourceBackedEventDraft]]:
-    return _pack_candidates_by_input_limit(
-        candidates=candidates,
-        estimate=lambda batch: _estimate_unassigned_workstream_input_tokens(
-            target_date,
-            known_workstreams=known_workstreams,
-            candidates=batch,
-        ),
-        input_limit=input_limit,
-    )
 
 
 def _pack_candidates_by_input_limit(
@@ -4006,6 +4054,7 @@ def _pack_day_merge_candidates(
     target_date: str,
     candidates: list[SourceBackedEventDraft],
     input_limit: int,
+    config: RuntimeConfig,
 ) -> list[list[SourceBackedEventDraft]]:
     batches: list[list[SourceBackedEventDraft]] = []
     current: list[SourceBackedEventDraft] = []
@@ -4013,7 +4062,8 @@ def _pack_day_merge_candidates(
         proposal = [*current, candidate]
         if (
             current
-            and _estimate_day_merge_input_tokens(target_date, proposal) > input_limit
+            and _estimate_day_merge_input_tokens(target_date, proposal, config)
+            > input_limit
         ):
             batches.append(current)
             current = [candidate]
@@ -4034,11 +4084,13 @@ def _build_cross_batch_summary_candidates(
     list[SourceBackedEventDraft],
     dict[str, list[str]],
     dict[str, str],
+    dict[str, CrossConversationGroup],
 ]:
     candidate_by_id = {candidate.draft_id: candidate for candidate in candidates}
     summaries: list[SourceBackedEventDraft] = []
     original_ids_by_summary: dict[str, list[str]] = {}
     primary_id_by_summary: dict[str, str] = {}
+    source_group_by_summary: dict[str, CrossConversationGroup] = {}
     used_ids = set(candidate_by_id)
     for index, group in enumerate(groups, start=1):
         members = [
@@ -4057,11 +4109,6 @@ def _build_cross_batch_summary_candidates(
         used_ids.add(summary_id)
         content = merge_content_texts([item.content for item in members])
         content = _bounded_text_excerpt(content, max(content_char_limit, 1))
-        workstream_names = [
-            item.workstream_key.strip()
-            for item in members
-            if item.workstream_key.strip()
-        ]
         summaries.append(
             replace(
                 primary,
@@ -4072,8 +4119,6 @@ def _build_cross_batch_summary_candidates(
                 content=content,
                 object_hint=primary.object_hint
                 or choose_preferred_text([item.object_hint for item in members]),
-                workstream_key=group.workstream_name.strip()
-                or (workstream_names[0] if workstream_names else ""),
                 source_message_ids=list(
                     dict.fromkeys(
                         message_id
@@ -4085,7 +4130,13 @@ def _build_cross_batch_summary_candidates(
         )
         original_ids_by_summary[summary_id] = [item.draft_id for item in members]
         primary_id_by_summary[summary_id] = primary.draft_id
-    return summaries, original_ids_by_summary, primary_id_by_summary
+        source_group_by_summary[summary_id] = group
+    return (
+        summaries,
+        original_ids_by_summary,
+        primary_id_by_summary,
+        source_group_by_summary,
+    )
 
 
 def _bounded_text_excerpt(value: str, limit: int) -> str:
@@ -4491,7 +4542,6 @@ def _attach_event_file_links(
                 ),
                 referenced_link_ids=list(event.referenced_link_ids),
                 referenced_attachment_ids=resolved_attachment_ids,
-                workstream_name=event.workstream_name,
                 action_labels=list(event.action_labels),
                 self_relations=list(event.self_relations),
                 evidence_fingerprints=list(event.evidence_fingerprints),

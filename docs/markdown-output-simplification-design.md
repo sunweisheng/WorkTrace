@@ -1,6 +1,8 @@
 # WorkTrace Markdown 输出简化设计
 
-> 状态：正式个人日报和多人汇总共同使用的输出契约。
+> 历史说明：本文涉及的工作流字段和分组步骤已被 [取消工作流概念并改进事件分组](workstream-free-event-grouping-design.md) 替代；旧输出设计保留用于兼容与演进追溯。
+
+> 状态：历史输出设计；当前输出契约以 [detailed-design.md](detailed-design.md) 和新事件分组设计为准。
 
 ## 1. 文档目标
 

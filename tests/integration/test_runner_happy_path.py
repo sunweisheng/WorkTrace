@@ -111,7 +111,7 @@ class FakeAnalyzer:
             context_requests=[],
         )
 
-    def merge_day_candidates(self, target_date, candidates):
+    def merge_day_candidates(self, target_date, candidates, *, validation_feedback=""):
         raise AssertionError("Should not group when there is only one candidate")
 
 
@@ -186,7 +186,6 @@ def test_runner_dumps_first_pass_conversation_debug_artifacts(tmp_path: Path) ->
     assert len(final_payload["events"]) == 1
     assert set(
         (
-            "workstream_name",
             "action_labels",
             "self_relations",
             "evidence_fingerprints",
@@ -286,7 +285,7 @@ def test_runner_groups_multiple_self_messages_in_same_conversation_into_one_llm_
                 context_requests=[],
             )
 
-        def merge_day_candidates(self, target_date, candidates):
+        def merge_day_candidates(self, target_date, candidates, *, validation_feedback=""):
             raise AssertionError("Should not group when there is only one candidate")
 
     analyzer = PerConversationAnalyzer()
@@ -340,11 +339,19 @@ def test_runner_keeps_distinct_events_with_same_source_message_ids_separate(
                 context_requests=[],
             )
 
-        def merge_day_candidates(self, target_date, candidates):
+        def merge_day_candidates(self, target_date, candidates, *, validation_feedback=""):
             return CrossConversationGroupResult(
                 groups=[
-                    CrossConversationGroup(group_id="g1", draft_ids=["draft-1"]),
-                    CrossConversationGroup(group_id="g2", draft_ids=["draft-2"]),
+                        CrossConversationGroup(
+                            group_id="g1",
+                            draft_ids=["draft-1"],
+                            primary_draft_id="draft-1",
+                        ),
+                        CrossConversationGroup(
+                            group_id="g2",
+                            draft_ids=["draft-2"],
+                            primary_draft_id="draft-2",
+                        ),
                 ]
             )
 
@@ -405,7 +412,7 @@ def test_runner_excludes_configured_topics_before_merge(tmp_path: Path) -> None:
                 context_requests=[],
             )
 
-        def merge_day_candidates(self, target_date, candidates):
+        def merge_day_candidates(self, target_date, candidates, *, validation_feedback=""):
             raise AssertionError("Excluded topics should be filtered before merge")
 
     config = RuntimeConfig(
@@ -464,7 +471,7 @@ def test_runner_filters_low_retention_events_before_merge(tmp_path: Path) -> Non
                 context_requests=[],
             )
 
-        def merge_day_candidates(self, target_date, candidates):
+        def merge_day_candidates(self, target_date, candidates, *, validation_feedback=""):
             raise AssertionError("Only one retained candidate should skip merge")
 
     config = RuntimeConfig(data_root=tmp_path / "data")
@@ -563,7 +570,7 @@ def test_runner_filters_non_self_related_other_people_event_before_merge(
                 context_requests=[],
             )
 
-        def merge_day_candidates(self, target_date, candidates):
+        def merge_day_candidates(self, target_date, candidates, *, validation_feedback=""):
             raise AssertionError("Non-self-related candidates should be filtered before merge")
 
     config = RuntimeConfig(data_root=tmp_path / "data")
@@ -650,11 +657,19 @@ def test_runner_sorts_events_by_source_message_time(tmp_path: Path) -> None:
                 context_requests=[],
             )
 
-        def merge_day_candidates(self, target_date, candidates):
+        def merge_day_candidates(self, target_date, candidates, *, validation_feedback=""):
             return CrossConversationGroupResult(
                 groups=[
-                    CrossConversationGroup(group_id="g1", draft_ids=["draft-late"]),
-                    CrossConversationGroup(group_id="g2", draft_ids=["draft-early"]),
+                        CrossConversationGroup(
+                            group_id="g1",
+                            draft_ids=["draft-late"],
+                            primary_draft_id="draft-late",
+                        ),
+                        CrossConversationGroup(
+                            group_id="g2",
+                            draft_ids=["draft-early"],
+                            primary_draft_id="draft-early",
+                        ),
                 ]
             )
 

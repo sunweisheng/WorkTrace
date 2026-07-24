@@ -132,7 +132,6 @@ def test_personal_fact_review_protocol_and_schema_require_source_backed_fields()
                         "text": "执行人确认重新修改设备编号。",
                         "evidence_message_ids": ["m1"],
                     },
-                    "workstream_key": {"text": "", "evidence_message_ids": []},
                 },
                 "removed_claims": [],
             }
@@ -191,7 +190,6 @@ def test_personal_fact_review_protocol_rejects_model_keep_drop_field() -> None:
                     "action_label": {"text": "", "evidence_message_ids": []},
                     "object_hint": {"text": "", "evidence_message_ids": []},
                     "retention_detail": {"text": "", "evidence_message_ids": []},
-                    "workstream_key": {"text": "", "evidence_message_ids": []},
                 },
                 "removed_claims": [],
                 "keep": True,

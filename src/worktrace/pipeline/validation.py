@@ -180,7 +180,6 @@ def validate_batch_analysis_result(
                 referenced_attachment_ids=referenced_attachment_ids,
                 self_evidence_message_ids=self_evidence_message_ids,
                 self_relations=self_relations,
-                workstream_key=(candidate.workstream_key or "").strip(),
                 source_message_ids=normalized_ids,
                 source_conversation_id=source_conversation_id,
                 source_slice_id=source_slice_id,
@@ -226,7 +225,6 @@ PERSONAL_FACT_FIELDS = {
     "action_label",
     "object_hint",
     "retention_detail",
-    "workstream_key",
 }
 
 
@@ -292,7 +290,6 @@ def validate_merged_event_drafts(
                 referenced_attachment_ids=list(
                     dict.fromkeys(draft.referenced_attachment_ids)
                 ),
-                workstream_name=draft.workstream_name,
                 action_labels=list(dict.fromkeys(draft.action_labels)),
                 self_relations=list(dict.fromkeys(draft.self_relations)),
                 source_message_ids=ordered_ids,
@@ -308,12 +305,17 @@ def validate_cross_conversation_groups(
 ) -> CrossConversationGroupResult:
     expected = [candidate.draft_id for candidate in candidates]
     expected_set = set(expected)
+    candidate_by_id = {candidate.draft_id: candidate for candidate in candidates}
+    candidate_order = {draft_id: index for index, draft_id in enumerate(expected)}
     seen: set[str] = set()
     normalized_groups: list[CrossConversationGroup] = []
     duplicates: list[str] = []
     unknown: list[str] = []
+    invalid_primary: list[str] = []
+    missing_reason: list[str] = []
+    invalid_evidence: list[str] = []
 
-    for group in group_result.groups:
+    for group_index, group in enumerate(group_result.groups, start=1):
         normalized_ids: list[str] = []
         for draft_id in group.draft_ids:
             if draft_id not in expected_set:
@@ -326,20 +328,53 @@ def validate_cross_conversation_groups(
             normalized_ids.append(draft_id)
 
         if normalized_ids:
-            primary_draft_id = group.primary_draft_id
-            if primary_draft_id not in normalized_ids:
-                primary_draft_id = normalized_ids[0]
+            normalized_ids.sort(key=candidate_order.__getitem__)
+            if group.primary_draft_id not in normalized_ids:
+                invalid_primary.append(group.primary_draft_id or f"group-{group_index}")
+            allowed_evidence = {
+                message_id
+                for draft_id in normalized_ids
+                for message_id in candidate_by_id[draft_id].source_message_ids
+            }
+            evidence_ids = list(dict.fromkeys(group.evidence_message_ids))
+            invalid_group_evidence = [
+                message_id
+                for message_id in evidence_ids
+                if message_id not in allowed_evidence
+            ]
+            if len(normalized_ids) > 1 and not group.merge_reason.strip():
+                missing_reason.append(f"group-{group_index}")
+            if len(normalized_ids) > 1 and not evidence_ids:
+                invalid_evidence.append(f"group-{group_index}:missing")
+            if invalid_group_evidence:
+                invalid_evidence.extend(invalid_group_evidence)
             normalized_groups.append(
                 CrossConversationGroup(
-                    group_id=group.group_id,
+                    group_id=f"group-{len(normalized_groups) + 1:03d}",
                     draft_ids=normalized_ids,
-                    primary_draft_id=primary_draft_id,
-                    workstream_name=group.workstream_name,
+                    primary_draft_id=group.primary_draft_id,
+                    merge_reason=(
+                        group.merge_reason.strip()
+                        if len(normalized_ids) > 1
+                        else "单条保留"
+                    ),
+                    evidence_message_ids=(
+                        evidence_ids if len(normalized_ids) > 1 else []
+                    ),
                 )
             )
 
     missing = [draft_id for draft_id in expected if draft_id not in seen]
-    if not missing and not unknown:
+    if not any(
+        (
+            missing,
+            duplicates,
+            unknown,
+            invalid_primary,
+            missing_reason,
+            invalid_evidence,
+        )
+    ):
         return CrossConversationGroupResult(groups=normalized_groups)
 
     details: list[str] = []
@@ -349,6 +384,12 @@ def validate_cross_conversation_groups(
         details.append(f"duplicates={sorted(set(duplicates))}")
     if unknown:
         details.append(f"unknown={sorted(set(unknown))}")
+    if invalid_primary:
+        details.append(f"invalid_primary={invalid_primary}")
+    if missing_reason:
+        details.append(f"missing_merge_reason={missing_reason}")
+    if invalid_evidence:
+        details.append(f"invalid_evidence={invalid_evidence}")
     raise AnalyzerProtocolError(
         "Cross-conversation merge groups are invalid: " + "; ".join(details)
     )
@@ -494,35 +535,52 @@ def normalize_cross_conversation_groups_with_fallback(
 ) -> tuple[CrossConversationGroupResult, list[str]]:
     expected = [candidate.draft_id for candidate in candidates]
     expected_set = set(expected)
+    candidate_by_id = {candidate.draft_id: candidate for candidate in candidates}
+    candidate_order = {draft_id: index for index, draft_id in enumerate(expected)}
     seen: set[str] = set()
     normalized_groups: list[CrossConversationGroup] = []
-    duplicates: list[str] = []
-    unknown: list[str] = []
+    rejected_groups: list[int] = []
 
-    for group in group_result.groups:
-        normalized_ids: list[str] = []
-        for draft_id in group.draft_ids:
-            if draft_id not in expected_set:
-                unknown.append(draft_id)
-                continue
-            if draft_id in seen:
-                duplicates.append(draft_id)
-                continue
-            seen.add(draft_id)
-            normalized_ids.append(draft_id)
-
-        if normalized_ids:
-            primary_draft_id = group.primary_draft_id
-            if primary_draft_id not in normalized_ids:
-                primary_draft_id = normalized_ids[0]
-            normalized_groups.append(
-                CrossConversationGroup(
-                    group_id=group.group_id,
-                    draft_ids=normalized_ids,
-                    primary_draft_id=primary_draft_id,
-                    workstream_name=group.workstream_name,
-                )
+    for group_index, group in enumerate(group_result.groups, start=1):
+        draft_ids = list(dict.fromkeys(group.draft_ids))
+        allowed_evidence = {
+            message_id
+            for draft_id in draft_ids
+            if draft_id in candidate_by_id
+            for message_id in candidate_by_id[draft_id].source_message_ids
+        }
+        is_valid = bool(draft_ids) and all(
+            draft_id in expected_set and draft_id not in seen
+            for draft_id in draft_ids
+        )
+        is_valid = is_valid and len(draft_ids) == len(group.draft_ids)
+        is_valid = is_valid and group.primary_draft_id in draft_ids
+        if len(draft_ids) > 1:
+            is_valid = is_valid and bool(group.merge_reason.strip())
+            is_valid = is_valid and bool(group.evidence_message_ids)
+            is_valid = is_valid and set(group.evidence_message_ids).issubset(
+                allowed_evidence
             )
+        if not is_valid:
+            rejected_groups.append(group_index)
+            continue
+        draft_ids.sort(key=candidate_order.__getitem__)
+        seen.update(draft_ids)
+        normalized_groups.append(
+            CrossConversationGroup(
+                group_id="",
+                draft_ids=draft_ids,
+                primary_draft_id=group.primary_draft_id,
+                merge_reason=(
+                    group.merge_reason.strip() if len(draft_ids) > 1 else "单条保留"
+                ),
+                evidence_message_ids=(
+                    list(dict.fromkeys(group.evidence_message_ids))
+                    if len(draft_ids) > 1
+                    else []
+                ),
+            )
+        )
 
     missing = [draft_id for draft_id in expected if draft_id not in seen]
     for index, draft_id in enumerate(missing, start=1):
@@ -531,29 +589,28 @@ def normalize_cross_conversation_groups_with_fallback(
                 group_id=f"fallback-{index}",
                 draft_ids=[draft_id],
                 primary_draft_id=draft_id,
-                workstream_name=next(
-                    (
-                        candidate.workstream_key.strip()
-                        for candidate in candidates
-                        if candidate.draft_id == draft_id
-                    ),
-                    "",
-                ),
+                merge_reason="单条保留",
+                evidence_message_ids=[],
             )
         )
 
-    warnings: list[str] = []
-    if missing or duplicates or unknown:
-        details: list[str] = []
-        if missing:
-            details.append(f"missing={missing}")
-        if duplicates:
-            details.append(f"duplicates={sorted(set(duplicates))}")
-        if unknown:
-            details.append(f"unknown={sorted(set(unknown))}")
-        warnings.append(
-            "Cross-conversation merge groups were repaired: " + "; ".join(details)
+    normalized_groups.sort(
+        key=lambda group: min(candidate_order[draft_id] for draft_id in group.draft_ids)
+    )
+    normalized_groups = [
+        CrossConversationGroup(
+            group_id=f"group-{index:03d}",
+            draft_ids=group.draft_ids,
+            primary_draft_id=group.primary_draft_id,
+            merge_reason=group.merge_reason,
+            evidence_message_ids=group.evidence_message_ids,
         )
+        for index, group in enumerate(normalized_groups, start=1)
+    ]
+    warnings = [
+        "Cross-conversation merge groups were repaired: "
+        f"rejected_groups={rejected_groups}; singleton_candidates={missing}"
+    ]
 
     return CrossConversationGroupResult(groups=normalized_groups), warnings
 

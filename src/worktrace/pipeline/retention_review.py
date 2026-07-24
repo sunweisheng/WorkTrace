@@ -28,8 +28,6 @@ def select_retention_review_candidates(
     for candidate in candidates:
         if candidate.retention_reason not in allowed_reasons:
             continue
-        if policy.require_empty_workstream and candidate.workstream_key.strip():
-            continue
         if policy.require_no_referenced_files and (
             candidate.referenced_link_ids or candidate.referenced_attachment_ids
         ):

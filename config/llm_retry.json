@@ -1,11 +1,13 @@
 {
   "online_request_retry_limit": 1,
+  "day_group_validation_retry_limit": 1,
   "segmentation_retry_limit": 3,
   "event_extraction_retry_limit": 3,
   "stream_first_response_timeout_seconds": 60,
   "max_concurrent_llm_requests": 3,
   "max_concurrent_event_extraction_requests": 5,
   "max_concurrent_personal_fact_review_requests": 3,
+  "max_concurrent_day_group_review_requests": 3,
   "codex_request_interval_min_seconds": 0,
   "codex_request_interval_max_seconds": 1,
   "max_concurrent_collected_merge_review_requests": 3

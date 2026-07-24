@@ -1150,7 +1150,8 @@ def test_merge_prompt_requires_all_draft_ids_to_be_returned() -> None:
     prompt = build_merge_prompt("2026-06-22", candidates)
 
     assert "禁止漏掉任何 draft_id。" in prompt
-    assert "错误示例：candidates 有 [d1, d2, d3]，但只返回 [['d1', 'd2']]，漏掉 d3，这是错误的。" in prompt
-    assert "正确示例：candidates 有 [d1, d2, d3]，若 d3 无法与其他事项合并，也必须返回 [['d1', 'd2'], ['d3']]。" in prompt
+    assert "每个 draft_id 必须且只能出现在一个 group 里。" in prompt
+    assert "多事件组必须填写具体 merge_reason" in prompt
+    assert "evidence_message_ids" in prompt
     assert '"action_label": "回复"' in prompt
     assert '"object_hint": "提前付款"' in prompt

@@ -28,7 +28,6 @@ _FACT_FIELD_ORDER = (
     "action_label",
     "object_hint",
     "retention_detail",
-    "workstream_key",
 )
 
 
@@ -302,7 +301,6 @@ def apply_personal_fact_review_results(
             action_label=clean_text(result.action_label),
             object_hint=clean_text(result.object_hint),
             retention_detail=clean_text(result.retention_detail),
-            workstream_key=clean_text(result.workstream_key),
             source_message_ids=ordered_source_ids,
             fact_items=list(result.fact_items),
             fact_risk_flags=[],
@@ -406,7 +404,6 @@ def _fact_text_fields(item: PersonalFactReviewItemResult) -> dict[str, str]:
         "action_label": item.action_label,
         "object_hint": item.object_hint,
         "retention_detail": item.retention_detail,
-        "workstream_key": item.workstream_key,
     }
 
 
@@ -419,7 +416,6 @@ def _fact_text_fields_from_candidate(
         "action_label": clean_text(candidate.action_label),
         "object_hint": clean_text(candidate.object_hint),
         "retention_detail": clean_text(candidate.retention_detail),
-        "workstream_key": clean_text(candidate.workstream_key),
     }
 
 

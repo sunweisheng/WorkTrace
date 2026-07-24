@@ -16,7 +16,6 @@ from src.worktrace.analyzers.output_schemas import (
     personal_fact_review_output_schema,
     retention_review_output_schema,
     segment_batch_output_schema,
-    workstream_assignment_output_schema,
 )
 from src.worktrace.config import RuntimeConfig, load_runtime_config_overrides
 from src.worktrace.models import (
@@ -79,7 +78,6 @@ def test_all_production_function_schemas_use_strict_object_shapes() -> None:
         personal_fact_review_output_schema(_personal_fact_batch()),
         anchor_batch_output_schema(CONFIG),
         merge_output_schema(),
-        workstream_assignment_output_schema(),
         collected_grouping_function_schema(
             CONFIG,
             draft_ids=["d1", "d2"],
@@ -115,7 +113,6 @@ def test_task_function_spec_applies_dynamic_enums_and_empty_array_limits() -> No
                 "type": "array",
                 "items": {"type": "string"},
             },
-            "workflow_id": {"type": "string"},
         },
         "required": [
             "draft_id",
@@ -125,7 +122,6 @@ def test_task_function_spec_applies_dynamic_enums_and_empty_array_limits() -> No
             "source_message_ids",
             "target_attachment_ids",
             "target_link_ids",
-            "workflow_id",
         ],
         "additionalProperties": False,
     }
@@ -137,7 +133,6 @@ def test_task_function_spec_applies_dynamic_enums_and_empty_array_limits() -> No
         message_ids=["m001", "m002"],
         attachment_ids=[],
         link_ids=[],
-        workflow_ids=["workflow-1"],
     )
     properties = spec.parameters["properties"]
 
@@ -151,7 +146,19 @@ def test_task_function_spec_applies_dynamic_enums_and_empty_array_limits() -> No
     assert properties["source_message_ids"]["items"]["enum"] == ["m001", "m002"]
     assert properties["target_attachment_ids"]["maxItems"] == 0
     assert properties["target_link_ids"]["maxItems"] == 0
-    assert properties["workflow_id"]["enum"] == ["workflow-1"]
+
+
+def test_day_grouping_function_has_only_grouping_fields() -> None:
+    schema = merge_output_schema()
+    group = schema["properties"]["groups"]["items"]
+
+    assert set(group["properties"]) == {
+        "draft_ids",
+        "primary_draft_id",
+        "merge_reason",
+        "evidence_message_ids",
+    }
+    assert "group_id" not in group["properties"]
 
 
 def _collected_event(

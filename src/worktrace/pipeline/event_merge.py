@@ -54,9 +54,6 @@ def merge_duplicate_drafts(
                         for attachment_id in item.referenced_attachment_ids
                     )
                 ),
-                workstream_name=choose_preferred_text(
-                    [item.workstream_name for item in items]
-                ),
                 action_labels=list(
                     dict.fromkeys(
                         label
@@ -104,7 +101,6 @@ def build_work_events(
                 retention_reason=draft.retention_reason,
                 retention_detail=draft.retention_detail,
                 referenced_attachment_ids=list(draft.referenced_attachment_ids),
-                workstream_name=draft.workstream_name,
                 action_labels=list(draft.action_labels),
                 self_relations=list(draft.self_relations),
                 evidence_fingerprints=[

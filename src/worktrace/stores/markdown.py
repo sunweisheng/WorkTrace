@@ -165,12 +165,6 @@ class MarkdownEventStore(EventStore):
         content = self._normalize_public_text(event.content)
         object_hint = self._normalize_public_text(event.object_hint)
         retention_detail = self._normalize_public_text(event.retention_detail)
-        workstream_name = self._normalize_public_text(event.workstream_name.strip())
-        workstream_line = (
-            f"- **工作流**: {workstream_name}\n"
-            if workstream_name and workstream_name != UNKNOWN_METADATA_VALUE
-            else ""
-        )
         action_labels = self._render_metadata_values(event.action_labels)
         relation_label = (
             "协作方式"
@@ -188,7 +182,6 @@ class MarkdownEventStore(EventStore):
             f"{merge_meta}\n"
             f"### {index}. {title}\n\n"
             f"- **日期**: {event.date}\n"
-            f"{workstream_line}"
             f"- **主要动作**: {action_labels}\n"
             f"- **内容**: {content}\n"
             f"- **具体对象**: {object_hint}\n"
@@ -465,9 +458,6 @@ class MarkdownEventStore(EventStore):
             source_report_owners = self._parse_source_values(
                 self._extract_value(block, "- 来源负责人: ")
             )
-            workstream_name = self._parse_optional_metadata_value(
-                self._extract_value(block, "- **工作流**: ")
-            )
             action_labels = self._parse_metadata_values(
                 self._extract_value(block, "- **主要动作**: ")
             )
@@ -500,7 +490,6 @@ class MarkdownEventStore(EventStore):
                     object_hint=object_hint,
                     retention_reason=retention_reason,
                     retention_detail=retention_detail,
-                    workstream_name=workstream_name,
                     action_labels=action_labels,
                     self_relations=self_relations,
                     evidence_fingerprints=merge_meta.get("evidence_fingerprints", []),

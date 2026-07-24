@@ -18,6 +18,11 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         help="Replay trace directory. Default: data/replay-trace/<date>",
     )
+    parser.add_argument(
+        "--baseline-trace-root",
+        default=None,
+        help="Optional baseline trace directory used to calculate before/after differences.",
+    )
     return parser.parse_args(argv)
 
 
@@ -379,6 +384,124 @@ def _collect_personal_fact_review_timing(
     }
 
 
+def _stage_duration_summary(
+    summary: dict[str, object],
+    stage: str,
+) -> dict[str, float | int]:
+    timing_summary = summary.get("timing_summary", {})
+    events = timing_summary.get("events", []) if isinstance(timing_summary, dict) else []
+    values: list[float] = []
+    if isinstance(events, list):
+        for item in events:
+            if not isinstance(item, dict) or item.get("event") != "runner.stage.completed":
+                continue
+            raw_line = str(item.get("raw_line", ""))
+            stage_match = re.search(r'stage="([^"]+)"', raw_line)
+            if stage_match is not None and stage_match.group(1) == stage:
+                values.append(_to_float(item.get("duration_ms")))
+    return _build_basic_stats(values)
+
+
+def _request_kind_duration_summary(
+    summary: dict[str, object],
+    request_kind: str,
+) -> dict[str, float | int]:
+    llm_usage_summary = summary.get("llm_usage_summary", {})
+    requests = (
+        llm_usage_summary.get("requests", [])
+        if isinstance(llm_usage_summary, dict)
+        else []
+    )
+    values = [
+        _to_float(item.get("duration_ms"))
+        for item in requests
+        if isinstance(item, dict) and item.get("request_kind") == request_kind
+    ]
+    return _build_basic_stats(values)
+
+
+def _collect_day_grouping_timing(summary: dict[str, object]) -> dict[str, object]:
+    legacy_workstream_values = [
+        _to_float(item.get("duration_ms"))
+        for item in (
+            summary.get("llm_usage_summary", {}).get("requests", [])
+            if isinstance(summary.get("llm_usage_summary"), dict)
+            else []
+        )
+        if isinstance(item, dict)
+        and item.get("request_kind")
+        in {"workstream_assignment", "unassigned_workstream_assignment"}
+    ]
+    return {
+        "initial_grouping_request_accumulated_ms": (
+            _request_kind_duration_summary(summary, "day_candidate_merge")
+        ),
+        "local_review_request_accumulated_ms": (
+            _request_kind_duration_summary(summary, "day_group_review")
+        ),
+        "local_review_wall_clock_ms": _stage_duration_summary(
+            summary,
+            "day_group_review_all",
+        ),
+        "merge_day_candidates_wall_clock_ms": _stage_duration_summary(
+            summary,
+            "merge_day_candidates",
+        ),
+        "legacy_workstream_request_accumulated_ms": _build_basic_stats(
+            legacy_workstream_values
+        ),
+        "notes": {
+            "request_accumulated": "Sum of individual request durations; concurrent requests may overlap.",
+            "wall_clock": "Runner stage duration; use this for actual elapsed time.",
+        },
+    }
+
+
+def _load_report_summary(trace_root: Path) -> dict[str, object]:
+    summary = _load_summary(trace_root)
+    if not isinstance(summary.get("llm_usage_summary"), dict):
+        summary["llm_usage_summary"] = _load_llm_usage_summary(
+            trace_root,
+            summary.get("target_date"),
+        )
+    return summary
+
+
+def _comparison_metric(
+    baseline: dict[str, object],
+    current: dict[str, object],
+    key: str,
+) -> dict[str, float]:
+    baseline_stats = baseline.get(key, {})
+    current_stats = current.get(key, {})
+    baseline_total = _to_float(
+        baseline_stats.get("total") if isinstance(baseline_stats, dict) else 0.0
+    )
+    current_total = _to_float(
+        current_stats.get("total") if isinstance(current_stats, dict) else 0.0
+    )
+    return {
+        "baseline_ms": round(baseline_total, 3),
+        "current_ms": round(current_total, 3),
+        "delta_ms": round(current_total - baseline_total, 3),
+        "delta_s": round((current_total - baseline_total) / 1000, 3),
+    }
+
+
+def _build_day_grouping_comparison(
+    baseline: dict[str, object],
+    current: dict[str, object],
+) -> dict[str, object]:
+    keys = (
+        "initial_grouping_request_accumulated_ms",
+        "local_review_request_accumulated_ms",
+        "local_review_wall_clock_ms",
+        "merge_day_candidates_wall_clock_ms",
+        "legacy_workstream_request_accumulated_ms",
+    )
+    return {key: _comparison_metric(baseline, current, key) for key in keys}
+
+
 def _build_hook_vs_http_summary(
     hook_exec: dict[str, object],
     curl_http: dict[str, object],
@@ -431,19 +554,15 @@ def main(argv: list[str] | None = None) -> int:
     else:
         raise SystemExit("Either --date or --trace-root is required.")
 
-    summary = _load_summary(trace_root)
-    if not isinstance(summary.get("llm_usage_summary"), dict):
-        summary["llm_usage_summary"] = _load_llm_usage_summary(
-            trace_root,
-            summary.get("target_date"),
-        )
+    summary = _load_report_summary(trace_root)
     stderr_lines = _load_llm_stderr_lines(trace_root)
     if not stderr_lines:
         stderr_lines = _load_stderr_lines(trace_root)
     hook_exec = _collect_hook_exec_summary(summary)
     curl_http = _collect_chat_completions_timings(stderr_lines)
 
-    payload = {
+    day_grouping_timing = _collect_day_grouping_timing(summary)
+    payload: dict[str, object] = {
         "target_date": summary.get("target_date"),
         "trace_root": str(trace_root.resolve()),
         "resume_requested": summary.get("resume_requested", False),
@@ -452,10 +571,23 @@ def main(argv: list[str] | None = None) -> int:
         "stage_totals": _collect_stage_totals(summary),
         "online_llm": _collect_online_llm_summary(summary),
         "personal_fact_review_timing": _collect_personal_fact_review_timing(summary),
+        "day_grouping_timing": day_grouping_timing,
         "hook_exec": hook_exec,
         "curl_http": curl_http,
         "hook_vs_http": _build_hook_vs_http_summary(hook_exec, curl_http),
     }
+    if args.baseline_trace_root:
+        baseline_root = Path(args.baseline_trace_root)
+        baseline_summary = _load_report_summary(baseline_root)
+        baseline_timing = _collect_day_grouping_timing(baseline_summary)
+        payload["baseline"] = {
+            "trace_root": str(baseline_root.resolve()),
+            "target_date": baseline_summary.get("target_date"),
+            "day_grouping_timing": baseline_timing,
+        }
+        payload["day_grouping_timing_comparison"] = (
+            _build_day_grouping_comparison(baseline_timing, day_grouping_timing)
+        )
     sys_stdout = json.dumps(payload, ensure_ascii=False, indent=2)
     print(sys_stdout)
     return 0

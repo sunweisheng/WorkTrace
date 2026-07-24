@@ -30,7 +30,6 @@ def filter_candidate_drafts(
             draft.action_label,
             draft.object_hint,
             draft.retention_detail,
-            draft.workstream_key,
         ),
     )
 
@@ -48,7 +47,6 @@ def filter_merged_drafts(
             *draft.action_labels,
             draft.object_hint,
             draft.retention_detail,
-            draft.workstream_name,
         ),
     )
 
@@ -74,7 +72,6 @@ def filter_work_events_with_diagnostics(
             *event.action_labels,
             event.object_hint,
             event.retention_detail,
-            event.workstream_name,
             *(link.title for link in event.file_links),
             *(link.url for link in event.file_links),
         ),

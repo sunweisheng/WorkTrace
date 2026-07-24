@@ -1,6 +1,6 @@
 # WorkTrace 跨会话合并与工作流归属设计
 
-> 状态：正式个人日报主链。本文档描述 `candidate_events` 形成之后、`WorkEvent` 物化之前的当前实现。
+> 历史设计：其中的工作流方案已被 [取消工作流概念并改进事件分组](workstream-free-event-grouping-design.md) 替代。本文保留当时的设计事实，不作为当前实现依据。
 
 ## 1. 为什么需要两次分组判断
 

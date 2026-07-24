@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import pytest
+
+from src.worktrace.errors import AnalyzerProtocolError
 from src.worktrace.models import (
     AttachmentMeta,
     BatchAnalysisResult,
@@ -525,7 +528,7 @@ def test_validation_keeps_valid_self_relations_and_warns_for_invalid_items() -> 
     assert len(warnings) == 3
 
 
-def test_validation_deduplicates_cross_conversation_groups() -> None:
+def test_validation_rejects_duplicate_cross_conversation_groups() -> None:
     candidates = [
         SourceBackedEventDraft(
             draft_id="d1",
@@ -549,19 +552,29 @@ def test_validation_deduplicates_cross_conversation_groups() -> None:
         ),
     ]
 
-    validated = validate_cross_conversation_groups(
-        CrossConversationGroupResult(
-            groups=[
-                CrossConversationGroup(group_id="g1", draft_ids=["d1"]),
-                CrossConversationGroup(group_id="g2", draft_ids=["d1"]),
-                CrossConversationGroup(group_id="g3", draft_ids=["d2"]),
-            ]
-        ),
-        candidates,
-    )
-
-    assert [group.group_id for group in validated.groups] == ["g1", "g3"]
-    assert [group.draft_ids for group in validated.groups] == [["d1"], ["d2"]]
+    with pytest.raises(AnalyzerProtocolError, match=r"duplicates=\['d1'\]"):
+        validate_cross_conversation_groups(
+            CrossConversationGroupResult(
+                groups=[
+                    CrossConversationGroup(
+                        group_id="g1",
+                        draft_ids=["d1"],
+                        primary_draft_id="d1",
+                    ),
+                    CrossConversationGroup(
+                        group_id="g2",
+                        draft_ids=["d1"],
+                        primary_draft_id="d1",
+                    ),
+                    CrossConversationGroup(
+                        group_id="g3",
+                        draft_ids=["d2"],
+                        primary_draft_id="d2",
+                    ),
+                ]
+            ),
+            candidates,
+        )
 
 
 def test_validation_repairs_missing_cross_conversation_groups() -> None:
@@ -591,14 +604,19 @@ def test_validation_repairs_missing_cross_conversation_groups() -> None:
     repaired, warnings = normalize_cross_conversation_groups_with_fallback(
         CrossConversationGroupResult(
             groups=[
-                CrossConversationGroup(group_id="g1", draft_ids=["d1"]),
+                CrossConversationGroup(
+                    group_id="g1",
+                    draft_ids=["d1"],
+                    primary_draft_id="d1",
+                ),
             ]
         ),
         candidates,
     )
 
-    assert [group.group_id for group in repaired.groups] == ["g1", "fallback-1"]
+    assert [group.group_id for group in repaired.groups] == ["group-001", "group-002"]
     assert [group.draft_ids for group in repaired.groups] == [["d1"], ["d2"]]
     assert warnings == [
-        "Cross-conversation merge groups were repaired: missing=['d2']"
+        "Cross-conversation merge groups were repaired: "
+        "rejected_groups=[]; singleton_candidates=['d2']"
     ]

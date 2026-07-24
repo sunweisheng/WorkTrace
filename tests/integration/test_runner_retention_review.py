@@ -121,7 +121,7 @@ class ReviewAnalyzer:
         self.review_calls += 1
         return self.result
 
-    def merge_day_candidates(self, target_date, candidates):
+    def merge_day_candidates(self, target_date, candidates, *, validation_feedback=""):
         raise AssertionError("A single retained candidate must not call merge")
 
 

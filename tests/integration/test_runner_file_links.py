@@ -94,7 +94,7 @@ class LinkAnalyzer:
             context_requests=[],
         )
 
-    def merge_day_candidates(self, target_date, candidates):
+    def merge_day_candidates(self, target_date, candidates, *, validation_feedback=""):
         raise AssertionError("Should not group when there is only one candidate")
 
 

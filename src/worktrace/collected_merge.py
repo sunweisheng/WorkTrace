@@ -785,13 +785,6 @@ class CollectedMergeRunner:
             and _has_same_conversation_only_boundary(source_events)
         ):
             reasons.append("same_conversation_only")
-        workstreams = {
-            "".join(item.event.workstream_name.casefold().split())
-            for item in source_events
-            if item.event.workstream_name.strip()
-        }
-        if self.config.review_workstream_conflicts and len(workstreams) > 1:
-            reasons.append("workstream_conflict")
         reasons.extend(
             derive_semantic_review_trigger_reasons(
                 group=group,
@@ -1860,10 +1853,6 @@ class CollectedMergeRunner:
         repair_warnings: list[str] | None = None,
     ) -> tuple[list[WorkEvent], list[str]]:
         repair_warnings = list(repair_warnings or [])
-        merge_result, boundary_warnings = enforce_collected_workstream_boundaries(
-            merge_result,
-            source_events,
-        )
         merge_result, metadata_warnings = self._fill_collected_merge_group_metadata(
             source_events,
             merge_result,
@@ -1892,14 +1881,12 @@ class CollectedMergeRunner:
             merged_events_after_sensitive=merged_events_after_sensitive,
             retained_events=retained_events,
             repair_warnings=repair_warnings,
-            boundary_warnings=boundary_warnings,
             metadata_warnings=metadata_warnings,
             sensitive_warnings=sensitive_warnings,
             retention_warnings=retention_warnings,
         )
         return retained_events, [
             *repair_warnings,
-            *boundary_warnings,
             *metadata_warnings,
             *sensitive_warnings,
             *retention_warnings,
@@ -3207,17 +3194,6 @@ class CollectedMergeRunner:
                 ]
             )
             file_links = _merge_file_links(items)
-            workstream_names = _dedupe(
-                [item.event.workstream_name for item in items]
-            )
-            normalized_workstream_names = {
-                "".join(name.casefold().split()) for name in workstream_names
-            }
-            output_workstream_name = (
-                workstream_names[0]
-                if len(normalized_workstream_names) <= 1 and workstream_names
-                else ""
-            )
             action_labels = _dedupe(
                 [
                     label
@@ -3278,7 +3254,6 @@ class CollectedMergeRunner:
                     object_hint=group.object_hint,
                     retention_reason=group.retention_reason,
                     retention_detail=group.retention_detail,
-                    workstream_name=output_workstream_name,
                     action_labels=action_labels,
                     self_relations=self_relations,
                     evidence_fingerprints=evidence_fingerprints,
@@ -3688,7 +3663,6 @@ class CollectedMergeRunner:
         merged_events_after_sensitive: list[WorkEvent],
         retained_events: list[WorkEvent],
         repair_warnings: list[str],
-        boundary_warnings: list[str],
         metadata_warnings: list[str],
         sensitive_warnings: list[str],
         retention_warnings: list[str],
@@ -3713,7 +3687,6 @@ class CollectedMergeRunner:
                     self.config.retention_policy,
                 ),
                 "repair_warnings": repair_warnings,
-                "boundary_warnings": boundary_warnings,
                 "metadata_warnings": metadata_warnings,
                 "sensitive_warnings": sensitive_warnings,
                 "retention_warnings": retention_warnings,
@@ -3915,8 +3888,7 @@ def _classify_source_markdown(
     if parsed.is_merged:
         return "upstream_merged"
     if any(
-        event.workstream_name
-        or event.action_labels
+        event.action_labels
         or event.self_relations
         or event.evidence_fingerprints
         or event.file_keys
@@ -4603,10 +4575,6 @@ def build_grouping_summary_events(
         ]
         if not items:
             continue
-        workstream_names = _dedupe([item.event.workstream_name for item in items])
-        normalized_workstreams = {
-            "".join(name.casefold().split()) for name in workstream_names
-        }
         is_singleton = len(items) == 1
         has_model_summary = all(
             clean_text(value)
@@ -4690,11 +4658,6 @@ def build_grouping_summary_events(
                         [item.event.retention_reason for item in items]
                     ),
                     retention_detail=derive_collected_merge_retention_detail(items),
-                    workstream_name=(
-                        workstream_names[0]
-                        if len(normalized_workstreams) <= 1 and workstream_names
-                        else ""
-                    ),
                     action_labels=_dedupe(
                         [
                             label
@@ -4902,14 +4865,6 @@ def collected_events_are_similar(source_events: list[CollectedSourceEvent]) -> b
 
 
 def _events_are_deterministically_same(left: WorkEvent, right: WorkEvent) -> bool:
-    left_workstream = _normalize_text(left.workstream_name)
-    right_workstream = _normalize_text(right.workstream_name)
-    if (
-        left_workstream
-        and right_workstream
-        and left_workstream.casefold() != right_workstream.casefold()
-    ):
-        return False
     left_title = _normalize_text(left.title)
     right_title = _normalize_text(right.title)
     left_content = _normalize_text(left.content)
@@ -5210,97 +5165,6 @@ def _build_singleton_collected_group(
     )
 
 
-def enforce_collected_workstream_boundaries(
-    merge_result: CollectedMergeResult,
-    source_events: list[CollectedSourceEvent],
-) -> tuple[CollectedMergeResult, list[str]]:
-    source_by_id = {item.draft_id: item for item in source_events}
-    groups: list[CollectedMergeGroup] = []
-    warnings: list[str] = []
-
-    for group in merge_result.groups:
-        items = [
-            source_by_id[draft_id]
-            for draft_id in group.draft_ids
-            if draft_id in source_by_id
-        ]
-        named_groups: dict[str, list[CollectedSourceEvent]] = {}
-        unnamed_items: list[CollectedSourceEvent] = []
-        for item in items:
-            name = clean_text(item.event.workstream_name)
-            if not name:
-                unnamed_items.append(item)
-                continue
-            normalized_name = "".join(name.casefold().split())
-            named_groups.setdefault(normalized_name, []).append(item)
-
-        if len(named_groups) <= 1:
-            groups.append(group)
-            continue
-
-        if _named_workstream_groups_share_thread_evidence(named_groups):
-            groups.append(group)
-            warnings.append(
-                "Allowed collected merge across different named workstreams because "
-                f"shared conversation or message evidence connects the group: {group.group_id}."
-            )
-            continue
-
-        partitions = [*named_groups.values(), *([item] for item in unnamed_items)]
-        for index, partition in enumerate(partitions, start=1):
-            groups.append(
-                _build_boundary_fallback_group(
-                    group,
-                    partition,
-                    partition_index=index,
-                )
-            )
-        warnings.append(
-            "Split collected merge group because different named workstreams cannot merge: "
-            f"{group.group_id}."
-        )
-
-    return CollectedMergeResult(groups=groups), warnings
-
-
-def _named_workstream_groups_share_thread_evidence(
-    named_groups: dict[str, list[CollectedSourceEvent]],
-) -> bool:
-    names = list(named_groups)
-    connected: dict[str, set[str]] = {name: set() for name in names}
-    for left_index, left_name in enumerate(names):
-        for right_name in names[left_index + 1 :]:
-            if any(
-                _events_share_thread_evidence(left.event, right.event)
-                for left in named_groups[left_name]
-                for right in named_groups[right_name]
-            ):
-                connected[left_name].add(right_name)
-                connected[right_name].add(left_name)
-
-    seen = {names[0]}
-    pending = [names[0]]
-    while pending:
-        current = pending.pop()
-        for neighbor in connected[current]:
-            if neighbor in seen:
-                continue
-            seen.add(neighbor)
-            pending.append(neighbor)
-    return len(seen) == len(names)
-
-
-def _events_share_thread_evidence(left: WorkEvent, right: WorkEvent) -> bool:
-    left_messages = set(left.evidence_fingerprints)
-    right_messages = set(right.evidence_fingerprints)
-    left_conversations = set(left.conversation_fingerprints)
-    right_conversations = set(right.conversation_fingerprints)
-    return bool(
-        left_messages.intersection(right_messages)
-        or left_conversations.intersection(right_conversations)
-    )
-
-
 def _has_same_conversation_only_boundary(
     source_events: list[CollectedSourceEvent],
 ) -> bool:
@@ -5486,29 +5350,6 @@ def _collected_grouping_split_reason(result: CollectedGroupingResult) -> str:
             if group.split_reason.strip()
         ),
         "",
-    )
-
-
-def _build_boundary_fallback_group(
-    original_group: CollectedMergeGroup,
-    items: list[CollectedSourceEvent],
-    *,
-    partition_index: int,
-) -> CollectedMergeGroup:
-    return CollectedMergeGroup(
-        group_id=f"{original_group.group_id}-workstream-{partition_index}",
-        draft_ids=[item.draft_id for item in items],
-        title=choose_preferred_text([item.event.title for item in items]),
-        content=merge_content_texts([item.event.content for item in items]),
-        object_hint=choose_preferred_text([item.event.object_hint for item in items]),
-        retention_reason=choose_preferred_text(
-            [
-                item.event.retention_reason
-                for item in items
-                if item.event.retention_reason in RETENTION_REASONS
-            ]
-        ),
-        retention_detail=derive_collected_merge_retention_detail(items),
     )
 
 

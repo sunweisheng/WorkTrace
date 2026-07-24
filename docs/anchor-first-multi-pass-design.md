@@ -1,5 +1,7 @@
 # WorkTrace 锚点优先设计演进记录
 
+> 历史说明：本文涉及的工作流方案已被 [取消工作流概念并改进事件分组](workstream-free-event-grouping-design.md) 替代，正文不改写历史事实。
+
 > 状态：历史设计与当前落地对照。当前正式流程请以 [detailed-design.md](detailed-design.md) 为准。
 
 ## 1. 最初目标

@@ -112,6 +112,8 @@ class Analyzer(ABC):
         self,
         target_date: str,
         candidates: list[SourceBackedEventDraft],
+        *,
+        validation_feedback: str = "",
     ) -> str:
         raise NotImplementedError
 
@@ -136,6 +138,8 @@ class Analyzer(ABC):
         self,
         target_date: str,
         candidates: list[SourceBackedEventDraft],
+        *,
+        validation_feedback: str = "",
     ) -> CrossConversationGroupResult:
         raise NotImplementedError
 

@@ -18,6 +18,7 @@ from ..models import (
     ConversationSegmentationResult,
     ConversationSlice,
     ContextRequest,
+    CrossConversationGroup,
     LinkedFileTextBlock,
     NormalizedMessage,
     PersonalFactReviewBatch,
@@ -100,7 +101,7 @@ def _build_personal_fact_rules(config: RuntimeConfig) -> list[str]:
         else "fact_risk_flags 没有可用配置时返回空数组。"
     )
     return [
-        "fact_items 必须覆盖 topic、content、action_label、object_hint、retention_detail 和非空 workstream_key；每项使用 field、text、evidence_message_ids。",
+        "fact_items 必须覆盖 topic、content、action_label、object_hint 和 retention_detail；每项使用 field、text、evidence_message_ids。",
         "除 content 可拆成多个按顺序连接的事实外，其他非空字段各返回一项，text 必须与对应字段完全一致。",
         "content 必须与全部 content fact_items 的 text 按返回顺序直接连接后完全一致。",
         "每个 fact_item 必须引用 source_message_ids 中直接支持该项文字的真实消息；不能用无关消息为推断或补充内容背书。",
@@ -158,7 +159,6 @@ def build_batch_analysis_prompt(
             "self_evidence_message_ids 必须列出证明本人发起、负责、审批或跟进该事项的本人消息；它可以与 source_message_ids 不同。",
             _build_self_relation_rule(runtime_config),
             ATTACHMENT_FILE_NAME_RULE,
-            "workstream_key 只在消息明确命名项目、产品或政策时填写其稳定规范名称；不能使用城市、地点、部门、工具类别、环境或泛化主题，无法确定时返回空字符串。",
             "正例：本人要求他人汇报、本人审批、本人同步、本人催办、本人推进，都算与本人直接相关。",
             "反例：他人之间讨论自己的工作、自己的承诺、自己的处理进度，即使本人在该会话里发过言，也不算与本人直接相关。",
             "如果当前消息是在纠正、澄清或替换前文对象，topic、content、object_hint 必须以当前消息确认后的对象为准。",
@@ -341,7 +341,6 @@ def build_segment_batch_analysis_prompt(
             "一个 candidate 只能描述一条工作线；若同一 segment 同时出现两个命名项目、产品、政策或不相干业务对象，必须拆成多个 candidate_events。",
             ATTACHMENT_FILE_NAME_RULE,
             "图片和文件附件默认只提供元数据；判断依赖其内容时，必须返回 attachment_text 的 context_requests，并给出对应消息和附件 ID，不要猜测图片或文件内容。",
-            "workstream_key 只在消息明确命名项目、产品或政策时填写其稳定规范名称；不能使用城市、地点、部门、工具类别、环境或泛化主题，无法确定时返回空字符串。",
             "本人提出的问题、风险和待确认事项本身可以提炼，不要求已有处理结果。",
             EVENT_TITLE_RULE,
             "表情是本人回复证据，但不能单凭表情描述事项已完成、已同意或已拒绝。",
@@ -454,9 +453,9 @@ def build_personal_fact_review_prompt(
             "每个输入 draft_id 必须且只能返回一次，并保持输入顺序。",
             "只能使用 role=evidence 且属于 allowed_evidence_message_ids 的消息作为事实证据；context 只能帮助理解。",
             "allowed_evidence_message_ids 按候选独立生效；即使同批其他候选中出现了某个消息 ID，也不能把它用于当前候选。",
-            "supported=true 时，只在 fact_items 中返回原聊天直接支持的 topic、content、action_label、object_hint、retention_detail 和 workstream_key；不要在 fact_items 之外重复返回这些文字字段。",
+            "supported=true 时，只在 fact_items 中返回原聊天直接支持的 topic、content、action_label、object_hint 和 retention_detail；不要在 fact_items 之外重复返回这些文字字段。",
             "supported=true 时，topic、content、object_hint 和 retention_detail 必须都有非空文字和至少一个合法 evidence_message_id；缺少任一必填字段的合法证据时必须返回 supported=false。",
-            "supported=true 时，topic、action_label、object_hint、retention_detail 以及非空 workstream_key 各返回且只返回一个对象；workstream_key 为空时返回空 text 和空 evidence_message_ids。",
+            "supported=true 时，topic、action_label、object_hint 和 retention_detail 各返回且只返回一个对象。",
             "content 可以拆成一个或多个对象，但必须按最终正文顺序返回；Python 会直接连接所有 content.text 生成正文，包括标点，不能把其他字段的文字放入 content。",
             "supported=false 表示原聊天无法支持一条同时具备 topic、content、object_hint 和 retention_detail 的有效事件；此时 fact_items 中各文字字段和证据必须为空，content 返回空数组，removed_claims 至少写一项。",
             "不要因为事件包含多人、多地点、多步骤或较长聊天就返回 supported=false。",
@@ -480,7 +479,6 @@ def build_personal_fact_review_prompt(
                         "object_hint": item.candidate.object_hint,
                         "retention_reason": item.candidate.retention_reason,
                         "retention_detail": item.candidate.retention_detail,
-                        "workstream_key": item.candidate.workstream_key,
                         "fact_items": [
                             fact.to_dict() for fact in item.candidate.fact_items
                         ],
@@ -511,7 +509,14 @@ def build_personal_fact_review_prompt(
     return dump_json(protocol, pretty=True)
 
 
-def build_merge_prompt(target_date: str, candidates: list[SourceBackedEventDraft]) -> str:
+def build_merge_prompt(
+    target_date: str,
+    candidates: list[SourceBackedEventDraft],
+    *,
+    config: RuntimeConfig | None = None,
+    validation_feedback: str = "",
+) -> str:
+    runtime_config = config or RuntimeConfig()
     protocol = {
         "instruction": (
             "按是否描述同一真实工作事件，对同一天的候选事项做跨会话分组。"
@@ -520,67 +525,26 @@ def build_merge_prompt(target_date: str, candidates: list[SourceBackedEventDraft
             "直接作答，不要展示你的推理过程。"
         ),
         "rules": [
-            "只把明显属于同一真实事件或同一项目生命周期的事项分到一起。",
-            "如果拿不准，宁可分开。",
-            "背景相同不等于同一事件。",
-            "不同的非空 workstream_key 必须分开，即使消息相邻、同一发送人或共享地点、设备也不能合并。",
-            "若多个候选具有相同的非空 workstream_key，必须合并为同一项目或政策生命周期；项目根候选作为 primary_draft_id。",
-            "workstream_key 为空的候选只能在某个非空工作流候选明确分配了同一具体对象或动作时并入该组；否则必须单独成组。",
-            "同一政策的适用范围/通知指令与其直接执行反馈应合并为一条闭环事件；范围和执行对象不一致时必须分开。",
-            "不能以城市、地点、部门、通用工具或相近时间作为合并理由。",
+            *runtime_config.personal_grouping_rules,
             "每个 draft_id 必须且只能出现在一个 group 里。",
             "禁止漏掉任何 draft_id。输出前必须逐个核对 candidates 里的全部 draft_id 都已被返回一次且仅一次。",
-            "错误示例：candidates 有 [d1, d2, d3]，但只返回 [['d1', 'd2']]，漏掉 d3，这是错误的。",
-            "正确示例：candidates 有 [d1, d2, d3]，若 d3 无法与其他事项合并，也必须返回 [['d1', 'd2'], ['d3']]。",
+            "多事件组必须填写具体 merge_reason，并引用组内合法 evidence_message_ids。",
+            "单例组的 merge_reason 填写单条保留，evidence_message_ids 返回空数组。",
         ],
         "target_date": target_date,
+        "validation_feedback": validation_feedback,
         "candidates": [
             {
                 "draft_id": candidate.draft_id,
                 "action_label": candidate.action_label,
                 "object_hint": candidate.object_hint,
-                "workstream_key": candidate.workstream_key,
                 "source_conversation_id": candidate.source_conversation_id,
-                "topic": candidate.topic,
-                "content": candidate.content,
-            }
-            for candidate in candidates
-        ],
-    }
-    return dump_json(protocol, pretty=True)
-
-
-def build_workstream_assignment_prompt(
-    target_date: str,
-    candidates: list[SourceBackedEventDraft],
-) -> str:
-    protocol = {
-        "instruction": (
-            "判断当天候选事项是否属于某个明确命名的项目、产品或政策工作流。"
-            "只调用指定 Function 一次提交 assignments，不展示推理过程。"
-        ),
-        "rules": [
-            "每个 draft_id 必须且只能返回一次。",
-            "parent_draft_id 填该事项的直接项目父候选 draft_id；独立事项返回空字符串。",
-            "一个明确命名的项目、产品或政策根候选的 parent_draft_id 填自己的 draft_id，并在 root_workstream_name 填输入中明确出现的名称；其余事项的 root_workstream_name 返回空字符串。",
-            "只有候选内容明确表明项目启动时分配了该任务、该任务是该项目的实施/验收/监控/成效统计，或该政策的范围指令与直接执行反馈构成同一闭环时，才能归入同一项目根候选。",
-            "不同命名项目、产品或政策不得归并；共享城市、地点、部门、设备、通用工具、相近时间或相似措辞都不是依据。",
-            "不确定时返回独立事项，绝不猜测。",
-            "每个非独立、非根归属必须在 evidence_message_ids 中引用至少一条子事项或直接父候选的 source_message_ids；直接父候选本身及其 source_message_ids 共同构成另一侧证据，不能使用输入外的消息 ID。",
-            "同一政策的适用范围指令与其直接执行/通知反馈，即使描述的是不同对象子集，只要输入没有明确命名不同政策，应归入同一政策工作流。",
-            "不同写法是否为同一命名项目由消息语义判断，不能仅凭字符串相似度判断。",
-        ],
-        "target_date": target_date,
-        "candidates": [
-            {
-                "draft_id": candidate.draft_id,
-                "topic": candidate.topic,
-                "content": candidate.content,
-                "object_hint": candidate.object_hint,
-                "workstream_key": candidate.workstream_key,
+                "source_slice_id": candidate.source_slice_id,
                 "source_message_ids": candidate.source_message_ids,
-                "self_evidence_message_ids": candidate.self_evidence_message_ids,
-                "retention_detail": candidate.retention_detail,
+                "referenced_link_ids": candidate.referenced_link_ids,
+                "referenced_attachment_ids": candidate.referenced_attachment_ids,
+                "topic": candidate.topic,
+                "content": candidate.content,
             }
             for candidate in candidates
         ],
@@ -588,41 +552,53 @@ def build_workstream_assignment_prompt(
     return dump_json(protocol, pretty=True)
 
 
-def build_unassigned_workstream_assignment_prompt(
+def build_day_group_review_prompt(
     target_date: str,
     *,
-    known_workstreams: list[dict[str, object]],
-    unassigned_candidates: list[SourceBackedEventDraft],
+    candidates: list[SourceBackedEventDraft],
+    groups: list[CrossConversationGroup],
+    relation_reasons: list[dict[str, object]],
+    config: RuntimeConfig,
+    validation_feedback: str = "",
 ) -> str:
-    protocol = {
-        "instruction": (
-            "复核尚未归属的候选事项是否属于已确认的项目、产品或政策工作流。"
-            "只调用指定 Function 一次提交 assignments，不展示推理过程。"
-        ),
-        "rules": [
-            "只处理 unassigned_candidates 中的 draft_id；每个必须且只能返回一次。",
-            "parent_draft_id 只能填 known_workstreams.members 中的 draft_id；无法明确归属时返回空字符串。",
-            "不能新建项目根，也不能合并不同 known_workstreams。root_workstream_name 必须返回空字符串。",
-            "只有候选内容明确表明是该项目的启动分配、实施、验收、监控、成效统计，或是该政策的范围指令与直接执行/通知反馈时，才能归入。",
-            "同一政策的适用范围指令与其直接执行/通知反馈，即使描述不同对象子集，只要输入没有明确命名不同政策，应归入同一政策工作流。",
-            "城市、地点、部门、设备、工具、时间相近或文字相似都不是归属依据；不确定时必须独立。",
-            "每个非独立归属必须在 evidence_message_ids 中引用至少一条子事项或直接父候选的 source_message_ids，不能使用输入外的消息 ID。",
-        ],
-        "target_date": target_date,
-        "known_workstreams": known_workstreams,
-        "unassigned_candidates": [
-            {
-                "draft_id": candidate.draft_id,
-                "topic": candidate.topic,
-                "content": candidate.content,
-                "object_hint": candidate.object_hint,
-                "source_message_ids": candidate.source_message_ids,
-                "retention_detail": candidate.retention_detail,
-            }
-            for candidate in unassigned_candidates
-        ],
-    }
-    return dump_json(protocol, pretty=True)
+    candidate_by_id = {item.draft_id: item for item in candidates}
+    return dump_json(
+        {
+            "instruction": (
+                "复核存在结构化强关联但仍被分开的完整事件组是否属于同一实际事项。"
+                "只调用指定 Function 一次提交 groups，不展示推理过程。"
+            ),
+            "rules": [
+                *config.personal_group_review_rules,
+                "每个 existing_group 的全部 draft_ids 必须始终一起出现，不得拆散。",
+                "所有 draft_id 必须且只能返回一次。",
+                "多事件组必须填写具体 merge_reason 和合法 evidence_message_ids。",
+                "单例组填写单条保留，evidence_message_ids 返回空数组。",
+            ],
+            "target_date": target_date,
+            "validation_feedback": validation_feedback,
+            "strong_relations": relation_reasons,
+            "existing_groups": [group.to_dict() for group in groups],
+            "candidates": [
+                {
+                    "draft_id": draft_id,
+                    "topic": candidate_by_id[draft_id].topic,
+                    "content": candidate_by_id[draft_id].content,
+                    "action_label": candidate_by_id[draft_id].action_label,
+                    "object_hint": candidate_by_id[draft_id].object_hint,
+                    "source_slice_id": candidate_by_id[draft_id].source_slice_id,
+                    "source_message_ids": candidate_by_id[draft_id].source_message_ids,
+                    "referenced_link_ids": candidate_by_id[draft_id].referenced_link_ids,
+                    "referenced_attachment_ids": candidate_by_id[
+                        draft_id
+                    ].referenced_attachment_ids,
+                }
+                for group in groups
+                for draft_id in group.draft_ids
+            ],
+        },
+        pretty=True,
+    )
 
 
 def build_collected_merge_prompt(
@@ -676,7 +652,7 @@ def build_collected_grouping_prompt(
                 "semantic_reasons 只选择实际成立的语义依据；不得直接返回 shared_message、"
                 "shared_file、same_conversation、evidence_relation_ids 或内部 group_reason。"
             ),
-            "risk_flags 标记跨批、工作流冲突、对象过宽或来源很多等需要复核的风险。",
+            "risk_flags 标记跨批、对象过宽或来源很多等需要复核的风险。",
         ],
         "group_reason_definitions": {
             item.key: {
@@ -720,7 +696,6 @@ def build_collected_grouping_prompt(
                 "title": item.event.title,
                 "content": clean_text(item.event.content),
                 "object_hint": item.event.object_hint,
-                "workstream_name": item.event.workstream_name,
                 "action_labels": list(item.event.action_labels),
             }
             for item in events
@@ -758,13 +733,6 @@ def build_collected_review_prompt(
         computed_review_reasons.append("cross_batch")
     if runtime_config.review_repaired_groups and candidate_group.was_repaired:
         computed_review_reasons.append("repaired_group")
-    workstreams = {
-        "".join(item.event.workstream_name.casefold().split())
-        for item in events
-        if item.event.workstream_name.strip()
-    }
-    if runtime_config.review_workstream_conflicts and len(workstreams) > 1:
-        computed_review_reasons.append("workstream_conflict")
     evidence_catalog = build_collected_evidence_relation_catalog(
         events,
         excluded_draft_ids=set(),
@@ -867,7 +835,6 @@ def build_collected_review_prompt(
                 "title": item.event.title,
                 "content": clean_text(item.event.content),
                 "object_hint": item.event.object_hint,
-                "workstream_name": item.event.workstream_name,
                 "action_labels": list(item.event.action_labels),
             }
             for item in events
@@ -979,7 +946,6 @@ def build_anchor_analysis_prompt(
             "self_evidence_message_ids 列出证明本人直接相关的本人消息；事实来源可以是他人的反馈。",
             _build_self_relation_rule(runtime_config),
             ATTACHMENT_FILE_NAME_RULE,
-            "workstream_key 只填写消息明确命名的项目、产品或政策；无法确定时返回空字符串。",
             "如果窗口里有多个动作，就拆开。",
             "动作类型比共享名词更重要。",
             "同步/通知 与 核对/校验/执行/跟进，通常不是同一事件。",
@@ -1033,7 +999,6 @@ def build_anchor_batch_analysis_prompt(
             "self_evidence_message_ids 列出证明本人直接相关的本人消息；事实来源可以是他人的反馈。",
             _build_self_relation_rule(runtime_config),
             ATTACHMENT_FILE_NAME_RULE,
-            "workstream_key 只填写消息明确命名的项目、产品或政策；无法确定时返回空字符串。",
             "如果同一窗口有多个动作，就拆开。",
             "动作类型比共享名词更重要。",
             "同步/通知 与 核对/校验/执行/跟进，通常不是同一事件。",
@@ -1329,7 +1294,6 @@ def _serialize_collected_source_event_for_prompt(
         "object_hint": source_event.event.object_hint,
         "retention_reason": source_event.event.retention_reason,
         "retention_detail": source_event.event.retention_detail,
-        "workstream_name": source_event.event.workstream_name,
         "action_labels": list(source_event.event.action_labels),
         "self_relations": [
             {

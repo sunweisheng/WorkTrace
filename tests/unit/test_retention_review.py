@@ -54,7 +54,6 @@ def _candidate(
     draft_id: str = "d1",
     *,
     reason: str = "follow_up_assigned",
-    workstream: str = "",
     links: list[str] | None = None,
     attachments: list[str] | None = None,
 ) -> SourceBackedEventDraft:
@@ -74,7 +73,6 @@ def _candidate(
         referenced_link_ids=links or [],
         referenced_attachment_ids=attachments or [],
         self_evidence_message_ids=["m2"],
-        workstream_key=workstream,
     )
 
 
@@ -115,7 +113,6 @@ def test_selects_only_configured_structural_boundary_candidates() -> None:
         [
             _candidate("selected"),
             _candidate("decision", reason="decision_made"),
-            _candidate("workstream", workstream="发布项目"),
             _candidate("linked", links=["m1#link1"]),
             _candidate("attached", attachments=["att-1"]),
         ],
