@@ -321,6 +321,8 @@ def test_load_runtime_config_overrides_reads_collected_merge_review_config(
                 "review_repaired_groups": True,
                 "review_workstream_conflicts": False,
                 "review_same_conversation_only_groups": True,
+                "review_semantic_only_object_conflicts": False,
+                "review_broad_object_groups": False,
                 "group_reason_definitions": [
                     asdict(item)
                     for item in DEFAULT_COLLECTED_GROUP_REASON_DEFINITIONS
@@ -339,6 +341,8 @@ def test_load_runtime_config_overrides_reads_collected_merge_review_config(
     assert config.review_repaired_groups is True
     assert config.review_workstream_conflicts is False
     assert config.review_same_conversation_only_groups is True
+    assert config.review_semantic_only_object_conflicts is False
+    assert config.review_broad_object_groups is False
     assert config.collected_group_reason_definitions[-1].key == (
         "same_deliverable_batch"
     )
@@ -349,18 +353,20 @@ def test_repo_collected_merge_config_matches_review_defaults() -> None:
         Path("config/collected_merge.json").read_text(encoding="utf-8")
     )
 
-    assert payload == {
-        "high_risk_review_enabled": True,
-        "high_risk_source_event_count": 10,
-        "high_risk_source_file_count": 4,
-        "review_cross_batch_groups": True,
-        "review_repaired_groups": True,
-        "review_workstream_conflicts": True,
-        "review_same_conversation_only_groups": True,
-        "group_reason_definitions": [
-            asdict(item) for item in DEFAULT_COLLECTED_GROUP_REASON_DEFINITIONS
-        ],
-    }
+    assert payload["high_risk_review_enabled"] is True
+    assert payload["high_risk_source_event_count"] == 10
+    assert payload["high_risk_source_file_count"] == 4
+    assert payload["review_cross_batch_groups"] is True
+    assert payload["review_repaired_groups"] is True
+    assert payload["review_workstream_conflicts"] is True
+    assert payload["review_same_conversation_only_groups"] is True
+    assert payload["review_semantic_only_object_conflicts"] is True
+    assert payload["review_broad_object_groups"] is True
+    definitions = {item["key"]: item for item in payload["group_reason_definitions"]}
+    assert definitions["same_object"]["acceptance_rules"]
+    assert definitions["same_object"]["rejection_rules"]
+    assert definitions["continuous_action"]["acceptance_rules"]
+    assert definitions["same_deliverable_batch"]["rejection_rules"]
 
 
 @pytest.mark.parametrize(

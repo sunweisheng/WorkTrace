@@ -15,7 +15,10 @@ from src.worktrace.analyzers.protocol import (
     parse_personal_fact_review_payload,
     parse_retention_review_payload,
 )
-from src.worktrace.analyzers.collected_evidence import EvidenceRelation
+from src.worktrace.analyzers.collected_evidence import (
+    EvidenceRelation,
+    derive_group_evidence,
+)
 from src.worktrace.analyzers.output_schemas import (
     batch_output_schema,
     collected_grouping_output_schema,
@@ -302,8 +305,11 @@ def test_collected_function_payload_restores_verified_internal_reasons() -> None
                     "summary_content": "两条记录描述同一事项。",
                     "summary_object_hint": "同一事项",
                     "semantic_reasons": ["same_object"],
-                    "evidence_relation_ids": ["MSG-001", "FILE-001"],
                     "reason_detail": "具体对象和前后动作一致。",
+                    "member_connections": [
+                        {"draft_id": "d1", "connection_detail": "处理该事项。"},
+                        {"draft_id": "d2", "connection_detail": "继续该事项。"},
+                    ],
                     "risk_flags": [],
                 }
             ],
@@ -319,10 +325,9 @@ def test_collected_function_payload_restores_verified_internal_reasons() -> None
     assert errors == []
     assert result.groups[0].group_reason == [
         "shared_message",
-        "shared_file",
         "same_object",
     ]
-    assert result.groups[0].evidence_relation_ids == ["MSG-001", "FILE-001"]
+    assert result.groups[0].evidence_relation_ids == ["MSG-001"]
     assert result.groups[0].reason_detail == "具体对象和前后动作一致。"
 
 
@@ -368,11 +373,19 @@ def test_collected_function_payload_rejects_invalid_evidence_relations(
             ],
             "singleton_draft_ids": [],
         },
-        evidence_catalog=catalog,
+            evidence_catalog=catalog,
+            allow_model_evidence_relation_ids=True,
+            require_member_connections=False,
     )
 
     assert any(error.startswith(expected_error) for error in errors)
     assert result.validation_errors == errors
+    matching_error = next(error for error in errors if error.startswith(expected_error))
+    if expected_error == "evidence_outside_group":
+        assert "relation_draft_ids=['d1', 'd4']" in matching_error
+        assert "group_draft_ids=['d1', 'd2', 'd3']" in matching_error
+    if expected_error == "evidence_does_not_cover_group":
+        assert "relation_endpoints=[['d1', 'd2']]" in matching_error
 
 
 def test_collected_function_payload_requires_reason_detail_for_multi_group() -> None:
@@ -387,8 +400,11 @@ def test_collected_function_payload_requires_reason_detail_for_multi_group() -> 
                     "summary_content": "两条记录描述同一事项。",
                     "summary_object_hint": "同一事项",
                     "semantic_reasons": ["same_object"],
-                    "evidence_relation_ids": [],
                     "reason_detail": "",
+                    "member_connections": [
+                        {"draft_id": "d1", "connection_detail": "处理该事项。"},
+                        {"draft_id": "d2", "connection_detail": "继续该事项。"},
+                    ],
                     "risk_flags": [],
                 }
             ],
@@ -399,6 +415,83 @@ def test_collected_function_payload_requires_reason_detail_for_multi_group() -> 
     )
 
     assert any(error.startswith("reason_detail_missing") for error in errors)
+
+
+def test_collected_function_payload_requires_exact_member_connections() -> None:
+    _result, errors = parse_collected_grouping_function_payload(
+        {
+            "merged_groups": [
+                {
+                    "group_id": "g1",
+                    "draft_ids": ["d1", "d2"],
+                    "summary_title": "同一事项",
+                    "summary_content": "两条记录描述同一事项。",
+                    "summary_object_hint": "同一事项",
+                    "semantic_reasons": ["same_object"],
+                    "reason_detail": "具体对象一致。",
+                    "member_connections": [
+                        {"draft_id": "d1", "connection_detail": "处理对象。"},
+                        {"draft_id": "d1", "connection_detail": "重复说明。"},
+                        {"draft_id": "d3", "connection_detail": "组外说明。"},
+                    ],
+                    "risk_flags": [],
+                }
+            ],
+            "singleton_draft_ids": [],
+        },
+        evidence_catalog=[],
+        allowed_semantic_reasons=["same_object"],
+    )
+
+    assert any(error.startswith("duplicate_member_connection") for error in errors)
+    assert any(error.startswith("unknown_member_connection") for error in errors)
+    assert any(error.startswith("missing_member_connection") for error in errors)
+
+
+def test_python_derives_stable_mixed_evidence_spanning_set() -> None:
+    audit = derive_group_evidence(
+        ["d1", "d2", "d3"],
+        [
+            EvidenceRelation("MSG-001", "shared_message", ("d1", "d2"), 1),
+            EvidenceRelation("FILE-001", "shared_file", ("d2", "d3"), 1),
+            EvidenceRelation("MSG-002", "shared_message", ("d1", "d3"), 1),
+        ],
+    )
+
+    assert audit.connected is True
+    assert audit.basis_relation_ids == ("MSG-001", "FILE-001")
+    assert audit.uncovered_draft_ids == ()
+
+
+def test_python_prefers_minimum_evidence_set_before_catalog_order() -> None:
+    audit = derive_group_evidence(
+        ["d1", "d2", "d3"],
+        [
+            EvidenceRelation("MSG-001", "shared_message", ("d1", "d2"), 1),
+            EvidenceRelation("FILE-001", "shared_file", ("d2", "d3"), 1),
+            EvidenceRelation(
+                "MSG-002",
+                "shared_message",
+                ("d1", "d2", "d3"),
+                1,
+            ),
+        ],
+    )
+
+    assert audit.connected is True
+    assert audit.basis_relation_ids == ("MSG-002",)
+
+
+def test_python_keeps_partial_evidence_out_of_merge_basis() -> None:
+    audit = derive_group_evidence(
+        ["d1", "d2", "d3"],
+        [EvidenceRelation("MSG-001", "shared_message", ("d1", "d2"), 1)],
+    )
+
+    assert audit.connected is False
+    assert audit.contained_relation_ids == ("MSG-001",)
+    assert audit.basis_relation_ids == ()
+    assert audit.uncovered_draft_ids == ("d3",)
 
 
 def test_anchor_status_list_string_is_normalized_to_single_status() -> None:

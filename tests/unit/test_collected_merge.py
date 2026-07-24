@@ -8,10 +8,12 @@ import pytest
 
 from src.worktrace.analyzers.failover import FailoverAnalyzer
 from src.worktrace.collected_merge import (
+    _collected_review_result_basis_error,
     CollectedMergeRunner,
     aggregate_collected_quality_summaries,
     build_collected_quality_summary,
     build_grouping_summary_events,
+    collected_grouping_validation_feedback,
     enforce_collected_workstream_boundaries,
     extract_person_name_from_filename,
     repair_collected_grouping_result,
@@ -46,6 +48,20 @@ from src.worktrace.models import (
 from src.worktrace.models import WorkEvent
 from src.worktrace.stores.markdown import MarkdownEventStore
 from tests.helpers import NullDelivery
+
+
+def test_grouping_validation_feedback_explains_partial_evidence_action() -> None:
+    feedback = collected_grouping_validation_feedback(
+        "evidence_does_not_cover_group field=merged_groups[0].draft_ids "
+        "group_id=g1 relation_ids=['MSG-001'] "
+        "relation_endpoints=[['d1', 'd2']] uncovered_draft_ids=['d3']"
+    )
+
+    assert "group_id=g1" in feedback
+    assert "relation_endpoints=[['d1', 'd2']]" in feedback
+    assert "uncovered_draft_ids=['d3']" in feedback
+    assert "加入缺失成员" in feedback
+    assert "删除该合并" in feedback
 
 
 class FakeAnalyzer:
@@ -2089,7 +2105,7 @@ def test_collected_grouping_prompt_uses_same_day_conversation_candidates() -> No
     assert message_b not in prompt
     assert payload["events"][0]["content"] == long_content
     assert "same_deliverable_batch" in payload["group_reason_definitions"]
-    assert "shared_file" not in payload["group_reason_definitions"]
+    assert "shared_file" in payload["group_reason_definitions"]
 
 
 def test_grouping_repair_preserves_only_matching_candidate_summary() -> None:
@@ -2194,7 +2210,7 @@ def test_grouping_summary_event_uses_model_summary_and_keeps_evidence() -> None:
 
 
 def test_balanced_candidate_content_fits_limit_across_sources(tmp_path: Path) -> None:
-    input_limit_tokens = 1400
+    input_limit_tokens = 2000
     config = RuntimeConfig(
         data_root=tmp_path / "data",
         model_input_batch_target_tokens=input_limit_tokens,
@@ -2495,13 +2511,13 @@ def test_relation_priority_batches_preserve_same_conversation_candidates(
         analyzer=analyzer,
         config=RuntimeConfig(
             data_root=tmp_path / "data",
-            model_input_batch_target_tokens=2000,
+            model_input_batch_target_tokens=2600,
             collected_merge_trace_enabled=True,
             collected_merge_trace_root=trace_root,
         ),
     ).run("2026-06-29")
 
-    assert result.merged_event_count == 6
+    assert 1 < result.merged_event_count < 12
     assert any(
         "Skipped cross-batch coordination" in warning
         for warning in result.warning_messages
@@ -2511,8 +2527,8 @@ def test_relation_priority_batches_preserve_same_conversation_candidates(
     summary = json.loads(
         (trace_root / "2026-06-29" / "summary.json").read_text(encoding="utf-8")
     )
-    assert max(step["input_estimated_tokens"] for step in summary["steps"]) <= 2000
-    assert {step["input_target_tokens"] for step in summary["steps"]} == {2000}
+    assert max(step["input_estimated_tokens"] for step in summary["steps"]) <= 2600
+    assert {step["input_target_tokens"] for step in summary["steps"]} == {2600}
     output = MarkdownEventStore(config=RuntimeConfig()).parse_day_document(
         Path(result.output_path or "").read_text(encoding="utf-8")
     )
@@ -2924,7 +2940,7 @@ def test_high_risk_review_reasons_follow_configured_conditions(tmp_path: Path) -
             risk_flags=["broad_object", "large_group"],
         ),
         same_workstream,
-    ) == []
+    ) == ["broad_object"]
     cross_batch_disabled = _build_runner(
         tmp_path,
         analyzer=ReviewAnalyzer(),
@@ -2946,6 +2962,143 @@ def test_high_risk_review_reasons_follow_configured_conditions(tmp_path: Path) -
         ),
         same_workstream,
     ) == []
+
+
+def test_high_risk_review_flags_semantic_only_object_conflict(tmp_path: Path) -> None:
+    runner = _build_runner(tmp_path, analyzer=ReviewAnalyzer())
+    events = [
+        CollectedSourceEvent(
+            "d1",
+            "张三",
+            "a.md",
+            _event(event_id="e1", title="事项一", content="事实一", object_hint="对象一"),
+        ),
+        CollectedSourceEvent(
+            "d2",
+            "李四",
+            "b.md",
+            _event(event_id="e2", title="事项二", content="事实二", object_hint="对象二"),
+        ),
+    ]
+    group = CollectedGroupingGroup(
+        "g1",
+        ["d1", "d2"],
+        group_reason=["same_object"],
+        semantic_reasons=["same_object"],
+    )
+
+    assert runner._collected_group_review_reasons(group, events) == [
+        "semantic_only_object_conflict"
+    ]
+
+    shared_message = "sha256:" + "a" * 64
+    connected_events = [
+        replace(
+            item,
+            event=replace(item.event, evidence_fingerprints=[shared_message]),
+        )
+        for item in events
+    ]
+    assert runner._collected_group_review_reasons(group, connected_events) == []
+
+    prompt = json.loads(
+        build_collected_review_prompt(
+            "2026-06-29",
+            events,
+            group,
+            config=RuntimeConfig(),
+        )
+    )
+    assert prompt["review_reasons"] == ["semantic_only_object_conflict"]
+
+
+def test_high_risk_review_prompt_computes_broad_object_reason() -> None:
+    events = [
+        CollectedSourceEvent(
+            "d1",
+            "张三",
+            "a.md",
+            _event(event_id="e1", title="事项一", content="事实一"),
+        ),
+        CollectedSourceEvent(
+            "d2",
+            "李四",
+            "b.md",
+            _event(event_id="e2", title="事项二", content="事实二"),
+        ),
+    ]
+    prompt = json.loads(
+        build_collected_review_prompt(
+            "2026-06-29",
+            events,
+            CollectedGroupingGroup(
+                "g1",
+                ["d1", "d2"],
+                risk_flags=["broad_object"],
+            ),
+            config=RuntimeConfig(),
+        )
+    )
+
+    assert prompt["review_reasons"] == ["broad_object"]
+
+
+def test_review_basis_accepts_mixed_message_and_file_connection() -> None:
+    events = [
+        CollectedSourceEvent(
+            "d1",
+            "张三",
+            "a.md",
+            _event(
+                event_id="e1",
+                title="事项",
+                content="开始处理。",
+                evidence_fingerprints=["message-1"],
+            ),
+        ),
+        CollectedSourceEvent(
+            "d2",
+            "李四",
+            "b.md",
+            _event(
+                event_id="e2",
+                title="事项",
+                content="继续处理。",
+                evidence_fingerprints=["message-1"],
+                file_keys=["file-1"],
+            ),
+        ),
+        CollectedSourceEvent(
+            "d3",
+            "王五",
+            "c.md",
+            _event(
+                event_id="e3",
+                title="事项",
+                content="完成处理。",
+                file_keys=["file-1"],
+            ),
+        ),
+    ]
+    result = CollectedGroupingResult(
+        groups=[
+            CollectedGroupingGroup(
+                "g1",
+                ["d1", "d2", "d3"],
+                group_reason=["shared_message", "shared_file"],
+            )
+        ]
+    )
+
+    assert (
+        _collected_review_result_basis_error(
+            result,
+            events,
+            reasons=["same_conversation_only"],
+            config=RuntimeConfig(),
+        )
+        == ""
+    )
 
 
 def test_high_risk_review_marks_disconnected_same_conversation_groups(

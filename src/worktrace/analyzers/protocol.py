@@ -8,6 +8,7 @@ from ..models import (
     BatchAnalysisResult,
     BatchAnchorAnalysisResult,
     BatchSegmentAnalysisResult,
+    CollectedGroupMemberConnection,
     CollectedGroupingGroup,
     CollectedGroupingResult,
     CollectedMergeResult,
@@ -239,8 +240,14 @@ def parse_collected_grouping_function_payload(
     *,
     evidence_catalog: list[object],
     allowed_semantic_reasons: Sequence[str] = (),
+    allow_model_evidence_relation_ids: bool = False,
+    require_member_connections: bool = True,
 ) -> tuple[CollectedGroupingResult, list[str]]:
-    from .collected_evidence import EvidenceRelation, selected_relations_cover_group
+    from .collected_evidence import (
+        EvidenceRelation,
+        derive_group_evidence,
+        selected_relations_cover_group,
+    )
 
     data = expect_json_object(payload, "Collected grouping Function result")
     catalog = {
@@ -264,6 +271,25 @@ def parse_collected_grouping_function_payload(
             continue
         group_id = str(raw_group.get("group_id", "")).strip() or f"merged-{index:03d}"
         draft_ids = [str(value) for value in raw_group.get("draft_ids", [])]
+        if len(draft_ids) < 2:
+            errors.append(
+                "merged_group_too_small "
+                f"field=merged_groups[{index - 1}].draft_ids group_id={group_id} "
+                f"draft_ids={draft_ids}"
+            )
+        duplicate_draft_ids = sorted(
+            {
+                draft_id
+                for draft_id in draft_ids
+                if draft_ids.count(draft_id) > 1
+            }
+        )
+        if duplicate_draft_ids:
+            errors.append(
+                "duplicate_group_member "
+                f"field=merged_groups[{index - 1}].draft_ids group_id={group_id} "
+                f"draft_ids={duplicate_draft_ids}"
+            )
         raw_semantic_reasons = [
             str(value) for value in raw_group.get("semantic_reasons", [])
         ]
@@ -279,56 +305,94 @@ def parse_collected_grouping_function_payload(
                     f"field=merged_groups[{index - 1}].semantic_reasons "
                     f"group_id={group_id} reason={reason}"
                 )
-        relation_ids = [
+        model_relation_ids = [
             str(value) for value in raw_group.get("evidence_relation_ids", [])
         ]
-        duplicate_relation_ids = sorted(
-            {
-                relation_id
-                for relation_id in relation_ids
-                if relation_ids.count(relation_id) > 1
-            }
-        )
-        if duplicate_relation_ids:
+        if model_relation_ids and not allow_model_evidence_relation_ids:
             errors.append(
-                "duplicate_evidence_relation "
+                "model_evidence_relation_ids_not_allowed "
                 f"field=merged_groups[{index - 1}].evidence_relation_ids "
-                f"group_id={group_id} relation_ids={duplicate_relation_ids}"
+                f"group_id={group_id} relation_ids={model_relation_ids}"
             )
-        selected_relations: list[EvidenceRelation] = []
-        derived_reasons: list[str] = []
-        for relation_id in relation_ids:
-            relation = catalog.get(relation_id)
-            if relation is None:
+        evidence_audit = derive_group_evidence(draft_ids, list(catalog.values()))
+        selected_relations: list[EvidenceRelation]
+        relation_ids: list[str]
+        if allow_model_evidence_relation_ids:
+            duplicate_relation_ids = sorted(
+                {
+                    relation_id
+                    for relation_id in model_relation_ids
+                    if model_relation_ids.count(relation_id) > 1
+                }
+            )
+            if duplicate_relation_ids:
                 errors.append(
-                    "unknown_evidence_relation "
+                    "duplicate_evidence_relation "
                     f"field=merged_groups[{index - 1}].evidence_relation_ids "
-                    f"group_id={group_id} relation_id={relation_id}"
+                    f"group_id={group_id} relation_ids={duplicate_relation_ids}"
                 )
-                continue
-            if not set(relation.draft_ids).issubset(set(draft_ids)):
+            selected_relations = []
+            for relation_id in model_relation_ids:
+                relation = catalog.get(relation_id)
+                if relation is None:
+                    errors.append(
+                        "unknown_evidence_relation "
+                        f"field=merged_groups[{index - 1}].evidence_relation_ids "
+                        f"group_id={group_id} relation_id={relation_id}"
+                    )
+                    continue
+                if not set(relation.draft_ids).issubset(set(draft_ids)):
+                    errors.append(
+                        "evidence_outside_group "
+                        f"field=merged_groups[{index - 1}].evidence_relation_ids "
+                        f"group_id={group_id} relation_id={relation_id} "
+                        f"relation_draft_ids={list(relation.draft_ids)} "
+                        f"group_draft_ids={draft_ids}"
+                    )
+                    continue
+                selected_relations.append(relation)
+            relation_ids = list(model_relation_ids)
+            if (
+                not semantic_reasons
+                and selected_relations
+                and not selected_relations_cover_group(draft_ids, selected_relations)
+            ):
                 errors.append(
-                    "evidence_outside_group "
+                    "evidence_does_not_cover_group "
                     f"field=merged_groups[{index - 1}].evidence_relation_ids "
-                    f"group_id={group_id} relation_id={relation_id}"
+                    f"group_id={group_id} relation_ids={relation_ids} "
+                    "relation_endpoints="
+                    f"{[list(item.draft_ids) for item in selected_relations]}"
                 )
-                continue
-            selected_relations.append(relation)
-            derived_reasons.append(relation.relation_type)
-        if not semantic_reasons and not selected_relations:
+        else:
+            relation_ids = list(evidence_audit.basis_relation_ids)
+            selected_relations = [catalog[value] for value in relation_ids]
+            if (
+                not semantic_reasons
+                and evidence_audit.contained_relation_ids
+                and not evidence_audit.connected
+            ):
+                errors.append(
+                    "evidence_does_not_cover_group "
+                    f"field=merged_groups[{index - 1}].draft_ids "
+                    f"group_id={group_id} "
+                    f"relation_ids={list(evidence_audit.contained_relation_ids)} "
+                    "relation_endpoints="
+                    f"{[list(catalog[value].draft_ids) for value in evidence_audit.contained_relation_ids]} "
+                    f"uncovered_draft_ids={list(evidence_audit.uncovered_draft_ids)}"
+                )
+        derived_reasons = [relation.relation_type for relation in selected_relations]
+        if (
+            not semantic_reasons
+            and not selected_relations
+            and (
+                allow_model_evidence_relation_ids
+                or not evidence_audit.contained_relation_ids
+            )
+        ):
             errors.append(
                 "merge_reason_missing "
                 f"field=merged_groups[{index - 1}] group_id={group_id}"
-            )
-        if (
-            not semantic_reasons
-            and selected_relations
-            and not selected_relations_cover_group(draft_ids, selected_relations)
-        ):
-            errors.append(
-                "evidence_does_not_cover_group "
-                f"field=merged_groups[{index - 1}].evidence_relation_ids "
-                f"group_id={group_id} relation_ids={relation_ids}"
             )
         reason_detail = str(raw_group.get("reason_detail", "")).strip()
         if not reason_detail:
@@ -336,6 +400,58 @@ def parse_collected_grouping_function_payload(
                 "reason_detail_missing "
                 f"field=merged_groups[{index - 1}].reason_detail group_id={group_id}"
             )
+        member_connections: list[CollectedGroupMemberConnection] = []
+        raw_connections = raw_group.get("member_connections")
+        if not isinstance(raw_connections, list):
+            raw_connections = []
+            if require_member_connections:
+                errors.append(
+                    "member_connections_missing "
+                    f"field=merged_groups[{index - 1}].member_connections "
+                    f"group_id={group_id} draft_ids={draft_ids}"
+                )
+        for connection_index, raw_connection in enumerate(raw_connections):
+            if not isinstance(raw_connection, dict) or set(raw_connection) != {
+                "draft_id",
+                "connection_detail",
+            }:
+                errors.append(
+                    "invalid_member_connection "
+                    f"field=merged_groups[{index - 1}].member_connections"
+                    f"[{connection_index}] group_id={group_id}"
+                )
+                continue
+            connection = CollectedGroupMemberConnection.from_dict(raw_connection)
+            member_connections.append(connection)
+            if not connection.connection_detail.strip():
+                errors.append(
+                    "member_connection_detail_missing "
+                    f"field=merged_groups[{index - 1}].member_connections"
+                    f"[{connection_index}].connection_detail group_id={group_id} "
+                    f"draft_id={connection.draft_id}"
+                )
+        if require_member_connections:
+            connection_ids = [item.draft_id for item in member_connections]
+            duplicate_connection_ids = sorted(
+                {
+                    draft_id
+                    for draft_id in connection_ids
+                    if connection_ids.count(draft_id) > 1
+                }
+            )
+            unknown_connection_ids = sorted(set(connection_ids).difference(draft_ids))
+            missing_connection_ids = sorted(set(draft_ids).difference(connection_ids))
+            for error_name, invalid_ids in (
+                ("duplicate_member_connection", duplicate_connection_ids),
+                ("unknown_member_connection", unknown_connection_ids),
+                ("missing_member_connection", missing_connection_ids),
+            ):
+                if invalid_ids:
+                    errors.append(
+                        f"{error_name} "
+                        f"field=merged_groups[{index - 1}].member_connections "
+                        f"group_id={group_id} draft_ids={invalid_ids}"
+                    )
         groups.append(
             CollectedGroupingGroup(
                 group_id=group_id,
@@ -347,6 +463,7 @@ def parse_collected_grouping_function_payload(
                 semantic_reasons=semantic_reasons,
                 evidence_relation_ids=relation_ids,
                 reason_detail=reason_detail,
+                member_connections=member_connections,
                 risk_flags=[str(value) for value in raw_group.get("risk_flags", [])],
             )
         )

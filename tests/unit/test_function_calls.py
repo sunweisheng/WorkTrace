@@ -83,7 +83,6 @@ def test_all_production_function_schemas_use_strict_object_shapes() -> None:
         collected_grouping_function_schema(
             CONFIG,
             draft_ids=["d1", "d2"],
-            evidence_relation_ids=["MSG-001"],
             include_split_reason=True,
         ),
         collected_merge_output_schema(),
@@ -194,9 +193,9 @@ def test_collected_grouping_contract_numbers_only_real_relations() -> None:
         deterministic_groups=[],
         include_split_reason=False,
     )
-    relation_schema = contract.function_spec.parameters["properties"][
+    group_properties = contract.function_spec.parameters["properties"][
         "merged_groups"
-    ]["items"]["properties"]["evidence_relation_ids"]
+    ]["items"]["properties"]
 
     assert [item.to_dict() for item in contract.evidence_catalog] == [
         {
@@ -212,11 +211,13 @@ def test_collected_grouping_contract_numbers_only_real_relations() -> None:
             "shared_count": 1,
         },
     ]
-    assert relation_schema["items"]["enum"] == ["MSG-001", "FILE-001"]
-    assert relation_schema["maxItems"] == 2
+    assert "evidence_relation_ids" not in group_properties
+    assert group_properties["member_connections"]["items"]["properties"][
+        "draft_id"
+    ]["enum"] == ["d1", "d2", "d3"]
 
 
-def test_collected_grouping_contract_disallows_evidence_when_catalog_is_empty() -> None:
+def test_collected_grouping_contract_keeps_evidence_out_of_model_output() -> None:
     contract = collected_grouping_call_contract(
         "collected_candidate_grouping",
         config=CONFIG,
@@ -224,10 +225,28 @@ def test_collected_grouping_contract_disallows_evidence_when_catalog_is_empty() 
         deterministic_groups=[],
         include_split_reason=False,
     )
-    relation_schema = contract.function_spec.parameters["properties"][
+    group_properties = contract.function_spec.parameters["properties"][
         "merged_groups"
-    ]["items"]["properties"]["evidence_relation_ids"]
+    ]["items"]["properties"]
 
     assert contract.evidence_catalog == ()
-    assert relation_schema["maxItems"] == 0
-    assert "enum" not in relation_schema["items"]
+    assert "evidence_relation_ids" not in group_properties
+    assert "member_connections" in group_properties
+
+
+def test_collected_review_example_does_not_preselect_same_object_group() -> None:
+    events = [_collected_event("d1"), _collected_event("d2")]
+    contract = collected_grouping_call_contract(
+        "collected_group_review",
+        config=CONFIG,
+        events=events,
+        deterministic_groups=[["d1", "d2"]],
+        include_split_reason=True,
+    )
+
+    assert contract.function_spec.typical_arguments["merged_groups"] == []
+    assert contract.function_spec.typical_arguments["singleton_draft_ids"] == [
+        "d1",
+        "d2",
+    ]
+    assert contract.function_spec.typical_arguments["split_reason"]

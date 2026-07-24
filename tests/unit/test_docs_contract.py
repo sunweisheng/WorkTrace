@@ -363,7 +363,7 @@ def test_current_docs_describe_function_calling_and_input_estimation() -> None:
     assert "每次请求" in combined and "关闭" in combined and "客户端" in combined
 
 
-def test_current_docs_describe_numbered_collected_evidence() -> None:
+def test_current_docs_describe_python_computed_collected_evidence() -> None:
     documents = [
         Path("README.md").read_text(encoding="utf-8"),
         Path("SKILL.md").read_text(encoding="utf-8"),
@@ -372,15 +372,48 @@ def test_current_docs_describe_numbered_collected_evidence() -> None:
     ]
 
     for content in documents:
-        assert "evidence_relation_ids" in content
+        assert "member_connections" in content
         assert "MSG-xxx" in content
         assert "conversation_groups" in content
         assert "不编号" in content
         assert "Python" in content and "恢复" in content
+        assert (
+            "不再返回 `evidence_relation_ids`" in content
+            or "不再包含 `evidence_relation_ids`" in content
+        )
+        assert "最小" in content and "连接" in content
     combined = "\n".join(documents)
     assert "不创建临时目录" in combined
     assert "reason_detail" in combined
     assert "旧记录" in combined or "旧结果" in combined
+    assert "内部 `evidence_relation_ids`" in combined
+
+
+def test_collected_merge_docs_describe_protocol_v2_review_and_replay() -> None:
+    documents = [
+        Path("README.md").read_text(encoding="utf-8"),
+        Path("SKILL.md").read_text(encoding="utf-8"),
+        Path("docs/detailed-design.md").read_text(encoding="utf-8"),
+        Path("docs/collected-people-merge-plan.md").read_text(encoding="utf-8"),
+        Path("docs/two-level-collected-merge-improvement-plan.md").read_text(
+            encoding="utf-8"
+        ),
+        Path("docs/implementation-breakdown.md").read_text(encoding="utf-8"),
+    ]
+    combined = "\n".join(documents)
+
+    assert "acceptance_rules" in combined
+    assert "rejection_rules" in combined
+    assert "review_semantic_only_object_conflicts" in combined
+    assert "review_broad_object_groups" in combined
+    assert "grouping_protocol_version: 2" in combined
+    assert "evidence_audit" in combined
+    assert "semantic_audit" in combined
+    assert "legacy_audit" in combined
+    assert "current" in combined
+    assert "model_call_count" in combined
+    assert "补入缺失成员或删除该合并" in combined
+    assert "调试模式只增加" in combined and "不改变线路和次数" in combined
 
 
 def test_current_docs_do_not_describe_removed_online_protocol() -> None:

@@ -126,14 +126,9 @@ def collected_grouping_call_contract(
     from .output_schemas import collected_grouping_function_schema
     from .prompts import build_collected_evidence_relation_catalog
 
-    excluded_draft_ids = (
-        set()
-        if include_split_reason
-        else {draft_id for group in deterministic_groups for draft_id in group}
-    )
     catalog = build_collected_evidence_relation_catalog(
         events,
-        excluded_draft_ids=excluded_draft_ids,
+        excluded_draft_ids=set(),
     )
     draft_ids = [str(getattr(item, "draft_id")) for item in events]
     event_by_id = {str(getattr(item, "draft_id")): item for item in events}
@@ -145,7 +140,10 @@ def collected_grouping_call_contract(
     ]
     typical_groups: list[dict[str, object]] = []
     grouped_ids: set[str] = set()
-    for index, group in enumerate(deterministic_groups, start=1):
+    example_groups = (
+        [] if request_kind == "collected_group_review" else deterministic_groups
+    )
+    for index, group in enumerate(example_groups, start=1):
         members = [draft_id for draft_id in group if draft_id in event_by_id]
         if len(members) < 2:
             continue
@@ -162,8 +160,14 @@ def collected_grouping_call_contract(
                 "summary_object_hint": str(getattr(event, "object_hint", "具体事项"))
                 or "具体事项",
                 "semantic_reasons": semantic_reasons[:1],
-                "evidence_relation_ids": [],
                 "reason_detail": "这些记录描述同一具体事项的连续动作。",
+                "member_connections": [
+                    {
+                        "draft_id": draft_id,
+                        "connection_detail": "该记录属于同一确定性事件组。",
+                    }
+                    for draft_id in members
+                ],
                 "risk_flags": [],
             }
         )
@@ -175,7 +179,11 @@ def collected_grouping_call_contract(
     }
     if include_split_reason:
         typical_arguments = {
-            "split_reason": "",
+            "split_reason": (
+                "示例中的记录缺少足够的同一事项依据，因此分别保留。"
+                if request_kind == "collected_group_review"
+                else ""
+            ),
             **typical_arguments,
         }
     spec = function_call_spec(
@@ -183,7 +191,6 @@ def collected_grouping_call_contract(
         collected_grouping_function_schema(
             config,
             draft_ids=draft_ids,
-            evidence_relation_ids=[item.relation_id for item in catalog],
             include_split_reason=include_split_reason,
         ),
         typical_arguments=typical_arguments,

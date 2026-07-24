@@ -30,7 +30,11 @@ from ..utils.hashing import is_sha256_fingerprint
 from ..utils.json_io import dump_json
 from ..utils.link_refs import build_message_link_candidates
 from ..utils.text import clean_text
-from .collected_evidence import EvidenceRelation, build_evidence_relation_catalog
+from .collected_evidence import (
+    EvidenceRelation,
+    build_evidence_relation_catalog,
+    derive_semantic_review_trigger_reasons,
+)
 
 _AUDIO_TAG_RE = re.compile(r"<audio\b[^>]*duration=\"([^\"]+)\"[^>]*/?>", re.IGNORECASE)
 _VIDEO_TAG_RE = re.compile(r"<video\b[^>]*duration=\"([^\"]+)\"[^>]*/?>", re.IGNORECASE)
@@ -658,29 +662,29 @@ def build_collected_grouping_prompt(
         "rules": [
             "每个输入 draft_id 必须且只能出现在 merged_groups 或 singleton_draft_ids 中一次。",
             "deterministic_groups 必须原样保留，不能拆分或加入其他组。",
-            "conversation_groups 表示事件来自同一天同一飞书会话，只是候选关系，不代表必须合并。",
-            "同一大群中的不同真实事项必须分开。",
-            "共同消息和共同文件只能通过 evidence_relation_catalog 中已有的编号引用；相同具体对象、连续动作或内容明确一致可作为语义依据。",
-            "不同员工或部门从不同视角描述同一真实事项时可以合并。",
+            "判断每个多事件组时，必须逐项遵守 group_reason_definitions 中配置的成立条件和排除条件。",
+            "evidence_relation_catalog 只用于判断；共同消息和共同文件的有效编号由 Python 在返回分组后自动计算，不要在结果中返回证据编号。",
             "拿不准是否同一事项时必须分开。",
-            "不同非空工作流名称通常应分开；只有共享会话或共同消息且内容明确一致时才可合并。",
             (
                 "merged_groups 中每组至少两条记录，必须返回非空 summary_title、summary_content、"
                 "summary_object_hint 和 reason_detail；摘要应整合具体对象、动作、进展、结果、风险、"
                 "待办和明确冲突，不得按人员逐条罗列或补充来源中没有的事实。"
             ),
+            "merged_groups 的 member_connections 必须逐条覆盖本组全部 draft_id，每个编号恰好一次，并具体说明该事件与共同对象、动作链或交付批次的直接关系。",
             "不合并的记录只放入 singleton_draft_ids，不要为它生成组对象。",
             (
                 "semantic_reasons 只选择实际成立的语义依据；不得直接返回 shared_message、"
-                "shared_file、same_conversation 或内部 group_reason。"
+                "shared_file、same_conversation、evidence_relation_ids 或内部 group_reason。"
             ),
             "risk_flags 标记跨批、工作流冲突、对象过宽或来源很多等需要复核的风险。",
-            "来源负责人相同不能单独作为合并依据。",
         ],
         "group_reason_definitions": {
-            item.key: item.description
+            item.key: {
+                "description": item.description,
+                "acceptance_rules": list(item.acceptance_rules),
+                "rejection_rules": list(item.rejection_rules),
+            }
             for item in reason_definitions
-            if item.supports_semantic_merge and not item.evidence_relation
         },
         "target_date": target_date,
         **(
@@ -761,6 +765,18 @@ def build_collected_review_prompt(
     }
     if runtime_config.review_workstream_conflicts and len(workstreams) > 1:
         computed_review_reasons.append("workstream_conflict")
+    evidence_catalog = build_collected_evidence_relation_catalog(
+        events,
+        excluded_draft_ids=set(),
+    )
+    computed_review_reasons.extend(
+        derive_semantic_review_trigger_reasons(
+            group=candidate_group,
+            source_events=events,
+            config=runtime_config,
+            relations=evidence_catalog,
+        )
+    )
     effective_review_reasons = list(
         dict.fromkeys(
             computed_review_reasons if review_reasons is None else review_reasons
@@ -774,25 +790,23 @@ def build_collected_review_prompt(
         ),
         "rules": [
             "所有输入 draft_id 必须且只能出现在 merged_groups 或 singleton_draft_ids 中一次。",
-            "确认属于同一真实事项时保留在同一组；拿不准时拆开。",
-            "同一会话、同一负责人、标题相似或部门相同都不能单独证明是同一事项。",
-            "不同业务对象、不同主要动作或不同结果方向应拆开。",
-            "不同非空工作流通常拆开，除非共享消息证据且内容明确一致。",
+            "判断每个多事件组时，必须逐项遵守 group_reason_definitions 中配置的成立条件和排除条件；拿不准时拆开。",
             "多成员组放入 merged_groups 并返回非空候选摘要和 reason_detail；单成员只放入 singleton_draft_ids。",
+            "每个多成员组的 member_connections 必须逐条覆盖本组全部 draft_id，每个编号恰好一次，并说明该事件与共同对象、动作链或交付批次的直接关系。",
             (
                 "只有将输入的多成员候选拆成多个组时，返回一条非空的顶层 split_reason，"
                 "整体说明各组的具体业务差异；未拆开时返回空字符串。"
             ),
             (
-                "semantic_reasons 只能返回配置允许的语义依据；共同消息和共同文件只能引用"
-                " evidence_relation_catalog 中已有编号，同一会话不能作为多成员组的合并依据。"
+                "semantic_reasons 只能返回配置允许的语义依据；evidence_relation_catalog 只用于判断，"
+                "共同消息和共同文件编号由 Python 自动计算，不要在结果中返回。"
             ),
             *(
                 [
                     "本组的来源仅因同一会话跨越多个没有共同消息或共同文件的部分。"
                     "逐一核对这些部分：只有它们确属同一明确事项时才能保留原组；"
                     "否则必须拆开，并用一条顶层 split_reason 写明各组的具体业务差异。"
-                    "任何保留的多成员子组必须引用能够覆盖该组的共同消息、共同文件编号，或在 semantic_reasons 中明确写配置允许的语义依据："
+                    "任何保留的多成员子组必须具有能够覆盖该组的共同消息、共同文件关系，或在 semantic_reasons 中明确写配置允许的语义依据："
                     + "、".join(semantic_reason_keys)
                     + "；"
                     "只有同一会话候选关系的子组会被判为无效。"
@@ -802,9 +816,12 @@ def build_collected_review_prompt(
             ),
         ],
         "group_reason_definitions": {
-            item.key: item.description
+            item.key: {
+                "description": item.description,
+                "acceptance_rules": list(item.acceptance_rules),
+                "rejection_rules": list(item.rejection_rules),
+            }
             for item in reason_definitions
-            if item.supports_semantic_merge and not item.evidence_relation
         },
         "target_date": target_date,
         "review_reasons": effective_review_reasons,
@@ -828,10 +845,7 @@ def build_collected_review_prompt(
         ),
         "evidence_relation_catalog": [
             item.to_dict()
-            for item in build_collected_evidence_relation_catalog(
-                events,
-                excluded_draft_ids=set(),
-            )
+            for item in evidence_catalog
         ],
         "events": [
             {

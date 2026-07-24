@@ -73,10 +73,32 @@ python3 -m src.worktrace.cli merge-collected --date YYYY-MM-DD
 ```json
 {
   "split_reason": "拆组时说明整体分组差异，未拆组时为空",
-  "group_reason": ["shared_message", "shared_file", "same_conversation", "same_object", "continuous_action", "same_deliverable_batch"],
-  "risk_flags": ["cross_batch", "workstream_conflict", "broad_object", "large_group"]
+  "merged_groups": [
+    {
+      "group_id": "group-001",
+      "draft_ids": ["draft-001", "draft-002"],
+      "semantic_reasons": ["same_object"],
+      "reason_detail": "说明整个组为何属于同一真实事项",
+      "member_connections": [
+        {
+          "draft_id": "draft-001",
+          "connection_detail": "说明该事件与共同对象、动作链或交付批次的直接关系"
+        },
+        {
+          "draft_id": "draft-002",
+          "connection_detail": "说明该事件与共同对象、动作链或交付批次的直接关系"
+        }
+      ],
+      "risk_flags": ["broad_object"]
+    }
+  ],
+  "singleton_draft_ids": []
 }
 ```
+
+新模型输出不再返回 `evidence_relation_ids` 或内部 `group_reason`。模型仍能看到 Python 编号的 `MSG-xxx`、`FILE-xxx` 证据目录，但只负责语义判断和逐事件说明；Python 在模型分组后排除端点越界的关系，并按稳定目录顺序计算能够连接全组的最小证据集合。内部 `evidence_relation_ids` 只保存 Python 计算结果并兼容旧 trace。局部证据不能作为全组合并依据。
+
+`member_connections` 必须与每个多事件组的 `draft_ids` 完全一致，不能遗漏、重复、引用组外编号或留空。重复编号和单成员合并组不静默修复，仍作为当前请求的结果质量错误进入局部重试。
 
 正式正文返回：
 
@@ -108,13 +130,17 @@ Python 检查每个输入 draft 只出现一次、锁定组未改变、`covered_
   "review_cross_batch_groups": true,
   "review_repaired_groups": true,
   "review_workstream_conflicts": true,
-  "review_same_conversation_only_groups": true
+  "review_same_conversation_only_groups": true,
+  "review_semantic_only_object_conflicts": true,
+  "review_broad_object_groups": true
 }
 ```
 
-同一文件、同一对象、连续动作和同批交付材料等合法原因及其证据要求由同文件中的 `group_reason_definitions` 定义，完整默认值以仓库配置为准。
+共同消息、共同文件、同一对象、连续动作和同批交付材料等规则由同文件中的 `group_reason_definitions` 定义。每项包含 `acceptance_rules` 和 `rejection_rules`：语义理由必须说明具体共同对象、动作承接关系或同一提交任务，并逐条覆盖全部成员；只有地区、部门、系统、业务类别、负责人、标题、时间、文件格式或报表类别相似时不得合并。共同消息和共同文件必须由 Python 计算并连接整个组；同一会话永远不能单独支持合并。完整中文说明只维护在 JSON 配置中，不在 Python 代码中硬编码业务关键词。
 
-单条候选直接保留，不进入高风险复核。多条候选在来源事件达到 10 条、来源文件达到 4 个、跨批再次判断、Python 修复、不同非空工作流，或同一会话连接了多个没有共同消息或共同文件的部分时，在正式正文前最多三路并行复核。跨批仅协调存在共同消息指纹或共同文件的候选。复核可以保留原组或拆成多个子组；同一会话复核保留多事件子组时，必须有共同消息、共同文件，或使用配置允许的语义依据，不能只用同一会话。`shared_file` 仅指同一个文件；不同文件属于同一批次交付时使用 `same_deliverable_batch`。拆开时只需一条顶层 `split_reason` 说明整体分组差异，旧格式中任一子组已有理由也可接受；完全没有理由时 Python 才保留原组并记录告警。结果必须完整覆盖原组，不得遗漏、重复或增加 draft ID。
+单条候选直接保留，不进入高风险复核。多条候选在来源事件达到 10 条、来源文件达到 4 个、跨批再次判断、Python 修复、不同非空工作流、同一会话连接了多个没有共同消息或共同文件的部分、没有完整共同证据且标准化后的非空 `object_hint` 存在多个值，或模型返回 `broad_object` 时，在正式正文前最多三路并行复核。对象冲突只触发针对性复核，不直接自动拆组。跨批仅协调存在共同消息指纹或共同文件的候选。候选分组与高风险复核使用独立 Function 示例，复核示例采用保守拆分，不预填原候选组或 `same_object`。复核可以保留原组或拆成多个子组；同一会话复核保留多事件子组时，必须有 Python 计算的完整共同消息/文件证据，或使用配置允许的语义依据，不能只用同一会话。拆开时只需一条顶层 `split_reason` 说明整体分组差异，旧格式中任一子组已有理由也可接受；完全没有理由时 Python 才保留原组并记录告警。结果必须完整覆盖原组，不得遗漏、重复或增加 draft ID。
+
+分组协议错误会把错误组、重复编号、证据端点和缺失成员反馈给模型，并明确要求补入缺失成员或删除该合并。结果质量错误固定走 Online 首次请求、Online 局部重试 1 次、Codex 当前请求备用 1 次；Codex 仍失败或结果仍不合法时终止本次合并。调试模式只增加 trace，不改变线路和次数。
 
 候选、复核和正式内容请求使用任务专用 Function，并以 `model_input_batch_target_tokens=5200` 为模型输入估算目标。统一估算取“最终提示词、合法参数示例、证据编号、重试反馈和 `/no_think` 加完整 Function 与 `tool_choice`”同“相同提示词加 Codex output-schema”两者的较大值。复核超过目标时先按消息、文件和会话关系分批；单条正文仍过长时复用正文切片和分层摘要，无法继续拆分的最小输入允许发送。
 
@@ -160,9 +186,14 @@ Python 检查每个输入 draft 只出现一次、锁定组未改变、`covered_
 - 一个人部门输入输出数量相同
 - 9 条不触发数量复核，10 条触发；4 个文件触发
 - 单条候选跳过复核；多条跨批、修复和工作流冲突触发复核
+- 没有完整证据且对象不一致、`broad_object` 分别触发复核；对象一致或已有完整证据时不新增触发
+- Python 排除组外证据端点，并稳定选择消息和文件共同组成的最小完整连接集合
+- 逐事件说明遗漏、重复、未知编号和空说明进入结果质量重试
+- 高风险复核示例不预填原候选组或 `same_object`
 - 有拆分理由的复核拆组、无拆分理由时保留原组，以及无效覆盖失败
 - 正文覆盖局部重试及失败不落盘
 - 质量统计与 trace JSON、Markdown 摘要一致
 - 138 和 195 事件规模的候选分批不超过 6200 token
+- 离线回放脚本同时覆盖候选分组和高风险复核，并确认 `model_call_count=0`
 
 后续真实 V2 验收应选取多人描述同一事项、同一会话不同事项、相似标题不同对象和一个人部门四类日期。验收重点是误合并、漏合并、关键事实遗漏和高风险复核拆组结果，不以压缩比例作为唯一结论。

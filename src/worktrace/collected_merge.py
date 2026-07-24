@@ -29,8 +29,14 @@ from .analyzers.function_calls import (
     collected_grouping_call_contract,
     task_function_call_spec,
 )
+from .analyzers.collected_evidence import (
+    EvidenceRelation,
+    derive_group_evidence,
+    derive_semantic_review_trigger_reasons,
+)
 from .analyzers.output_schemas import collected_merge_output_schema
 from .analyzers.prompts import (
+    build_collected_evidence_relation_catalog,
     build_collected_grouping_prompt,
     build_collected_merge_prompt,
     build_collected_review_prompt,
@@ -786,6 +792,17 @@ class CollectedMergeRunner:
         }
         if self.config.review_workstream_conflicts and len(workstreams) > 1:
             reasons.append("workstream_conflict")
+        reasons.extend(
+            derive_semantic_review_trigger_reasons(
+                group=group,
+                source_events=source_events,
+                config=self.config,
+                relations=build_collected_evidence_relation_catalog(
+                    source_events,
+                    excluded_draft_ids=set(),
+                ),
+            )
+        )
         return reasons
 
     def _review_collected_group_with_batching(
@@ -1180,6 +1197,7 @@ class CollectedMergeRunner:
                 step_index=trace_step_index,
                 grouping_result=result,
                 source_coverage_error=validation_error,
+                source_events=fitted_events,
             )
             if not validation_error:
                 repaired, repair_warnings = repair_collected_grouping_result(
@@ -1208,7 +1226,9 @@ class CollectedMergeRunner:
                     )
                     warnings.append(warning)
                     self._collected_merge_failure_warnings.append(warning)
-                    validation_feedback = validation_error
+                    validation_feedback = collected_grouping_validation_feedback(
+                        validation_error
+                    )
                     retry_reason = "python_validation_fallback"
                     use_fallback = True
                     fallback_from_step_index = trace_step_index
@@ -1233,7 +1253,9 @@ class CollectedMergeRunner:
                     f"coverage: group={candidate_group.group_id} {partition_error}"
                 )
             invalid_result_count += 1
-            validation_feedback = validation_error
+            validation_feedback = collected_grouping_validation_feedback(
+                validation_error
+            )
             if split_reason_error:
                 warning = (
                     "Retrying current high-risk review because the split had no overall "
@@ -2402,6 +2424,7 @@ class CollectedMergeRunner:
                 step_index=trace_step_index,
                 grouping_result=grouping_result,
                 source_coverage_error=partition_error,
+                source_events=source_events,
             )
             if not partition_error:
                 return grouping_result, warnings
@@ -2419,7 +2442,9 @@ class CollectedMergeRunner:
                     )
                     warnings.append(warning)
                     self._collected_merge_failure_warnings.append(warning)
-                    validation_feedback = partition_error
+                    validation_feedback = collected_grouping_validation_feedback(
+                        partition_error
+                    )
                     retry_reason = "python_validation_fallback"
                     use_fallback = True
                     fallback_from_step_index = trace_step_index
@@ -2429,7 +2454,9 @@ class CollectedMergeRunner:
                     + partition_error
                 )
             invalid_result_count += 1
-            validation_feedback = partition_error
+            validation_feedback = collected_grouping_validation_feedback(
+                partition_error
+            )
             retry_reason = "python_validation_failed"
             warning = (
                 "Retrying current collected candidate grouping after Python validation: "
@@ -3391,6 +3418,7 @@ class CollectedMergeRunner:
         input_estimated_tokens = estimates["input_estimated_tokens"]
         target_tokens = self.config.model_input_batch_target_tokens
         step = {
+            "grouping_protocol_version": 2,
             "step_index": step_index,
             "status": "started",
             "stage": stage,
@@ -3465,6 +3493,7 @@ class CollectedMergeRunner:
         step_index: int,
         grouping_result: CollectedGroupingResult,
         source_coverage_error: str = "",
+        source_events: list[CollectedSourceEvent] | None = None,
     ) -> None:
         step = self._collected_merge_trace_step(step_index)
         if step is None:
@@ -3474,6 +3503,71 @@ class CollectedMergeRunner:
             split_reason_source = "top_level"
         elif any(group.split_reason.strip() for group in grouping_result.groups):
             split_reason_source = "legacy_group"
+        trace_catalog = [
+            EvidenceRelation.from_dict(item)
+            for item in step.get("evidence_relation_catalog", [])
+            if isinstance(item, dict)
+        ]
+        source_by_id = {
+            item.draft_id: item for item in (source_events or [])
+        }
+        evidence_audits: list[dict[str, Any]] = []
+        semantic_audits: list[dict[str, Any]] = []
+        for group in grouping_result.groups:
+            if len(group.draft_ids) < 2:
+                continue
+            evidence_audits.append(
+                {
+                    "group_id": group.group_id,
+                    **derive_group_evidence(group.draft_ids, trace_catalog).to_dict(),
+                }
+            )
+            connection_ids = [item.draft_id for item in group.member_connections]
+            group_sources = [
+                source_by_id[draft_id]
+                for draft_id in group.draft_ids
+                if draft_id in source_by_id
+            ]
+            semantic_audits.append(
+                {
+                    "group_id": group.group_id,
+                    "semantic_reasons": list(group.semantic_reasons),
+                    "reason_detail": group.reason_detail,
+                    "risk_flags": list(group.risk_flags),
+                    "member_connections": [
+                        item.to_dict() for item in group.member_connections
+                    ],
+                    "member_connection_draft_ids": connection_ids,
+                    "missing_member_connection_draft_ids": sorted(
+                        set(group.draft_ids).difference(connection_ids)
+                    ),
+                    "unknown_member_connection_draft_ids": sorted(
+                        set(connection_ids).difference(group.draft_ids)
+                    ),
+                    "duplicate_member_connection_draft_ids": sorted(
+                        {
+                            draft_id
+                            for draft_id in connection_ids
+                            if connection_ids.count(draft_id) > 1
+                        }
+                    ),
+                    "member_connections_complete": bool(
+                        connection_ids
+                        and len(connection_ids) == len(group.draft_ids)
+                        and len(set(connection_ids)) == len(group.draft_ids)
+                        and set(connection_ids) == set(group.draft_ids)
+                        and all(
+                            item.connection_detail.strip()
+                            for item in group.member_connections
+                        )
+                    ),
+                    "review_trigger_reasons": (
+                        self._collected_group_review_reasons(group, group_sources)
+                        if len(group_sources) == len(group.draft_ids)
+                        else []
+                    ),
+                }
+            )
         step.update(
             {
                 "status": "success",
@@ -3484,6 +3578,8 @@ class CollectedMergeRunner:
                     grouping_result
                 ),
                 "split_reason_source": split_reason_source,
+                "evidence_audit": evidence_audits,
+                "semantic_audit": semantic_audits,
                 "python_validation": {
                     "valid": not source_coverage_error,
                     "errors": (
@@ -3696,6 +3792,24 @@ class CollectedMergeRunner:
     ) -> None:
         if self._collected_merge_trace_dir is None:
             return
+        validation_error_counts: Counter[str] = Counter()
+        retry_count_by_reason: Counter[str] = Counter()
+        semantic_review_trigger_counts: Counter[str] = Counter()
+        for step in self._collected_merge_trace_steps:
+            validation = step.get("python_validation", {})
+            if isinstance(validation, dict):
+                for error in validation.get("errors", []):
+                    error_code = str(error).strip().split(maxsplit=1)[0]
+                    if error_code:
+                        validation_error_counts[error_code] += 1
+            retry_reason = str(step.get("retry_reason", "")).strip()
+            if retry_reason and retry_reason != "initial":
+                retry_count_by_reason[retry_reason] += 1
+            for audit in step.get("semantic_audit", []):
+                if not isinstance(audit, dict):
+                    continue
+                for reason in audit.get("review_trigger_reasons", []):
+                    semantic_review_trigger_counts[str(reason)] += 1
         summary = {
             "status": status,
             "target_date": target_date,
@@ -3717,6 +3831,11 @@ class CollectedMergeRunner:
             ],
             "warning_messages": warning_messages,
             "batch_decisions": self._collected_merge_batch_decisions,
+            "validation_error_counts": dict(validation_error_counts),
+            "retry_count_by_reason": dict(retry_count_by_reason),
+            "semantic_review_trigger_counts": dict(
+                semantic_review_trigger_counts
+            ),
             "steps": self._collected_merge_trace_steps,
         }
         (self._collected_merge_trace_dir / "summary.json").write_text(
@@ -4242,6 +4361,12 @@ def render_collected_merge_trace_summary(summary: dict[str, Any]) -> str:
         f"| Content retries | {quality.get('content_retry_count', 0)} |",
         f"| Shortened prompts | {quality.get('shortened_prompt_count', 0)} |",
         f"| Review required | {str(bool(quality.get('review_required', False))).lower()} |",
+        "",
+        "## Validation And Review",
+        "",
+        f"- Validation errors: `{dump_json(summary.get('validation_error_counts', {}))}`",
+        f"- Retries by reason: `{dump_json(summary.get('retry_count_by_reason', {}))}`",
+        f"- Review triggers: `{dump_json(summary.get('semantic_review_trigger_counts', {}))}`",
         "",
         "## Step Metrics",
         "",
@@ -5037,6 +5162,38 @@ def collected_grouping_partition_error(
     return "; ".join(details)
 
 
+def collected_grouping_validation_feedback(error: str) -> str:
+    instructions: list[str] = []
+    if "duplicate_draft_id" in error or "duplicate_group_member" in error:
+        instructions.append(
+            "每个 draft_id 只能出现一次；在多事件组和 singleton_draft_ids 中二选一。"
+        )
+    if "merged_group_too_small" in error:
+        instructions.append(
+            "只有一条事件时不要返回 merged_groups 对象，只放入 singleton_draft_ids。"
+        )
+    if "member_connection" in error:
+        instructions.append(
+            "member_connections 必须与当前组 draft_ids 完全一致，每个编号恰好一次且说明非空。"
+        )
+    if "merge_reason_missing" in error:
+        instructions.append(
+            "无法给出配置允许的具体语义理由时必须拆分，不要用宽泛共同背景代替。"
+        )
+    if "evidence_does_not_cover_group" in error:
+        instructions.append(
+            "Python 只发现局部共同证据；请按错误中的证据端点加入缺失成员，"
+            "或删除该合并并把事件拆开；只有确有依据时才改用覆盖全组的合法语义理由。"
+        )
+    if "missing_overall_split_reason" in error:
+        instructions.append(
+            "拆成多个组时必须在顶层 split_reason 写明各组的具体业务差异。"
+        )
+    if not instructions:
+        instructions.append("按错误中的字段、组编号和事件编号修正后重新提交。")
+    return error + "\n处理要求：\n- " + "\n- ".join(dict.fromkeys(instructions))
+
+
 def _build_singleton_collected_group(
     source_event: CollectedSourceEvent,
     index: int,
@@ -5215,18 +5372,41 @@ def _collected_review_result_basis_error(
         ]
         if len(items) != len(group.draft_ids):
             continue
-        invalid_declared_reasons = [
+        declared_evidence_reasons = [
             reason
             for reason in group.group_reason
-            if (
-                reason in reason_definitions
-                and reason_definitions[reason].evidence_relation
-                and not _events_have_connected_relation(
+            if reason in reason_definitions
+            and reason_definitions[reason].evidence_relation
+        ]
+        message_or_file_reasons = [
+            reason
+            for reason in declared_evidence_reasons
+            if reason_definitions[reason].evidence_relation in {"message", "file"}
+        ]
+        invalid_declared_reasons: list[str] = []
+        if len(
+            {
+                reason_definitions[reason].evidence_relation
+                for reason in message_or_file_reasons
+            }
+        ) > 1:
+            if not _events_have_connected_merge_evidence(items):
+                invalid_declared_reasons.extend(message_or_file_reasons)
+        else:
+            invalid_declared_reasons.extend(
+                reason
+                for reason in message_or_file_reasons
+                if not _events_have_connected_relation(
                     items,
                     reason_definitions[reason].evidence_relation,
                 )
             )
-        ]
+        invalid_declared_reasons.extend(
+            reason
+            for reason in declared_evidence_reasons
+            if reason_definitions[reason].evidence_relation == "conversation"
+            and not _events_have_connected_relation(items, "conversation")
+        )
         if invalid_declared_reasons:
             invalid_group_ids.append(
                 (group.group_id or ",".join(group.draft_ids))

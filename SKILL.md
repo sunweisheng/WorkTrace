@@ -88,13 +88,15 @@ python -m src.worktrace.cli merge-collected --date YYYY-MM-DD
 - 个人 MD 与已经包含该人员的部门 MD 可以同时输入；程序不比较 `source_event_ids`，不拦截，也不提示重复来源，文件组合由负责人人工控制。
 - 同一天同一会话只用于发现可能属于同一事项的候选，最终仍由模型结合内容确认，不自动强制合并。
 - 多人候选阶段默认使用完整事件正文，并按 `model_input_batch_target_tokens=5200` 的完整输入估算优先分批。固定结构的 Online 请求使用任务专用 Function Calling；估算取“最终提示词、当前合法参数示例、证据编号、重试错误和 `/no_think` 加完整 tools 与 `tool_choice`”同“相同提示词加 Codex 完整 output-schema”两者的较大值。超过目标时关系优先分批；已经拆到最小必要输入仍超过目标时标记为 `oversized_singleton` 并发送，不设置额外的本地绝对上限。重试反馈使当前请求超限时标记 `oversized_retry` 后发送。
-- `config/collected_merge.json` 控制高风险复核和合法语义原因。Python 在每个多人请求的内存中把真实共同消息、共同文件关系编号为 `MSG-xxx`、`FILE-xxx`；模型只能从 `evidence_relation_ids` 枚举选择，并返回 `semantic_reasons`、`reason_detail` 和 `risk_flags`，不能直接声明 `shared_message`、`shared_file` 或内部 `group_reason`。Python 校验编号、组内范围和连接覆盖后才恢复内部原因；`conversation_groups` 只是候选关系，不编号。多条候选在来源事件达到 10 条、来源文件达到 4 个、跨批、分组修复、不同非空工作流，或同一会话连接了多个没有共同消息或共同文件的部分时触发复核，单条候选直接保留。跨批只协调存在共同消息指纹或共同文件的候选；多事件子组仍需合法依据和自己的 `reason_detail`。最多三路复核并保持原候选顺序。拆组时只需一条顶层 `split_reason` 说明整体业务差异；旧记录中任一子组已有理由也兼容接受，完全没有理由时拒绝拆分、保留原组并记录告警。
+- `config/collected_merge.json` 是多人合并语义说明的唯一来源：每个 `group_reason_definitions` 项配置 `acceptance_rules` 和 `rejection_rules`，具体中文判断规则不得复制到 Python。模型能看到 Python 编号的 `MSG-xxx`、`FILE-xxx` 证据目录，但新结果只返回 `semantic_reasons`、`reason_detail`、逐条覆盖全部成员的 `member_connections` 和 `risk_flags`，不再返回 `evidence_relation_ids`，也不能直接声明 `shared_message`、`shared_file` 或内部 `group_reason`。Python 只使用端点都在当前组内的关系，按稳定目录顺序计算连接全部成员的最小证据集合，并恢复内部原因；局部证据只写审计，不作为全组合并依据。内部 `evidence_relation_ids` 仅保存 Python 计算结果并兼容旧 trace；`conversation_groups` 只是候选关系，不编号。逐事件说明遗漏、重复、组外引用或空说明，以及重复事件编号和单成员合并组，都必须进入当前请求局部重试，不得静默修复。
+- 多条候选在来源事件达到 10 条、来源文件达到 4 个、跨批、分组修复、不同非空工作流、同一会话连接多个无共同消息/文件的部分、无完整共同证据且非空 `object_hint` 不一致，或模型标记 `broad_object` 时触发复核，单条候选直接保留。跨批只协调存在共同消息指纹或共同文件的候选；多事件子组仍需合法依据和自己的 `reason_detail`。最多三路复核并保持原候选顺序。高风险复核 Function 示例采用保守拆分，不预填原组或 `same_object`。拆组时只需一条顶层 `split_reason` 说明整体业务差异；旧记录中任一子组已有理由也兼容接受，完全没有理由时拒绝拆分、保留原组并记录告警。
 - 正式正文必须完整覆盖锁定组并给出关键事实来源；局部重试后仍不完整时不写文件。单条事件组直接保留，不增加模型调用。
 - 日期根目录和每个一级子目录分别作为独立合并范围；更深层目录不递归处理。
 - 每个合并范围输出本目录 `YYYY-MM-DD-登录人姓名-merged.md`。
 - 团队汇总文件会公开保留来源人员，并在隐藏信息中逐级保留来源事件 ID；中心结果还公开显示从上游 `*-merged.md` 文件名提取并逐级保留的来源负责人。
 - 缺少当前登录人的个人 MD 时静默执行普通汇总，不产生 warning。
-- 输入/输出数量、字符数、覆盖率和复核统计全部由 Python 计算，并进入 CLI JSON 与 trace summary；不要求每一级事件数必须减少。
+- 输入/输出数量、字符数、覆盖率、校验错误、重试原因和复核触发统计全部由 Python 计算，并进入 CLI JSON 与 trace summary；调试模式只增加记录，不改变 Online 局部重试 1 次和当前请求 Codex 备用 1 次的线路；不要求每一级事件数必须减少。
+- `python3 scripts/replay_collected_review_failures.py --trace-root <trace目录> --steps <编号列表> --output-dir <输出目录>` 可离线复盘候选分组和高风险复核。旧 trace 使用 `legacy_audit`，不补造 `member_connections`；新实验结果使用 `current` 完整执行新协议校验。该脚本不调用模型，也不生成正式 Markdown。
 - 每个生成的团队汇总文件都会通过飞书 CLI 机器人身份发送给当前登录用户自己。
 - 更多细节见 `docs/collected-people-merge-plan.md`。
 
@@ -103,7 +105,7 @@ python -m src.worktrace.cli merge-collected --date YYYY-MM-DD
 - 仓库根目录就是 skill 根目录，不使用单独的 `skill/` 子目录。
 - 核心实现应放在 `src/`，测试放在 `tests/`，设计文档放在 `docs/`。
 - 不要让 LLM 参与数据计算；统计或计算必须由 Python 完成。
-- 个人保留提示、既有业务词、临时协作与事实复核条件和语义信号说明维护在 `config/retention_policy.json`，不得在 Python 中新增聊天关键词做语义判断。
+- 个人保留提示、既有业务词、临时协作与事实复核条件和语义信号说明维护在 `config/retention_policy.json`；多人合并理由的描述、成立条件和排除条件维护在 `config/collected_merge.json`。不得在 Python 中新增聊天关键词或具体中文业务判断规则。
 - 个人日报和多人汇总统一使用默认值为 `5200` 的 `model_input_batch_target_tokens` 作为模型输入估算目标，不另设多人合并字符阈值。分批和调用前检查必须调用同一个 Python 估算函数，并取 Online Function 定义与 `tool_choice`、Codex 完整 output-schema 两种估算的较大值；模型名、URL、API Key、timeout 和 stream 不计入。会话分段窗口、锚点降级批次、跨会话候选合并及多人汇总等仍可拆的组合输入必须继续拆分；最小必要输入仍超过目标时允许发送，并在调试记录中保存两条线路估算、目标值、超限原因、实际 token 和估算差。该值不是 HTTP 字节数或服务端上下文上限。
 - `WORKTRACE_LLM_STREAM` 是 Online 文字和图片请求的唯一流式开关，默认 `false`。每次请求重新读取配置，创建并关闭独立 OpenAI 和 HTTP 客户端；固定结构请求强制且只允许调用一次预期 Function，显式开启流式时按调用 ID 拼接 Function 参数。普通文字或图片理解不强制 Function Calling。Python 校验失败先用 Online 局部重试当前请求并反馈具体错误；可重试错误用尽局部重试后只将当前请求交给 Codex 一次，下一请求重新优先 Online。Codex 失败或结果仍不合法时停止整次生成。调试、诊断或一次运行失败都不构成整次切换后端的授权；需要改变全局后端或重试次数时，先停止并取得用户明确同意。
 - 原始聊天内容不应长期落盘，长期保留的只有结构化事件清单。

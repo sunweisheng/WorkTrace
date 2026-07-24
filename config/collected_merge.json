@@ -6,42 +6,68 @@
   "review_repaired_groups": true,
   "review_workstream_conflicts": true,
   "review_same_conversation_only_groups": true,
+  "review_semantic_only_object_conflicts": true,
+  "review_broad_object_groups": true,
   "group_reason_definitions": [
     {
       "key": "shared_message",
       "description": "事件之间存在 Python evidence_relations 明确给出的共同消息；没有共同消息计数时不得使用。",
       "evidence_relation": "message",
-      "supports_semantic_merge": false
+      "supports_semantic_merge": false,
+      "acceptance_rules": ["Python 计算的共同消息关系能够连接组内全部事件。"],
+      "rejection_rules": ["共同消息只覆盖组内部分事件。"]
     },
     {
       "key": "shared_file",
       "description": "事件之间引用系统识别的同一个文件；不同文件即使格式、名称或用途相似也不得使用。",
       "evidence_relation": "file",
-      "supports_semantic_merge": false
+      "supports_semantic_merge": false,
+      "acceptance_rules": ["Python 计算的共同文件关系能够连接组内全部事件。"],
+      "rejection_rules": ["共同文件只覆盖组内部分事件。"]
     },
     {
       "key": "same_conversation",
       "description": "事件来自同一天同一会话；只能用于候选发现，不能单独支持高风险多事件子组。",
       "evidence_relation": "conversation",
-      "supports_semantic_merge": false
+      "supports_semantic_merge": false,
+      "acceptance_rules": [],
+      "rejection_rules": ["同一会话单独作为多事件组合并依据。"]
     },
     {
       "key": "same_object",
       "description": "事件处理同一个明确业务对象，不是宽泛领域或相似标题。",
       "evidence_relation": "",
-      "supports_semantic_merge": true
+      "supports_semantic_merge": true,
+      "acceptance_rules": [
+        "写出一个具体且唯一的共同对象。",
+        "逐条说明事件如何直接作用于该对象。"
+      ],
+      "rejection_rules": [
+        "仅同地区、部门、系统、业务类别、负责人或标题相似。",
+        "先上提成宽泛概念再合并。"
+      ]
     },
     {
       "key": "continuous_action",
       "description": "事件是同一事项的前后连续动作，能够说明动作顺序或承接关系。",
       "evidence_relation": "",
-      "supports_semantic_merge": true
+      "supports_semantic_merge": true,
+      "acceptance_rules": [
+        "写明前一事件结果如何成为后一事件的输入、条件或明确后续动作。",
+        "动作关系必须覆盖组内全部事件。"
+      ],
+      "rejection_rules": ["仅时间接近、同一会话、并行处理或都属于同类数据处理。"]
     },
     {
       "key": "same_deliverable_batch",
       "description": "事件涉及不同文件，但属于同一报送周期、同一提交任务或同一套交付材料；仅文件格式相同或名称相似不足以成立。",
       "evidence_relation": "",
-      "supports_semantic_merge": true
+      "supports_semantic_merge": true,
+      "acceptance_rules": [
+        "写明同一提交任务或成套交付要求。",
+        "逐条说明每项交付在该批次中的角色。"
+      ],
+      "rejection_rules": ["仅同月份、同文件格式、同报表类别或名称相似。"]
     }
   ]
 }

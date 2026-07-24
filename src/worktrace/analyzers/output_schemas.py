@@ -734,11 +734,9 @@ def collected_grouping_function_schema(
     config: RuntimeConfig,
     *,
     draft_ids: list[str],
-    evidence_relation_ids: list[str],
     include_split_reason: bool,
 ) -> dict[str, object]:
     unique_draft_ids = list(dict.fromkeys(draft_ids))
-    unique_relation_ids = list(dict.fromkeys(evidence_relation_ids))
     semantic_reasons = [
         item.key
         for item in config.collected_group_reason_definitions
@@ -750,9 +748,6 @@ def collected_grouping_function_schema(
         "broad_object",
         "large_group",
     ]
-    evidence_item_schema: dict[str, object] = {"type": "string"}
-    if unique_relation_ids:
-        evidence_item_schema["enum"] = unique_relation_ids
     semantic_item_schema: dict[str, object] = {"type": "string"}
     if semantic_reasons:
         semantic_item_schema["enum"] = semantic_reasons
@@ -777,11 +772,22 @@ def collected_grouping_function_schema(
                 "uniqueItems": True,
                 "items": semantic_item_schema,
             },
-            "evidence_relation_ids": {
+            "member_connections": {
                 "type": "array",
-                "maxItems": len(unique_relation_ids),
-                "uniqueItems": True,
-                "items": evidence_item_schema,
+                "minItems": 2,
+                "maxItems": len(unique_draft_ids),
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "draft_id": {
+                            "type": "string",
+                            "enum": unique_draft_ids,
+                        },
+                        "connection_detail": {"type": "string", "minLength": 1},
+                    },
+                    "required": ["draft_id", "connection_detail"],
+                    "additionalProperties": False,
+                },
             },
             "reason_detail": {"type": "string", "minLength": 1},
             "risk_flags": {
@@ -798,7 +804,7 @@ def collected_grouping_function_schema(
             "summary_content",
             "summary_object_hint",
             "semantic_reasons",
-            "evidence_relation_ids",
+            "member_connections",
             "reason_detail",
             "risk_flags",
         ],

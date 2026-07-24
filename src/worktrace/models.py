@@ -1741,6 +1741,25 @@ class CollectedSourceEvent:
 
 
 @dataclass(frozen=True)
+class CollectedGroupMemberConnection:
+    draft_id: str
+    connection_detail: str
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "CollectedGroupMemberConnection":
+        return cls(
+            draft_id=str(data.get("draft_id", "")),
+            connection_detail=str(data.get("connection_detail", "")),
+        )
+
+    def to_dict(self) -> dict[str, str]:
+        return {
+            "draft_id": self.draft_id,
+            "connection_detail": self.connection_detail,
+        }
+
+
+@dataclass(frozen=True)
 class CollectedGroupingGroup:
     group_id: str
     draft_ids: list[str]
@@ -1753,6 +1772,9 @@ class CollectedGroupingGroup:
     semantic_reasons: list[str] = field(default_factory=list)
     evidence_relation_ids: list[str] = field(default_factory=list)
     reason_detail: str = ""
+    member_connections: list[CollectedGroupMemberConnection] = field(
+        default_factory=list
+    )
     risk_flags: list[str] = field(default_factory=list)
     was_repaired: bool = False
 
@@ -1770,6 +1792,10 @@ class CollectedGroupingGroup:
             semantic_reasons=_string_list(data.get("semantic_reasons")),
             evidence_relation_ids=_string_list(data.get("evidence_relation_ids")),
             reason_detail=str(data.get("reason_detail", "")),
+            member_connections=[
+                CollectedGroupMemberConnection.from_dict(item)
+                for item in _dict_list(data.get("member_connections"))
+            ],
             risk_flags=_string_list(data.get("risk_flags")),
             was_repaired=bool(data.get("was_repaired", False)),
         )
@@ -1787,6 +1813,9 @@ class CollectedGroupingGroup:
             "semantic_reasons": list(self.semantic_reasons),
             "evidence_relation_ids": list(self.evidence_relation_ids),
             "reason_detail": self.reason_detail,
+            "member_connections": [
+                item.to_dict() for item in self.member_connections
+            ],
             "risk_flags": list(self.risk_flags),
             "was_repaired": self.was_repaired,
         }

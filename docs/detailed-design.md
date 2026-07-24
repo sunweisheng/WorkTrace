@@ -356,7 +356,11 @@ flowchart TD
     L --> M["最终过滤、写入、自发送"]
 ```
 
-多人合并候选发现默认发送来源 MD 中的完整事件正文。Python 根据共同消息、共同文件形成生产代码现有的 `evidence_relations`，并在每个滚动批次或高风险复核请求的内存中，仅把数量大于零的关系编号为 `MSG-xxx`、`FILE-xxx`；不创建临时目录或独立文件。编号清单进入模型上下文和 `evidence_relation_ids` 枚举。`conversation_groups` 仍只表示同日会话候选关系，不编号，也不进入证据参数。模型只返回 `semantic_reasons`、`evidence_relation_ids`、`reason_detail` 和 `risk_flags`，不能直接声明 `shared_message`、`shared_file` 或内部 `group_reason`。Python 检查编号存在、关系成员属于当前组，以及仅依靠证据编号时所选关系能连接全部组员；通过后才恢复内部原因。即使消息或文件集合完全相同也不能自动合并，证据编号只证明共享关系存在，模型仍须结合具体对象和前后动作判断。单条候选直接保留，不进入高风险复核。多条候选在来源事件达到 10 条、来源文件达到 4 个、跨批、Python 修复、不同非空工作流，或同一会话连接了多个没有共同消息或共同文件的部分时增加高风险复核，最多三路并行并保持原候选顺序。每个多事件子组必须有合法关系依据和自己的 `reason_detail`，单条组不要求。复核拆组时只要求一条顶层 `split_reason` 解释整体差异；拆成多个单条组或一个多事件组加若干单条组都适用。旧记录只要任一子组有非空理由也兼容接受，所有位置都无理由时拒绝拆分、保留原组并写告警。
+多人合并候选发现默认发送来源 MD 中的完整事件正文。Python 根据共同消息、共同文件形成 `evidence_relations`，并在每个滚动批次或高风险复核请求的内存中，仅把数量大于零的关系编号为 `MSG-xxx`、`FILE-xxx`；不创建临时目录或独立文件。编号清单只进入模型上下文供判断。`conversation_groups` 仍只表示同日会话候选关系，不编号，也不进入证据参数。新模型输出只返回 `semantic_reasons`、`reason_detail`、逐条覆盖全部成员的 `member_connections` 和 `risk_flags`，不再返回 `evidence_relation_ids`，也不能直接声明 `shared_message`、`shared_file` 或内部 `group_reason`。Python 在分组后排除端点位于组外的关系，再按稳定目录顺序选择能够连接全部成员的最小关系集合，消息和文件可以共同组成连接链；成功后才恢复内部原因和兼容旧 trace 的 `evidence_relation_ids`。局部证据只写审计；没有完整证据且没有合法语义理由时返回 `merge_reason_missing`，有局部证据但覆盖不足时返回 `evidence_does_not_cover_group`。即使消息或文件集合完全相同也不能自动合并，模型仍须结合具体对象和前后动作判断。
+
+`config/collected_merge.json` 是多人合并中文判断规则的唯一来源。每个 `group_reason_definitions` 项配置 `acceptance_rules` 和 `rejection_rules`；Python 只读取规则供提示使用，并负责编号、证据连接、覆盖和标准化字段比较，不硬编码业务关键词。`member_connections` 必须与组内 `draft_ids` 完全一致，遗漏、重复、未知编号、空说明、重复组员和单成员合并组都作为结果质量错误，不静默修复。
+
+单条候选直接保留，不进入高风险复核。多条候选在来源事件达到 10 条、来源文件达到 4 个、跨批、Python 修复、不同非空工作流、同一会话连接了多个没有共同消息或共同文件的部分、无完整共同证据且标准化后的非空 `object_hint` 不一致，或模型标记 `broad_object` 时增加高风险复核，最多三路并行并保持原候选顺序。对象不一致只触发复核，不自动拆组；对象一致或已有完整证据时不增加这项复核。候选和复核使用独立 Function 示例，高风险复核示例采用保守拆分，不预填原组或 `same_object`。每个多事件子组必须有合法关系依据、自己的 `reason_detail` 和完整 `member_connections`，单条组不要求。复核拆组时只要求一条顶层 `split_reason` 解释整体差异；旧记录只要任一子组有非空理由也兼容接受，所有位置都无理由时拒绝拆分、保留原组并写告警。协议错误反馈包含错误组、重复编号、证据端点、缺失成员，并要求补入缺失成员或删除该合并。结果质量错误固定走 Online 首次请求、Online 局部重试 1 次、Codex 当前请求备用 1 次；最后仍失败时终止本次合并。调试模式只增加记录，不改变线路和次数。
 
 候选、复核和正式正文使用各自任务专用 Function，并调用同一生产估算函数：`prepared_prompt` 包含最终提示词、当前合法参数示例、证据编号、重试错误反馈和 `/no_think`；`online_estimate` 再加入完整 Function 定义与 `tool_choice`，`codex_estimate` 再加入完整 output-schema，最终取两者较大值。`model_input_batch_target_tokens=5200` 是模型输入估算目标，不是 HTTP 字节数或服务端上下文上限。每尝试加入一个候选都重新构建并估算；复核超过目标时按关系分批，单条正文仍过长时复用正文切片和分层摘要；不可继续拆分的最小输入允许发送。校验错误只重试当前请求，加入具体错误后重新估算，超限时标记 `oversized_retry` 后发送。正式内容必须返回完整 `covered_draft_ids` 和 `fact_items`；Python 检查整批 draft 分配、锁定组和事实来源，模型明确拒绝输入或结果仍不完整时当前 scope 失败且不写文件。若 scope 目录已有同名历史输出，失败不会删除或覆盖旧文件，是否成功必须以本次 CLI JSON 为准。
 
@@ -424,6 +428,8 @@ OnlineLLMAnalyzer -> openai Python SDK -> Responses API provider
 - `high_risk_review_enabled = True`
 - `high_risk_source_event_count = 10`
 - `high_risk_source_file_count = 4`
+- `review_semantic_only_object_conflicts = True`
+- `review_broad_object_groups = True`
 - `slice_retry_limit = 3`
 - `anchor_batch_size = 3`
 - `llm_stream_enabled = False`
@@ -448,7 +454,7 @@ OnlineLLMAnalyzer -> openai Python SDK -> Responses API provider
 - `config/conversation_window.json`：初始窗口聚合和按需扩窗阈值
 - `config/llm_retry.json`：分段/提炼重试、流式首次返回超时、Codex 间隔，以及切分、提炼、个人事实复核和多人高风险复核并发数
 - `config/retention_policy.json`：个人保留提示、既有业务词、临时协作复核、个人事实复核条件和模型信号定义
-- `config/collected_merge.json`：多人汇总高风险复核开关、阈值和条件
+- `config/collected_merge.json`：多人汇总高风险复核开关、阈值、条件，以及合并理由的描述、成立条件和排除条件
 - `config/attachment_text.json`：文本附件限制
 - `config/image_summary.json`：图片摘要限制和 prompt
 - `config/reaction_catalogs/*.json`：reaction 语义目录
@@ -503,9 +509,9 @@ segmentation 和 segment batch 的模型失败轮次保存输入、prompt 与 `f
 
 `scripts/report_replay_call_inputs.py` 会把分段、提炼、分段失败后的直接提炼和两类复核的每次尝试（包括失败重试）写入 `call-input-report.md`。在线模型成功响应数分为文字与图片摘要，调试文件保存的是文字调用尝试，两种口径不要求相等：请求发送前或服务端失败的尝试可能有调试输入但没有成功响应。`personal_fact_review_summary.review_retry_count` 统计未通过 Python 协议校验后实际发生的局部重试；例如值为 5 表示 5 个失败尝试后来只重试对应候选，最终运行仍可成功。完整原聊天仍从已有分段调试输入查看。
 
-多人汇总 trace 写 `source-audit.json`、step JSON、`step-NNN-prompt.txt`、`summary.json` 和 `summary.md`。每个模型请求前先保存输入和 prompt；成功、失败、结果质量重试和自送达失败都会留下 summary。step 记录 `prompt_estimated_tokens`、`online_input_estimated_tokens`、`codex_input_estimated_tokens`、最终 `input_estimated_tokens`、目标值、超限原因、`actual_input_tokens` 和估算差值；同时保存 Function 名、去敏定义、证据编号清单、有效拆分理由及来源、Python 校验结果、批次加入/换批依据、当前逻辑请求实际使用的在线/Codex 调用记录、`input_events`、`deterministic_groups`、正文覆盖、`boundary_warnings`、过滤和最终事件。两个 summary 文件还保存 Python 计算的 `quality_summary`、各线路调用数和耗时、切换数以及 Codex 等待统计，因此可以从来源增强信息追到最终部门事件并核对各级数量和覆盖率。
+多人汇总 trace 写 `source-audit.json`、step JSON、`step-NNN-prompt.txt`、`summary.json` 和 `summary.md`。每个模型请求前先保存输入和 prompt；成功、失败、结果质量重试和自送达失败都会留下 summary。候选和复核 step 使用 `grouping_protocol_version: 2`，并按组保存 `evidence_audit`、`semantic_audit` 和 `python_validation.errors`；旧 trace 回放可额外记录 `model_declared_evidence_relation_ids`，但新流程不使用它。step 还记录输入估算、实际 token、Function、证据目录、拆分理由、调用记录、`input_events`、`deterministic_groups`、正文覆盖和 `boundary_warnings`。两个 summary 文件保存 Python 计算的 `quality_summary`、校验错误、重试原因、复核触发、各线路调用数和耗时、切换数以及 Codex 等待统计，因此可以从来源增强信息追到最终部门事件并核对各级数量和覆盖率。
 
-`scripts/replay_collected_review_failures.py` 默认读取在线失败清单中的 M07-M11，离线重建当前高风险复核 prompt、Function 定义、证据编号和输入估算，并用生产校验逻辑检查历史返回或 `--result-dir` 提供的新实验结果。回放同时覆盖新版顶层 `split_reason` 和旧版子组理由兼容路径。该脚本不调用模型；`--output-dir` 只写调试报告和后续实验输入。
+`scripts/replay_collected_review_failures.py` 保留失败清单的 `--inventory`、`--ids`、`--result-dir` 和 `--output-dir`，并新增 `--trace-root`、`--steps`，可直接离线回放候选分组和高风险复核 step。旧 trace 使用 `legacy_audit` 展示原错误和新证据算法结果，不补造 `member_connections`；新实验结果使用 `current` 完整执行协议 v2 校验。汇总按阶段统计重复编号、单成员合并、理由缺失、证据越界、覆盖不足、逐事件说明缺失和新增复核触发次数，`summary.md` 显示“旧结果问题、新规则处理、是否仍需模型复核”。脚本明确记录 `model_call_count: 0`，不调用模型，也不生成正式 Markdown。
 
 所有主阶段同时通过 `logging_utils.log_timing(...)` 输出耗时和数量字段。在线和 Codex 记录都显式携带 `request_kind`；在线没有等待日志，Codex 等待单独进入调用记录；并发事实复核同时记录单候选累计口径和整体墙钟口径。
 
