@@ -552,6 +552,9 @@ def build_merge_prompt(
         "negative_examples": list(
             runtime_config.personal_grouping_negative_examples
         ),
+        "negative_examples": list(
+            runtime_config.personal_grouping_negative_examples
+        ),
         "target_date": target_date,
         **(
             {"retry_validation_errors": validation_feedback}
@@ -665,6 +668,10 @@ def build_collected_grouping_prompt(
             "evidence_relation_catalog 只用于判断；共同消息和共同文件的有效编号由 Python 在返回分组后自动计算，不要在结果中返回证据编号。",
             "拿不准是否同一事项时必须分开。",
             (
+                "candidate_discovery_context 只用于发现需要对照判断的候选，"
+                "不是输出分组；不得复制 candidate_set_id 或直接按其中的 draft_ids 合并。"
+            ),
+            (
                 "merged_groups 中每组至少两条记录，必须返回非空 summary_title、summary_content、"
                 "summary_object_hint 和 reason_detail；摘要应整合具体对象、动作、进展、结果、风险、"
                 "待办和明确冲突，不得按人员逐条罗列或补充来源中没有的事实。"
@@ -685,6 +692,9 @@ def build_collected_grouping_prompt(
             }
             for item in reason_definitions
         },
+        "negative_examples": list(
+            runtime_config.personal_grouping_negative_examples
+        ),
         "target_date": target_date,
         **(
             {"retry_validation_errors": validation_feedback}
@@ -692,10 +702,14 @@ def build_collected_grouping_prompt(
             else {}
         ),
         "deterministic_groups": deterministic_groups,
-        "conversation_groups": _build_collected_conversation_groups(
-            events,
-            excluded_draft_ids=deterministic_ids,
-        ),
+        "candidate_discovery_context": {
+            "same_conversation_candidate_sets": (
+                _build_collected_conversation_candidate_sets(
+                    events,
+                    excluded_draft_ids=deterministic_ids,
+                )
+            ),
+        },
         "evidence_relation_catalog": [
             item.to_dict()
             for item in build_collected_evidence_relation_catalog(
@@ -814,6 +828,9 @@ def build_collected_review_prompt(
             }
             for item in reason_definitions
         },
+        "negative_examples": list(
+            runtime_config.personal_grouping_negative_examples
+        ),
         "target_date": target_date,
         "review_reasons": effective_review_reasons,
         **(
@@ -830,10 +847,14 @@ def build_collected_review_prompt(
             "risk_flags": list(candidate_group.risk_flags),
             "was_repaired": candidate_group.was_repaired,
         },
-        "conversation_groups": _build_collected_conversation_groups(
-            events,
-            excluded_draft_ids=set(),
-        ),
+        "candidate_discovery_context": {
+            "same_conversation_candidate_sets": (
+                _build_collected_conversation_candidate_sets(
+                    events,
+                    excluded_draft_ids=set(),
+                )
+            ),
+        },
         "evidence_relation_catalog": [
             item.to_dict()
             for item in evidence_catalog
@@ -1402,7 +1423,7 @@ def build_collected_evidence_relation_catalog(
     )
 
 
-def _build_collected_conversation_groups(
+def _build_collected_conversation_candidate_sets(
     events: list[CollectedSourceEvent],
     *,
     excluded_draft_ids: set[str],
@@ -1425,7 +1446,7 @@ def _build_collected_conversation_groups(
     )
     return [
         {
-            "group_id": f"conversation-{index:03d}",
+            "candidate_set_id": f"context-{index:03d}",
             "draft_ids": list(draft_ids),
         }
         for index, draft_ids in enumerate(member_groups, start=1)

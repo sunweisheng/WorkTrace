@@ -3545,9 +3545,12 @@ class CollectedMergeRunner:
             )
         step.update(
             {
-                "status": "success",
+                "status": (
+                    "validation_failed" if source_coverage_error else "success"
+                ),
                 "raw_group_count": len(grouping_result.groups),
                 "raw_result": grouping_result.to_dict(),
+                "raw_function_payload": grouping_result.raw_function_payload,
                 "source_coverage_error": source_coverage_error,
                 "effective_split_reason": _collected_grouping_split_reason(
                     grouping_result
@@ -3579,14 +3582,32 @@ class CollectedMergeRunner:
         step = self._collected_merge_trace_step(step_index)
         if step is None:
             return
+        missing_field_error = ""
+        if self._should_retry_collected_merge_missing_fields(
+            merge_result,
+            missing_summary,
+        ):
+            missing_field_error = (
+                "missing_required_fields "
+                + format_collected_merge_missing_field_summary(missing_summary)
+            )
+        validation_errors = [
+            value for value in (coverage_error, missing_field_error) if value
+        ]
         step.update(
             {
-                "status": "success",
+                "status": (
+                    "validation_failed" if validation_errors else "success"
+                ),
                 "raw_group_count": len(merge_result.groups),
                 "raw_group_metrics": collected_merge_group_metrics(merge_result),
                 "missing_required_field_summary": missing_summary,
                 "source_coverage_error": coverage_error,
                 "raw_result": merge_result.to_dict(),
+                "python_validation": {
+                    "valid": not validation_errors,
+                    "errors": validation_errors,
+                },
             }
         )
         self._attach_collected_merge_llm_calls(step)
@@ -3800,7 +3821,7 @@ class CollectedMergeRunner:
             "failed_step_indexes": [
                 step["step_index"]
                 for step in self._collected_merge_trace_steps
-                if step.get("status") == "failed"
+                if step.get("status") in {"failed", "validation_failed"}
             ],
             "warning_messages": warning_messages,
             "batch_decisions": self._collected_merge_batch_decisions,

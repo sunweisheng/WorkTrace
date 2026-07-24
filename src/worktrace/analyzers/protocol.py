@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 from typing import Sequence
 
 from ..errors import AnalyzerProtocolError, PersonalGroupingValidationError
@@ -759,6 +760,7 @@ def parse_collected_grouping_function_payload(
             groups=groups,
             split_reason=str(data.get("split_reason", "")).strip(),
             validation_errors=errors,
+            raw_function_payload=copy.deepcopy(data),
         ),
         errors,
     )

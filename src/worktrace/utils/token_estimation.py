@@ -6,7 +6,11 @@ from ..analyzers.function_calls import FunctionCallSpec
 
 
 def estimate_text_tokens(value: str) -> int:
-    return max(1, len(value) // 3 + 50)
+    ascii_chars = sum(ord(char) < 128 for char in value)
+    non_ascii_chars = len(value) - ascii_chars
+    # Mixed Chinese JSON prompts contain many identifiers and punctuation. The
+    # Qwen usage reported by the gateway is conservatively covered by this ratio.
+    return max(1, (ascii_chars * 5 + 11) // 12 + non_ascii_chars + 200)
 
 
 def prepare_model_prompt(prompt: str, *, append_no_think: bool) -> str:

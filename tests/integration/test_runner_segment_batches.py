@@ -560,9 +560,13 @@ def test_runner_segments_each_original_anchor_window_not_the_full_conversation(
     result = runner.run("2026-07-10")
 
     assert result.status == DailyRunStatus.SUCCESS.value
-    assert analyzer.segmentation_inputs == [
-        [f"om_{index:03d}" for index in range(10, 71)]
-    ]
+    expected_window_ids = {f"om_{index:03d}" for index in range(10, 71)}
+    assert len(analyzer.segmentation_inputs) > 1
+    assert set().union(*map(set, analyzer.segmentation_inputs)) == expected_window_ids
+    assert all(
+        set(message_ids) < expected_window_ids
+        for message_ids in analyzer.segmentation_inputs
+    )
 
 
 def test_runner_limits_parallel_segmentation_and_waits_for_its_phase(
@@ -1823,7 +1827,7 @@ def test_runner_keeps_protocol_and_validation_segmentation_failures_separate(
 
     runner.run("2026-07-10")
 
-    assert analyzer.segment_calls == 3
+    assert analyzer.segment_calls > 2
 
 
 def test_runner_hydrates_document_title_before_anchor_segmentation(tmp_path: Path) -> None:

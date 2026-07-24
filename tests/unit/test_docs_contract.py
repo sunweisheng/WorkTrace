@@ -268,7 +268,7 @@ def test_docs_describe_python_collected_evidence_relations() -> None:
 
     for content in documents:
         assert "evidence_relations" in content
-        assert "conversation_groups" in content
+        assert "candidate_discovery_context" in content
         assert "Python" in content
         assert "原始" in content and "指纹" in content
         assert "完全相同" in content and "不能自动合并" in content
@@ -376,8 +376,8 @@ def test_current_docs_describe_python_computed_collected_evidence() -> None:
     for content in documents:
         assert "member_connections" in content
         assert "MSG-xxx" in content
-        assert "conversation_groups" in content
-        assert "不编号" in content
+        assert "candidate_discovery_context" in content
+        assert "输出分组" in content
         assert "Python" in content and "恢复" in content
         assert (
             "不再返回 `evidence_relation_ids`" in content

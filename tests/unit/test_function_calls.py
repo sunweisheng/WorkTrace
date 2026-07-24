@@ -287,6 +287,18 @@ def test_collected_grouping_contract_keeps_evidence_out_of_model_output() -> Non
     assert contract.evidence_catalog == ()
     assert "evidence_relation_ids" not in group_properties
     assert "member_connections" in group_properties
+    structure_example = contract.function_spec.argument_structure_example
+    assert structure_example is not None
+    merged_group = structure_example["merged_group"]
+    assert merged_group["draft_ids"] == [
+        "<input_draft_id_1>",
+        "<input_draft_id_2>",
+    ]
+    assert [
+        item["draft_id"] for item in merged_group["member_connections"]
+    ] == ["<input_draft_id_1>", "<input_draft_id_2>"]
+    assert "d1" not in str(structure_example)
+    assert "d2" not in str(structure_example)
 
 
 def test_collected_review_example_does_not_preselect_same_object_group() -> None:

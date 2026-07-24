@@ -523,10 +523,9 @@ class CodexAnalyzer(Analyzer):
                 append_no_think=True,
             )
         else:
-            request_schema = output_schema if self.config.codex_stdin_mode else None
             estimated_tokens = estimate_model_input_tokens(
                 prompt,
-                output_schema=request_schema,
+                output_schema=output_schema,
             )
             command_prompt = prompt
         target_tokens = self.config.model_input_batch_target_tokens
@@ -559,7 +558,7 @@ class CodexAnalyzer(Analyzer):
             output_path = Path(handle.name)
         schema_path: Path | None = None
         schema_handle = None
-        if self.config.codex_stdin_mode and output_schema is not None:
+        if output_schema is not None:
             schema_handle = tempfile.NamedTemporaryFile(
                 prefix="worktrace-codex-schema-",
                 suffix=".json",
@@ -599,20 +598,23 @@ class CodexAnalyzer(Analyzer):
                     input_text=command_prompt,
                 )
             else:
+                args = [
+                    "codex",
+                    "exec",
+                    "--skip-git-repo-check",
+                    "--ephemeral",
+                    "--color",
+                    "never",
+                    "-s",
+                    "read-only",
+                    "-o",
+                    str(output_path),
+                ]
+                if schema_path is not None:
+                    args.extend(["--output-schema", str(schema_path)])
+                args.append(command_prompt)
                 result = self.command_runner(
-                    (
-                        "codex",
-                        "exec",
-                        "--skip-git-repo-check",
-                        "--ephemeral",
-                        "--color",
-                        "never",
-                        "-s",
-                        "read-only",
-                        "-o",
-                        str(output_path),
-                        command_prompt,
-                    ),
+                    tuple(args),
                     cwd=self.cwd,
                     timeout=self.config.analyzer_timeout_seconds,
                 )

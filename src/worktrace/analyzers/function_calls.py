@@ -75,6 +75,7 @@ class FunctionCallSpec:
     description: str
     parameters: dict[str, object]
     typical_arguments: dict[str, object]
+    argument_structure_example: dict[str, object] | None = None
 
     def tool(self) -> dict[str, object]:
         return {
@@ -96,12 +97,26 @@ class FunctionCallSpec:
         if isinstance(payload, dict):
             payload.pop("required_output_schema", None)
             payload["typical_function_arguments"] = self.typical_arguments
+            if self.argument_structure_example is not None:
+                payload["function_argument_structure_example"] = (
+                    self.argument_structure_example
+                )
             return json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True)
-        return (
+        prepared = (
             prompt.rstrip()
             + "\n\n典型 Function 参数示例：\n"
             + json.dumps(self.typical_arguments, ensure_ascii=False, indent=2)
         )
+        if self.argument_structure_example is not None:
+            prepared += (
+                "\n\nFunction 参数结构示例：\n"
+                + json.dumps(
+                    self.argument_structure_example,
+                    ensure_ascii=False,
+                    indent=2,
+                )
+            )
+        return prepared
 
 
 @dataclass(frozen=True)
@@ -228,6 +243,34 @@ def collected_grouping_call_contract(
             ),
             **typical_arguments,
         }
+    argument_structure_example = None
+    if not typical_groups:
+        argument_structure_example = {
+            "note": (
+                "仅展示 merged_groups 单项的字段结构；占位值不属于输入，"
+                "也不表示任何实际事件应合并。"
+            ),
+            "merged_group": {
+                "group_id": "<group_id>",
+                "draft_ids": ["<input_draft_id_1>", "<input_draft_id_2>"],
+                "summary_title": "<summary_title>",
+                "summary_content": "<summary_content>",
+                "summary_object_hint": "<summary_object_hint>",
+                "semantic_reasons": ["<allowed_semantic_reason>"],
+                "reason_detail": "<reason_detail>",
+                "member_connections": [
+                    {
+                        "draft_id": "<input_draft_id_1>",
+                        "connection_detail": "<direct_connection_detail>",
+                    },
+                    {
+                        "draft_id": "<input_draft_id_2>",
+                        "connection_detail": "<direct_connection_detail>",
+                    },
+                ],
+                "risk_flags": [],
+            },
+        }
     spec = function_call_spec(
         request_kind,
         collected_grouping_function_schema(
@@ -236,6 +279,7 @@ def collected_grouping_call_contract(
             include_split_reason=include_split_reason,
         ),
         typical_arguments=typical_arguments,
+        argument_structure_example=argument_structure_example,
     )
     return CollectedGroupingCallContract(
         function_spec=spec,
@@ -249,6 +293,7 @@ def function_call_spec(
     parameters: dict[str, object],
     *,
     typical_arguments: dict[str, object] | None = None,
+    argument_structure_example: dict[str, object] | None = None,
     enum_values: Mapping[str, Sequence[str]] | None = None,
     exact_array_lengths: Mapping[str, int] | None = None,
 ) -> FunctionCallSpec:
@@ -271,6 +316,11 @@ def function_call_spec(
             copy.deepcopy(typical_arguments)
             if typical_arguments is not None
             else _example_from_schema(normalized_parameters)
+        ),
+        argument_structure_example=(
+            copy.deepcopy(argument_structure_example)
+            if argument_structure_example is not None
+            else None
         ),
     )
 

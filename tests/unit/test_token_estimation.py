@@ -10,8 +10,9 @@ from src.worktrace.utils.token_estimation import (
 
 
 def test_estimate_text_tokens_uses_shared_worktrace_formula() -> None:
-    assert estimate_text_tokens("") == 50
-    assert estimate_text_tokens("a" * 300) == 150
+    assert estimate_text_tokens("") == 200
+    assert estimate_text_tokens("a" * 300) == 325
+    assert estimate_text_tokens("中" * 300) == 500
 
 
 def test_estimate_structured_input_tokens_includes_function_and_codex_schema() -> None:

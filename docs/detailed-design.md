@@ -340,7 +340,7 @@ flowchart LR
 flowchart TD
     A["来源事件"] --> B["关键词过滤 + 保留门槛"]
     B --> C["相同 event_id 且内容相似的确定性组"]
-    C --> D["Python 计算 evidence_relations 和 conversation_groups"]
+    C --> D["Python 计算 evidence_relations 和 candidate_discovery_context"]
     D --> E["LLM 使用事件正文发现候选组"]
     E --> F{"候选、复核或内容 prompt 超阈值?"}
     F -->|"是"| G["关系优先分批并汇合组摘要"]
@@ -357,13 +357,13 @@ flowchart TD
     L --> M["最终过滤、写入、自发送"]
 ```
 
-多人合并候选发现默认发送来源 MD 中的完整事件正文。Python 根据共同消息、共同文件形成 `evidence_relations`，并在每个滚动批次或高风险复核请求的内存中，仅把数量大于零的关系编号为 `MSG-xxx`、`FILE-xxx`；不创建临时目录或独立文件。编号清单只进入模型上下文供判断。`conversation_groups` 仍只表示同日会话候选关系，不编号，也不进入证据参数。新模型输出只返回 `semantic_reasons`、`reason_detail`、逐条覆盖全部成员的 `member_connections` 和 `risk_flags`，不再返回 `evidence_relation_ids`，也不能直接声明 `shared_message`、`shared_file` 或内部 `group_reason`。Python 在分组后排除端点位于组外的关系，再按稳定目录顺序选择能够连接全部成员的最小关系集合，消息和文件可以共同组成连接链；成功后才恢复内部原因和兼容旧 trace 的 `evidence_relation_ids`。局部证据只写审计；没有完整证据且没有合法语义理由时返回 `merge_reason_missing`，有局部证据但覆盖不足时返回 `evidence_does_not_cover_group`。即使消息或文件集合完全相同也不能自动合并，模型仍须结合具体对象和前后动作判断。
+多人合并候选发现默认发送来源 MD 中的完整事件正文。Python 根据共同消息、共同文件形成 `evidence_relations`，并在每个滚动批次或高风险复核请求的内存中，仅把数量大于零的关系编号为 `MSG-xxx`、`FILE-xxx`；不创建临时目录或独立文件。编号清单只进入模型上下文供判断。同日会话候选放在 `candidate_discovery_context.same_conversation_candidate_sets` 中，使用 `candidate_set_id` 而不是输出分组的 `group_id`，并明确只用于发现候选、不得复制为合并组。多人提示词同时读取配置中的负面示例；没有确定性组时，另用不含真实 draft ID 的占位结构展示 `member_connections`。新模型输出只返回 `semantic_reasons`、`reason_detail`、逐条覆盖全部成员的 `member_connections` 和 `risk_flags`，不再返回 `evidence_relation_ids`，也不能直接声明 `shared_message`、`shared_file` 或内部 `group_reason`。Python 在分组后排除端点位于组外的关系，再按稳定目录顺序选择能够连接全部成员的最小关系集合，消息和文件可以共同组成连接链；成功后才恢复内部原因和兼容旧 trace 的 `evidence_relation_ids`。局部证据只写审计；没有完整证据且没有合法语义理由时返回 `merge_reason_missing`，有局部证据但覆盖不足时返回 `evidence_does_not_cover_group`。即使消息或文件集合完全相同也不能自动合并，模型仍须结合具体对象和前后动作判断。
 
 `config/collected_merge.json` 是多人合并中文判断规则的唯一来源。每个 `group_reason_definitions` 项配置 `acceptance_rules` 和 `rejection_rules`；Python 只读取规则供提示使用，并负责编号、证据连接、覆盖和标准化字段比较，不硬编码业务关键词。`member_connections` 必须与组内 `draft_ids` 完全一致，遗漏、重复、未知编号、空说明、重复组员和单成员合并组都作为结果质量错误，不静默修复。
 
 单条候选直接保留，不进入高风险复核。多条候选在来源事件达到 10 条、来源文件达到 4 个、跨批、Python 修复、同一会话连接了多个没有共同消息或共同文件的部分、无完整共同证据且标准化后的非空 `object_hint` 不一致，或模型标记 `broad_object` 时增加高风险复核，最多三路并行并保持原候选顺序。对象不一致只触发复核，不自动拆组；对象一致或已有完整证据时不增加这项复核。候选和复核使用独立 Function 示例，高风险复核示例采用保守拆分，不预填原组或 `same_object`。每个多事件子组必须有合法关系依据、自己的 `reason_detail` 和完整 `member_connections`，单条组不要求。复核拆组时只要求一条顶层 `split_reason` 解释整体差异；旧记录只要任一子组有非空理由也兼容接受，所有位置都无理由时拒绝拆分、保留原组并写告警。协议错误反馈包含错误组、重复编号、证据端点、缺失成员，并要求补入缺失成员或删除该合并。结果质量错误固定走 Online 首次请求、Online 局部重试 1 次、Codex 当前请求备用 1 次；最后仍失败时终止本次合并。调试模式只增加记录，不改变线路和次数。
 
-候选、复核和正式正文使用各自任务专用 Function，并调用同一生产估算函数：`prepared_prompt` 包含最终提示词、当前合法参数示例、证据编号、重试错误反馈和 `/no_think`；`online_estimate` 再加入完整 Function 定义与 `tool_choice`，`codex_estimate` 再加入完整 output-schema，最终取两者较大值。`model_input_batch_target_tokens=5200` 是模型输入估算目标，不是 HTTP 字节数或服务端上下文上限。每尝试加入一个候选都重新构建并估算；复核超过目标时按关系分批，单条正文仍过长时复用正文切片和分层摘要；不可继续拆分的最小输入允许发送。校验错误只重试当前请求，加入具体错误后重新估算，超限时标记 `oversized_retry` 后发送。正式内容必须返回完整 `covered_draft_ids` 和 `fact_items`；Python 检查整批 draft 分配、锁定组和事实来源，模型明确拒绝输入或结果仍不完整时当前 scope 失败且不写文件。若 scope 目录已有同名历史输出，失败不会删除或覆盖旧文件，是否成功必须以本次 CLI JSON 为准。
+候选、复核和正式正文使用各自任务专用 Function，并调用同一生产估算函数：`prepared_prompt` 包含最终提示词、当前合法参数示例、证据编号、重试错误反馈和 `/no_think`；`online_estimate` 再加入完整 Function 定义与 `tool_choice`，`codex_estimate` 再加入完整 output-schema，最终取两者较大值。估算器区分 ASCII 和非 ASCII 字符，并为混合中文 JSON、动态编号及协议固定开销留出余量。`model_input_batch_target_tokens=5200` 是模型输入估算目标，不是 HTTP 字节数或服务端上下文上限。每尝试加入一个候选都重新构建并估算；复核超过目标时按关系分批，单条正文仍过长时复用正文切片和分层摘要；不可继续拆分的最小输入允许发送。校验错误只重试当前请求，加入具体错误后重新估算，超限时标记 `oversized_retry` 后发送。正式内容必须返回完整 `covered_draft_ids` 和 `fact_items`；Python 检查整批 draft 分配、锁定组和事实来源，模型明确拒绝输入或结果仍不完整时当前 scope 失败且不写文件。若 scope 目录已有同名历史输出，失败不会删除或覆盖旧文件，是否成功必须以本次 CLI JSON 为准。调试 step 在 Python 校验失败时标记 `validation_failed`，`failed_step_indexes` 同时包含调用失败和校验失败；候选分组还保存解析前的 `raw_function_payload`，用于检查被解析器丢弃的非法结构。
 
 部门负责人和中心负责人复用同一个 `merge-collected` 命令，当前代码没有自动的层级编排。第一级由部门负责人收集本部门 v2 个人 MD 后运行；第二级由中心负责人收集各部门 `*-merged.md` 后再次运行。个人 MD 和部门 MD 可以同时作为输入，程序不比较两者的 `source_event_ids`，不拦截，也不提示重复来源。输出名始终取当前飞书登录人姓名。一级子目录是并列 scope，不会自动把子目录输出再送入根目录。上游汇总继续保留原始来源人员和事件 ID，并从 `*-merged.md` 文件名提取上一级负责人；中心公开输出显示 `来源负责人`，来源事件 ID 仅保存在隐藏信息中。
 

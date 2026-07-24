@@ -532,6 +532,35 @@ def test_collected_function_payload_requires_exact_member_connections() -> None:
     assert any(error.startswith("missing_member_connection") for error in errors)
 
 
+def test_collected_function_payload_preserves_invalid_raw_connections() -> None:
+    payload = {
+        "merged_groups": [
+            {
+                "group_id": "g1",
+                "draft_ids": ["d1", "d2"],
+                "summary_title": "同一事项",
+                "summary_content": "两条记录描述同一事项。",
+                "summary_object_hint": "同一事项",
+                "semantic_reasons": ["same_object"],
+                "reason_detail": "具体对象一致。",
+                "member_connections": ["d1", {"draft_id": "d2"}],
+                "risk_flags": [],
+            }
+        ],
+        "singleton_draft_ids": [],
+    }
+
+    result, errors = parse_collected_grouping_function_payload(
+        payload,
+        evidence_catalog=[],
+        allowed_semantic_reasons=["same_object"],
+    )
+
+    assert sum(error.startswith("invalid_member_connection") for error in errors) == 2
+    assert result.raw_function_payload == payload
+    assert result.raw_function_payload is not payload
+
+
 def test_python_derives_stable_mixed_evidence_spanning_set() -> None:
     audit = derive_group_evidence(
         ["d1", "d2", "d3"],

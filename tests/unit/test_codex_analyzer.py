@@ -315,6 +315,45 @@ def test_codex_analyzer_counts_output_schema_before_command(tmp_path: Path) -> N
     assert calls == []
 
 
+def test_codex_analyzer_passes_output_schema_in_default_mode(tmp_path: Path) -> None:
+    schema = {
+        "type": "object",
+        "properties": {"result": {"type": "string"}},
+        "required": ["result"],
+        "additionalProperties": False,
+    }
+    function_spec = FunctionCallSpec(
+        request_kind="preflight",
+        name="submit_worktrace_probe",
+        description="提交结果。",
+        parameters=schema,
+        typical_arguments={"result": "ok"},
+    )
+    captured: dict[str, object] = {}
+
+    def fake_runner(args, *, cwd=None, timeout=None, input_text=None):
+        output_path = Path(args[args.index("-o") + 1])
+        schema_path = Path(args[args.index("--output-schema") + 1])
+        captured["args"] = args
+        captured["schema"] = json.loads(schema_path.read_text(encoding="utf-8"))
+        captured["input_text"] = input_text
+        output_path.write_text('{"result":"ok"}', encoding="utf-8")
+        return subprocess.CompletedProcess(args=args, returncode=0, stdout="", stderr="")
+
+    analyzer = CodexAnalyzer(
+        config=RuntimeConfig(data_root=tmp_path / "data", analyzer_backend="codex"),
+        command_runner=fake_runner,
+        cwd=tmp_path,
+    )
+
+    assert analyzer.request_function("处理输入", function_spec=function_spec) == {
+        "result": "ok"
+    }
+    assert "--output-schema" in captured["args"]
+    assert captured["schema"] == schema
+    assert captured["input_text"] is None
+
+
 def test_codex_request_pacer_reserves_shared_interval(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

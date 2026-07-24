@@ -1826,6 +1826,11 @@ class CollectedGroupingResult:
     groups: list[CollectedGroupingGroup] = field(default_factory=list)
     split_reason: str = ""
     validation_errors: list[str] = field(default_factory=list)
+    raw_function_payload: dict[str, Any] | None = field(
+        default=None,
+        repr=False,
+        compare=False,
+    )
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "CollectedGroupingResult":

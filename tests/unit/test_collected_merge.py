@@ -1798,6 +1798,53 @@ def test_collected_merge_does_not_retry_retryable_error(tmp_path: Path) -> None:
     assert analyzer.call_count == 1
 
 
+def test_collected_grouping_validation_failure_marks_step_and_summary(
+    tmp_path: Path,
+) -> None:
+    class InvalidGroupingAnalyzer(TwoStageAnalyzer):
+        def group_collected_events(self, target_date, events, deterministic_groups):
+            raw_payload = {
+                "merged_groups": [],
+                "singleton_draft_ids": [events[0].draft_id],
+            }
+            return CollectedGroupingResult(
+                groups=[CollectedGroupingGroup("singleton-001", [events[0].draft_id])],
+                raw_function_payload=raw_payload,
+            )
+
+    inbox = tmp_path / "merge_inbox" / "2026" / "06" / "29"
+    for index, person in enumerate(("张三", "李四"), start=1):
+        _write_day_doc(
+            inbox / f"2026-06-29-{person}.md",
+            [_event(event_id=f"evt-{index}", title="事项", content=f"事实 {index}")],
+            tmp_path,
+        )
+    trace_root = tmp_path / "trace"
+
+    result = _build_runner(
+        tmp_path,
+        analyzer=InvalidGroupingAnalyzer(),
+        config=RuntimeConfig(
+            data_root=tmp_path / "data",
+            collected_merge_missing_field_retry_limit=0,
+            collected_merge_trace_enabled=True,
+            collected_merge_trace_root=trace_root,
+        ),
+    ).run("2026-06-29")
+
+    assert result.status == "failed"
+    summary = json.loads(
+        (trace_root / "2026-06-29" / "summary.json").read_text(encoding="utf-8")
+    )
+    assert summary["failed_step_indexes"] == [1]
+    assert summary["steps"][0]["status"] == "validation_failed"
+    assert summary["steps"][0]["python_validation"]["valid"] is False
+    assert summary["steps"][0]["raw_function_payload"] == {
+        "merged_groups": [],
+        "singleton_draft_ids": [summary["steps"][0]["input_events"][0]["draft_id"]],
+    }
+
+
 def test_collected_merge_mixes_enhanced_legacy_and_upstream_sources(
     tmp_path: Path,
 ) -> None:
@@ -1999,13 +2046,20 @@ def test_collected_grouping_prompt_uses_same_day_conversation_candidates() -> No
         "2026-06-29",
         events,
         [],
-        config=RuntimeConfig(prompt_message_char_limit=12),
+        config=RuntimeConfig(
+            prompt_message_char_limit=12,
+            personal_grouping_negative_examples=("同一会话不足以证明属于同一事项。",),
+        ),
     )
     payload = json.loads(prompt)
 
-    assert payload["conversation_groups"] == [
-        {"group_id": "conversation-001", "draft_ids": ["d1", "d2"]}
-    ]
+    assert payload["candidate_discovery_context"] == {
+        "same_conversation_candidate_sets": [
+            {"candidate_set_id": "context-001", "draft_ids": ["d1", "d2"]}
+        ]
+    }
+    assert "conversation_groups" not in payload
+    assert payload["negative_examples"]
     assert payload["evidence_relation_catalog"] == []
     assert conversation not in prompt
     assert message_a not in prompt
@@ -2117,7 +2171,7 @@ def test_grouping_summary_event_uses_model_summary_and_keeps_evidence() -> None:
 
 
 def test_balanced_candidate_content_fits_limit_across_sources(tmp_path: Path) -> None:
-    input_limit_tokens = 2000
+    input_limit_tokens = 4000
     config = RuntimeConfig(
         data_root=tmp_path / "data",
         model_input_batch_target_tokens=input_limit_tokens,
@@ -2156,7 +2210,7 @@ def test_balanced_candidate_content_fits_limit_across_sources(tmp_path: Path) ->
 
 
 def test_single_oversized_render_event_is_split_below_limit(tmp_path: Path) -> None:
-    input_limit_tokens = 1400
+    input_limit_tokens = 3000
     config = RuntimeConfig(
         data_root=tmp_path / "data",
         model_input_batch_target_tokens=input_limit_tokens,
@@ -2381,7 +2435,7 @@ def test_relation_priority_batches_preserve_same_conversation_candidates(
         analyzer=analyzer,
         config=RuntimeConfig(
             data_root=tmp_path / "data",
-            model_input_batch_target_tokens=2600,
+                model_input_batch_target_tokens=5200,
             collected_merge_trace_enabled=True,
             collected_merge_trace_root=trace_root,
         ),
@@ -2397,8 +2451,8 @@ def test_relation_priority_batches_preserve_same_conversation_candidates(
     summary = json.loads(
         (trace_root / "2026-06-29" / "summary.json").read_text(encoding="utf-8")
     )
-    assert max(step["input_estimated_tokens"] for step in summary["steps"]) <= 2600
-    assert {step["input_target_tokens"] for step in summary["steps"]} == {2600}
+    assert max(step["input_estimated_tokens"] for step in summary["steps"]) <= 5200
+    assert {step["input_target_tokens"] for step in summary["steps"]} == {5200}
     output = MarkdownEventStore(config=RuntimeConfig()).parse_day_document(
         Path(result.output_path or "").read_text(encoding="utf-8")
     )
