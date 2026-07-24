@@ -88,13 +88,16 @@ def _input_metrics(error: Exception) -> dict[str, int | bool | None]:
 
 @dataclass
 class FailoverAnalyzer(Analyzer):
-    """Use Codex only for the online request that failed safely to retry."""
+    """Retry safe Online failures before using Codex for the current request."""
 
     primary: Analyzer
     fallback: Analyzer
     usage_recorder: LLMUsageRecorder
+    online_request_retry_limit: int = 1
 
     def __post_init__(self) -> None:
+        if self.online_request_retry_limit < 0:
+            raise ValueError("online_request_retry_limit must be non-negative.")
         self._request_state = local()
 
     def last_request_used_fallback(self) -> bool:
@@ -102,40 +105,46 @@ class FailoverAnalyzer(Analyzer):
 
     def _call(self, method_name: str, *args: Any, **kwargs: Any) -> Any:
         self._request_state.used_fallback = False
-        started_at = perf_counter()
         function_spec = kwargs.get("function_spec")
         request_kind = (
             function_spec.request_kind
             if isinstance(function_spec, FunctionCallSpec)
             else _REQUEST_KINDS[method_name]
         )
-        try:
-            return getattr(self.primary, method_name)(*args, **kwargs)
-        except RetryableAnalyzerProtocolError as exc:
-            self._request_state.used_fallback = True
-            self.usage_recorder.record(
-                request_kind,
-                {},
-                duration_ms=(perf_counter() - started_at) * 1000,
-                backend="online",
-                status="failed",
-                fallback_from="online",
-                fallback_to="codex",
-                error_category=_safe_error_category(exc),
-                **_input_metrics(exc),
-            )
-            return getattr(self.fallback, method_name)(*args, **kwargs)
-        except AnalyzerProtocolError as exc:
-            self.usage_recorder.record(
-                request_kind,
-                {},
-                duration_ms=(perf_counter() - started_at) * 1000,
-                backend="online",
-                status="failed",
-                error_category=_safe_error_category(exc),
-                **_input_metrics(exc),
-            )
-            raise
+        for attempt_index in range(self.online_request_retry_limit + 1):
+            started_at = perf_counter()
+            try:
+                return getattr(self.primary, method_name)(*args, **kwargs)
+            except RetryableAnalyzerProtocolError as exc:
+                use_fallback = attempt_index == self.online_request_retry_limit
+                self.usage_recorder.record(
+                    request_kind,
+                    {},
+                    duration_ms=(perf_counter() - started_at) * 1000,
+                    backend="online",
+                    status="failed",
+                    fallback_from="online" if use_fallback else None,
+                    fallback_to="codex" if use_fallback else None,
+                    error_category=_safe_error_category(exc),
+                    **_input_metrics(exc),
+                )
+                if not use_fallback:
+                    continue
+                self._request_state.used_fallback = True
+                return getattr(self.fallback, method_name)(*args, **kwargs)
+            except AnalyzerProtocolError as exc:
+                self.usage_recorder.record(
+                    request_kind,
+                    {},
+                    duration_ms=(perf_counter() - started_at) * 1000,
+                    backend="online",
+                    status="failed",
+                    error_category=_safe_error_category(exc),
+                    **_input_metrics(exc),
+                )
+                raise
+
+        raise AssertionError("Online retry loop ended unexpectedly.")
 
     def fallback_current_request(
         self,

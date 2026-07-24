@@ -35,7 +35,7 @@ python3 -m src.worktrace.cli sync-reaction-catalog --source feishu
 
 个人日报把未完成任务的模型中间结果临时保存在 `data/cache/llm/YYYY/MM/YYYY-MM-DD/`：先完成全部窗口切分，再逐批提炼事件。默认重新生成会在 preflight 通过后先删除旧个人日报、当天中间结果和当天个人调试目录，再从头执行；明确使用 `--resume` 时保留这三类旧产物，并只复用输入未变化的中间结果。Markdown 写入成功后，模型中间结果目录自动删除。
 
-`config/llm_retry.json` 可分别设置窗口切分和事件提炼的额外重试次数、流式响应首次返回时间、Codex 调用间隔，以及切分、提炼、个人事实复核和多人高风险复核并发数。`WORKTRACE_LLM_STREAM` 是文字和图片请求共用的唯一流式开关，默认关闭；显式开启时，从请求开始到首个流事件的限制为 60 秒，首个流事件返回后不再使用该限制，后续读取使用 `.env` 的 `WORKTRACE_LLM_TIMEOUT_SECONDS`。
+`config/llm_retry.json` 可分别设置 Online 请求级额外重试次数、窗口切分和事件提炼的结果质量重试次数、流式响应首次返回时间、Codex 调用间隔，以及切分、提炼、个人事实复核和多人高风险复核并发数。`WORKTRACE_LLM_STREAM` 是文字和图片请求共用的唯一流式开关，默认关闭；显式开启时，从请求开始到首个流事件的限制为 60 秒，首个流事件返回后不再使用该限制，后续读取使用 `.env` 的 `WORKTRACE_LLM_TIMEOUT_SECONDS`。
 
 ## 当前范围
 
@@ -347,7 +347,7 @@ WORKTRACE_COLLECTED_MERGE_MISSING_FIELD_RETRY_LIMIT=1
 
 固定结构的 Online 调用使用各任务自己的 Function 参数结构，设置 `strict:true` 并用 `tool_choice` 强制调用一次预期 Function；非流式默认读取一次完整 Function 调用，显式开启流式时按调用 ID 拼接参数片段后再统一解析和校验。普通文字总结和图片理解不强制使用 Function Calling。preflight 发送真实 Function Calling 探针，不支持时直接报错，不回退到旧结构化输出方式。
 
-在线文字请求不增加等待。遇到网络、超时、429、5xx、流式 JSON 异常、空结果或无效 JSON 时，只把当前请求立即交给 Codex 重做；后续请求仍先走在线线路。模型结果通过传输但未通过 Python 结构、编号、证据或覆盖校验时，固定执行 Online 首次请求、Online 局部重试 1 次、Codex 当前请求备用 1 次；Codex 仍失败才终止本次合并。调试模式只增加 trace 和日志，不改变这条线路或次数。401、403、TLS 证书和请求参数错误不会切换。Codex 调用间隔由 `config/llm_retry.json` 的 `0-1` 秒范围控制，图片摘要继续只走在线图片能力。
+在线文字请求之间不增加等待。遇到网络、超时、429、5xx、流式 JSON 异常、空结果或无效 JSON 时，当前请求按 `online_request_retry_limit=1` 在首次失败后立即再试 Online 1 次；第二次仍失败才交给 Codex，后续请求仍先走在线线路。模型结果通过传输但未通过 Python 结构、编号、证据或覆盖校验时，固定执行 Online 首次请求、Online 局部重试 1 次、Codex 当前请求备用 1 次；Codex 仍失败才终止本次合并。调试模式只增加 trace 和日志，不改变这两类线路或次数。401、403、TLS 证书和请求参数错误不会重试，也不会切换。Codex 调用间隔由 `config/llm_retry.json` 的 `0-1` 秒范围控制，图片摘要继续只走在线图片能力。
 
 个人调试的 `llm_usage.json` 和多人 trace 的每个 step 都保存线路、成功或失败、切换方向、耗时及安全错误类别等调用记录；多人 `summary.json` 另汇总在线/Codex 耗时、切换次数和 Codex 等待。
 
@@ -359,7 +359,7 @@ WORKTRACE_COLLECTED_MERGE_MISSING_FIELD_RETRY_LIMIT=1
 | `config/event_metadata.json` | 本人参与方式的英文键、中文显示名和排序 |
 | `config/conversation_blacklist.json` | 在消息采集前排除整个会话 |
 | `config/conversation_window.json` | 群聊锚点聚合、初始上下文和按需扩窗轮数 |
-| `config/llm_retry.json` | 分段/提炼重试、流式首次返回超时、Codex 调用间隔，以及切分、提炼、个人事实复核和多人高风险复核并发数 |
+| `config/llm_retry.json` | Online 请求级重试、分段/提炼结果质量重试、流式首次返回超时、Codex 调用间隔，以及切分、提炼、个人事实复核和多人高风险复核并发数 |
 | `config/retention_policy.json` | 个人事件保留提示、既有业务词、临时协作复核、事实复核条件和模型信号定义 |
 | `config/collected_merge.json` | 多人汇总高风险复核开关、事件数/文件数阈值、复核条件，以及各合并理由的描述、成立条件和排除条件；具体中文语义判断不写入 Python |
 | `config/attachment_text.json` | 文本附件扩窗的开关、扩展名、数量和大小限制 |
@@ -380,7 +380,7 @@ WORKTRACE_COLLECTED_MERGE_MISSING_FIELD_RETRY_LIMIT=1
 
 敏感词和排除词都采用归一化后的包含匹配，并在候选、合并草稿和最终事件阶段重复执行；三层都会检查标题、正文、主要动作、具体对象、保留依据和工作流，最终事件还会检查文件标题和 URL。指派词只作为“同一语句明确点名本人”的兜底，本人发言、reply/quote 和 reaction 证据不依赖该列表。
 
-仓库当前配置会让话题切分最多并发 3 个请求、事件提炼最多并发 5 个请求、个人事实复核最多并发 3 个请求；同一会话的话题切分仍按窗口顺序执行，同一事实复核候选的重试仍按顺序执行。`config/llm_retry.json` 中的重试次数表示首次调用之外允许的额外重试次数。
+仓库当前配置会让话题切分最多并发 3 个请求、事件提炼最多并发 5 个请求、个人事实复核最多并发 3 个请求；同一会话的话题切分仍按窗口顺序执行，同一事实复核候选的重试仍按顺序执行。`online_request_retry_limit=1` 表示可重试的 Online 请求失败后额外再试 1 次；其他重试配置也都表示首次调用之外允许的额外重试次数。
 
 ## 运行前检查
 
@@ -435,7 +435,7 @@ python3 -m src.worktrace.cli --date 2026-07-06 --debug-output
 
 `python3 scripts/replay_collected_review_failures.py` 默认离线回放失败清单中的 M07-M11，也可通过 `--trace-root <trace目录> --steps 13,14,17,18,34,39,46` 直接复盘候选分组和高风险复核 step。旧 trace 使用 `legacy_audit` 展示原错误和新证据算法的处理方式，不补造 `member_connections`；`--result-dir` 中的新实验结果使用 `current` 完整执行协议 v2 校验。`--output-dir` 只写 prompt、Function 定义、`summary.json` 和 `summary.md`，其中按阶段统计重复编号、单成员合并、理由缺失、证据越界、覆盖不足、逐事件说明错误和新增复核触发次数。脚本不调用模型，也不生成正式 Markdown。
 
-429、HTTP 5xx、连接失败、超时、流式 JSON 异常及空或无效 JSON 返回会立即由 Codex 重做当前文字请求，后续请求仍优先在线；不会重复在线请求。临时协作复核或个人事实复核的结果缺失、重复、覆盖不完整或证据非法属于结果质量校验，仍只重试当前复核批次。401、403、TLS 证书和请求参数错误不会切换。过滤诊断只记录阶段、类别、来源文件、来源人员、事件 ID 和标题，不记录命中关键词或完整敏感正文。
+429、HTTP 5xx、连接失败、超时、流式 JSON 异常及空或无效 JSON 返回会让当前文字请求立即再试 Online 1 次，仍失败才由 Codex 重做；后续请求仍优先在线。临时协作复核或个人事实复核的结果缺失、重复、覆盖不完整或证据非法属于结果质量校验，仍只重试当前复核批次。401、403、TLS 证书和请求参数错误不会重试，也不会切换。过滤诊断只记录阶段、类别、来源文件、来源人员、事件 ID 和标题，不记录命中关键词或完整敏感正文。
 
 调试文件可能包含裁剪后的聊天、附件正文、图片摘要和模型输出，只应临时启用，不应提交或长期保留。
 

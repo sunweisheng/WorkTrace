@@ -84,6 +84,7 @@ class AnalyzerFactory:
                     usage_recorder=recorder,
                 ),
                 usage_recorder=recorder,
+                online_request_retry_limit=config.online_request_retry_limit,
             )
 
         from .analyzers.codex import CodexAnalyzer

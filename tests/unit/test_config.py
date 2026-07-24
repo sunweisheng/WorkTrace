@@ -219,6 +219,7 @@ def test_load_runtime_config_overrides_reads_llm_retry_settings(tmp_path: Path) 
     (config_dir / "llm_retry.json").write_text(
         json.dumps(
             {
+                "online_request_retry_limit": 2,
                 "segmentation_retry_limit": 5,
                 "event_extraction_retry_limit": 6,
                 "stream_first_response_timeout_seconds": 61,
@@ -235,6 +236,7 @@ def test_load_runtime_config_overrides_reads_llm_retry_settings(tmp_path: Path) 
 
     config = load_runtime_config_overrides(RuntimeConfig(), cwd=tmp_path)
 
+    assert config.online_request_retry_limit == 2
     assert config.anchor_retry_limit == 5
     assert config.analysis_batch_retry_limit == 6
     assert config.stream_first_response_timeout_seconds == 61
@@ -554,6 +556,7 @@ def test_load_runtime_config_overrides_rejects_invalid_codex_interval(tmp_path: 
     (config_dir / "llm_retry.json").write_text(
         json.dumps(
             {
+                "online_request_retry_limit": 1,
                 "segmentation_retry_limit": 3,
                 "event_extraction_retry_limit": 3,
                 "stream_first_response_timeout_seconds": 60,
@@ -569,4 +572,31 @@ def test_load_runtime_config_overrides_rejects_invalid_codex_interval(tmp_path: 
     )
 
     with pytest.raises(ValueError, match="codex_request_interval_min_seconds"):
+        load_runtime_config_overrides(RuntimeConfig(), cwd=tmp_path)
+
+
+def test_load_runtime_config_overrides_rejects_invalid_online_retry_limit(
+    tmp_path: Path,
+) -> None:
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    (config_dir / "llm_retry.json").write_text(
+        json.dumps(
+            {
+                "online_request_retry_limit": -1,
+                "segmentation_retry_limit": 3,
+                "event_extraction_retry_limit": 3,
+                "stream_first_response_timeout_seconds": 60,
+                "max_concurrent_llm_requests": 3,
+                "max_concurrent_event_extraction_requests": 5,
+                "max_concurrent_personal_fact_review_requests": 3,
+                "codex_request_interval_min_seconds": 0,
+                "codex_request_interval_max_seconds": 1,
+                "max_concurrent_collected_merge_review_requests": 3,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="online_request_retry_limit"):
         load_runtime_config_overrides(RuntimeConfig(), cwd=tmp_path)

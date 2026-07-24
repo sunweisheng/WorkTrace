@@ -82,7 +82,7 @@ flowchart LR
 | `analyzers/base.py` | 分段、片段批处理、临时协作复核、个人事实复核、旧批处理、分段失败后直接提炼、日级合并和多人合并接口 |
 | `analyzers/online.py` | OpenAI Python SDK + Responses API 在线文字实现；固定结构使用任务专用 Function Calling，每次请求独立创建和关闭客户端 |
 | `analyzers/codex.py` | Codex CLI 文字实现，使用线程安全的 0-1 秒调用间隔 |
-| `analyzers/failover.py` | 在线文字请求首次发生可切换错误时，仅把当前请求改由 Codex 执行 |
+| `analyzers/failover.py` | 在线文字请求首次发生可切换错误时，只对当前请求再试 Online 1 次，仍失败才改由 Codex 执行 |
 | `analyzers/prompts.py` | 所有语义任务 prompt |
 | `analyzers/function_calls.py` | `FunctionCallSpec`、任务专用 Function、动态 ID 枚举、典型参数示例和多人证据编号合同 |
 | `analyzers/output_schemas.py` | Function 参数与 Codex output-schema 共用结构；事实复核按当前候选动态限制 `draft_id` 和合法证据 ID |
@@ -110,7 +110,7 @@ flowchart LR
 6. Python 在模型分组后排除组外证据端点，并按稳定目录顺序计算连接全组的最小消息/文件证据集合；大 prompt 按关系集合优先分批，跨批只协调共享消息指纹或文件的候选
 7. 单条组直接保留；多条组达到配置阈值、跨批、分组修复、工作流冲突、无完整证据且对象不一致或标记 `broad_object` 时，最多三路高风险复核。复核使用独立的保守拆分 Function 示例
 8. 正式内容按锁定候选组分批生成，并返回完整 `covered_draft_ids` 和带来源的 `fact_items`
-9. 可切换在线错误立即由 Codex 重做当前请求，不重复在线调用；结果质量错误按 Online 首次请求、Online 局部重试 1 次、Codex 当前请求备用 1 次执行，最后仍失败则终止本次合并且不写文件
+9. 可切换在线错误让当前请求额外再试 Online 1 次，仍失败才由 Codex 重做；结果质量错误按 Online 首次请求、Online 局部重试 1 次、Codex 当前请求备用 1 次执行，最后仍失败则终止本次合并且不写文件
 10. 聚合工作流、动作、协作方式、消息指纹、会话指纹、文件标识、来源人员、事件 ID 和上一级负责人
 11. Python 计算 scope 和整次运行的 `quality_summary`，团队 `WorkEvent` 最终过滤、写入和自发送
 
@@ -126,7 +126,7 @@ flowchart LR
 | `config/event_metadata.json` | 本人参与方式英文键、中文显示名和排序 |
 | `config/conversation_blacklist.json` | 整会话排除 |
 | `config/conversation_window.json` | 群聊锚点聚合、初始上下文和按需扩窗阈值 |
-| `config/llm_retry.json` | 分段/提炼重试、流式首次返回超时、Codex 间隔，以及切分、提炼、个人事实复核和多人高风险复核并发数 |
+| `config/llm_retry.json` | Online 请求级重试、分段/提炼结果质量重试、流式首次返回超时、Codex 间隔，以及切分、提炼、个人事实复核和多人高风险复核并发数 |
 | `config/retention_policy.json` | 个人事件保留提示、结构化业务词、临时协作复核、事实复核条件和模型信号定义 |
 | `config/collected_merge.json` | 多人汇总高风险复核开关、事件数/文件数阈值、对象冲突与宽泛对象复核条件，以及合并原因的描述、`acceptance_rules` 和 `rejection_rules` |
 | `config/attachment_text.json` | 文本附件提取限制 |

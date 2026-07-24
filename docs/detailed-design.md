@@ -412,6 +412,7 @@ OnlineLLMAnalyzer -> openai Python SDK -> Responses API provider
 
 - `timezone = "Asia/Shanghai"`
 - `analyzer_backend = "online"`
+- `online_request_retry_limit = 1`
 - `anchor_retry_limit = 3`
 - `anchor_batch_retry_limit = 1`
 - `conversation_segmentation_failure_threshold = 2`
@@ -437,7 +438,7 @@ OnlineLLMAnalyzer -> openai Python SDK -> Responses API provider
 
 ### 9.2 `.env` 与环境变量
 
-模型连接必填项只有 `WORKTRACE_LLM_BASE_URL`、`WORKTRACE_LLM_MODEL`、`WORKTRACE_LLM_API_KEY` 三项。`WORKTRACE_LLM_REASONING_EFFORT` 未配置时使用 `RuntimeConfig.llm_reasoning_effort = "none"`；显式配置为其他值会被 preflight 拒绝。timeout/stream/TLS 位于 `.env` 或进程环境变量，环境变量优先；下一次请求重新读取后生效。在线文字请求不等待；可切换失败仅让当前请求改由 Codex 执行，下一请求继续在线优先。Codex 间隔在 `config/llm_retry.json` 统一控制。`WORKTRACE_LLM_TLS_VERIFY` 只进入 preflight 和文本 analyzer 的 HTTP client；图片摘要使用独立 SDK client 及其默认的证书校验行为。
+模型连接必填项只有 `WORKTRACE_LLM_BASE_URL`、`WORKTRACE_LLM_MODEL`、`WORKTRACE_LLM_API_KEY` 三项。`WORKTRACE_LLM_REASONING_EFFORT` 未配置时使用 `RuntimeConfig.llm_reasoning_effort = "none"`；显式配置为其他值会被 preflight 拒绝。timeout/stream/TLS 位于 `.env` 或进程环境变量，环境变量优先；下一次请求重新读取后生效。在线文字请求不等待；可切换失败按 `online_request_retry_limit=1` 只让当前请求再试 Online 1 次，仍失败才改由 Codex 执行，下一请求继续在线优先。请求级重试次数和 Codex 间隔都在 `config/llm_retry.json` 统一控制。`WORKTRACE_LLM_TLS_VERIFY` 只进入 preflight 和文本 analyzer 的 HTTP client；图片摘要使用独立 SDK client 及其默认的证书校验行为。
 
 多人汇总 trace 和字段缺失重试也支持环境覆盖：
 
@@ -452,7 +453,7 @@ OnlineLLMAnalyzer -> openai Python SDK -> Responses API provider
 - `config/event_metadata.json`：参与方式英文键、中文显示名和排序
 - `config/conversation_blacklist.json`：整会话排除
 - `config/conversation_window.json`：初始窗口聚合和按需扩窗阈值
-- `config/llm_retry.json`：分段/提炼重试、流式首次返回超时、Codex 间隔，以及切分、提炼、个人事实复核和多人高风险复核并发数
+- `config/llm_retry.json`：Online 请求级重试、分段/提炼结果质量重试、流式首次返回超时、Codex 间隔，以及切分、提炼、个人事实复核和多人高风险复核并发数
 - `config/retention_policy.json`：个人保留提示、既有业务词、临时协作复核、个人事实复核条件和模型信号定义
 - `config/collected_merge.json`：多人汇总高风险复核开关、阈值、条件，以及合并理由的描述、成立条件和排除条件
 - `config/attachment_text.json`：文本附件限制

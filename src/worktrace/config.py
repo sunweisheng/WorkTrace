@@ -847,6 +847,7 @@ def _load_llm_retry_overrides(
     if not isinstance(payload, dict):
         raise ValueError(f"Invalid LLM retry config: {retry_path} must contain a JSON object.")
     keys = {
+        "online_request_retry_limit",
         "segmentation_retry_limit",
         "event_extraction_retry_limit",
         "stream_first_response_timeout_seconds",
@@ -908,6 +909,7 @@ def _load_llm_retry_overrides(
         )
     return replace(
         config,
+        online_request_retry_limit=values["online_request_retry_limit"],
         anchor_retry_limit=values["segmentation_retry_limit"],
         analysis_batch_retry_limit=values["event_extraction_retry_limit"],
         stream_first_response_timeout_seconds=values["stream_first_response_timeout_seconds"],
@@ -1112,6 +1114,7 @@ def _read_string_list(
 class RuntimeConfig:
     timezone: str = "Asia/Shanghai"
     analyzer_backend: str = "online"
+    online_request_retry_limit: int = 1
     anchor_retry_limit: int = 3
     analysis_batch_retry_limit: int = 3
     stream_first_response_timeout_seconds: int = 60

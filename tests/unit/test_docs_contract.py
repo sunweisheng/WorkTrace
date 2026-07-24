@@ -326,6 +326,7 @@ def test_docs_match_failover_and_collected_merge_optimizations() -> None:
     content = "\n".join(path.read_text(encoding="utf-8") for path in documents)
 
     assert "codex_request_interval_min_seconds" in content
+    assert "online_request_retry_limit" in content
     assert "当前请求" in content
     assert "单条候选直接保留" in content
     assert "共同消息指纹或共同文件" in content

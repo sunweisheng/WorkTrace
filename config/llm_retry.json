@@ -1,4 +1,5 @@
 {
+  "online_request_retry_limit": 1,
   "segmentation_retry_limit": 3,
   "event_extraction_retry_limit": 3,
   "stream_first_response_timeout_seconds": 60,
