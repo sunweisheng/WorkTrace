@@ -24,6 +24,15 @@ from .base import ContentResolver
 
 logger = logging.getLogger("worktrace")
 
+_WARNING_DETAIL_MAX_CHARS = 500
+
+
+def _warning_detail(exc: Exception) -> str:
+    detail = " ".join(clean_text(str(exc)).split()) or type(exc).__name__
+    if len(detail) <= _WARNING_DETAIL_MAX_CHARS:
+        return detail
+    return detail[: _WARNING_DETAIL_MAX_CHARS - 3].rstrip() + "..."
+
 
 @dataclass
 class FeishuMessageContentResolver(ContentResolver):
@@ -38,6 +47,7 @@ class FeishuMessageContentResolver(ContentResolver):
     _image_summary_cache: dict[tuple[str, str], AttachmentTextBlock] = field(
         default_factory=dict
     )
+    _warning_messages: list[str] = field(default_factory=list)
     _image_summary_lock: Lock = field(default_factory=Lock)
 
     def __post_init__(self) -> None:
@@ -222,6 +232,12 @@ class FeishuMessageContentResolver(ContentResolver):
                 blocks.append(image_summary)
         return blocks or None
 
+    def drain_warning_messages(self) -> list[str]:
+        with self._image_summary_lock:
+            warnings = list(self._warning_messages)
+            self._warning_messages.clear()
+        return warnings
+
     def _load_image_summary_if_needed(
         self,
         message: NormalizedMessage,
@@ -243,7 +259,13 @@ class FeishuMessageContentResolver(ContentResolver):
                     required=required,
                 )
             except Exception as exc:
-                logger.warning("Skipped image summary for message %s: %s", message.message_id, exc)
+                detail = _warning_detail(exc)
+                warning = (
+                    f"Skipped image summary for message {message.message_id}: "
+                    f"{detail}"
+                )
+                self._warning_messages.append(warning)
+                logger.warning("%s", warning)
                 return None
             if not summary:
                 return None

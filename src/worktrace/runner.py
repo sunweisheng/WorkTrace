@@ -113,6 +113,7 @@ from .pipeline.retention_review import (
     apply_retention_review_results,
     build_retention_review_candidates,
     pack_retention_review_batches,
+    prepare_retention_review_retry_batch,
     select_retention_review_candidates,
     validate_retention_review_result,
 )
@@ -345,6 +346,10 @@ class DailyTraceRunner:
                 run_started_at,
                 self._failed_result(target_date, str(exc)),
             )
+
+        warning_messages.extend(
+            _drain_content_resolver_warnings(self.dependencies.content_resolver)
+        )
 
         merged_drafts: list[MergedEventDraft] = []
         if all_candidates:
@@ -687,18 +692,27 @@ class DailyTraceRunner:
             last_error = ""
             for attempt in range(self.config.analysis_batch_retry_limit + 1):
                 result = None
+                attempt_batch = (
+                    batch
+                    if not last_error
+                    else prepare_retention_review_retry_batch(
+                        batch,
+                        retry_feedback=last_error,
+                        config=self.config,
+                    )
+                )
                 try:
                     call_count += 1
-                    result = review_method(batch)
+                    result = review_method(attempt_batch)
                     validated = validate_retention_review_result(
-                        batch,
+                        attempt_batch,
                         result,
                         policy,
                     )
                     reviewed.update(validated)
                     debug_batches.append(
                         _retention_review_debug_entry(
-                            batch,
+                            attempt_batch,
                             attempt=attempt,
                             status="success",
                             result=result,
@@ -718,7 +732,7 @@ class DailyTraceRunner:
                     last_error = "Retention review is not implemented by the analyzer."
                     debug_batches.append(
                         _retention_review_debug_entry(
-                            batch,
+                            attempt_batch,
                             attempt=attempt,
                             status="failed",
                             result=result,
@@ -744,7 +758,7 @@ class DailyTraceRunner:
                     last_error = str(exc)
                     debug_batches.append(
                         _retention_review_debug_entry(
-                            batch,
+                            attempt_batch,
                             attempt=attempt,
                             status="failed",
                             result=result,
@@ -3567,6 +3581,15 @@ def _retention_review_debug_entry(
         "estimated_input_tokens": batch.estimated_input_tokens,
         "input_target_tokens": batch.input_target_tokens,
         "oversized_singleton": batch.oversized_singleton,
+        "oversized_retry": batch.oversized_retry,
+        "input_overage_reason": (
+            "oversized_retry"
+            if batch.oversized_retry
+            else "minimum_required_input"
+            if batch.oversized_singleton
+            else ""
+        ),
+        "retry_feedback": batch.retry_feedback,
         "attempt": attempt,
         "status": status,
         "candidates": [
@@ -3584,6 +3607,13 @@ def _retention_review_debug_entry(
         "coverage": _retention_review_coverage(result),
         "error_summary": error_summary,
     }
+
+
+def _drain_content_resolver_warnings(content_resolver: object) -> list[str]:
+    drain = getattr(content_resolver, "drain_warning_messages", None)
+    if not callable(drain):
+        return []
+    return [str(item) for item in drain() if str(item).strip()]
 
 
 def _personal_fact_review_debug_entry(

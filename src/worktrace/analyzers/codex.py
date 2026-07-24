@@ -289,7 +289,9 @@ class CodexAnalyzer(Analyzer):
                 result_count=len(batch.candidates),
                 **references,
             ),
-            **oversized_input_kwargs(batch.oversized_singleton),
+            **oversized_input_kwargs(
+                batch.oversized_singleton or batch.oversized_retry
+            ),
         )
         return parse_retention_review_payload(payload)
 

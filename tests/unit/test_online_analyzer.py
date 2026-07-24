@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 import json
 from pathlib import Path
 from threading import Event
@@ -171,6 +172,7 @@ def test_online_analyzer_uses_retention_review_protocol(
         captured.update(
             prompt=prompt,
             function_spec=function_spec,
+            allow_oversized_input=allow_oversized_input,
         )
         return {
             "results": [
@@ -189,11 +191,19 @@ def test_online_analyzer_uses_retention_review_protocol(
 
     monkeypatch.setattr(analyzer, "_invoke_online", fake_invoke)
 
-    result = analyzer.review_retention_candidates(sample_retention_review_batch())
+    result = analyzer.review_retention_candidates(
+        replace(
+            sample_retention_review_batch(),
+            retry_feedback="证据消息不属于当前候选。",
+            oversized_retry=True,
+        )
+    )
 
     assert result.results[0].draft_id == "draft-1"
     assert captured["function_spec"].request_kind == "retention_review"
     assert "不要决定保留或删除" in str(captured["prompt"])
+    assert "证据消息不属于当前候选。" in str(captured["prompt"])
+    assert captured["allow_oversized_input"] is True
     assert captured["function_spec"].parameters != retention_review_output_schema(config)
     assert captured["function_spec"].parameters["properties"]["results"]["minItems"] == 1
 

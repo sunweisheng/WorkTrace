@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
 from ..analyzers.output_schemas import retention_review_output_schema
 from ..analyzers.function_calls import message_reference_ids, task_function_call_spec
 from ..analyzers.prompts import build_retention_review_prompt
@@ -181,6 +183,24 @@ def validate_retention_review_result(
                     )
         validated[item.draft_id] = item
     return validated
+
+
+def prepare_retention_review_retry_batch(
+    batch: RetentionReviewBatch,
+    *,
+    retry_feedback: str,
+    config: RuntimeConfig,
+) -> RetentionReviewBatch:
+    probe = replace(batch, retry_feedback=retry_feedback)
+    estimated_tokens = _estimate_review_prompt_tokens(probe, config)
+    return replace(
+        probe,
+        estimated_input_tokens=estimated_tokens,
+        input_target_tokens=config.model_input_batch_target_tokens,
+        oversized_retry=(
+            estimated_tokens > config.model_input_batch_target_tokens
+        ),
+    )
 
 
 def apply_retention_review_results(

@@ -22,6 +22,7 @@ from src.worktrace.pipeline.retention_review import (
     apply_retention_review_results,
     build_retention_review_candidates,
     pack_retention_review_batches,
+    prepare_retention_review_retry_batch,
     select_retention_review_candidates,
     validate_retention_review_result,
 )
@@ -319,3 +320,30 @@ def test_single_oversized_review_candidate_is_marked_for_model_invocation() -> N
     assert len(batches) == 1
     assert batches[0].oversized_singleton is True
     assert batches[0].estimated_input_tokens > batches[0].input_target_tokens
+
+
+def test_review_retry_feedback_is_reestimated_and_marks_oversized_retry() -> None:
+    batch = pack_retention_review_batches(
+        target_date="2026-07-15",
+        candidates=[_review_batch().candidates[0]],
+        config=CONFIG,
+    )[0]
+    retry_feedback = "具体校验错误：证据消息不属于当前候选。" * 200
+    retry_config = replace(
+        CONFIG,
+        model_input_batch_target_tokens=batch.estimated_input_tokens + 10,
+    )
+
+    retry_batch = prepare_retention_review_retry_batch(
+        batch,
+        retry_feedback=retry_feedback,
+        config=retry_config,
+    )
+
+    assert retry_batch.retry_feedback == retry_feedback
+    assert retry_feedback in build_retention_review_prompt(
+        retry_batch,
+        config=retry_config,
+    )
+    assert retry_batch.estimated_input_tokens > retry_batch.input_target_tokens
+    assert retry_batch.oversized_retry is True

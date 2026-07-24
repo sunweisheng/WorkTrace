@@ -297,3 +297,48 @@ def test_runner_fails_without_writing_after_review_protocol_retries(
     assert result.output_path is None
     assert analyzer.review_calls == 2
     assert not (tmp_path / "data" / "2026" / "07").exists()
+
+
+def test_runner_sends_concrete_validation_error_on_retention_review_retry(
+    tmp_path: Path,
+) -> None:
+    class RetryingReviewAnalyzer(ReviewAnalyzer):
+        def __init__(self) -> None:
+            super().__init__(RetentionReviewResult())
+            self.review_batches = []
+
+        def review_retention_candidates(self, batch):
+            self.review_calls += 1
+            self.review_batches.append(batch)
+            evidence_message_ids = ["unknown"] if self.review_calls == 1 else ["m1"]
+            return RetentionReviewResult(
+                results=[
+                    RetentionReviewItemResult(
+                        draft_id="d1",
+                        routine_signals=[
+                            RetentionSignalEvidence(
+                                "presence_or_availability",
+                                evidence_message_ids,
+                            )
+                        ],
+                    )
+                ]
+            )
+
+    analyzer = RetryingReviewAnalyzer()
+
+    result = _runner(tmp_path, analyzer, retry_limit=1).run("2026-07-15")
+
+    expected_error = (
+        "Retention review returned an invalid signal or evidence reference."
+    )
+    assert result.status == DailyRunStatus.SUCCESS.value
+    assert analyzer.review_calls == 2
+    assert analyzer.review_batches[0].retry_feedback == ""
+    assert analyzer.review_batches[1].retry_feedback == expected_error
+    debug_payload = json.loads(
+        (tmp_path / "debug" / "2026-07-15" / "retention_review.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert debug_payload["batches"][1]["retry_feedback"] == expected_error

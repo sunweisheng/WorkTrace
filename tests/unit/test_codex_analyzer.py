@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 import json
 import subprocess
 from pathlib import Path
@@ -137,10 +138,18 @@ def test_codex_analyzer_uses_retention_review_protocol(
 
     monkeypatch.setattr(analyzer, "_invoke_codex", fake_invoke)
 
-    result = analyzer.review_retention_candidates(sample_retention_review_batch())
+    result = analyzer.review_retention_candidates(
+        replace(
+            sample_retention_review_batch(),
+            retry_feedback="证据消息不属于当前候选。",
+            oversized_retry=True,
+        )
+    )
 
     assert result.results[0].draft_id == "draft-1"
     assert "不要决定保留或删除" in str(captured["prompt"])
+    assert "证据消息不属于当前候选。" in str(captured["prompt"])
+    assert captured["allow_oversized_input"] is True
     assert captured["request_kind"] == "retention_review"
     function_spec = captured["function_spec"]
     assert isinstance(function_spec, FunctionCallSpec)

@@ -395,6 +395,7 @@ def build_retention_review_prompt(
             "routine_signals": routine_signal_types,
             "substantive_signals": substantive_signal_types,
         },
+        "retry_feedback": batch.retry_feedback,
         "input": {
             "target_date": batch.target_date,
             "batch_id": batch.batch_id,

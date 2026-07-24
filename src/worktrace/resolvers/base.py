@@ -40,6 +40,9 @@ class ContentResolver(ABC):
             "Required image context",
         )
 
+    def drain_warning_messages(self) -> list[str]:
+        return []
+
     @abstractmethod
     def load_link_text_if_needed(
         self,

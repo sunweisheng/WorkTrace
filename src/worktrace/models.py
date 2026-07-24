@@ -905,9 +905,11 @@ class RetentionReviewBatch:
     target_date: str
     batch_id: str
     candidates: list[RetentionReviewCandidate] = field(default_factory=list)
+    retry_feedback: str = ""
     estimated_input_tokens: int = 0
     input_target_tokens: int = 0
     oversized_singleton: bool = False
+    oversized_retry: bool = False
 
 
 @dataclass(frozen=True)

@@ -138,6 +138,56 @@ def test_message_resolver_summarizes_image_only_when_requested(tmp_path: Path) -
     assert summarizer.calls == 1
 
 
+def test_message_resolver_queues_bounded_image_failure_warning(tmp_path: Path) -> None:
+    class FailingImageSummarizer:
+        def summarize(self, image_path: Path, *, required: bool = False) -> str:
+            raise RuntimeError("413 response\n" + "x" * 800)
+
+    image_path = tmp_path / "image.png"
+    image_path.write_bytes(b"image-bytes")
+    resolver = FeishuMessageContentResolver(
+        config=RuntimeConfig(data_root=tmp_path / "data"),
+        image_summarizer=FailingImageSummarizer(),
+        image_downloader=lambda *_: image_path,
+    )
+    message = NormalizedMessage(
+        conversation_id="oc_1",
+        conversation_name="项目群",
+        message_id="om_image_failure",
+        sender_open_id="ou_1",
+        sender_name="Alice",
+        send_time="2026-06-22T10:00:00+08:00",
+        message_type="image",
+        text="[Image: img_1]",
+        reply_to_message_id=None,
+        quote_message_id=None,
+        attachments=[
+            AttachmentMeta(
+                attachment_id="img_1",
+                file_name="image.png",
+                mime_type="image/png",
+                file_size=11,
+            )
+        ],
+    )
+
+    summaries = resolver.load_attachment_text_if_needed(
+        message,
+        ["img_1"],
+        "需要核对图片",
+    )
+    warnings = resolver.drain_warning_messages()
+
+    assert summaries is None
+    assert len(warnings) == 1
+    assert warnings[0].startswith(
+        "Skipped image summary for message om_image_failure: 413 response "
+    )
+    assert warnings[0].endswith("...")
+    assert "\n" not in warnings[0]
+    assert resolver.drain_warning_messages() == []
+
+
 def test_message_resolver_fetches_doc_title_for_bare_feishu_url(tmp_path: Path) -> None:
     call_count = 0
 

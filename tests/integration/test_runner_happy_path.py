@@ -147,6 +147,39 @@ def test_runner_happy_path(tmp_path: Path) -> None:
     assert not (tmp_path / "data" / "debug" / "conversations").exists()
 
 
+def test_runner_includes_image_failure_in_final_warnings(tmp_path: Path) -> None:
+    class ImageWarningResolver(FakeResolver):
+        def __init__(self) -> None:
+            self.warning_messages = [
+                "Skipped image summary for message om_image: 413 response"
+            ]
+
+        def drain_warning_messages(self):
+            warnings = list(self.warning_messages)
+            self.warning_messages.clear()
+            return warnings
+
+    config = RuntimeConfig(data_root=tmp_path / "data")
+    runner = DailyTraceRunner(
+        config=config,
+        dependencies=RuntimeDependencies(
+            chat_source=FakeSource(),
+            content_resolver=ImageWarningResolver(),
+            analyzer=FakeAnalyzer(),
+            delivery_channel=FakeDelivery(),
+            event_store=MarkdownEventStore(config=config),
+        ),
+    )
+
+    result = runner.run("2026-06-22")
+
+    assert result.status == DailyRunStatus.SUCCESS_WITH_WARNINGS.value
+    assert result.warning_count == 1
+    assert result.error_summary == (
+        "Skipped image summary for message om_image: 413 response"
+    )
+
+
 def test_runner_dumps_first_pass_conversation_debug_artifacts(tmp_path: Path) -> None:
     config = RuntimeConfig(
         data_root=tmp_path / "data",
