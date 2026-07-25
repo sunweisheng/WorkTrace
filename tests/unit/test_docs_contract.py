@@ -215,8 +215,9 @@ def test_docs_describe_two_level_collected_merge_and_full_content_grouping() -> 
         assert "来源负责人" in content
         assert "quality_summary" in content
         assert "config/collected_merge.json" in content
-    assert "生产代码和文档已按本方案实现" in improvement_plan
-    assert "真实多人 V2 语义效果仍需后续运行验收" in improvement_plan
+    assert "两级人工汇总、来源负责人和质量报告已进入生产代码" in improvement_plan
+    assert "当前分组与复核规则以现行事件分组设计为准" in improvement_plan
+    assert "后续真实 V2 验收应选取" in improvement_plan
 
 
 def test_docs_allow_manual_personal_and_upstream_input_combination() -> None:
@@ -513,12 +514,18 @@ def test_current_docs_do_not_restore_removed_workstream_protocol() -> None:
     current_documents = [
         Path("README.md"),
         Path("SKILL.md"),
+        Path("docs/anchor-analysis-protocol.md"),
+        Path("docs/anchor-experiment-usage.md"),
+        Path("docs/anchor-first-implementation-breakdown.md"),
+        Path("docs/anchor-first-multi-pass-design.md"),
         Path("docs/detailed-design.md"),
         Path("docs/implementation-breakdown.md"),
         Path("docs/employee-guide.md"),
+        Path("docs/markdown-output-simplification-design.md"),
         Path("docs/privacy-note.md"),
         Path("docs/online-analyzer-usage.md"),
         Path("docs/collected-people-merge-plan.md"),
+        Path("docs/two-level-collected-merge-improvement-plan.md"),
     ]
     removed_tokens = (
         "workstream_key",

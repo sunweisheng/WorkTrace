@@ -46,7 +46,7 @@ python3 -m src.worktrace.cli --date YYYY-MM-DD --resume
 python3 -m src.worktrace.anchor_experiment --date YYYY-MM-DD
 ```
 
-实验输出 JSON/表格和调试文件，不写正式个人 Markdown，也不执行正式全日工作流校正、文件证据聚合和自发送链路。
+实验输出 JSON/表格和调试文件，不写正式个人 Markdown，也不执行正式全日事件分组、强关联漏合并复核、文件证据聚合和自发送链路。
 
 ## 4. 代码落点
 

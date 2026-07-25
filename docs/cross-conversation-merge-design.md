@@ -1,12 +1,14 @@
-# WorkTrace 跨会话合并与工作流归属设计
+# WorkTrace 跨会话合并与工作流归属历史设计
 
 > 历史设计：其中的工作流方案已被 [取消工作流概念并改进事件分组](workstream-free-event-grouping-design.md) 替代。本文保留当时的设计事实，不作为当前实现依据。
+
+下文中的流程、字段和代码落点均指该方案被替代前的版本。
 
 ## 1. 为什么需要两次分组判断
 
 同一工作事项可能同时出现在项目群、私聊、文档讨论群和交付群。片段分析只能提炼局部事实，不能独立决定全日候选的工作流归属。
 
-当前 Online analyzer 路径包含两个不同任务：
+当时的 Online analyzer 路径包含两个不同任务：
 
 1. `merge_day_candidates(...)` 做初始语义分组
 2. `request_function(workstream assignment)` 使用工作流归属专用 Function 对候选建立权威分组
@@ -31,7 +33,7 @@
 
 全日分组不重新携带整段原始聊天。
 
-## 3. 当前控制流
+## 3. 当时控制流
 
 ```mermaid
 flowchart TD
@@ -166,11 +168,11 @@ follow-up 约束：
 
 排查误合并/误拆分时，应先看 `resolved_groups.json` 和 workstream assignment。只有 assignment 失败回退时，初始模型组才直接影响最终结果。
 
-## 9. 当前代码落点
+## 9. 当时代码落点
 
 - `src/worktrace/runner.py`
 - `src/worktrace/pipeline/cross_conversation_merge.py`
-- `src/worktrace/pipeline/workstream_resolution.py`
+- `src/worktrace/pipeline/workstream_resolution.py`（当前版本已删除）
 - `src/worktrace/pipeline/validation.py`
 - `src/worktrace/analyzers/prompts.py`
 - `src/worktrace/analyzers/output_schemas.py`

@@ -353,7 +353,7 @@ WORKTRACE_COLLECTED_MERGE_MISSING_FIELD_RETRY_LIMIT=1
 
 固定结构的 Online 调用使用各任务自己的 Function 参数结构，设置 `strict:true` 并用 `tool_choice` 强制调用一次预期 Function；非流式默认读取一次完整 Function 调用，显式开启流式时按调用 ID 拼接参数片段后再统一解析和校验。普通文字总结和图片理解不强制使用 Function Calling。preflight 发送真实 Function Calling 探针，不支持时直接报错，不回退到旧结构化输出方式。
 
-在线文字请求之间不增加等待。遇到网络、超时、429、5xx、流式 JSON 异常、空结果或无效 JSON 时，当前请求按 `online_request_retry_limit=1` 在首次失败后立即再试 Online 1 次；第二次仍失败才交给 Codex，后续请求仍先走在线线路。模型结果通过传输但未通过 Python 结构、编号、证据或覆盖校验时，固定执行 Online 首次请求、Online 局部重试 1 次、Codex 当前请求备用 1 次；Codex 仍失败才终止本次合并。调试模式只增加 trace 和日志，不改变这两类线路或次数。401、403、TLS 证书和请求参数错误不会重试，也不会切换。Codex 调用间隔由 `config/llm_retry.json` 的 `0-1` 秒范围控制，图片摘要继续只走在线图片能力。
+在线文字请求之间不增加等待。遇到网络、超时、429、5xx、流式 JSON 异常、空结果或无效 JSON 时，当前请求按 `online_request_retry_limit=1` 在首次失败后立即再试 Online 1 次；第二次仍失败才交给 Codex，后续请求仍先走在线线路。模型结果通过传输但未通过 Python 结构、编号、证据或覆盖校验时，固定执行 Online 首次请求、Online 局部重试 1 次、Codex 当前请求备用 1 次。普通结构化任务和多人正式正文在 Codex 后仍失败或不合法时终止当前生成；个人全日分组会保留合法组并把其余候选拆成单例；个人强关联复核和多人高风险复核会保留复核前分组并写 warning。调试模式只增加 trace 和日志，不改变这些线路或次数。401、403、TLS 证书和请求参数错误不会重试，也不会切换。Codex 调用间隔由 `config/llm_retry.json` 的 `0-1` 秒范围控制，图片摘要继续只走在线图片能力。
 
 个人调试的 `llm_usage.json` 和多人 trace 的每个 step 都保存线路、成功或失败、切换方向、耗时及安全错误类别等调用记录；多人 `summary.json` 另汇总在线/Codex 耗时、切换次数和 Codex 等待。
 
@@ -493,7 +493,7 @@ python3 -m pip install -r requirements.txt
 - [多人汇总设计](docs/collected-people-merge-plan.md)：`merge-collected` 当前实现
 - [部门到中心两级汇总改造说明](docs/two-level-collected-merge-improvement-plan.md)：当前实现、历史样本结论和真实 V2 验收边界
 - [Online Analyzer](docs/online-analyzer-usage.md)：Responses API 调用和错误边界
-- [Markdown 输出](docs/markdown-output-simplification-design.md)：事件文件格式
+- [Markdown 输出](docs/markdown-output-simplification-design.md)：去掉管理者总结后的当前事件文件格式
 - [锚点实验使用说明](docs/anchor-experiment-usage.md)：独立实验入口，不等同于正式日报
 - [锚点能力当前状态](docs/anchor-first-implementation-breakdown.md)：正式主链与独立实验的边界
 - [锚点协议](docs/anchor-analysis-protocol.md)：分段失败后直接提炼和独立实验使用的协议

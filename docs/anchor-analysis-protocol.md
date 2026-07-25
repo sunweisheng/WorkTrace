@@ -1,6 +1,6 @@
 # WorkTrace 锚点分析协议
 
-> 历史说明：本文涉及的工作流字段已被 [取消工作流概念并改进事件分组](workstream-free-event-grouping-design.md) 替代；锚点输入与回退协议内容保留用于演进追溯。
+> 历史说明：旧版协议中的工作流字段已被 [取消工作流概念并改进事件分组](workstream-free-event-grouping-design.md) 替代；下文只描述当前仍在使用的锚点输入与回退协议。
 
 > 状态：正式主链在分段失败后直接提炼时，与独立 `anchor_experiment` 共用的聊天窗口分析协议。正式主链优先使用“聊天窗口分段 + 片段批处理”。
 
@@ -67,7 +67,6 @@ Python 领域模型还包含 `pending`、`failed`、`skipped`，用于运行状�
 - `referenced_attachment_ids`
 - `self_evidence_message_ids`
 - `self_relations`（参与方式及其本人证据消息 ID）
-- `workstream_key`
 - `source_message_ids`
 - `fact_items`（`field`、`text`、`evidence_message_ids`）
 - `fact_risk_flags`
@@ -82,8 +81,7 @@ Python 领域模型还包含 `pending`、`failed`、`skipped`，用于运行状�
 - 附件文件名只用于识别文件；消息明确表示发送、查看、审核、转交或处理附件时可以引用附件 ID，但不能据文件名推断附件正文
 - `retention_reason` 必须是六个允许枚举之一
 - `object_hint` 和 `retention_detail` 必须具体
-- `workstream_key` 表达业务工作流归属，不是泛化标题
-- `fact_items` 必须覆盖标题、正文、主要动作、具体对象、保留依据和非空工作流，并引用真实来源消息
+- `fact_items` 必须覆盖标题、正文、主要动作、具体对象和保留依据，并引用真实来源消息
 - `fact_risk_flags` 只能使用 `config/retention_policy.json` 配置的风险类型
 
 ## 5. `context_requests`
@@ -93,6 +91,7 @@ Python 领域模型还包含 `pending`、`failed`、`skipped`，用于运行状�
 - `request_type`
 - `target_message_ids`
 - `target_attachment_ids`
+- `target_link_ids`
 
 领域层支持四种类型：
 
@@ -101,7 +100,7 @@ Python 领域模型还包含 `pending`、`failed`、`skipped`，用于运行状�
 - `attachment_text`
 - `linked_file_text`
 
-锚点 expansion 的 prompt/解析层可携带 `target_link_ids`；Python 会校验请求类型与目标 ID 的组合，再决定是否扩展。
+Python 会校验请求类型与三类目标 ID 的组合，再决定是否扩展。
 
 ## 6. `needs_cross_anchor_merge`
 
