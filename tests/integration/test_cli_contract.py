@@ -289,6 +289,7 @@ def test_cli_merge_collected_returns_structured_json(capsys, tmp_path) -> None:
     personal_debug_file.write_text("{}", encoding="utf-8")
 
     def fake_run(*, target_date, config):
+        assert config.collected_merge_trace_enabled is False
         return CollectedMergeRunResult(
             status=DailyRunStatus.SUCCESS.value,
             target_date=target_date,
@@ -336,3 +337,48 @@ def test_cli_merge_collected_returns_structured_json(capsys, tmp_path) -> None:
     assert payload["self_delivery_status"] == "success"
     assert payload["outputs"][0]["source_event_count"] == 1
     assert personal_debug_file.exists()
+
+
+def test_cli_debug_output_enables_collected_merge_trace(capsys, tmp_path) -> None:
+    captured_config = None
+    trace_root = tmp_path / "custom-collected-trace"
+
+    def fake_run(*, target_date, config):
+        nonlocal captured_config
+        captured_config = config
+        return CollectedMergeRunResult(
+            status=DailyRunStatus.SUCCESS.value,
+            target_date=target_date,
+            input_dir=str(tmp_path / "merge_inbox/2026/06/29"),
+            output_path=str(
+                tmp_path / "merge_inbox/2026/06/29/2026-06-29-管理者-merged.md"
+            ),
+            source_file_count=2,
+            source_event_count=3,
+            merged_event_count=2,
+            skipped_file_count=0,
+            warning_messages=[],
+            self_delivery_status="success",
+            self_delivery_target="ou_manager",
+            self_delivery_error="",
+        )
+
+    exit_code = main(
+        ["--debug-output", "merge-collected", "--date", "2026-06-29"],
+        config=RuntimeConfig(
+            data_root=tmp_path / "data",
+            collected_merge_trace_enabled=False,
+            collected_merge_trace_root=trace_root,
+        ),
+        collected_run_func=fake_run,
+    )
+
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+
+    assert exit_code == 0
+    assert payload["status"] == DailyRunStatus.SUCCESS.value
+    assert captured_config is not None
+    assert captured_config.collected_merge_trace_enabled is True
+    assert captured_config.collected_merge_trace_root == trace_root
+    assert captured_config.conversation_debug_root is None

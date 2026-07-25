@@ -440,7 +440,13 @@ python3 -m src.worktrace.cli --date 2026-07-06 --debug-output
 
 保存旧 trace 后，可用 `scripts/report_event_grouping_comparison.py --date YYYY-MM-DD --baseline-trace-root <旧目录> --current-trace-root <新目录>` 输出 JSON 和 Markdown。该脚本只统计候选覆盖、重复遗漏、单例/多事件组、分组关系变化、强关联复核结果、合并理由和证据，不替代人工判断语义。
 
-多人汇总跟踪通过 `.env` 的 `WORKTRACE_COLLECTED_MERGE_TRACE=true` 开启，默认写入 `data/debug/collected_merge/<target_date>/`。`source-audit.json` 记录每个来源文件的格式、声明数、解析数、差值、过滤数量和部分读取状态；每次真实模型调用会在请求前写入 `step-NNN.json` 与 `step-NNN-prompt.txt`。其中 `prompt_estimated_tokens` 记录含典型参数示例和 `/no_think` 的提示词估算，`online_input_estimated_tokens`、`codex_input_estimated_tokens` 和 `input_estimated_tokens` 分别记录两条线路及最终取大值的估算；`input_target_tokens`、超限原因、`actual_input_tokens` 和估算差值用于核对分批。候选和复核 step 使用 `grouping_protocol_version: 2`，并保存完整 `input_events`、`deterministic_groups`，按组记录 `evidence_audit`、`semantic_audit` 和 `python_validation.errors`；`summary.json` 由 Python 汇总校验错误、重试原因、新增复核触发次数和 `stage_timing_summary`。调试模式只增加这些记录，不改变模型线路。`summary.json`、`summary.md` 在模型失败时也会生成，并记录失败步骤、具体过滤事件、最终事件、`boundary_warnings`、各线路耗时和 Codex 等待。
+多人汇总调试可直接使用下面的命令；全局参数必须放在 `merge-collected` 前：
+
+```bash
+python3 -m src.worktrace.cli --debug-output merge-collected --date YYYY-MM-DD
+```
+
+该参数会开启多人 trace，默认写入 `data/debug/collected_merge/<target_date>/`，并保留 `.env` 中 `WORKTRACE_COLLECTED_MERGE_TRACE_ROOT` 指定的目录。需要长期启用时，也可以配置 `WORKTRACE_COLLECTED_MERGE_TRACE=true`。`source-audit.json` 记录每个来源文件的格式、声明数、解析数、差值、过滤数量和部分读取状态；每次真实模型调用会在请求前写入 `step-NNN.json` 与 `step-NNN-prompt.txt`。其中 `prompt_estimated_tokens` 记录含典型参数示例和 `/no_think` 的提示词估算，`online_input_estimated_tokens`、`codex_input_estimated_tokens` 和 `input_estimated_tokens` 分别记录两条线路及最终取大值的估算；`input_target_tokens`、超限原因、`actual_input_tokens` 和估算差值用于核对分批。候选和复核 step 使用 `grouping_protocol_version: 2`，并保存完整 `input_events`、`deterministic_groups`，按组记录 `evidence_audit`、`semantic_audit` 和 `python_validation.errors`；`summary.json` 由 Python 汇总校验错误、重试原因、新增复核触发次数和 `stage_timing_summary`。调试模式只增加这些记录，不改变模型线路。`summary.json`、`summary.md` 在模型失败时也会生成，并记录失败步骤、具体过滤事件、最终事件、`boundary_warnings`、各线路耗时和 Codex 等待。
 
 `scripts/diagnose_collected_merge_rolling.py` 的每个模型步骤也会在调用前写入 `status=running`，并实时输出步骤状态；完成或异常后，同一个 `step-NNN.json` 会更新为 `success` 或 `failed`。调试文件保持 `running` 只表示调用尚未返回，不能据此判断模型无响应。
 

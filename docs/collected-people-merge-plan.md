@@ -259,7 +259,13 @@ Python 以 `model_input_batch_target_tokens=5200` 为分批目标。每尝试加
 
 ## 12. Trace
 
-开启：
+单次运行优先使用 CLI 开启；全局参数必须放在 `merge-collected` 前：
+
+```bash
+python3 -m src.worktrace.cli --debug-output merge-collected --date YYYY-MM-DD
+```
+
+该参数保留配置中的 trace 根目录。需要长期开启或指定目录时，也可以配置：
 
 ```dotenv
 WORKTRACE_COLLECTED_MERGE_TRACE=true

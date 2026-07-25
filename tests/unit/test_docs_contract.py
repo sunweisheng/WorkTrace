@@ -634,6 +634,20 @@ def test_readme_mentions_quick_usage_examples() -> None:
     assert "YYYY-MM-DD-登录人姓名-merged.md" in content
 
 
+def test_collected_merge_docs_use_debug_output_cli_flag() -> None:
+    command = (
+        "python3 -m src.worktrace.cli --debug-output "
+        "merge-collected --date YYYY-MM-DD"
+    )
+
+    for path in (
+        Path("README.md"),
+        Path("SKILL.md"),
+        Path("docs/collected-people-merge-plan.md"),
+    ):
+        assert command in path.read_text(encoding="utf-8")
+
+
 def test_readme_and_skill_no_longer_mention_merge_drive_upload() -> None:
     readme = Path("README.md").read_text(encoding="utf-8")
     skill = Path("SKILL.md").read_text(encoding="utf-8")

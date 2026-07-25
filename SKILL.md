@@ -88,6 +88,13 @@ python -m src.worktrace.cli --date YYYY-MM-DD
 python -m src.worktrace.cli merge-collected --date YYYY-MM-DD
 ```
 
+需要保留多人汇总 trace 时，使用全局 `--debug-output`；该参数必须放在
+`merge-collected` 前，并沿用配置中的 `collected_merge_trace_root`：
+
+```bash
+python3 -m src.worktrace.cli --debug-output merge-collected --date YYYY-MM-DD
+```
+
 管理人员汇总模式约定：
 
 - 输入目录固定为 `merge_inbox/YYYY/MM/DD/`。
@@ -106,6 +113,7 @@ python -m src.worktrace.cli merge-collected --date YYYY-MM-DD
 - 团队汇总文件会公开保留来源人员，并在隐藏信息中逐级保留来源事件 ID；中心结果还公开显示从上游 `*-merged.md` 文件名提取并逐级保留的来源负责人。
 - 缺少当前登录人的个人 MD 时静默执行普通汇总，不产生 warning。
 - 输入/输出数量、字符数、覆盖率、校验错误、重试原因、复核触发和阶段耗时全部由 Python 计算，并进入 CLI JSON 与 trace summary；阶段实际耗时看 `wall_clock_ms`，并发请求负载看 `request_accumulated_ms`，不能把请求累计耗时当作实际等待时间。调试模式只增加记录，不改变 Online 局部重试 1 次和当前请求 Codex 备用 1 次的线路；不要求每一级事件数必须减少。
+- 多人汇总的 `--debug-output` 会直接开启 trace，默认写入 `data/debug/collected_merge/<target_date>/`；如果 `.env` 配置了 `WORKTRACE_COLLECTED_MERGE_TRACE_ROOT`，继续使用该目录。也可通过 `WORKTRACE_COLLECTED_MERGE_TRACE=true` 长期开启。
 - `python3 scripts/replay_collected_review_failures.py --trace-root <trace目录> --steps <编号列表> --output-dir <输出目录>` 可离线复盘候选分组和高风险复核。旧 trace 使用 `legacy_audit`，不补造 `member_connections`；新实验结果使用 `current` 完整执行新协议校验。该脚本不调用模型，也不生成正式 Markdown。
 - 每个生成的团队汇总文件都会通过飞书 CLI 机器人身份发送给当前登录用户自己。
 - 更多细节见 `docs/collected-people-merge-plan.md`。

@@ -35,7 +35,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     sync_parser.add_argument("--source", default="feishu")
     parser.add_argument("--date", dest="target_date", required=False)
     parser.add_argument("--preflight", dest="preflight_only", action="store_true")
-    parser.add_argument("--debug-output", dest="debug_output", action="store_true")
+    parser.add_argument(
+        "--debug-output",
+        dest="debug_output",
+        action="store_true",
+        help="Enable personal debug artifacts or merge-collected trace output.",
+    )
     parser.add_argument(
         "--resume",
         action="store_true",
@@ -128,7 +133,11 @@ def run_sync_reaction_catalog(
 
 
 def apply_cli_overrides(config: RuntimeConfig, args: argparse.Namespace) -> RuntimeConfig:
-    if not args.debug_output or config.conversation_debug_root is not None:
+    if not args.debug_output:
+        return config
+    if args.command == "merge-collected":
+        return replace(config, collected_merge_trace_enabled=True)
+    if config.conversation_debug_root is not None:
         return config
     return replace(
         config,

@@ -448,6 +448,10 @@ OnlineLLMAnalyzer -> openai Python SDK -> Responses API provider
 - `WORKTRACE_COLLECTED_MERGE_MISSING_FIELD_RETRY_RATIO`
 - `WORKTRACE_COLLECTED_MERGE_MISSING_FIELD_RETRY_LIMIT`
 
+单次多人汇总调试可使用
+`python3 -m src.worktrace.cli --debug-output merge-collected --date YYYY-MM-DD`。
+CLI 会开启 `collected_merge_trace_enabled`，并保留环境配置的 trace 根目录。
+
 ### 9.3 JSON 配置
 
 - `config/event_rules.json`：三类业务关键词
