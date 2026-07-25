@@ -338,6 +338,16 @@ def test_collected_merge_models_roundtrip_new_quality_and_coverage_fields() -> N
         merged_event_count=1,
         skipped_file_count=0,
         quality_summary=quality,
+        stage_timing_summary={
+            "candidate_grouping": {
+                "wall_clock_ms": 125.5,
+                "request_accumulated_ms": 210.25,
+            },
+            "total": {
+                "wall_clock_ms": 300.0,
+                "request_accumulated_ms": 210.25,
+            },
+        },
     )
 
     assert CollectedMergeGroup.from_dict(group.to_dict()) == group

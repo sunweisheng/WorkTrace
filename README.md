@@ -224,7 +224,7 @@ flowchart TD
     F --> G["共同消息/文件/同日会话建立关系集合"]
     G --> H["LLM 使用事件正文发现候选组"]
     H --> R["修复候选覆盖并判断高风险"]
-    R -->|"高风险"| V["复核并在不确定时拆组"]
+    R -->|"高风险"| V["结合完整上下文复核分组"]
     R -->|"普通"| I["按锁定候选组分批生成正式内容"]
     V --> I
     I --> J{"字段和来源覆盖完整?"}
@@ -260,15 +260,15 @@ merge_inbox/2026/07/06/
 
 文件组合由负责人人工控制。个人 MD 与已经包含该人员的部门 MD 同时存在时，程序会把两份都作为正常输入，不比较 `source_event_ids`，不拦截，也不写重复来源 warning。一级子目录是并列的独立汇总范围，不表示系统会自动按“员工 -> 部门 -> 中心”顺序连续执行。
 
-多人汇总只接受带 v2 会话证据的新个人日报和新版上游 `*-merged.md`。任一事件缺少会话指纹时，所有 scope 都会在模型调用、文件写入和发送前停止，并列出必须重新生成的文件。若新版文件仅在尾部留下一个未闭合事件，系统仍按既有部分恢复规则处理，并记录 `partial_file_count`。
+多人汇总只接受带 v2 会话证据的新个人日报和新版上游 `*-merged.md`。任一事件缺少会话指纹时，所有 scope 都会在模型调用、文件写入和发送前停止，并列出必须重新生成的文件。来源 front matter 的声明事件数与实际解析数不同是允许情况，可能来自人工删除，只记录 `declared_event_count`、`parsed_event_count` 和 `event_count_delta`，不告警也不阻断。只有检测到损坏事件块时才把文件标记为 `partial` 并写 warning；若新版文件仅在尾部留下一个未闭合事件，系统仍按既有部分恢复规则处理，并记录 `partial_file_count`。
 
 历史 v1 文件仍可用于检查解析数量、输入规模和旧输出质量，但缺少同日会话证据，不能直接运行当前多人汇总，也不能用来证明当前 V2 候选分组的语义效果。最终验收必须使用重新生成的 v2 个人 MD 和由它们生成的 v2 上游汇总 MD。
 
 个人事件会对“日期 + 原始会话 ID”计算不可逆会话指纹；同一天同一会话的不同消息因此可以建立候选关系。生产代码先用 Python 计算 `evidence_relations`，再在每个滚动批次或复核请求的内存中，把数量大于零的共同消息、共同文件关系编号为 `MSG-xxx`、`FILE-xxx`。编号清单进入模型上下文供模型判断；同会话候选放在 `candidate_discovery_context` 中，不使用输出分组字段或组编号，并明确禁止直接复制为合并组。新模型输出中不再包含 `evidence_relation_ids`，也不能自行声明 `shared_message`、`shared_file` 或内部 `group_reason`。Python 在模型返回分组后只保留全部端点都位于当前组内的关系，并按稳定目录顺序选择能够连接全部成员的最小关系集合，再恢复内部原因；内部 `evidence_relation_ids` 只保存 Python 计算结果并兼容旧 trace。消息或文件集合完全相同也不能自动合并，第一阶段 LLM 仍须结合具体对象和前后动作判断是否属于同一真实事项，第二阶段才生成正式汇总；同一会话不会自动强制合并。
 
-候选发现默认发送来源 MD 中的完整事件正文，不再按原始聊天消息的 `prompt_message_char_limit` 固定截取。模型返回 `semantic_reasons`、`reason_detail`、`member_connections` 和 `risk_flags`；每个多事件组的 `member_connections` 必须与 `draft_ids` 完全一致，每个编号恰好一次且说明非空。没有确定性组时，提示词使用不含真实 draft ID 的占位结构展示 `member_connections`，避免示例预先暗示实际事件应合并；同时复用 `config/event_grouping.json` 中的负面示例。Python 不静默修复遗漏、重复、组外编号、空说明、重复事件编号或单成员合并组，这些错误会带具体字段、组编号和事件编号进入当前请求重试。个人与多人共同使用 `config/event_grouping.json` 中每个理由的 `acceptance_rules`、`rejection_rules`；`config/collected_merge.json` 只保留多人高风险复核开关和阈值。Python 只比较结构字段、编号和标准化后的对象值，不硬编码业务关键词。局部证据无法连接整个组时只写入 trace；没有完整证据且没有合法语义理由时返回 `merge_reason_missing`，有局部证据但无法支持全组且也没有合法语义理由时返回 `evidence_does_not_cover_group`。
+候选发现默认发送来源 MD 中的完整事件正文，不再按原始聊天消息的 `prompt_message_char_limit` 固定截取。模型返回 `semantic_reasons`、`reason_detail`、`member_connections` 和 `risk_flags`；每个多事件组的 `member_connections` 必须与 `draft_ids` 完全一致，每个编号恰好一次且说明非空。没有确定性组时，提示词使用不含真实 draft ID 的占位结构展示 `member_connections`，避免示例预先暗示实际事件应合并；同时复用 `config/event_grouping.json` 中的负面示例。Python 不静默修复遗漏、重复、组外编号、空说明、重复事件编号或单成员合并组，这些错误会带具体字段、组编号和事件编号进入当前请求重试。个人与多人共同使用 `config/event_grouping.json` 中每个理由的 `acceptance_rules`、`rejection_rules`；`config/collected_merge.json` 只保留多人高风险复核开关和阈值。`same_deliverable_batch` 可以表达同一批配套产物、同一交付物的多个版本，以及不同时间、状态、地区或阶段形成但需要统一汇报或交付的连续产物。文件、版本、时期、状态、地区、项目归属、名称或格式相似都只是上下文信息，任何单项都不能直接决定合并或拆分，最终由模型结合完整上下文判断。Python 只比较结构字段、编号和标准化后的对象值，不硬编码业务关键词。局部证据无法连接整个组时只写入 trace；没有完整证据且没有合法语义理由时返回 `merge_reason_missing`，有局部证据但无法支持全组且也没有合法语义理由时返回 `evidence_does_not_cover_group`。
 
-来源事件达到 10 条、来源文件达到 4 个、跨批判断、Python 修复、同一会话连接多个无共同消息/文件的部分、无完整共同证据且标准化后的非空 `object_hint` 存在多个值，或模型返回 `broad_object` 风险时增加高风险复核；对象冲突不会直接自动拆组。候选和复核使用独立 Function 示例，高风险复核示例采用保守拆分，不预填原组或 `same_object`。复核拿不准时拆开。多事件子组必须有合法关系依据和自己的 `reason_detail`；单条组不要求 `reason_detail`。拆组时只返回一条顶层 `split_reason` 解释整体分组差异，不要求每个子组重复填写；旧结果中任一子组存在非空理由仍兼容，所有位置都无理由时拒绝拆分、保留原候选并告警。来源负责人相同不能单独作为合并依据。旧 trace 中的工作流字段可读取但不参与判断，新多人 trace 和 Markdown 不再生成该字段。
+来源事件达到 10 条、来源文件达到 4 个、跨批判断、Python 修复、同一会话连接多个无共同消息/文件的部分、无完整共同证据且标准化后的非空 `object_hint` 存在多个值，或模型返回 `broad_object` 风险时增加高风险复核；对象冲突不会直接自动拆组。候选和复核使用独立 Function 示例，复核不预设保留或拆分方向，由模型结合完整上下文选择。多事件子组必须有合法关系依据和自己的 `reason_detail`；单条组不要求 `reason_detail`。拆组时只返回一条顶层 `split_reason` 解释整体分组差异，不要求每个子组重复填写；旧结果中任一子组存在非空理由仍兼容。复核结果表达矛盾、遗漏来源、重复来源、引用非法证据、缺少合并依据或拆分理由时，只重试当前候选；Online 局部重试和当前请求 Codex 备用后仍非法，则保留复核前分组并告警，不自动拆分，也不让其他候选或整次部门汇总失败。技术调用失败仍按原有失败规则处理。来源负责人相同不能单独作为合并依据。旧 trace 中的工作流字段可读取但不参与判断，新多人 trace 和 Markdown 不再生成该字段。
 
 候选、复核和正式正文请求统一按任务专用 Function 和上述同一输入估算函数使用 `model_input_batch_target_tokens=5200` 分批。每尝试加入一个候选都会重建拟提交批次的 prompt、合法参数示例、证据编号和 Function 定义后重新估算。能够拆分时先按消息、文件和会话关系优先分批，必要时复用正文切片和分层摘要；最小必要输入仍超过目标时标记后发送，由模型服务决定是否接受。正式正文必须返回完整 `covered_draft_ids` 和带来源的 `fact_items`；Python 只重试当前组的结果质量问题，模型明确拒绝输入或重试后仍不完整时当前 scope 失败，不写不完整文件。若当前 scope 已有同名历史输出，失败不会删除或覆盖它，判断本次结果必须以 CLI JSON 的 `status` 和 `outputs` 为准。单条事件组直接保留原文，不增加模型调用；正文不再把全部来源原文机械追加到模型结果。
 
@@ -276,7 +276,7 @@ merge_inbox/2026/07/06/
 
 上游 `*-merged.md` 的文件名负责人会写入事件的 `source_report_owners`。中心汇总公开显示 `来源负责人`，并继续保留原始来源人员；来源事件 ID 只写入隐藏 `merge_meta`。个人 MD 和没有上游负责人的第一级部门结果不显示来源负责人。
 
-每个 scope 和整次运行都会由 Python 生成 `quality_summary`，包括输入/过滤后/输出事件数、正文字符数、来源覆盖、单条组/多来源组、高风险复核、正文重试和提示缩短统计。比例只用于人工查看，不设置强制减少比例；一个人部门或当天没有重复事项时，输出事件数可以等于输入事件数。相同数据同时进入 CLI JSON、trace `summary.json` 和 `summary.md`。
+每个 scope 和整次运行都会由 Python 生成 `quality_summary`，包括输入/过滤后/输出事件数、正文字符数、来源覆盖、单条组/多来源组、高风险复核、正文重试和提示缩短统计。比例只用于人工查看，不设置强制减少比例；一个人部门或当天没有重复事项时，输出事件数可以等于输入事件数。`stage_timing_summary` 由 Python 用单调时钟记录来源解析、来源过滤、候选分组、候选整理、高风险复核、正文合并、Markdown 写入、自送达和总耗时；实际等待时间看 `wall_clock_ms`，并发请求负载只看 `request_accumulated_ms`，两者不能混用。相同数据同时进入 CLI JSON、trace `summary.json` 和 `summary.md`。
 
 ## 输出字段
 
@@ -440,7 +440,7 @@ python3 -m src.worktrace.cli --date 2026-07-06 --debug-output
 
 保存旧 trace 后，可用 `scripts/report_event_grouping_comparison.py --date YYYY-MM-DD --baseline-trace-root <旧目录> --current-trace-root <新目录>` 输出 JSON 和 Markdown。该脚本只统计候选覆盖、重复遗漏、单例/多事件组、分组关系变化、强关联复核结果、合并理由和证据，不替代人工判断语义。
 
-多人汇总跟踪通过 `.env` 的 `WORKTRACE_COLLECTED_MERGE_TRACE=true` 开启，默认写入 `data/debug/collected_merge/<target_date>/`。`source-audit.json` 记录每个来源文件的格式、声明/解析/过滤数量和部分读取状态；每次真实模型调用会在请求前写入 `step-NNN.json` 与 `step-NNN-prompt.txt`。其中 `prompt_estimated_tokens` 记录含典型参数示例和 `/no_think` 的提示词估算，`online_input_estimated_tokens`、`codex_input_estimated_tokens` 和 `input_estimated_tokens` 分别记录两条线路及最终取大值的估算；`input_target_tokens`、超限原因、`actual_input_tokens` 和估算差值用于核对分批。候选和复核 step 使用 `grouping_protocol_version: 2`，并保存完整 `input_events`、`deterministic_groups`，按组记录 `evidence_audit`、`semantic_audit` 和 `python_validation.errors`；`summary.json` 由 Python 汇总校验错误、重试原因和新增复核触发次数。调试模式只增加这些记录，不改变模型线路。`summary.json`、`summary.md` 在模型失败时也会生成，并记录失败步骤、具体过滤事件、最终事件、`boundary_warnings`、各线路耗时和 Codex 等待。
+多人汇总跟踪通过 `.env` 的 `WORKTRACE_COLLECTED_MERGE_TRACE=true` 开启，默认写入 `data/debug/collected_merge/<target_date>/`。`source-audit.json` 记录每个来源文件的格式、声明数、解析数、差值、过滤数量和部分读取状态；每次真实模型调用会在请求前写入 `step-NNN.json` 与 `step-NNN-prompt.txt`。其中 `prompt_estimated_tokens` 记录含典型参数示例和 `/no_think` 的提示词估算，`online_input_estimated_tokens`、`codex_input_estimated_tokens` 和 `input_estimated_tokens` 分别记录两条线路及最终取大值的估算；`input_target_tokens`、超限原因、`actual_input_tokens` 和估算差值用于核对分批。候选和复核 step 使用 `grouping_protocol_version: 2`，并保存完整 `input_events`、`deterministic_groups`，按组记录 `evidence_audit`、`semantic_audit` 和 `python_validation.errors`；`summary.json` 由 Python 汇总校验错误、重试原因、新增复核触发次数和 `stage_timing_summary`。调试模式只增加这些记录，不改变模型线路。`summary.json`、`summary.md` 在模型失败时也会生成，并记录失败步骤、具体过滤事件、最终事件、`boundary_warnings`、各线路耗时和 Codex 等待。
 
 `scripts/diagnose_collected_merge_rolling.py` 的每个模型步骤也会在调用前写入 `status=running`，并实时输出步骤状态；完成或异常后，同一个 `step-NNN.json` 会更新为 `success` 或 `failed`。调试文件保持 `running` 只表示调用尚未返回，不能据此判断模型无响应。
 

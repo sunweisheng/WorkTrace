@@ -566,8 +566,11 @@ class MarkdownEventStore(EventStore):
         return ""
 
     def _extract_event_heading_title(self, block: str) -> str:
-        match = re.search(r"^###\s+\d+\.\s+(.+?)\s*$", block, flags=re.MULTILINE)
-        return match.group(1).strip() if match else ""
+        for line in block.splitlines():
+            match = re.fullmatch(r"###[ \t]+\d+\.[ \t]*(.*)", line)
+            if match:
+                return match.group(1).strip()
+        return ""
 
     def _extract_retention_reason(self, block: str) -> str:
         marker = "<!-- worktrace:retention_reason: "

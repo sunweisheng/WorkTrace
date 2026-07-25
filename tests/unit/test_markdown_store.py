@@ -33,6 +33,31 @@ def test_markdown_store_roundtrip(tmp_path: Path) -> None:
     assert loaded.events[0].title == "主题"
 
 
+def test_markdown_store_keeps_empty_heading_title_empty() -> None:
+    store = MarkdownEventStore(config=RuntimeConfig())
+    markdown = store.render_day_document(
+        DayDocument(
+            date="2026-06-22",
+            events=[
+                WorkEvent(
+                    date="2026-06-22",
+                    event_id="evt-empty-title",
+                    title="",
+                    content="保留空标题事件的正文。",
+                    object_hint="空标题解析",
+                )
+            ],
+            generated_at="2026-06-22T20:00:00+08:00",
+        )
+    )
+
+    loaded = store.parse_day_document(markdown)
+
+    assert loaded.events[0].title == ""
+    assert loaded.events[0].date == "2026-06-22"
+    assert loaded.events[0].content == "保留空标题事件的正文。"
+
+
 def test_markdown_store_renders_public_event_fields(tmp_path: Path) -> None:
     store = MarkdownEventStore(config=RuntimeConfig(data_root=tmp_path / "data"))
     write_result = store.replace_day(

@@ -10,6 +10,7 @@ from contextlib import nullcontext
 from dataclasses import dataclass, replace
 from pathlib import Path
 from threading import Event, Lock
+from time import perf_counter
 from typing import Any, Sequence
 
 from .config import RetentionPolicyConfig, RuntimeConfig
@@ -79,6 +80,25 @@ from .utils.token_estimation import (
 )
 
 
+COLLECTED_MERGE_TIMING_STAGES = (
+    "source_parse",
+    "source_filter",
+    "candidate_grouping",
+    "candidate_reconciliation",
+    "high_risk_review",
+    "content_merge",
+    "markdown_write",
+    "self_delivery",
+    "total",
+)
+
+COLLECTED_REQUEST_KIND_STAGES = {
+    "collected_candidate_grouping": "candidate_grouping",
+    "collected_group_review": "high_risk_review",
+    "collected_event_merge": "content_merge",
+}
+
+
 @dataclass
 class CollectedMergeRunner:
     config: RuntimeConfig
@@ -112,6 +132,8 @@ class CollectedMergeRunner:
         self._collected_merge_filter_diagnostics: list[dict[str, Any]] = []
         self._collected_merge_failure_warnings: list[str] = []
         self._collected_quality_counters: Counter[str] = Counter()
+        self._collected_merge_stage_wall_clock_ms: Counter[str] = Counter()
+        self._collected_usage_record_start_index = 0
 
     def _llm_usage_recorder(self) -> LLMUsageRecorder | None:
         recorder = getattr(self.analyzer, "usage_recorder", None)
@@ -122,6 +144,39 @@ class CollectedMergeRunner:
         if recorder is None:
             return nullcontext()
         return recorder.request_context(str(step_index))
+
+    def _record_collected_stage_timing(self, stage: str, started_at: float) -> None:
+        self._collected_merge_stage_wall_clock_ms[stage] += (
+            perf_counter() - started_at
+        ) * 1000
+
+    def _collected_stage_timing_summary(self) -> dict[str, dict[str, float]]:
+        request_totals: Counter[str] = Counter()
+        recorder = self._llm_usage_recorder()
+        if recorder is not None:
+            records = recorder.records()[self._collected_usage_record_start_index :]
+            for record in records:
+                stage = COLLECTED_REQUEST_KIND_STAGES.get(
+                    str(record.get("request_kind", ""))
+                )
+                duration_ms = record.get("duration_ms")
+                if stage and isinstance(duration_ms, (int, float)):
+                    request_totals[stage] += float(duration_ms)
+        summary = {
+            stage: {
+                "wall_clock_ms": round(
+                    float(self._collected_merge_stage_wall_clock_ms[stage]),
+                    3,
+                ),
+                "request_accumulated_ms": round(float(request_totals[stage]), 3),
+            }
+            for stage in COLLECTED_MERGE_TIMING_STAGES
+        }
+        summary["total"]["request_accumulated_ms"] = round(
+            sum(float(value) for value in request_totals.values()),
+            3,
+        )
+        return summary
 
     def _supports_current_request_fallback(self) -> bool:
         return callable(getattr(self.analyzer, "fallback_current_request", None))
@@ -157,10 +212,12 @@ class CollectedMergeRunner:
         self._write_collected_merge_trace_step(step)
 
     def run(self, target_date: str) -> CollectedMergeRunResult:
+        run_started_at = perf_counter()
         input_dir = self.build_input_dir(target_date)
         try:
             self_identity = self.self_identity_resolver()
         except (OSError, ValueError, StoreWriteError) as exc:
+            total_ms = round((perf_counter() - run_started_at) * 1000, 3)
             return CollectedMergeRunResult(
                 status=DailyRunStatus.FAILED.value,
                 target_date=target_date,
@@ -176,6 +233,12 @@ class CollectedMergeRunner:
                 self_delivery_target="",
                 self_delivery_error="",
                 outputs=[],
+                stage_timing_summary={
+                    "total": {
+                        "wall_clock_ms": total_ms,
+                        "request_accumulated_ms": 0.0,
+                    }
+                },
             )
         child_dirs = (
             [
@@ -193,7 +256,16 @@ class CollectedMergeRunner:
             child_dirs=child_dirs,
         )
         if preflight_failure is not None:
-            return preflight_failure
+            total_ms = round((perf_counter() - run_started_at) * 1000, 3)
+            return replace(
+                preflight_failure,
+                stage_timing_summary={
+                    "total": {
+                        "wall_clock_ms": total_ms,
+                        "request_accumulated_ms": 0.0,
+                    }
+                },
+            )
 
         outputs = [
             self._run_one_directory(
@@ -230,6 +302,13 @@ class CollectedMergeRunner:
         delivery_errors = [
             output.self_delivery_error for output in outputs if output.self_delivery_error
         ]
+        stage_timing_summary = aggregate_collected_stage_timing_summaries(
+            [output.stage_timing_summary for output in outputs]
+        )
+        stage_timing_summary["total"]["wall_clock_ms"] = round(
+            (perf_counter() - run_started_at) * 1000,
+            3,
+        )
         return CollectedMergeRunResult(
             status=status,
             target_date=target_date,
@@ -248,6 +327,7 @@ class CollectedMergeRunner:
             self_delivery_target=first_output.self_delivery_target,
             self_delivery_error="; ".join(delivery_errors),
             outputs=outputs,
+            stage_timing_summary=stage_timing_summary,
         )
 
     def _preflight_conversation_evidence(
@@ -379,7 +459,9 @@ class CollectedMergeRunner:
         )
         self._collected_quality_counters = Counter()
         self._start_collected_merge_trace(target_date, input_dir)
+        directory_started_at = perf_counter()
         warning_messages: list[str] = []
+        source_parse_started_at = perf_counter()
         (
             source_events,
             source_file_count,
@@ -393,8 +475,10 @@ class CollectedMergeRunner:
             output_path=output_path,
             ignored_subdirectories=ignored_subdirectories,
         )
+        self._record_collected_stage_timing("source_parse", source_parse_started_at)
         warning_messages.extend(read_warnings)
         parsed_source_events = list(source_events)
+        source_filter_started_at = perf_counter()
         source_events, source_filter_warnings, source_filter_diagnostics = (
             self._filter_source_events(source_events)
         )
@@ -433,6 +517,7 @@ class CollectedMergeRunner:
             input_dir=input_dir,
         )
         warning_messages.extend(owner_source_warnings)
+        self._record_collected_stage_timing("source_filter", source_filter_started_at)
 
         merged_events: list[WorkEvent] = []
         if source_events:
@@ -456,6 +541,8 @@ class CollectedMergeRunner:
                     [],
                     counters=self._collected_quality_counters,
                 )
+                self._record_collected_stage_timing("total", directory_started_at)
+                stage_timing_summary = self._collected_stage_timing_summary()
                 output = CollectedMergeOutput(
                     input_dir=str(input_dir.resolve()),
                     output_path=None,
@@ -466,6 +553,7 @@ class CollectedMergeRunner:
                     partial_file_count=partial_file_count,
                     quality_summary=quality_summary,
                     warning_messages=warning_messages,
+                    stage_timing_summary=stage_timing_summary,
                 )
                 self._write_collected_merge_trace_summary(
                     status=DailyRunStatus.FAILED.value,
@@ -492,6 +580,7 @@ class CollectedMergeRunner:
         )
 
         try:
+            markdown_write_started_at = perf_counter()
             output_path.parent.mkdir(parents=True, exist_ok=True)
             day_doc = self.store.render_day_document(
                 day_doc=DayDocument(
@@ -502,7 +591,13 @@ class CollectedMergeRunner:
             )
             output_path.write_text(day_doc, encoding="utf-8")
         except OSError as exc:
+            self._record_collected_stage_timing(
+                "markdown_write",
+                markdown_write_started_at,
+            )
             warning_messages.append(f"Failed to write merged markdown: {output_path}")
+            self._record_collected_stage_timing("total", directory_started_at)
+            stage_timing_summary = self._collected_stage_timing_summary()
             self._write_collected_merge_trace_summary(
                 status=DailyRunStatus.FAILED.value,
                 target_date=target_date,
@@ -526,8 +621,15 @@ class CollectedMergeRunner:
                 partial_file_count=partial_file_count,
                 quality_summary=quality_summary,
                 warning_messages=warning_messages,
+                stage_timing_summary=stage_timing_summary,
+            )
+        else:
+            self._record_collected_stage_timing(
+                "markdown_write",
+                markdown_write_started_at,
             )
 
+        self_delivery_started_at = perf_counter()
         self_delivery_status, self_delivery_target, self_delivery_error = (
             _deliver_markdown_to_self(
                 self.delivery_channel,
@@ -535,8 +637,12 @@ class CollectedMergeRunner:
                 markdown_path=output_path,
             )
         )
+        self._record_collected_stage_timing("self_delivery", self_delivery_started_at)
         if self_delivery_error:
             warning_messages.append(self_delivery_error)
+
+        self._record_collected_stage_timing("total", directory_started_at)
+        stage_timing_summary = self._collected_stage_timing_summary()
 
         self._write_collected_merge_trace_summary(
             status=(
@@ -569,6 +675,7 @@ class CollectedMergeRunner:
             self_delivery_status=self_delivery_status,
             self_delivery_target=self_delivery_target,
             self_delivery_error=self_delivery_error,
+            stage_timing_summary=stage_timing_summary,
         )
 
     def _merge_source_events(
@@ -583,60 +690,102 @@ class CollectedMergeRunner:
                 target_date,
                 source_events,
             )
-        return self._merge_source_events_single_stage(
-            target_date,
-            source_events,
-            merge_owner_person=merge_owner_person,
-        )
+        content_merge_started_at = perf_counter()
+        try:
+            return self._merge_source_events_single_stage(
+                target_date,
+                source_events,
+                merge_owner_person=merge_owner_person,
+            )
+        finally:
+            self._record_collected_stage_timing(
+                "content_merge",
+                content_merge_started_at,
+            )
 
     def _merge_source_events_two_stage(
         self,
         target_date: str,
         source_events: list[CollectedSourceEvent],
     ) -> tuple[list[WorkEvent], list[str]]:
-        deterministic_groups, deterministic_warnings = self._build_deterministic_groups(
-            source_events,
-        )
-        grouping_result, grouping_warnings = self._invoke_collected_grouping_with_retry(
-            target_date,
-            source_events,
-            deterministic_groups,
-        )
-        grouping_result, repair_warnings = repair_collected_grouping_result(
-            grouping_result,
-            source_events,
-            deterministic_groups,
-        )
-        grouping_result, review_warnings = self._review_high_risk_groups(
-            target_date,
-            source_events,
-            grouping_result,
-        )
-        source_by_id = {item.draft_id: item for item in source_events}
-        multi_groups = [
-            group for group in grouping_result.groups if len(group.draft_ids) > 1
-        ]
-        singleton_groups = [
-            group for group in grouping_result.groups if len(group.draft_ids) == 1
-        ]
-        retry_warnings: list[str] = []
-        rendered_groups: list[CollectedMergeGroup] = []
-        if multi_groups:
-            rendered_groups, retry_warnings = self._render_collected_multi_groups(
+        reconciliation_started_at = perf_counter()
+        try:
+            deterministic_groups, deterministic_warnings = self._build_deterministic_groups(
+                source_events,
+            )
+        finally:
+            self._record_collected_stage_timing(
+                "candidate_reconciliation",
+                reconciliation_started_at,
+            )
+        grouping_started_at = perf_counter()
+        try:
+            grouping_result, grouping_warnings = self._invoke_collected_grouping_with_retry(
                 target_date,
                 source_events,
-                multi_groups,
+                deterministic_groups,
             )
+        finally:
+            self._record_collected_stage_timing(
+                "candidate_grouping",
+                grouping_started_at,
+            )
+        reconciliation_started_at = perf_counter()
+        try:
+            grouping_result, repair_warnings = repair_collected_grouping_result(
+                grouping_result,
+                source_events,
+                deterministic_groups,
+            )
+        finally:
+            self._record_collected_stage_timing(
+                "candidate_reconciliation",
+                reconciliation_started_at,
+            )
+        review_started_at = perf_counter()
+        try:
+            grouping_result, review_warnings = self._review_high_risk_groups(
+                target_date,
+                source_events,
+                grouping_result,
+            )
+        finally:
+            self._record_collected_stage_timing(
+                "high_risk_review",
+                review_started_at,
+            )
+        content_merge_started_at = perf_counter()
+        try:
+            source_by_id = {item.draft_id: item for item in source_events}
+            multi_groups = [
+                group for group in grouping_result.groups if len(group.draft_ids) > 1
+            ]
+            singleton_groups = [
+                group for group in grouping_result.groups if len(group.draft_ids) == 1
+            ]
+            retry_warnings: list[str] = []
+            rendered_groups: list[CollectedMergeGroup] = []
+            if multi_groups:
+                rendered_groups, retry_warnings = self._render_collected_multi_groups(
+                    target_date,
+                    source_events,
+                    multi_groups,
+                )
 
-        rendered_groups.extend(
-            _build_singleton_collected_group(source_by_id[group.draft_ids[0]], index)
-            for index, group in enumerate(singleton_groups, start=1)
-        )
-        merged_events, final_warnings = self._finalize_collected_merge_result(
-            target_date,
-            source_events,
-            CollectedMergeResult(groups=rendered_groups),
-        )
+            rendered_groups.extend(
+                _build_singleton_collected_group(source_by_id[group.draft_ids[0]], index)
+                for index, group in enumerate(singleton_groups, start=1)
+            )
+            merged_events, final_warnings = self._finalize_collected_merge_result(
+                target_date,
+                source_events,
+                CollectedMergeResult(groups=rendered_groups),
+            )
+        finally:
+            self._record_collected_stage_timing(
+                "content_merge",
+                content_merge_started_at,
+            )
         return merged_events, [
             *deterministic_warnings,
             *grouping_warnings,
@@ -1171,6 +1320,10 @@ class CollectedMergeRunner:
                 reasons=reasons,
                 config=self.config,
             )
+            decision_conflict_error = collected_grouping_decision_conflict_error(
+                result,
+                candidate_group.draft_ids,
+            )
             split_reason_error = ""
             if (
                 len(candidate_group.draft_ids) > 1
@@ -1183,7 +1336,12 @@ class CollectedMergeRunner:
                 )
             validation_error = "; ".join(
                 value
-                for value in (partition_error, relation_error, split_reason_error)
+                for value in (
+                    partition_error,
+                    decision_conflict_error,
+                    relation_error,
+                    split_reason_error,
+                )
                 if value
             )
             self._record_collected_grouping_trace_success(
@@ -1200,13 +1358,14 @@ class CollectedMergeRunner:
                 )
                 return repaired, [*warnings, *repair_warnings]
             if attempt_used_fallback:
-                if cancel_event is not None:
-                    cancel_event.set()
-                raise AnalyzerProtocolError(
-                    "High-risk collected group review failed Python validation after "
-                    "Codex fallback: "
+                warning = (
+                    "Kept the pre-review collected group because the current-request "
+                    "fallback still returned an invalid high-risk review result: "
                     f"group={candidate_group.group_id} {validation_error}"
                 )
+                warnings.append(warning)
+                self._collected_merge_failure_warnings.append(warning)
+                return CollectedGroupingResult(groups=[candidate_group]), warnings
             if (
                 invalid_result_count
                 >= self.config.collected_merge_missing_field_retry_limit
@@ -1226,30 +1385,26 @@ class CollectedMergeRunner:
                     use_fallback = True
                     fallback_from_step_index = trace_step_index
                     continue
-                if split_reason_error:
-                    warning = (
-                        "High-risk collected group split was rejected after local retry "
-                        "because no overall split reason was returned: "
-                        f"group={candidate_group.group_id}."
-                    )
-                    warnings.append(warning)
-                    self._collected_merge_failure_warnings.append(warning)
-                    return CollectedGroupingResult(groups=[candidate_group]), warnings
-                if relation_error:
-                    raise AnalyzerProtocolError(
-                        "High-risk collected group review returned an unsupported "
-                        "merge basis: "
-                        f"group={candidate_group.group_id} {relation_error}"
-                    )
-                raise AnalyzerProtocolError(
-                    "High-risk collected group review did not preserve source "
-                    f"coverage: group={candidate_group.group_id} {partition_error}"
+                warning = (
+                    "Kept the pre-review collected group because the high-risk review "
+                    "remained invalid after local retries: "
+                    f"group={candidate_group.group_id} {validation_error}"
                 )
+                warnings.append(warning)
+                self._collected_merge_failure_warnings.append(warning)
+                return CollectedGroupingResult(groups=[candidate_group]), warnings
             invalid_result_count += 1
             validation_feedback = collected_grouping_validation_feedback(
                 validation_error
             )
-            if split_reason_error:
+            if decision_conflict_error:
+                warning = (
+                    "Retrying high-risk collected group review because the merge and "
+                    "split decisions conflicted: "
+                    f"group={candidate_group.group_id} {decision_conflict_error}"
+                )
+                retry_reason = "conflicting_merge_split_decision"
+            elif split_reason_error:
                 warning = (
                     "Retrying current high-risk review because the split had no overall "
                     f"reason: group={candidate_group.group_id} {split_reason_error}"
@@ -2891,6 +3046,7 @@ class CollectedMergeRunner:
                         "status": "skipped",
                         "declared_event_count": None,
                         "parsed_event_count": 0,
+                        "event_count_delta": None,
                         "partial_event_ids": [],
                         "partial_reason": "",
                         "warning_messages": ["Invalid source filename."],
@@ -2914,6 +3070,7 @@ class CollectedMergeRunner:
                         "status": "skipped",
                         "declared_event_count": self.store.last_declared_event_count,
                         "parsed_event_count": 0,
+                        "event_count_delta": None,
                         "partial_event_ids": [],
                         "partial_reason": "",
                         "warning_messages": [str(exc)],
@@ -2944,16 +3101,6 @@ class CollectedMergeRunner:
                 warnings.append(
                     f"Source markdown date mismatch: {path.name} ({day_doc.date})"
                 )
-            if (
-                self.store.last_declared_event_count is not None
-                and self.store.last_declared_event_count != len(day_doc.events)
-                and not partial_event_ids
-            ):
-                warnings.append(
-                    f"Source markdown event count mismatch: {path.name} "
-                    f"(declared={self.store.last_declared_event_count} "
-                    f"parsed={len(day_doc.events)})."
-                )
             source_audit.append(
                 {
                     "source_file": path.name,
@@ -2962,6 +3109,10 @@ class CollectedMergeRunner:
                     "status": "partial" if partial_event_ids else "success",
                     "declared_event_count": self.store.last_declared_event_count,
                     "parsed_event_count": len(day_doc.events),
+                    "event_count_delta": _event_count_delta(
+                        self.store.last_declared_event_count,
+                        len(day_doc.events),
+                    ),
                     "partial_event_ids": partial_event_ids,
                     "partial_reason": (
                         "malformed trailing event block" if partial_event_ids else ""
@@ -3101,12 +3252,17 @@ class CollectedMergeRunner:
         finalized: list[dict[str, Any]] = []
         for item in source_audit:
             source_file = str(item.get("source_file", ""))
+            parsed_event_count = parsed_counts.get(
+                source_file,
+                int(item.get("parsed_event_count", 0)),
+            )
             finalized.append(
                 {
                     **item,
-                    "parsed_event_count": parsed_counts.get(
-                        source_file,
-                        int(item.get("parsed_event_count", 0)),
+                    "parsed_event_count": parsed_event_count,
+                    "event_count_delta": _event_count_delta(
+                        item.get("declared_event_count"),
+                        parsed_event_count,
                     ),
                     "sensitive_filtered_count": filter_counts.get(
                         (source_file, "sensitive"),
@@ -3308,6 +3464,11 @@ class CollectedMergeRunner:
         self._collected_merge_source_audit = []
         self._collected_merge_filter_diagnostics = []
         self._collected_merge_failure_warnings = []
+        self._collected_merge_stage_wall_clock_ms = Counter()
+        recorder = self._llm_usage_recorder()
+        self._collected_usage_record_start_index = (
+            len(recorder.records()) if recorder is not None else 0
+        )
         if not self.config.collected_merge_trace_enabled:
             self._collected_merge_trace_dir = None
             return
@@ -3816,6 +3977,7 @@ class CollectedMergeRunner:
             "partial_file_count": partial_file_count,
             "quality_summary": quality_summary.to_dict(),
             "llm_usage_summary": self._collected_merge_llm_usage_summary(),
+            "stage_timing_summary": self._collected_stage_timing_summary(),
             "source_files": self._collected_merge_source_audit,
             "filter_diagnostics": self._collected_merge_filter_diagnostics,
             "failed_step_indexes": [
@@ -4300,10 +4462,46 @@ def aggregate_collected_quality_summaries(
     )
 
 
+def aggregate_collected_stage_timing_summaries(
+    summaries: list[dict[str, dict[str, float]]],
+) -> dict[str, dict[str, float]]:
+    aggregated = {
+        stage: {
+            "wall_clock_ms": 0.0,
+            "request_accumulated_ms": 0.0,
+        }
+        for stage in COLLECTED_MERGE_TIMING_STAGES
+    }
+    for summary in summaries:
+        for stage, metrics in summary.items():
+            if stage not in aggregated:
+                aggregated[stage] = {
+                    "wall_clock_ms": 0.0,
+                    "request_accumulated_ms": 0.0,
+                }
+            for metric in ("wall_clock_ms", "request_accumulated_ms"):
+                value = metrics.get(metric, 0.0)
+                if isinstance(value, (int, float)):
+                    aggregated[stage][metric] += float(value)
+    return {
+        stage: {
+            metric: round(value, 3)
+            for metric, value in metrics.items()
+        }
+        for stage, metrics in aggregated.items()
+    }
+
+
 def _quality_ratio(numerator: int | float, denominator: int) -> float:
     if denominator <= 0:
         return 0.0
     return round(float(numerator) / denominator, 4)
+
+
+def _event_count_delta(declared: object, parsed: int) -> int | None:
+    if isinstance(declared, bool) or not isinstance(declared, int):
+        return None
+    return parsed - declared
 
 
 def collected_merge_text_metrics(rows: list[dict[str, str]]) -> dict[str, Any]:
@@ -4319,6 +4517,7 @@ def collected_merge_text_metrics(rows: list[dict[str, str]]) -> dict[str, Any]:
 
 def render_collected_merge_trace_summary(summary: dict[str, Any]) -> str:
     quality = summary.get("quality_summary", {})
+    timings = summary.get("stage_timing_summary", {})
     lines = [
         f"# Collected Merge Trace · {summary['target_date']}",
         "",
@@ -4354,6 +4553,22 @@ def render_collected_merge_trace_summary(summary: dict[str, Any]) -> str:
         f"| Content retries | {quality.get('content_retry_count', 0)} |",
         f"| Shortened prompts | {quality.get('shortened_prompt_count', 0)} |",
         f"| Review required | {str(bool(quality.get('review_required', False))).lower()} |",
+        "",
+        "## Stage Timings",
+        "",
+        "| Stage | Wall clock ms | Request accumulated ms |",
+        "|---|---:|---:|",
+        *[
+            "| {stage} | {wall_clock_ms} | {request_accumulated_ms} |".format(
+                stage=stage,
+                wall_clock_ms=timings.get(stage, {}).get("wall_clock_ms", 0.0),
+                request_accumulated_ms=timings.get(stage, {}).get(
+                    "request_accumulated_ms",
+                    0.0,
+                ),
+            )
+            for stage in COLLECTED_MERGE_TIMING_STAGES
+        ],
         "",
         "## Validation And Review",
         "",
@@ -4413,19 +4628,20 @@ def render_collected_merge_trace_summary(summary: dict[str, Any]) -> str:
     lines.extend(["", "## Source Files", ""])
     lines.extend(
         [
-            "| File | Format | Status | Declared | Parsed | Model input | Sensitive | Excluded | Retention |",
-            "|---|---|---|---:|---:|---:|---:|---:|---:|",
+            "| File | Format | Status | Declared | Parsed | Delta | Model input | Sensitive | Excluded | Retention |",
+            "|---|---|---|---:|---:|---:|---:|---:|---:|---:|",
         ]
     )
     for item in summary.get("source_files", []):
         lines.append(
-            "| {file} | {format} | {status} | {declared} | {parsed} | {model_input} | "
+            "| {file} | {format} | {status} | {declared} | {parsed} | {delta} | {model_input} | "
             "{sensitive} | {excluded} | {retention} |".format(
                 file=item.get("source_file", ""),
                 format=item.get("format", ""),
                 status=item.get("status", ""),
                 declared=item.get("declared_event_count", ""),
                 parsed=item.get("parsed_event_count", ""),
+                delta=item.get("event_count_delta", ""),
                 model_input=item.get("model_input_event_count", ""),
                 sensitive=item.get("sensitive_filtered_count", 0),
                 excluded=item.get("excluded_filtered_count", 0),
@@ -5138,6 +5354,23 @@ def collected_grouping_partition_error(
     return "; ".join(details)
 
 
+def collected_grouping_decision_conflict_error(
+    grouping_result: CollectedGroupingResult,
+    expected_draft_ids: list[str],
+) -> str:
+    if not _collected_grouping_split_reason(grouping_result):
+        return ""
+    if len(grouping_result.groups) != 1:
+        return ""
+    returned_ids = grouping_result.groups[0].draft_ids
+    if Counter(returned_ids) != Counter(expected_draft_ids):
+        return ""
+    return (
+        "conflicting_merge_split_decision field=split_reason "
+        f"group_id={grouping_result.groups[0].group_id}"
+    )
+
+
 def collected_grouping_validation_feedback(error: str) -> str:
     instructions: list[str] = []
     if "duplicate_draft_id" in error or "duplicate_group_member" in error:
@@ -5152,9 +5385,13 @@ def collected_grouping_validation_feedback(error: str) -> str:
         instructions.append(
             "member_connections 必须与当前组 draft_ids 完全一致，每个编号恰好一次且说明非空。"
         )
+    if "conflicting_merge_split_decision" in error:
+        instructions.append(
+            "返回内容同时表达保留原组和拆分。请重新结合完整上下文选择一致结果：保留原组时返回合法合并依据并将 split_reason 留空；拆分时返回实际子组和具体 split_reason。"
+        )
     if "merge_reason_missing" in error:
         instructions.append(
-            "无法给出配置允许的具体语义理由时必须拆分，不要用宽泛共同背景代替。"
+            "重新结合完整上下文判断。保留多事件组时补充配置允许的具体语义依据；拆分时返回实际子组和具体 split_reason，不预设方向。"
         )
     if "evidence_does_not_cover_group" in error:
         instructions.append(

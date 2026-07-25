@@ -33,6 +33,24 @@ def _dict_list(value: Any) -> list[dict[str, Any]]:
     return result
 
 
+def _stage_timing_summary(value: Any) -> dict[str, dict[str, float]]:
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise TypeError("Expected stage timing summary to be a dictionary.")
+    result: dict[str, dict[str, float]] = {}
+    for stage, metrics in value.items():
+        if not isinstance(metrics, dict):
+            raise TypeError("Expected stage timing metrics to be dictionaries.")
+        result[str(stage)] = {
+            "wall_clock_ms": float(metrics.get("wall_clock_ms", 0.0)),
+            "request_accumulated_ms": float(
+                metrics.get("request_accumulated_ms", 0.0)
+            ),
+        }
+    return result
+
+
 @dataclass(frozen=True)
 class SelfIdentity:
     open_id: str
@@ -2024,6 +2042,7 @@ class CollectedMergeOutput:
     self_delivery_status: str = ""
     self_delivery_target: str = ""
     self_delivery_error: str = ""
+    stage_timing_summary: dict[str, dict[str, float]] = field(default_factory=dict)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> CollectedMergeOutput:
@@ -2052,6 +2071,9 @@ class CollectedMergeOutput:
             self_delivery_error=str(
                 data.get("self_delivery_error", data.get("upload_error", ""))
             ),
+            stage_timing_summary=_stage_timing_summary(
+                data.get("stage_timing_summary")
+            ),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -2068,6 +2090,10 @@ class CollectedMergeOutput:
             "self_delivery_status": self.self_delivery_status,
             "self_delivery_target": self.self_delivery_target,
             "self_delivery_error": self.self_delivery_error,
+            "stage_timing_summary": {
+                stage: dict(metrics)
+                for stage, metrics in self.stage_timing_summary.items()
+            },
         }
 
 
@@ -2090,6 +2116,7 @@ class CollectedMergeRunResult:
     self_delivery_target: str = ""
     self_delivery_error: str = ""
     outputs: list[CollectedMergeOutput] = field(default_factory=list)
+    stage_timing_summary: dict[str, dict[str, float]] = field(default_factory=dict)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> CollectedMergeRunResult:
@@ -2124,6 +2151,9 @@ class CollectedMergeRunResult:
                 CollectedMergeOutput.from_dict(item)
                 for item in _dict_list(data.get("outputs"))
             ],
+            stage_timing_summary=_stage_timing_summary(
+                data.get("stage_timing_summary")
+            ),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -2143,6 +2173,10 @@ class CollectedMergeRunResult:
             "self_delivery_target": self.self_delivery_target,
             "self_delivery_error": self.self_delivery_error,
             "outputs": [item.to_dict() for item in self.outputs],
+            "stage_timing_summary": {
+                stage: dict(metrics)
+                for stage, metrics in self.stage_timing_summary.items()
+            },
         }
 
 

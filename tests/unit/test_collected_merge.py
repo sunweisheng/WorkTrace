@@ -1736,6 +1736,57 @@ def test_collected_merge_partially_reads_truncated_source_file(
     ]
 
 
+def test_collected_merge_records_declared_count_difference_without_warning(
+    tmp_path: Path,
+) -> None:
+    inbox = tmp_path / "merge_inbox" / "2026" / "06" / "29"
+    source_path = inbox / "2026-06-29-张三.md"
+    _write_day_doc(
+        source_path,
+        [
+            _event(
+                event_id="evt-kept",
+                title="人工保留事件",
+                content="来源文件允许人工删除其他事件。",
+            )
+        ],
+        tmp_path,
+    )
+    source_path.write_text(
+        source_path.read_text(encoding="utf-8").replace(
+            "event_count: 1",
+            "event_count: 2",
+        ),
+        encoding="utf-8",
+    )
+
+    trace_root = tmp_path / "trace"
+    result = _build_runner(
+        tmp_path,
+        config=RuntimeConfig(
+            data_root=tmp_path / "data",
+            collected_merge_trace_enabled=True,
+            collected_merge_trace_root=trace_root,
+        ),
+    ).run("2026-06-29")
+
+    assert result.source_event_count == 1
+    assert not any(
+        "event count mismatch" in warning.casefold()
+        for warning in result.warning_messages
+    )
+    source_audit = json.loads(
+        (trace_root / "2026-06-29" / "source-audit.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    source_file = source_audit["source_files"][0]
+    assert source_file["status"] == "success"
+    assert source_file["declared_event_count"] == 2
+    assert source_file["parsed_event_count"] == 1
+    assert source_file["event_count_delta"] == -1
+
+
 def test_collected_merge_does_not_retry_non_retryable_error(tmp_path: Path) -> None:
     class NonRetryableAnalyzer:
         def __init__(self) -> None:
@@ -1843,6 +1894,39 @@ def test_collected_grouping_validation_failure_marks_step_and_summary(
         "merged_groups": [],
         "singleton_draft_ids": [summary["steps"][0]["input_events"][0]["draft_id"]],
     }
+
+
+def test_collected_grouping_failure_still_records_stage_wall_clock(
+    tmp_path: Path,
+) -> None:
+    class FailingGroupingAnalyzer(TwoStageAnalyzer):
+        def group_collected_events(self, target_date, events, deterministic_groups):
+            raise AnalyzerProtocolError("candidate grouping failed")
+
+    inbox = tmp_path / "merge_inbox" / "2026" / "06" / "29"
+    _write_day_doc(
+        inbox / "2026-06-29-张三.md",
+        [_event(event_id="evt-1", title="事项", content="事实")],
+        tmp_path,
+    )
+    trace_root = tmp_path / "trace"
+
+    result = _build_runner(
+        tmp_path,
+        analyzer=FailingGroupingAnalyzer(),
+        config=RuntimeConfig(
+            data_root=tmp_path / "data",
+            collected_merge_trace_enabled=True,
+            collected_merge_trace_root=trace_root,
+        ),
+    ).run("2026-06-29")
+    summary = json.loads(
+        (trace_root / "2026-06-29" / "summary.json").read_text(encoding="utf-8")
+    )
+
+    assert result.status == "failed"
+    assert summary["stage_timing_summary"]["candidate_grouping"]["wall_clock_ms"] > 0
+    assert result.outputs[0].stage_timing_summary == summary["stage_timing_summary"]
 
 
 def test_collected_merge_mixes_enhanced_legacy_and_upstream_sources(
@@ -3276,7 +3360,9 @@ def test_same_conversation_review_accepts_same_deliverable_batch_reason(
     assert any("unsupported merge basis" in warning for warning in warnings)
 
 
-def test_other_high_risk_review_rejects_false_shared_file(tmp_path: Path) -> None:
+def test_other_high_risk_review_keeps_original_group_after_invalid_basis(
+    tmp_path: Path,
+) -> None:
     class FalseSharedFileAnalyzer(ReviewAnalyzer):
         def review_collected_group(
             self,
@@ -3321,13 +3407,16 @@ def test_other_high_risk_review_rejects_false_shared_file(tmp_path: Path) -> Non
         config=RuntimeConfig(collected_merge_missing_field_retry_limit=0),
     )
 
-    with pytest.raises(AnalyzerProtocolError, match="unsupported merge basis"):
-        runner._invoke_collected_review_with_retry(
-            "2026-06-29",
-            events,
-            CollectedGroupingGroup("g1", ["d0", "d1"]),
-            reasons=["source_event_count"],
-        )
+    reviewed, warnings = runner._invoke_collected_review_with_retry(
+        "2026-06-29",
+        events,
+        CollectedGroupingGroup("g1", ["d0", "d1"]),
+        reasons=["source_event_count"],
+    )
+
+    assert [group.draft_ids for group in reviewed.groups] == [["d0", "d1"]]
+    assert any("shared_file" in warning for warning in warnings)
+    assert any("Kept the pre-review collected group" in warning for warning in warnings)
 
 
 @pytest.mark.parametrize("event_count", [2, 3, 4])
@@ -3422,7 +3511,8 @@ def test_high_risk_review_rejects_split_without_reason(tmp_path: Path) -> None:
     )
 
     assert [group.draft_ids for group in reviewed.groups] == [["d0", "d1"]]
-    assert any("no overall split reason" in warning for warning in warnings)
+    assert any("split had no overall reason" in warning for warning in warnings)
+    assert any("Kept the pre-review collected group" in warning for warning in warnings)
 
 
 def test_high_risk_review_accepts_one_legacy_group_split_reason(
@@ -3518,7 +3608,7 @@ def test_high_risk_review_runs_three_multi_groups_in_parallel(tmp_path: Path) ->
     assert [group.group_id for group in reviewed.groups] == ["g0", "g1", "g2"]
 
 
-def test_high_risk_review_cancels_pending_groups_after_codex_validation_failure(
+def test_high_risk_review_keeps_all_groups_after_codex_validation_failure(
     tmp_path: Path,
 ) -> None:
     route: list[str] = []
@@ -3580,35 +3670,36 @@ def test_high_risk_review_cancels_pending_groups_after_codex_validation_failure(
         ),
     )
 
-    with pytest.raises(AnalyzerProtocolError, match="after Codex fallback"):
-        runner._review_high_risk_groups(
-            "2026-07-21",
-            events,
-            CollectedGroupingResult(groups=groups),
-        )
+    reviewed, warnings = runner._review_high_risk_groups(
+        "2026-07-21",
+        events,
+        CollectedGroupingResult(groups=groups),
+    )
 
-    assert route == ["online:g0", "online:g0", "codex:g0"]
+    assert [group.draft_ids for group in reviewed.groups] == [
+        ["d0", "d1"],
+        ["d2", "d3"],
+        ["d4", "d5"],
+    ]
+    assert route == [
+        "online:g0",
+        "online:g0",
+        "codex:g0",
+        "online:g1",
+        "online:g1",
+        "codex:g1",
+        "online:g2",
+        "online:g2",
+        "codex:g2",
+    ]
+    assert sum("Kept the pre-review collected group" in item for item in warnings) == 3
 
 
-def test_high_risk_review_stops_in_flight_group_before_its_next_retry(
+def test_high_risk_review_keeps_concurrent_groups_after_validation_failure(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from threading import Event as ThreadEvent
-
-    import src.worktrace.collected_merge as collected_merge_module
-
     route: list[str] = []
-    cancellation_started = ThreadEvent()
-    second_group_started = ThreadEvent()
     online_calls: dict[str, int] = {}
-
-    class TrackingEvent(ThreadEvent):
-        def set(self) -> None:
-            super().set()
-            cancellation_started.set()
-
-    monkeypatch.setattr(collected_merge_module, "Event", TrackingEvent)
 
     class Online:
         def review_collected_group(
@@ -3624,14 +3715,6 @@ def test_high_risk_review_stops_in_flight_group_before_its_next_retry(
             online_calls[candidate_group.group_id] = (
                 online_calls.get(candidate_group.group_id, 0) + 1
             )
-            if (
-                candidate_group.group_id == "g0"
-                and online_calls[candidate_group.group_id] == 1
-            ):
-                assert second_group_started.wait(timeout=1)
-            if candidate_group.group_id == "g1":
-                second_group_started.set()
-                assert cancellation_started.wait(timeout=1)
             return CollectedGroupingResult(
                 groups=[CollectedGroupingGroup("invalid", [events[0].draft_id])]
             )
@@ -3674,20 +3757,24 @@ def test_high_risk_review_stops_in_flight_group_before_its_next_retry(
         ),
     )
 
-    with pytest.raises(AnalyzerProtocolError):
-        runner._review_high_risk_groups(
-            "2026-07-21",
-            events,
-            CollectedGroupingResult(groups=groups),
-        )
+    reviewed, warnings = runner._review_high_risk_groups(
+        "2026-07-21",
+        events,
+        CollectedGroupingResult(groups=groups),
+    )
 
+    assert [group.draft_ids for group in reviewed.groups] == [
+        ["d0", "d1"],
+        ["d2", "d3"],
+    ]
     assert route.count("online:g0") == 2
+    assert route.count("online:g1") == 2
     assert route.count("codex:g0") == 1
-    assert route.count("online:g1") == 1
-    assert "codex:g1" not in route
+    assert route.count("codex:g1") == 1
+    assert sum("Kept the pre-review collected group" in item for item in warnings) == 2
 
 
-def test_high_risk_review_invalid_partition_retries_then_fails(
+def test_high_risk_review_invalid_partition_retries_then_keeps_original(
     tmp_path: Path,
 ) -> None:
     events = [
@@ -3709,15 +3796,17 @@ def test_high_risk_review_invalid_partition_retries_then_fails(
         ),
     )
 
-    with pytest.raises(AnalyzerProtocolError, match="did not preserve source coverage"):
-        runner._invoke_collected_review_with_retry(
-            "2026-06-29",
-            events,
-            CollectedGroupingGroup("g1", ["d0", "d1"]),
-            reasons=["cross_batch"],
-        )
+    reviewed, warnings = runner._invoke_collected_review_with_retry(
+        "2026-06-29",
+        events,
+        CollectedGroupingGroup("g1", ["d0", "d1"]),
+        reasons=["cross_batch"],
+    )
 
     assert len(analyzer.review_calls) == 2
+    assert [group.draft_ids for group in reviewed.groups] == [["d0", "d1"]]
+    assert any("source coverage was invalid" in warning for warning in warnings)
+    assert any("Kept the pre-review collected group" in warning for warning in warnings)
 
 
 def test_candidate_grouping_uses_codex_after_online_local_retry_only(
@@ -4248,4 +4337,22 @@ def test_collected_quality_summary_is_deterministic_and_trace_matches(
 
     assert trace_summary["quality_summary"] == result.quality_summary.to_dict()
     assert result.to_dict()["quality_summary"] == trace_summary["quality_summary"]
+    assert trace_summary["stage_timing_summary"] == (
+        result.outputs[0].stage_timing_summary
+    )
+    assert set(trace_summary["stage_timing_summary"]) == {
+        "source_parse",
+        "source_filter",
+        "candidate_grouping",
+        "candidate_reconciliation",
+        "high_risk_review",
+        "content_merge",
+        "markdown_write",
+        "self_delivery",
+        "total",
+    }
+    assert trace_summary["stage_timing_summary"]["total"]["wall_clock_ms"] > 0
+    assert result.stage_timing_summary["total"]["wall_clock_ms"] > 0
     assert "## Quality Summary" in trace_markdown
+    assert "## Stage Timings" in trace_markdown
+    assert "Request accumulated ms" in trace_markdown
