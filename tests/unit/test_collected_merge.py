@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from src.worktrace import __version__
 from src.worktrace.analyzers.failover import FailoverAnalyzer
 from src.worktrace.collected_merge import (
     _collected_review_result_basis_error,
@@ -343,6 +344,7 @@ def test_collected_merge_reads_sources_and_renders_source_fields(tmp_path: Path)
         ]
     ]
     content = Path(result.output_path).read_text(encoding="utf-8")
+    assert f"skill_version: {__version__}" in content
     assert "- 来源人员: 张三、李四" in content
     assert "- 来源事件 ID:" not in content
     assert '"source_event_ids":["evt-shared"]' in content

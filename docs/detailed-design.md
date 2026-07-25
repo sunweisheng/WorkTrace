@@ -472,7 +472,7 @@ CLI 会开启 `collected_merge_trace_enabled`，并保留环境配置的 trace �
 
 机器字段：
 
-- front matter：`date`、`event_count`、`generated_at`、`generator`
+- front matter：`date`、`event_count`、`generated_at`、`generator`、`skill_version`
 - event HTML 注释：稳定 `event_id`
 - retention HTML 注释：内部枚举
 - `merge_meta` HTML 注释：v2 版本、参与方式英文键、消息证据 SHA-256、按“目标日期 + 来源会话 ID”生成的同日会话 SHA-256、文件标识 SHA-256，以及非空的来源事件 ID 和来源负责人

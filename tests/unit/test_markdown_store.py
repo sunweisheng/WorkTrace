@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+from src.worktrace import __version__
 from src.worktrace.config import EventMetadataItem, RuntimeConfig
 from src.worktrace.errors import StoreWriteError
 from src.worktrace.models import DayDocument, EventFileLink, WorkEvent
@@ -96,6 +97,7 @@ def test_markdown_store_renders_public_event_fields(tmp_path: Path) -> None:
 
     content = Path(write_result.output_path).read_text(encoding="utf-8")
 
+    assert f"skill_version: {__version__}" in content
     assert "# 工作事件日报 · 2026-06-22" in content
     assert "## 事件列表" in content
     assert "<!-- worktrace:event:start event_id=\"evt1\" -->" in content

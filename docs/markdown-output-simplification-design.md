@@ -89,7 +89,7 @@
 
 当前 `stores/markdown.py` 中：
 
-- front matter 仅包含日期、事件数、生成时间和生成器
+- front matter 仅包含日期、事件数、生成时间、生成器和 Skill 版本号
 - 正文包含 `# 工作事件日报 · YYYY-MM-DD`、`## 事件列表` 和逐条编号事件
 - `retention_reason` 作为内部枚举保存在隐藏注释中，对外展示为中文“保留理由”
 

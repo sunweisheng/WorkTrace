@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
+from .. import __version__
 from ..config import RuntimeConfig
 from ..errors import StoreWriteError
 from ..models import DayDocument, EventFileLink, StoreWriteResult, WorkEvent
@@ -137,6 +138,7 @@ class MarkdownEventStore(EventStore):
                 f"event_count: {len(day_doc.events)}",
                 f"generated_at: {day_doc.generated_at}",
                 f"generator: {self.config.generator_name}",
+                f"skill_version: {__version__}",
             ]
         )
 

@@ -280,6 +280,8 @@ merge_inbox/2026/07/06/
 
 ## 输出字段
 
+个人和团队汇总 Markdown 的 front matter 都包含 `date`、`event_count`、`generated_at`、`generator` 和 `skill_version`。`skill_version` 直接读取当前 WorkTrace Skill 版本，用于确认文件由哪个版本生成；历史文件不追溯补写。
+
 个人 Markdown 事件公开字段：
 
 - 日期
