@@ -63,6 +63,8 @@ def _safe_error_category(error: Exception) -> str:
         return "permission"
     if "certificate" in message or "tls" in message:
         return "tls"
+    if not isinstance(error, RetryableAnalyzerProtocolError):
+        return "invalid_protocol"
     if "timed out" in message or "timeout" in message:
         return "timeout"
     if "network" in message or "connection" in message:
@@ -155,7 +157,7 @@ class FailoverAnalyzer(Analyzer):
         **kwargs: Any,
     ) -> Any:
         """Send one already-retried request to Codex without changing later routing."""
-        if method_name not in _REQUEST_KINDS:
+        if method_name not in _REQUEST_KINDS and method_name != "request_function":
             raise ValueError(f"Unsupported fallback analyzer method: {method_name}.")
         self._request_state.used_fallback = True
         self.usage_recorder.mark_request_fallback(
@@ -290,6 +292,7 @@ class FailoverAnalyzer(Analyzer):
         deterministic_groups: list[list[str]],
         *,
         validation_feedback: str = "",
+        previous_invalid_assignment: dict[str, object] | None = None,
     ) -> CollectedGroupingResult:
         return self._call(
             "group_collected_events",
@@ -297,6 +300,7 @@ class FailoverAnalyzer(Analyzer):
             events,
             deterministic_groups,
             validation_feedback=validation_feedback,
+            previous_invalid_assignment=previous_invalid_assignment,
         )
 
     def review_collected_group(
@@ -307,6 +311,9 @@ class FailoverAnalyzer(Analyzer):
         *,
         review_reasons: list[str] | None = None,
         validation_feedback: str = "",
+        existing_groups: list[CollectedGroupingGroup] | None = None,
+        relation_reasons: list[dict[str, object]] | None = None,
+        atomic_groups: list[list[str]] | None = None,
     ) -> CollectedGroupingResult:
         return self._call(
             "review_collected_group",
@@ -315,4 +322,7 @@ class FailoverAnalyzer(Analyzer):
             candidate_group,
             review_reasons=review_reasons,
             validation_feedback=validation_feedback,
+            existing_groups=existing_groups,
+            relation_reasons=relation_reasons,
+            atomic_groups=atomic_groups,
         )

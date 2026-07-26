@@ -5,6 +5,7 @@ import logging
 import ssl
 import threading
 from dataclasses import dataclass
+from hashlib import sha256
 from itertools import chain
 from pathlib import Path
 from queue import Empty, Queue
@@ -49,6 +50,7 @@ from ..models import (
 from ..utils.token_estimation import estimate_structured_input_tokens, prepare_model_prompt
 from .base import Analyzer, is_indivisible_collected_request, oversized_input_kwargs
 from .function_calls import (
+    COLLECTED_GROUPING_FINAL_PARAMETER_CHECKS,
     FunctionCallSpec,
     collected_grouping_call_contract,
     function_call_spec,
@@ -99,11 +101,31 @@ class _FirstStreamEventTimeoutError(TimeoutError):
     pass
 
 
+class _NonStreamRequestTimeoutError(TimeoutError):
+    pass
+
+
 @dataclass(frozen=True)
 class _FirstStreamEventResult:
     stream: object
     iterator: Iterator[object]
     event: object | None
+
+
+@dataclass(frozen=True)
+class _FunctionArgumentsRepair:
+    kind: str
+    count: int
+    json_error_line: int
+    json_error_column: int
+    json_error_position: int
+    arguments_sha256: str
+
+
+@dataclass(frozen=True)
+class _ParsedFunctionArguments:
+    payload: object
+    repair: _FunctionArgumentsRepair | None = None
 
 
 def _apply_soft_no_think(prompt: str) -> str:
@@ -207,26 +229,85 @@ def _extract_text_from_responses_stream_event(event: object) -> str:
     return ""
 
 
-def _parse_function_arguments(value: object) -> object:
+def _single_redundant_comma(value: str) -> tuple[str, int] | None:
+    candidates: list[tuple[str, int]] = []
+    in_string = False
+    escaped = False
+    for index, character in enumerate(value):
+        if in_string:
+            if escaped:
+                escaped = False
+            elif character == "\\":
+                escaped = True
+            elif character == '"':
+                in_string = False
+            continue
+        if character == '"':
+            in_string = True
+            continue
+        if character != ",":
+            continue
+        next_index = index + 1
+        while next_index < len(value) and value[next_index].isspace():
+            next_index += 1
+        if next_index < len(value) and value[next_index] == ",":
+            candidates.append(("single_duplicate_comma_outside_string", next_index))
+        elif next_index < len(value) and value[next_index] in "}]":
+            candidates.append(("single_trailing_comma_outside_string", index))
+    return candidates[0] if len(candidates) == 1 else None
+
+
+def _parse_function_arguments_with_diagnostics(
+    value: object,
+) -> _ParsedFunctionArguments:
     if isinstance(value, dict):
-        return value
+        return _ParsedFunctionArguments(value)
     if not isinstance(value, str) or not value.strip():
         raise RetryableAnalyzerProtocolError(
             "Online LLM Function call did not contain arguments."
         )
     try:
-        return json.loads(value)
+        return _ParsedFunctionArguments(json.loads(value))
     except json.JSONDecodeError as exc:
+        redundant_comma = _single_redundant_comma(value)
+        if redundant_comma is not None:
+            repair_kind, comma_position = redundant_comma
+            repaired_value = (
+                value[:comma_position]
+                + value[comma_position + 1 :]
+            )
+            try:
+                repaired_payload = json.loads(repaired_value)
+            except json.JSONDecodeError:
+                pass
+            else:
+                return _ParsedFunctionArguments(
+                    repaired_payload,
+                    _FunctionArgumentsRepair(
+                        kind=repair_kind,
+                        count=1,
+                        json_error_line=exc.lineno,
+                        json_error_column=exc.colno,
+                        json_error_position=exc.pos,
+                        arguments_sha256=sha256(value.encode("utf-8")).hexdigest(),
+                    ),
+                )
         raise RetryableAnalyzerProtocolError(
-            "Online LLM Function arguments were not valid JSON."
+            "Online LLM Function arguments were not valid JSON: "
+            f"line={exc.lineno} column={exc.colno} position={exc.pos} "
+            f"arguments_sha256={sha256(value.encode('utf-8')).hexdigest()}."
         ) from exc
 
 
-def _extract_function_arguments_from_responses_payload(
+def _parse_function_arguments(value: object) -> object:
+    return _parse_function_arguments_with_diagnostics(value).payload
+
+
+def _extract_function_arguments_with_diagnostics_from_responses_payload(
     payload: object,
     *,
     expected_name: str,
-) -> object:
+) -> _ParsedFunctionArguments:
     if not isinstance(payload, dict):
         raise RetryableAnalyzerProtocolError(
             "Online LLM response did not contain a Function call."
@@ -251,14 +332,25 @@ def _extract_function_arguments_from_responses_payload(
             "Online LLM called an unexpected Function: "
             f"expected={expected_name} actual={actual_name}"
         )
-    return _parse_function_arguments(call.get("arguments"))
+    return _parse_function_arguments_with_diagnostics(call.get("arguments"))
 
 
-def _extract_stream_function_arguments(
-    event_payloads: list[dict[str, object]],
+def _extract_function_arguments_from_responses_payload(
+    payload: object,
     *,
     expected_name: str,
 ) -> object:
+    return _extract_function_arguments_with_diagnostics_from_responses_payload(
+        payload,
+        expected_name=expected_name,
+    ).payload
+
+
+def _extract_stream_function_arguments_with_diagnostics(
+    event_payloads: list[dict[str, object]],
+    *,
+    expected_name: str,
+) -> _ParsedFunctionArguments:
     chunks_by_call: dict[str, list[str]] = {}
     names_by_call: dict[str, str] = {}
     completed_payload: dict[str, object] | None = None
@@ -311,7 +403,7 @@ def _extract_stream_function_arguments(
 
     if completed_payload is not None:
         try:
-            return _extract_function_arguments_from_responses_payload(
+            return _extract_function_arguments_with_diagnostics_from_responses_payload(
                 completed_payload,
                 expected_name=expected_name,
             )
@@ -329,7 +421,20 @@ def _extract_stream_function_arguments(
             "Online LLM stream called an unexpected Function: "
             f"expected={expected_name} actual={actual_name or 'missing'}"
         )
-    return _parse_function_arguments("".join(chunks_by_call.get(call_key, [])))
+    return _parse_function_arguments_with_diagnostics(
+        "".join(chunks_by_call.get(call_key, []))
+    )
+
+
+def _extract_stream_function_arguments(
+    event_payloads: list[dict[str, object]],
+    *,
+    expected_name: str,
+) -> object:
+    return _extract_stream_function_arguments_with_diagnostics(
+        event_payloads,
+        expected_name=expected_name,
+    ).payload
 
 
 def _has_usage(payload: dict[str, object]) -> bool:
@@ -466,6 +571,46 @@ def _read_first_stream_event(
             _close_stream(stream)
         raise _FirstStreamEventTimeoutError(
             "Online LLM did not return its first stream event before the configured timeout."
+        ) from exc
+
+    if isinstance(result, BaseException):
+        raise result
+    return result
+
+
+def _read_non_stream_response(
+    client: OpenAI,
+    body: dict[str, object],
+    *,
+    timeout_seconds: float,
+) -> dict[str, object]:
+    result_queue: Queue[dict[str, object] | BaseException] = Queue(maxsize=1)
+    cancelled = threading.Event()
+
+    def read_response() -> None:
+        try:
+            response = client.responses.create(**body)
+            result: dict[str, object] | BaseException = response.model_dump()
+        except BaseException as exc:
+            result = exc
+        if not cancelled.is_set():
+            result_queue.put_nowait(result)
+
+    worker = threading.Thread(
+        target=read_response,
+        name="worktrace-non-stream-response",
+        daemon=True,
+    )
+    worker.start()
+    try:
+        result = result_queue.get(timeout=timeout_seconds)
+    except Empty as exc:
+        cancelled.set()
+        close = getattr(client, "close", None)
+        if callable(close):
+            close()
+        raise _NonStreamRequestTimeoutError(
+            "Online LLM request exceeded the configured total timeout."
         ) from exc
 
     if isinstance(result, BaseException):
@@ -646,8 +791,12 @@ class OnlineLLMAnalyzer(Analyzer):
         self,
         batch: PersonalFactReviewBatch,
     ) -> PersonalFactReviewResult:
-        references = message_reference_ids(
-            [message for item in batch.candidates for message in item.messages]
+        allowed_message_ids = list(
+            dict.fromkeys(
+                message_id
+                for item in batch.candidates
+                for message_id in item.allowed_evidence_message_ids
+            )
         )
         payload = self._invoke_online(
             self.build_personal_fact_review_prompt(batch),
@@ -655,8 +804,8 @@ class OnlineLLMAnalyzer(Analyzer):
                 "personal_fact_review",
                 personal_fact_review_output_schema(batch),
                 draft_ids=[item.candidate.draft_id for item in batch.candidates],
+                message_ids=allowed_message_ids,
                 result_count=len(batch.candidates),
-                **references,
             ),
             **oversized_input_kwargs(batch.oversized_singleton),
         )
@@ -723,7 +872,9 @@ class OnlineLLMAnalyzer(Analyzer):
                 validation_feedback=validation_feedback,
             ),
             function_spec=contract.function_spec,
-            **oversized_input_kwargs(len(candidates) == 1),
+            **oversized_input_kwargs(
+                len(candidates) == 1 or bool(validation_feedback)
+            ),
         )
         self.last_merge_payload = payload
         return parse_personal_grouping_function_payload(
@@ -768,6 +919,7 @@ class OnlineLLMAnalyzer(Analyzer):
         deterministic_groups: list[list[str]],
         *,
         validation_feedback: str = "",
+        previous_invalid_assignment: dict[str, object] | None = None,
     ) -> CollectedGroupingResult:
         contract = collected_grouping_call_contract(
             "collected_candidate_grouping",
@@ -775,6 +927,7 @@ class OnlineLLMAnalyzer(Analyzer):
             events=events,
             deterministic_groups=deterministic_groups,
             include_split_reason=False,
+            final_parameter_checks=COLLECTED_GROUPING_FINAL_PARAMETER_CHECKS,
         )
         payload = self._invoke_online(
             build_collected_grouping_prompt(
@@ -783,11 +936,13 @@ class OnlineLLMAnalyzer(Analyzer):
                 deterministic_groups,
                 config=self.config,
                 validation_feedback=validation_feedback,
+                previous_invalid_assignment=previous_invalid_assignment,
             ),
             function_spec=contract.function_spec,
             **oversized_input_kwargs(
                 is_indivisible_collected_request(events, deterministic_groups)
                 or bool(validation_feedback)
+                or previous_invalid_assignment is not None
             ),
         )
         try:
@@ -808,13 +963,22 @@ class OnlineLLMAnalyzer(Analyzer):
         *,
         review_reasons: list[str] | None = None,
         validation_feedback: str = "",
+        existing_groups: list[CollectedGroupingGroup] | None = None,
+        relation_reasons: list[dict[str, object]] | None = None,
+        atomic_groups: list[list[str]] | None = None,
     ) -> CollectedGroupingResult:
+        relation_ids = [
+            str(item.get("relation_id", ""))
+            for item in relation_reasons or []
+            if str(item.get("relation_id", ""))
+        ]
         contract = collected_grouping_call_contract(
             "collected_group_review",
             config=self.config,
             events=events,
             deterministic_groups=[list(candidate_group.draft_ids)],
             include_split_reason=True,
+            relation_ids=relation_ids,
         )
         payload = self._invoke_online(
             build_collected_review_prompt(
@@ -824,6 +988,9 @@ class OnlineLLMAnalyzer(Analyzer):
                 config=self.config,
                 review_reasons=review_reasons,
                 validation_feedback=validation_feedback,
+                existing_groups=existing_groups,
+                relation_reasons=relation_reasons,
+                atomic_groups=atomic_groups,
             ),
             function_spec=contract.function_spec,
             **oversized_input_kwargs(True),
@@ -833,6 +1000,8 @@ class OnlineLLMAnalyzer(Analyzer):
                 payload,
                 evidence_catalog=list(contract.evidence_catalog),
                 allowed_semantic_reasons=contract.semantic_reasons,
+                allowed_relation_ids=relation_ids,
+                allowed_draft_ids=[item.draft_id for item in events],
             )
             return result
         except AnalyzerProtocolError as exc:
@@ -902,7 +1071,7 @@ class OnlineLLMAnalyzer(Analyzer):
         request_kind = function_spec.request_kind
 
         try:
-            payload, usage_payload = self._invoke_via_sdk(
+            payload, usage_payload, arguments_repair = self._invoke_via_sdk(
                 settings,
                 body,
                 function_spec=function_spec,
@@ -933,6 +1102,10 @@ class OnlineLLMAnalyzer(Analyzer):
             raise RetryableAnalyzerProtocolError(
                 "Request timed out before the first stream event."
             ) from exc
+        except _NonStreamRequestTimeoutError as exc:
+            raise RetryableAnalyzerProtocolError(
+                "Request exceeded the configured total timeout."
+            ) from exc
         except json.JSONDecodeError as exc:
             raise RetryableAnalyzerProtocolError(
                 "Online LLM stream contained invalid JSON data."
@@ -941,6 +1114,17 @@ class OnlineLLMAnalyzer(Analyzer):
             raise AnalyzerProtocolError(str(exc)) from exc
 
         usage = extract_usage(usage_payload)
+        if arguments_repair is not None:
+            logger.warning(
+                "online_llm.function_arguments.repaired request_kind=%s repair_kind=%s repair_count=%s json_error_line=%s json_error_column=%s json_error_position=%s arguments_sha256=%s",
+                request_kind,
+                arguments_repair.kind,
+                arguments_repair.count,
+                arguments_repair.json_error_line,
+                arguments_repair.json_error_column,
+                arguments_repair.json_error_position,
+                arguments_repair.arguments_sha256,
+            )
         duration_ms = log_timing(
             logger,
             "online_llm.request.completed",
@@ -962,6 +1146,32 @@ class OnlineLLMAnalyzer(Analyzer):
             estimated_input_tokens=estimated_input_tokens,
             input_target_tokens=input_target_tokens,
             oversized_singleton=oversized_singleton,
+            function_arguments_repair_kind=(
+                arguments_repair.kind if arguments_repair is not None else None
+            ),
+            function_arguments_repair_count=(
+                arguments_repair.count if arguments_repair is not None else None
+            ),
+            function_arguments_json_error_line=(
+                arguments_repair.json_error_line
+                if arguments_repair is not None
+                else None
+            ),
+            function_arguments_json_error_column=(
+                arguments_repair.json_error_column
+                if arguments_repair is not None
+                else None
+            ),
+            function_arguments_json_error_position=(
+                arguments_repair.json_error_position
+                if arguments_repair is not None
+                else None
+            ),
+            function_arguments_sha256=(
+                arguments_repair.arguments_sha256
+                if arguments_repair is not None
+                else None
+            ),
         )
         return payload
 
@@ -971,7 +1181,7 @@ class OnlineLLMAnalyzer(Analyzer):
         body: dict[str, object],
         *,
         function_spec: FunctionCallSpec,
-    ) -> tuple[object, dict[str, object]]:
+    ) -> tuple[object, dict[str, object], _FunctionArgumentsRepair | None]:
         http_client = _build_http_client(settings)
         client = OpenAI(
             api_key=settings.api_key,
@@ -1004,20 +1214,27 @@ class OnlineLLMAnalyzer(Analyzer):
                             usage_payload = event_payload
                 finally:
                     _close_stream(first_event.stream)
-                arguments = _extract_stream_function_arguments(
+                parsed_arguments = _extract_stream_function_arguments_with_diagnostics(
                     event_payloads,
                     expected_name=function_spec.name,
                 )
-                return arguments, usage_payload or (event_payloads[-1] if event_payloads else {})
-            response = client.responses.create(**body)
-            response_payload = response.model_dump()
-            return (
-                _extract_function_arguments_from_responses_payload(
+                return (
+                    parsed_arguments.payload,
+                    usage_payload or (event_payloads[-1] if event_payloads else {}),
+                    parsed_arguments.repair,
+                )
+            response_payload = _read_non_stream_response(
+                client,
+                body,
+                timeout_seconds=settings.timeout_seconds,
+            )
+            parsed_arguments = (
+                _extract_function_arguments_with_diagnostics_from_responses_payload(
                     response_payload,
                     expected_name=function_spec.name,
-                ),
-                response_payload,
+                )
             )
+            return parsed_arguments.payload, response_payload, parsed_arguments.repair
         finally:
             close = getattr(client, "close", None)
             if callable(close):

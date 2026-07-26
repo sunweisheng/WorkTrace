@@ -378,5 +378,7 @@ def test_fact_review_prompt_states_exact_fact_item_coverage_contract() -> None:
     assert output_item["additionalProperties"] is False
     assert "不要在 fact_items 之外重复返回这些文字字段" in prompt
     assert "缺少任一必填字段的合法证据时必须返回 supported=false" in prompt
+    assert "局部表述不成立不能单独作为删除整条事件的理由" in prompt
+    assert "仍无法支持标题、正文、具体对象和保留依据" in prompt
     assert "Python 会直接连接所有 content.text 生成正文" in prompt
     assert "同批其他候选中出现了某个消息 ID" in prompt

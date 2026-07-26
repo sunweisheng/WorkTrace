@@ -12,6 +12,10 @@ import pytest
 
 import scripts.replay_day_with_trace as replay_debug
 from scripts.hook_trace_wrapper import main as hook_trace_main
+from scripts.replay_failed_day_group_reviews import (
+    _failed_component_ids,
+    _latest_validation_feedback,
+)
 from scripts.replay_day_with_trace import (
     _collect_day_grouping_artifact_summary,
     _collect_llm_usage_summary,
@@ -21,12 +25,18 @@ from scripts.replay_day_with_trace import (
 )
 from scripts.report_replay_call_inputs import (
     _anchor_fallback_records,
+    _day_group_discovery_records,
     _day_group_review_records,
     _merge_records,
+    _personal_group_render_records,
     _read_completed_call_counts,
     _review_records,
 )
-from scripts.report_event_grouping_comparison import _build_comparison
+from scripts.report_event_grouping_comparison import (
+    _build_comparison,
+    _discovery_summary,
+    _render_summary,
+)
 from scripts.report_replay_timings import (
     _build_day_grouping_comparison,
     _collect_day_grouping_timing,
@@ -172,10 +182,12 @@ def test_replay_main_updates_run_status_from_subprocess_result(
     final_status = json.loads(
         (trace_root / "run_status.json").read_text(encoding="utf-8")
     )
+    summary = json.loads((trace_root / "summary.json").read_text(encoding="utf-8"))
     assert actual_returncode == returncode
     assert final_status["status"] == expected_status
     assert final_status["returncode"] == returncode
     assert final_status["completed_at_utc"]
+    assert summary["model_input_batch_target_tokens"] == 7000
 
 
 def test_replay_summary_collects_review_artifact_status(tmp_path: Path) -> None:
@@ -582,15 +594,81 @@ def test_replay_summary_reads_new_and_legacy_day_grouping_artifacts(
         merge_root / "grouping_attempts.json",
         {
             "attempts": [
-                {"status": "invalid"},
-                {"status": "success"},
-                {"status": "repaired"},
+                {"request_label": "batch-001", "status": "invalid"},
+                {"request_label": "batch-001", "status": "success"},
+                {"request_label": "summary-001", "status": "repaired"},
             ]
         },
     )
     _write_json(
+        merge_root / "day_group_discovery.json",
+        {
+            "protocol": "group_checks_v1",
+            "status": "success",
+            "input_group_count": 2,
+            "input_chars": 80,
+            "token_estimates": {
+                "online_input_estimated_tokens": 500,
+                "codex_input_estimated_tokens": 520,
+            },
+            "oversized_submission": False,
+            "attempts": [{"status": "success"}],
+            "result": {
+                "candidate_groups": [
+                    {"group_ids": ["group-001", "group-002"], "reason": "连续动作"}
+                ],
+                "group_checks": [
+                    {
+                        "group_id": "group-001",
+                        "related_group_ids": ["group-002"],
+                        "reason": "连续动作",
+                    },
+                    {
+                        "group_id": "group-002",
+                        "related_group_ids": [],
+                        "reason": "关系已由其他组提出",
+                    },
+                ],
+            },
+            "abandon_reason": "",
+        },
+    )
+    _write_json(
         merge_root / "day_group_review.json",
-        {"attempts": [{"status": "failed"}, {"status": "success"}]},
+        {
+            "attempts": [
+                {"component_id": "review-001", "status": "failed"},
+                {"component_id": "review-002", "status": "success"},
+            ]
+        },
+    )
+    _write_json(
+        date_root / "llm_usage.json",
+        {
+            "requests": [
+                {"request_kind": "day_group_review"},
+                {"request_kind": "day_group_review"},
+                {"request_kind": "day_group_discovery"},
+            ]
+        },
+    )
+    _write_json(
+        merge_root / "day_group_review_replay.json",
+        {
+            "selected_component_ids": ["review-001"],
+            "runs": [{"component_id": "review-001", "status": "success"}],
+        },
+    )
+    _write_json(
+        merge_root / "personal_group_render.json",
+        {
+            "status": "success_with_warnings",
+            "attempts": [
+                {"group_id": "group-001", "status": "failed"},
+                {"group_id": "group-001", "status": "success"},
+            ],
+            "summary": {"group_count": 1, "failure_count": 0},
+        },
     )
     _write_json(
         merge_root / "resolved_groups.json",
@@ -608,14 +686,31 @@ def test_replay_summary_reads_new_and_legacy_day_grouping_artifacts(
 
     assert current["legacy_trace"] is False
     assert current["grouping_attempt_count"] == 3
+    assert current["initial_grouping_batch_count"] == 1
+    assert current["initial_grouping_attempt_count"] == 2
+    assert current["cross_batch_summary_batch_count"] == 1
+    assert current["cross_batch_summary_attempt_count"] == 1
     assert current["grouping_failed_attempt_count"] == 1
     assert current["grouping_repair_count"] == 1
+    assert current["discovery"]["available"] is True
+    assert current["discovery"]["protocol"] == "group_checks_v1"
+    assert current["discovery"]["checked_group_count"] == 2
+    assert current["discovery"]["candidate_group_count"] == 1
     assert current["review_attempt_count"] == 2
+    assert current["review_model_request_count"] == 2
     assert current["review_failed_attempt_count"] == 1
+    assert current["review_failed_component_ids"] == ["review-001"]
+    assert current["review_replay"]["available"] is True
+    assert current["review_replay"]["statuses"] == ["success"]
+    assert current["personal_group_render"]["available"] is True
+    assert current["personal_group_render"]["attempt_count"] == 2
+    assert current["personal_group_render"]["failed_attempt_count"] == 1
     assert current["summary"]["candidate_count"] == 2
 
     (merge_root / "grouping_attempts.json").unlink()
     (merge_root / "day_group_review.json").unlink()
+    (merge_root / "day_group_discovery.json").unlink()
+    (merge_root / "personal_group_render.json").unlink()
     _write_json(
         merge_root / "resolved_groups.json",
         {"groups": [{"draft_ids": ["d1"], "workstream_name": "旧字段"}]},
@@ -629,16 +724,72 @@ def test_replay_summary_reads_new_and_legacy_day_grouping_artifacts(
     assert legacy["legacy_trace"] is True
     assert legacy["grouping_attempt_count"] == 0
     assert legacy["review_attempt_count"] == 0
+    assert legacy["review_failed_component_ids"] == []
+    assert legacy["discovery"]["available"] is False
+    assert legacy["discovery"]["attempt_count"] is None
+    assert legacy["personal_group_render"]["available"] is False
+    assert legacy["personal_group_render"]["attempt_count"] is None
     assert legacy["summary"] is None
+
+
+def test_failed_day_group_review_selection_uses_latest_component_status() -> None:
+    components = [
+        {"component_id": "review-001"},
+        {"component_id": "review-002"},
+        {"component_id": "review-003"},
+    ]
+    attempts = [
+        {"component_id": "review-001", "status": "failed"},
+        {"component_id": "review-001", "status": "success"},
+        {"component_id": "review-002", "status": "failed"},
+    ]
+
+    assert _failed_component_ids(components, attempts) == [
+        "review-002",
+        "review-003",
+    ]
+
+
+def test_failed_day_group_review_replay_uses_latest_validation_feedback() -> None:
+    attempts = [
+        {
+            "failure_kind": "validation",
+            "validation_error": "第一次校验错误",
+        },
+        {
+            "failure_kind": "validation",
+            "validation_error": "最近一次校验错误",
+        },
+        {
+            "failure_kind": "request",
+            "validation_error": "Codex 502",
+        },
+    ]
+
+    assert _latest_validation_feedback(attempts) == "最近一次校验错误"
+    assert _latest_validation_feedback(
+        [{"failure_kind": "request", "validation_error": "Online 500"}]
+    ) == ""
 
 
 def test_day_grouping_timing_separates_accumulated_requests_and_wall_clock() -> None:
     summary = {
         "llm_usage_summary": {
             "requests": [
-                {"request_kind": "day_candidate_merge", "duration_ms": 14000.0},
+                {
+                    "request_kind": "day_candidate_merge",
+                    "request_context_id": "day-group:batch-001:1",
+                    "duration_ms": 9000.0,
+                },
+                {
+                    "request_kind": "day_candidate_merge",
+                    "request_context_id": "day-group:summary-001:1",
+                    "duration_ms": 5000.0,
+                },
+                {"request_kind": "day_group_discovery", "duration_ms": 6000.0},
                 {"request_kind": "day_group_review", "duration_ms": 9000.0},
                 {"request_kind": "day_group_review", "duration_ms": 8000.0},
+                {"request_kind": "personal_group_render", "duration_ms": 4000.0},
                 {"request_kind": "workstream_assignment", "duration_ms": 25000.0},
                 {
                     "request_kind": "unassigned_workstream_assignment",
@@ -646,8 +797,17 @@ def test_day_grouping_timing_separates_accumulated_requests_and_wall_clock() -> 
                 },
             ]
         },
+        "day_grouping_artifact_summary": {
+            "discovery": {"available": True}
+        },
         "timing_summary": {
+            "totals_by_event_ms": {"runner.run.completed": 30000.0},
             "events": [
+                {
+                    "event": "runner.stage.completed",
+                    "duration_ms": 6100.0,
+                    "raw_line": 'runner.stage.completed duration_ms=6100 stage="day_group_discovery_all"',
+                },
                 {
                     "event": "runner.stage.completed",
                     "duration_ms": 9000.0,
@@ -665,6 +825,11 @@ def test_day_grouping_timing_separates_accumulated_requests_and_wall_clock() -> 
                 },
                 {
                     "event": "runner.stage.completed",
+                    "duration_ms": 4100.0,
+                    "raw_line": 'runner.stage.completed duration_ms=4100 stage="personal_group_render_all"',
+                },
+                {
+                    "event": "runner.stage.completed",
                     "duration_ms": 23500.0,
                     "raw_line": 'runner.stage.completed duration_ms=23500 stage="merge_day_candidates"',
                 },
@@ -673,32 +838,74 @@ def test_day_grouping_timing_separates_accumulated_requests_and_wall_clock() -> 
     }
 
     timing = _collect_day_grouping_timing(summary)
+    stage_by_name = {
+        item["stage"]: item for item in _collect_stage_totals(summary)
+    }
 
     assert timing["initial_grouping_request_accumulated_ms"]["total"] == 14000.0
+    assert (
+        timing["initial_grouping_first_pass_request_accumulated_ms"]["total"]
+        == 9000.0
+    )
+    assert (
+        timing["removed_summary_regrouping_request_accumulated_ms"]["total"]
+        == 5000.0
+    )
+    assert timing["title_discovery_available"] is True
+    assert timing["title_discovery_request_accumulated_ms"]["total"] == 6000.0
+    assert timing["title_discovery_wall_clock_ms"]["total"] == 6100.0
     assert timing["local_review_request_accumulated_ms"]["total"] == 17000.0
     assert timing["local_review_wall_clock_ms"]["total"] == 9100.0
+    assert timing["content_render_request_accumulated_ms"]["total"] == 4000.0
+    assert timing["content_render_wall_clock_ms"]["total"] == 4100.0
     assert timing["merge_day_candidates_wall_clock_ms"]["total"] == 23500.0
     assert timing["legacy_workstream_request_accumulated_ms"]["total"] == 39000.0
+    assert stage_by_name["merge_day_candidates"]["timing_basis"] == "wall_clock"
+    assert stage_by_name["merge_day_candidates"]["share_of_runner_total_pct"] == 78.33
 
 
 def test_day_grouping_timing_comparison_calculates_python_deltas() -> None:
     baseline = {
+        "title_discovery_available": False,
+        "title_discovery_request_accumulated_ms": {"total": 0.0},
+        "title_discovery_wall_clock_ms": {"total": 0.0},
         "initial_grouping_request_accumulated_ms": {"total": 14000.0},
+        "initial_grouping_first_pass_request_accumulated_ms": {"total": 9000.0},
+        "removed_summary_regrouping_request_accumulated_ms": {"total": 5000.0},
         "local_review_request_accumulated_ms": {"total": 0.0},
         "local_review_wall_clock_ms": {"total": 0.0},
+        "content_render_request_accumulated_ms": {"total": 0.0},
+        "content_render_wall_clock_ms": {"total": 0.0},
         "merge_day_candidates_wall_clock_ms": {"total": 54000.0},
         "legacy_workstream_request_accumulated_ms": {"total": 39000.0},
     }
     current = {
+        "title_discovery_available": True,
+        "title_discovery_request_accumulated_ms": {"total": 6000.0},
+        "title_discovery_wall_clock_ms": {"total": 6100.0},
         "initial_grouping_request_accumulated_ms": {"total": 15000.0},
+        "initial_grouping_first_pass_request_accumulated_ms": {"total": 15000.0},
+        "removed_summary_regrouping_request_accumulated_ms": {"total": 0.0},
         "local_review_request_accumulated_ms": {"total": 12000.0},
         "local_review_wall_clock_ms": {"total": 7000.0},
+        "content_render_request_accumulated_ms": {"total": 4000.0},
+        "content_render_wall_clock_ms": {"total": 4100.0},
         "merge_day_candidates_wall_clock_ms": {"total": 23000.0},
         "legacy_workstream_request_accumulated_ms": {"total": 0.0},
     }
 
     comparison = _build_day_grouping_comparison(baseline, current)
 
+    assert comparison["title_discovery_available"] == {
+        "baseline": False,
+        "current": True,
+    }
+    assert comparison["title_discovery_wall_clock_ms"]["delta_ms"] == 6100.0
+    assert comparison["content_render_wall_clock_ms"]["delta_ms"] == 4100.0
+    assert (
+        comparison["removed_summary_regrouping_request_accumulated_ms"]["delta_ms"]
+        == -5000.0
+    )
     assert comparison["merge_day_candidates_wall_clock_ms"] == {
         "baseline_ms": 54000.0,
         "current_ms": 23000.0,
@@ -720,6 +927,66 @@ def test_call_input_report_reads_day_group_review_and_marks_legacy_calls(
                 {"draft_id": "d1", "topic": "事项一", "content": "内容一"},
                 {"draft_id": "d2", "topic": "事项二", "content": "内容二"},
             ]
+        },
+    )
+    _write_json(
+        merge_root / "day_group_discovery.json",
+        {
+            "status": "success",
+            "input": {
+                "groups": [
+                    {"group_id": "group-001", "title": "事项一"},
+                    {"group_id": "group-002", "title": "事项二"},
+                ]
+            },
+            "input_chars": 88,
+            "attempts": [
+                {
+                    "attempt": 1,
+                    "request_context_id": "day-group-discovery:2026-07-15:online-1",
+                    "backend": "online",
+                    "status": "success",
+                    "online_input_estimated_tokens": 500,
+                    "codex_input_estimated_tokens": 530,
+                    "input_estimated_tokens": 530,
+                    "oversized_submission": False,
+                    "result": {
+                        "group_checks": [
+                            {
+                                "group_id": "group-001",
+                                "related_group_ids": [],
+                                "reason": "没有关联",
+                            },
+                            {
+                                "group_id": "group-002",
+                                "related_group_ids": [],
+                                "reason": "没有关联",
+                            },
+                        ]
+                    },
+                }
+            ],
+            "usage_attempts": [
+                {
+                    "request_context_id": "day-group-discovery:2026-07-15:online-1",
+                    "input_tokens": 480,
+                }
+            ],
+            "result": {
+                "candidate_groups": [],
+                "group_checks": [
+                    {
+                        "group_id": "group-001",
+                        "related_group_ids": [],
+                        "reason": "没有关联",
+                    },
+                    {
+                        "group_id": "group-002",
+                        "related_group_ids": [],
+                        "reason": "没有关联",
+                    },
+                ],
+            },
         },
     )
     _write_json(
@@ -746,11 +1013,73 @@ def test_call_input_report_reads_day_group_review_and_marks_legacy_calls(
         },
     )
     _write_json(
+        merge_root / "day_group_review_replay.json",
+        {
+            "runs": [
+                {
+                    "component_id": "day-group-review-002",
+                    "status": "abandoned",
+                    "attempts": [
+                        {
+                            "component_id": "day-group-review-002",
+                            "attempt": 1,
+                            "backend": "codex",
+                            "status": "failed",
+                            "input": {
+                                "candidate_draft_ids": ["d2"],
+                                "groups": [{"draft_ids": ["d2"]}],
+                                "relation_reasons": [],
+                            },
+                        }
+                    ],
+                }
+            ]
+        },
+    )
+    _write_json(
         merge_root / "workstream_resolution_input.json",
         {"candidates": [{"draft_id": "d1", "topic": "旧事项"}]},
     )
+    _write_json(
+        merge_root / "personal_group_render.json",
+        {
+            "status": "success",
+            "groups": [
+                {
+                    "group_id": "group-001",
+                    "draft_ids": ["d1", "d2"],
+                    "status": "success",
+                    "result": {"topic": "完整事项", "object_hint": "具体对象"},
+                }
+            ],
+            "attempts": [
+                {
+                    "group_id": "group-001",
+                    "attempt": 1,
+                    "request_context_id": "personal-group-render:2026-07-15:group-001:online-1",
+                    "backend": "online",
+                    "status": "success",
+                    "online_input_estimated_tokens": 700,
+                    "codex_input_estimated_tokens": 750,
+                    "input_estimated_tokens": 750,
+                    "oversized_submission": False,
+                }
+            ],
+            "usage_attempts": [
+                {
+                    "request_context_id": "personal-group-render:2026-07-15:group-001:online-1",
+                    "input_tokens": 680,
+                }
+            ],
+        },
+    )
 
     review_records = _day_group_review_records(
+        debug_root,
+        max_excerpts=6,
+        max_chars=120,
+    )
+    discovery_records = _day_group_discovery_records(
         debug_root,
         max_excerpts=6,
         max_chars=120,
@@ -760,10 +1089,27 @@ def test_call_input_report_reads_day_group_review_and_marks_legacy_calls(
         max_excerpts=6,
         max_chars=120,
     )
+    render_records = _personal_group_render_records(
+        debug_root,
+        max_excerpts=6,
+        max_chars=120,
+    )
 
-    assert len(review_records) == 1
+    assert len(review_records) == 2
+    assert len(discovery_records) == 1
+    assert discovery_records[0].item_count == 2
+    assert "Online 估算 500" in discovery_records[0].content_summary
+    assert "实际 input token 480" in discovery_records[0].content_summary
+    assert "逐组检查 2/2" in discovery_records[0].content_summary
     assert review_records[0].item_count == 2
     assert "day-group-review-001" in review_records[0].category
+    assert "失败范围重放" in review_records[1].category
+    assert review_records[1].source_path == (
+        merge_root / "day_group_review_replay.json"
+    )
+    assert len(render_records) == 1
+    assert render_records[0].item_count == 2
+    assert "实际 input token 680" in render_records[0].content_summary
     assert [item.category for item in merge_records] == [
         "全日初始分组",
         "旧版工作流归属",
@@ -814,3 +1160,103 @@ def test_event_grouping_comparison_reports_coverage_merge_and_split_sets() -> No
     assert comparison["changes"]["merged_candidate_ids"] == ["d2", "d3"]
     assert comparison["changes"]["split_candidate_ids"] == ["d1", "d2"]
     assert len(comparison["changes"]["candidate_partition_changes"]) == 3
+
+
+def test_event_grouping_discovery_summary_links_candidate_to_review_result(
+    tmp_path: Path,
+) -> None:
+    discovery_path = tmp_path / "day_group_discovery.json"
+    _write_json(
+        discovery_path,
+        {
+            "protocol": "group_checks_v1",
+            "status": "success",
+            "input_group_count": 2,
+            "oversized_submission": False,
+            "result": {
+                "candidate_groups": [
+                    {
+                        "group_ids": ["group-001", "group-002"],
+                        "reason": "标题显示为连续动作。",
+                    }
+                ],
+                "group_checks": [
+                    {
+                        "group_id": "group-001",
+                        "related_group_ids": ["group-002"],
+                        "reason": "标题显示为连续动作。",
+                    },
+                    {
+                        "group_id": "group-002",
+                        "related_group_ids": [],
+                        "reason": "关系已由其他组提出。",
+                    },
+                ],
+            },
+        },
+    )
+    review = {
+        "components": [
+            {
+                "component_id": "day-group-review-001",
+                "final_status": "success",
+                "final_backend": "online",
+                "final_groups": [{"draft_ids": ["d1", "d2"]}],
+                "relation_reasons": [
+                    {
+                        "relation_types": ["title_discovery"],
+                        "group_ids": ["group-001", "group-002"],
+                    }
+                ],
+            }
+        ]
+    }
+
+    summary = _discovery_summary(discovery_path, review)
+
+    assert summary["available"] is True
+    assert summary["protocol"] == "group_checks_v1"
+    assert summary["checked_group_count"] == 2
+    assert summary["candidate_group_count"] == 1
+    assert summary["candidate_groups"][0]["review_final_status"] == "success"
+    assert summary["candidate_groups"][0]["reviewed_groups"] == [
+        {"draft_ids": ["d1", "d2"]}
+    ]
+
+    _write_json(
+        discovery_path,
+        {"status": "success", "result": {"candidate_groups": []}},
+    )
+    legacy = _discovery_summary(discovery_path, {"components": []})
+    assert legacy["protocol"] is None
+    assert legacy["checked_group_count"] is None
+
+
+def test_event_grouping_render_summary_preserves_unavailable_and_results(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "personal_group_render.json"
+
+    unavailable = _render_summary(path)
+    assert unavailable["available"] is False
+    assert unavailable["summary"] is None
+
+    _write_json(
+        path,
+        {
+            "status": "success",
+            "groups": [
+                {
+                    "group_id": "group-001",
+                    "draft_ids": ["d1", "d2"],
+                    "status": "success",
+                    "result": {"topic": "完整事项"},
+                }
+            ],
+            "summary": {"group_count": 1, "failure_count": 0},
+        },
+    )
+
+    available = _render_summary(path)
+    assert available["available"] is True
+    assert available["groups"][0]["result"]["topic"] == "完整事项"

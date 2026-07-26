@@ -14,12 +14,14 @@ from src.worktrace.errors import AnalyzerProtocolError, ModelInputLimitError
 from src.worktrace.models import (
     AnalysisBatch,
     ConversationSlice,
+    CollectedSourceEvent,
     NormalizedMessage,
     PersonalFactReviewBatch,
     PersonalFactReviewCandidate,
     RetentionReviewBatch,
     RetentionReviewCandidate,
     SourceBackedEventDraft,
+    WorkEvent,
 )
 from src.worktrace.utils.token_estimation import estimate_model_input_tokens
 
@@ -209,6 +211,116 @@ def test_codex_analyzer_uses_personal_fact_review_protocol(
     assert captured["output_schema"] == function_spec.parameters
 
 
+def test_codex_day_grouping_allows_retry_feedback_to_cross_input_target(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = load_runtime_config_overrides(
+        RuntimeConfig(data_root=tmp_path / "data", analyzer_backend="codex"),
+        cwd=Path.cwd(),
+    )
+    analyzer = CodexAnalyzer(config=config, cwd=tmp_path)
+    captured: dict[str, object] = {}
+    candidate = sample_retention_review_batch().candidates[0].candidate
+
+    def fake_invoke(
+        prompt,
+        *,
+        output_schema,
+        request_kind="auxiliary_json",
+        **kwargs,
+    ):
+        captured.update(
+            prompt=prompt,
+            output_schema=output_schema,
+            request_kind=request_kind,
+            **kwargs,
+        )
+        return {
+            "merged_groups": [],
+            "singleton_draft_ids": [candidate.draft_id],
+        }
+
+    monkeypatch.setattr(analyzer, "_invoke_codex", fake_invoke)
+
+    result = analyzer.merge_day_candidates(
+        candidate.date,
+        [candidate],
+        validation_feedback="member_connection_evidence_invalid",
+    )
+
+    assert result.groups[0].draft_ids == [candidate.draft_id]
+    assert captured["allow_oversized_input"] is True
+    assert "member_connection_evidence_invalid" in str(captured["prompt"])
+
+
+def test_codex_collected_grouping_adds_assignment_only_on_validation_retry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = load_runtime_config_overrides(
+        RuntimeConfig(data_root=tmp_path / "data"),
+        cwd=Path.cwd(),
+    )
+    analyzer = CodexAnalyzer(config=config, cwd=tmp_path)
+    captured: list[dict[str, object]] = []
+    events = [
+        CollectedSourceEvent(
+            draft_id,
+            draft_id,
+            f"{draft_id}.md",
+            WorkEvent("2026-07-22", draft_id, draft_id, f"处理 {draft_id}"),
+        )
+        for draft_id in ("d1", "d2")
+    ]
+    previous = {
+        "merged_groups": [],
+        "singleton_draft_ids": ["d1"],
+    }
+
+    def fake_invoke(
+        prompt,
+        *,
+        output_schema=None,
+        request_kind="auxiliary_json",
+        allow_oversized_input=False,
+        function_spec=None,
+    ):
+        captured.append(
+            {
+                "prompt": prompt,
+                "function_spec": function_spec,
+                "allow_oversized_input": allow_oversized_input,
+            }
+        )
+        return {
+            "merged_groups": [],
+            "singleton_draft_ids": ["d1", "d2"],
+        }
+
+    monkeypatch.setattr(analyzer, "_invoke_codex", fake_invoke)
+
+    analyzer.group_collected_events("2026-07-22", events, [])
+    analyzer.group_collected_events(
+        "2026-07-22",
+        events,
+        [],
+        validation_feedback="duplicate_draft_id",
+        previous_invalid_assignment=previous,
+    )
+
+    initial_prompt = json.loads(str(captured[0]["prompt"]))
+    retry_prompt = json.loads(str(captured[1]["prompt"]))
+    assert "previous_invalid_assignment" not in initial_prompt
+    assert captured[0]["function_spec"].final_parameter_checks
+    assert retry_prompt["previous_invalid_assignment"] == previous
+    assert (
+        captured[1]["function_spec"].final_parameter_checks
+        == captured[0]["function_spec"].final_parameter_checks
+    )
+    assert captured[1]["allow_oversized_input"] is True
+
+
 def test_codex_analyzer_surfaces_stderr_tail_on_failure(tmp_path: Path) -> None:
     def fake_runner(args, *, cwd=None, timeout=None, input_text=None):
         class Result:
@@ -352,6 +464,29 @@ def test_codex_analyzer_passes_output_schema_in_default_mode(tmp_path: Path) -> 
     assert "--output-schema" in captured["args"]
     assert captured["schema"] == schema
     assert captured["input_text"] is None
+
+
+def test_codex_analyzer_uses_configured_llm_timeout(tmp_path: Path) -> None:
+    (tmp_path / ".env").write_text(
+        "WORKTRACE_LLM_TIMEOUT_SECONDS=1200\n",
+        encoding="utf-8",
+    )
+    captured: dict[str, object] = {}
+
+    def fake_runner(args, *, cwd=None, timeout=None, input_text=None):
+        output_path = Path(args[args.index("-o") + 1])
+        output_path.write_text("{}", encoding="utf-8")
+        captured["timeout"] = timeout
+        return subprocess.CompletedProcess(args=args, returncode=0, stdout="", stderr="")
+
+    analyzer = CodexAnalyzer(
+        config=RuntimeConfig(data_root=tmp_path / "data", analyzer_backend="codex"),
+        command_runner=fake_runner,
+        cwd=tmp_path,
+    )
+
+    assert analyzer._invoke_codex("处理输入") == {}
+    assert captured["timeout"] == 1200
 
 
 def test_codex_request_pacer_reserves_shared_interval(

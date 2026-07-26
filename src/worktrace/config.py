@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Mapping
@@ -215,6 +216,29 @@ def _parse_non_negative_int(raw_value: str, *, env_var: str) -> int:
     return value
 
 
+def load_llm_timeout_seconds(
+    config: RuntimeConfig,
+    *,
+    cwd: Path | None = None,
+    environ: Mapping[str, str] | None = None,
+) -> int:
+    values = _read_local_env_values(config, cwd=cwd, environ=environ)
+    timeout_raw = values.get(config.llm_timeout_env_var, "").strip()
+    if not timeout_raw:
+        return config.analyzer_timeout_seconds
+    try:
+        timeout_seconds = int(timeout_raw)
+    except ValueError as exc:
+        raise ValueError(
+            f"Invalid LLM timeout: {config.llm_timeout_env_var} must be an integer."
+        ) from exc
+    if timeout_seconds <= 0:
+        raise ValueError(
+            f"Invalid LLM timeout: {config.llm_timeout_env_var} must be positive."
+        )
+    return timeout_seconds
+
+
 def load_online_llm_settings(
     config: RuntimeConfig,
     *,
@@ -231,19 +255,11 @@ def load_online_llm_settings(
     if missing:
         raise ValueError(build_missing_llm_config_message(config, missing))
 
-    timeout_raw = values.get(config.llm_timeout_env_var, "").strip()
-    timeout_seconds = config.analyzer_timeout_seconds
-    if timeout_raw:
-        try:
-            timeout_seconds = int(timeout_raw)
-        except ValueError as exc:
-            raise ValueError(
-                f"Invalid online LLM timeout: {config.llm_timeout_env_var} must be an integer."
-            ) from exc
-        if timeout_seconds <= 0:
-            raise ValueError(
-                f"Invalid online LLM timeout: {config.llm_timeout_env_var} must be positive."
-            )
+    timeout_seconds = load_llm_timeout_seconds(
+        config,
+        cwd=cwd,
+        environ=environ,
+    )
 
     stream_raw = values.get(config.llm_stream_env_var, "").strip()
     stream_enabled = config.llm_stream_enabled
@@ -719,9 +735,14 @@ def _load_event_grouping_overrides(
             f"Invalid event grouping config: {config_path} must contain a JSON object."
         )
     expected_keys = {
+        "attachment_name_normalization",
+        "collected_group_discovery_rules",
+        "personal_group_discovery_rules",
         "personal_grouping_negative_examples",
+        "personal_grouping_positive_examples",
         "personal_grouping_rules",
         "personal_review_rules",
+        "collected_review_rules",
         "group_reason_definitions",
     }
     if set(payload) != expected_keys:
@@ -742,6 +763,13 @@ def _load_event_grouping_overrides(
         file_path=config_path,
         error_prefix="Invalid event grouping config",
     )
+    collected_review_rules = _read_string_list(
+        payload,
+        key="collected_review_rules",
+        fallback=(),
+        file_path=config_path,
+        error_prefix="Invalid event grouping config",
+    )
     negative_examples = _read_string_list(
         payload,
         key="personal_grouping_negative_examples",
@@ -749,9 +777,84 @@ def _load_event_grouping_overrides(
         file_path=config_path,
         error_prefix="Invalid event grouping config",
     )
-    if not grouping_rules or not negative_examples or not review_rules:
+    positive_examples = _read_string_list(
+        payload,
+        key="personal_grouping_positive_examples",
+        fallback=(),
+        file_path=config_path,
+        error_prefix="Invalid event grouping config",
+    )
+    discovery_rules = _read_string_list(
+        payload,
+        key="personal_group_discovery_rules",
+        fallback=(),
+        file_path=config_path,
+        error_prefix="Invalid event grouping config",
+    )
+    collected_discovery_rules = _read_string_list(
+        payload,
+        key="collected_group_discovery_rules",
+        fallback=(),
+        file_path=config_path,
+        error_prefix="Invalid event grouping config",
+    )
+    attachment_normalization = payload["attachment_name_normalization"]
+    if not isinstance(attachment_normalization, dict) or set(
+        attachment_normalization
+    ) != {
+        "ignored_extensions",
+        "ignored_mime_type_prefixes",
+        "version_suffix_patterns",
+    }:
         raise ValueError(
-            "Invalid event grouping config: personal rules and examples must not be empty."
+            "Invalid event grouping config: attachment_name_normalization fields "
+            "do not match the contract."
+        )
+    ignored_mime_type_prefixes = _read_string_list(
+        attachment_normalization,
+        key="ignored_mime_type_prefixes",
+        fallback=(),
+        file_path=config_path,
+        error_prefix="Invalid event grouping config",
+    )
+    ignored_extensions = _read_string_list(
+        attachment_normalization,
+        key="ignored_extensions",
+        fallback=(),
+        file_path=config_path,
+        error_prefix="Invalid event grouping config",
+    )
+    version_suffix_patterns = _read_string_list(
+        attachment_normalization,
+        key="version_suffix_patterns",
+        fallback=(),
+        file_path=config_path,
+        error_prefix="Invalid event grouping config",
+    )
+    try:
+        for pattern in version_suffix_patterns:
+            re.compile(pattern)
+    except re.error as exc:
+        raise ValueError(
+            "Invalid event grouping config: version suffix pattern is invalid."
+        ) from exc
+    if not all(
+        (
+            grouping_rules,
+            negative_examples,
+            positive_examples,
+            discovery_rules,
+            collected_discovery_rules,
+            review_rules,
+            collected_review_rules,
+            ignored_mime_type_prefixes,
+            ignored_extensions,
+            version_suffix_patterns,
+        )
+    ):
+        raise ValueError(
+            "Invalid event grouping config: personal rules, examples and attachment "
+            "normalization must not be empty."
         )
     definitions = _read_collected_group_reason_definitions(
         payload["group_reason_definitions"],
@@ -761,8 +864,15 @@ def _load_event_grouping_overrides(
     return replace(
         config,
         personal_grouping_negative_examples=negative_examples,
+        personal_grouping_positive_examples=positive_examples,
+        personal_group_discovery_rules=discovery_rules,
+        collected_group_discovery_rules=collected_discovery_rules,
         personal_grouping_rules=grouping_rules,
         personal_group_review_rules=review_rules,
+        collected_group_review_rules=collected_review_rules,
+        attachment_ignored_mime_type_prefixes=ignored_mime_type_prefixes,
+        attachment_ignored_extensions=ignored_extensions,
+        attachment_version_suffix_patterns=version_suffix_patterns,
         collected_group_reason_definitions=definitions,
     )
 
@@ -1230,7 +1340,7 @@ class RuntimeConfig:
     conversation_segmentation_failure_threshold: int = 2
     reaction_discovery_page_limit: int = 3
     slice_base_limit: int = 150
-    model_input_batch_target_tokens: int = 5200
+    model_input_batch_target_tokens: int = 7000
     collected_merge_missing_field_retry_ratio: float = 0.2
     collected_merge_missing_field_retry_limit: int = 1
     collected_merge_trace_enabled: bool = False
@@ -1250,7 +1360,14 @@ class RuntimeConfig:
     ] = DEFAULT_COLLECTED_GROUP_REASON_DEFINITIONS
     personal_grouping_rules: tuple[str, ...] = ()
     personal_grouping_negative_examples: tuple[str, ...] = ()
+    personal_grouping_positive_examples: tuple[str, ...] = ()
+    personal_group_discovery_rules: tuple[str, ...] = ()
+    collected_group_discovery_rules: tuple[str, ...] = ()
     personal_group_review_rules: tuple[str, ...] = ()
+    collected_group_review_rules: tuple[str, ...] = ()
+    attachment_ignored_mime_type_prefixes: tuple[str, ...] = ()
+    attachment_ignored_extensions: tuple[str, ...] = ()
+    attachment_version_suffix_patterns: tuple[str, ...] = ()
     slice_retry_limit: int = 3
     prompt_slice_message_limit: int = 40
     prompt_message_char_limit: int = 300

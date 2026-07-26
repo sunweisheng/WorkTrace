@@ -3,12 +3,17 @@ from __future__ import annotations
 import copy
 from typing import Sequence
 
-from ..errors import AnalyzerProtocolError, PersonalGroupingValidationError
+from ..errors import (
+    AnalyzerProtocolError,
+    DayGroupDiscoveryValidationError,
+    PersonalGroupingValidationError,
+)
 from ..models import (
     AnchorAnalysisResult,
     BatchAnalysisResult,
     BatchAnchorAnalysisResult,
     BatchSegmentAnalysisResult,
+    CollectedGroupRelationResolution,
     CollectedGroupMemberConnection,
     CollectedGroupingGroup,
     CollectedGroupingResult,
@@ -16,7 +21,15 @@ from ..models import (
     ConversationSegmentationResult,
     CrossConversationGroup,
     CrossConversationGroupResult,
+    DayGroupDiscoveryCandidate,
+    DayGroupDiscoveryCheck,
+    DayGroupDiscoveryResult,
+    DayGroupRelationResolution,
+    DayGroupReviewResult,
     PersonalFactReviewResult,
+    PersonalFactItem,
+    PersonalGroupRenderItem,
+    PersonalGroupRenderResult,
     RetentionReviewResult,
     SourceBackedEventDraft,
 )
@@ -226,6 +239,427 @@ def parse_merge_payload(payload: object) -> CrossConversationGroupResult:
         return CrossConversationGroupResult.from_dict(data)
     except (KeyError, TypeError, ValueError) as exc:
         raise AnalyzerProtocolError("Invalid cross-conversation merge payload.") from exc
+
+
+def parse_day_group_discovery_payload(
+    payload: object,
+    *,
+    allowed_group_ids: Sequence[str],
+) -> DayGroupDiscoveryResult:
+    try:
+        data = expect_json_object(payload, "Day group discovery result")
+    except AnalyzerProtocolError as exc:
+        raise DayGroupDiscoveryValidationError(str(exc)) from exc
+    if set(data) != {"group_checks"}:
+        raise DayGroupDiscoveryValidationError(
+            "unexpected_fields field=day_group_discovery expected=['group_checks']"
+        )
+    raw_checks = data["group_checks"]
+    if not isinstance(raw_checks, list):
+        raise DayGroupDiscoveryValidationError(
+            "invalid_type field=group_checks expected=array"
+        )
+
+    allowed = list(dict.fromkeys(allowed_group_ids))
+    allowed_set = set(allowed)
+    order = {group_id: index for index, group_id in enumerate(allowed)}
+    seen_group_ids: set[str] = set()
+    checks_by_group_id: dict[str, DayGroupDiscoveryCheck] = {}
+    for index, item in enumerate(raw_checks):
+        field = f"group_checks[{index}]"
+        if not isinstance(item, dict) or set(item) != {
+            "group_id",
+            "related_group_ids",
+            "reason",
+        }:
+            raise DayGroupDiscoveryValidationError(
+                "unexpected_fields "
+                f"field={field} expected=['group_id', 'reason', 'related_group_ids']"
+            )
+        group_id = item["group_id"]
+        raw_related_ids = item["related_group_ids"]
+        reason = item["reason"]
+        if not isinstance(group_id, str):
+            raise DayGroupDiscoveryValidationError(
+                f"invalid_type field={field}.group_id expected=string"
+            )
+        if group_id not in allowed_set:
+            raise DayGroupDiscoveryValidationError(
+                f"unknown_group field={field}.group_id group_id={group_id}"
+            )
+        if group_id in seen_group_ids:
+            raise DayGroupDiscoveryValidationError(
+                f"duplicate_group_check field={field}.group_id group_id={group_id}"
+            )
+        if index >= len(allowed) or group_id != allowed[index]:
+            expected = allowed[index] if index < len(allowed) else "<none>"
+            raise DayGroupDiscoveryValidationError(
+                "out_of_order_group_check "
+                f"field={field}.group_id expected={expected} actual={group_id}"
+            )
+        seen_group_ids.add(group_id)
+        if not isinstance(raw_related_ids, list) or any(
+            not isinstance(related_id, str) for related_id in raw_related_ids
+        ):
+            raise DayGroupDiscoveryValidationError(
+                f"invalid_type field={field}.related_group_ids expected=array_of_strings"
+            )
+        if len(set(raw_related_ids)) != len(raw_related_ids):
+            raise DayGroupDiscoveryValidationError(
+                f"duplicate_related_group field={field}.related_group_ids"
+            )
+        if group_id in raw_related_ids:
+            raise DayGroupDiscoveryValidationError(
+                f"self_related_group field={field}.related_group_ids group_id={group_id}"
+            )
+        unknown = sorted(set(raw_related_ids).difference(allowed_set))
+        if unknown:
+            raise DayGroupDiscoveryValidationError(
+                f"unknown_group field={field}.related_group_ids group_ids={unknown}"
+            )
+        if not isinstance(reason, str) or not reason.strip():
+            raise DayGroupDiscoveryValidationError(
+                f"empty_reason field={field}.reason"
+            )
+        checks_by_group_id[group_id] = DayGroupDiscoveryCheck(
+            group_id=group_id,
+            related_group_ids=sorted(raw_related_ids, key=order.__getitem__),
+            reason=reason.strip(),
+        )
+
+    missing = [group_id for group_id in allowed if group_id not in seen_group_ids]
+    if missing:
+        raise DayGroupDiscoveryValidationError(
+            f"missing_group_checks field=group_checks group_ids={missing}"
+        )
+
+    adjacency = {group_id: set() for group_id in allowed}
+    for check in checks_by_group_id.values():
+        for related_id in check.related_group_ids:
+            adjacency[check.group_id].add(related_id)
+            adjacency[related_id].add(check.group_id)
+
+    candidates: list[DayGroupDiscoveryCandidate] = []
+    visited: set[str] = set()
+    for start_group_id in allowed:
+        if start_group_id in visited or not adjacency[start_group_id]:
+            continue
+        stack = [start_group_id]
+        component: list[str] = []
+        while stack:
+            group_id = stack.pop()
+            if group_id in visited:
+                continue
+            visited.add(group_id)
+            component.append(group_id)
+            stack.extend(
+                sorted(
+                    adjacency[group_id].difference(visited),
+                    key=order.__getitem__,
+                    reverse=True,
+                )
+            )
+        component.sort(key=order.__getitem__)
+        component_set = set(component)
+        reasons = [
+            f"{check.group_id}: {check.reason}"
+            for check in (checks_by_group_id[group_id] for group_id in component)
+            if component_set.intersection(check.related_group_ids)
+        ]
+        candidates.append(
+            DayGroupDiscoveryCandidate(
+                group_ids=component,
+                reason="；".join(dict.fromkeys(reasons)),
+            )
+        )
+    return DayGroupDiscoveryResult(
+        candidate_groups=candidates,
+        group_checks=[checks_by_group_id[group_id] for group_id in allowed],
+    )
+
+
+def parse_day_group_review_payload(
+    payload: object,
+    *,
+    candidates: Sequence[SourceBackedEventDraft],
+    allowed_semantic_reasons: Sequence[str],
+    allowed_relation_ids: Sequence[str],
+) -> DayGroupReviewResult:
+    try:
+        data = expect_json_object(payload, "Day group review Function result")
+    except AnalyzerProtocolError as exc:
+        raise PersonalGroupingValidationError(str(exc)) from exc
+    expected_fields = {
+        "merged_groups",
+        "singleton_draft_ids",
+        "relation_resolutions",
+    }
+    if set(data) != expected_fields:
+        raise PersonalGroupingValidationError(
+            "unexpected_fields field=day_group_review "
+            f"expected={sorted(expected_fields)} actual={sorted(data)}"
+        )
+    grouping_result = parse_personal_grouping_function_payload(
+        {
+            "merged_groups": data["merged_groups"],
+            "singleton_draft_ids": data["singleton_draft_ids"],
+        },
+        candidates=candidates,
+        allowed_semantic_reasons=allowed_semantic_reasons,
+    )
+
+    raw_resolutions = data["relation_resolutions"]
+    if not isinstance(raw_resolutions, list):
+        raise PersonalGroupingValidationError(
+            "invalid_type field=relation_resolutions expected=array"
+        )
+    allowed_relations = list(dict.fromkeys(allowed_relation_ids))
+    allowed_relation_set = set(allowed_relations)
+    candidate_ids = {item.draft_id for item in candidates}
+    allowed_message_ids = {
+        message_id
+        for item in candidates
+        for message_id in item.source_message_ids
+    }
+    seen_relations: set[str] = set()
+    resolutions: list[DayGroupRelationResolution] = []
+    errors: list[str] = []
+    required_resolution_fields = {
+        "relation_id",
+        "decision",
+        "connected_draft_ids",
+        "reason",
+        "evidence_message_ids",
+    }
+    for index, raw_resolution in enumerate(raw_resolutions):
+        prefix = f"relation_resolutions[{index}]"
+        if not isinstance(raw_resolution, dict):
+            errors.append(f"invalid_resolution field={prefix}")
+            continue
+        if set(raw_resolution) != required_resolution_fields:
+            errors.append(
+                f"unexpected_fields field={prefix} "
+                f"expected={sorted(required_resolution_fields)} "
+                f"actual={sorted(raw_resolution)}"
+            )
+            continue
+        relation_id = str(raw_resolution["relation_id"]).strip()
+        if relation_id not in allowed_relation_set:
+            errors.append(
+                f"unknown_relation field={prefix}.relation_id relation_id={relation_id}"
+            )
+        elif relation_id in seen_relations:
+            errors.append(
+                f"duplicate_relation field={prefix}.relation_id relation_id={relation_id}"
+            )
+        seen_relations.add(relation_id)
+        decision = str(raw_resolution["decision"]).strip()
+        if decision not in {"merged", "separate"}:
+            errors.append(
+                f"invalid_decision field={prefix}.decision decision={decision}"
+            )
+        raw_connected_ids = raw_resolution["connected_draft_ids"]
+        connected_ids = (
+            [str(value) for value in raw_connected_ids]
+            if isinstance(raw_connected_ids, list)
+            else []
+        )
+        if not isinstance(raw_connected_ids, list):
+            errors.append(
+                f"invalid_type field={prefix}.connected_draft_ids expected=array"
+            )
+        if len(connected_ids) != len(set(connected_ids)):
+            errors.append(
+                f"duplicate_member field={prefix}.connected_draft_ids"
+            )
+        unknown_drafts = sorted(set(connected_ids).difference(candidate_ids))
+        if unknown_drafts:
+            errors.append(
+                f"unknown_member field={prefix}.connected_draft_ids "
+                f"draft_ids={unknown_drafts}"
+            )
+        reason = raw_resolution["reason"]
+        if not isinstance(reason, str) or not reason.strip():
+            errors.append(f"empty_reason field={prefix}.reason")
+        raw_evidence_ids = raw_resolution["evidence_message_ids"]
+        evidence_ids = (
+            [str(value) for value in raw_evidence_ids]
+            if isinstance(raw_evidence_ids, list)
+            else []
+        )
+        if not isinstance(raw_evidence_ids, list) or not evidence_ids:
+            errors.append(
+                f"invalid_evidence field={prefix}.evidence_message_ids"
+            )
+        if len(evidence_ids) != len(set(evidence_ids)):
+            errors.append(
+                f"duplicate_evidence field={prefix}.evidence_message_ids"
+            )
+        unknown_evidence = sorted(set(evidence_ids).difference(allowed_message_ids))
+        if unknown_evidence:
+            errors.append(
+                f"unknown_evidence field={prefix}.evidence_message_ids "
+                f"message_ids={unknown_evidence}"
+            )
+        resolutions.append(
+            DayGroupRelationResolution(
+                relation_id=relation_id,
+                decision=decision,
+                connected_draft_ids=connected_ids,
+                reason=reason.strip() if isinstance(reason, str) else "",
+                evidence_message_ids=evidence_ids,
+            )
+        )
+    missing_relations = [
+        relation_id
+        for relation_id in allowed_relations
+        if relation_id not in seen_relations
+    ]
+    if missing_relations:
+        errors.append(f"missing_relations relation_ids={missing_relations}")
+    if errors:
+        raise PersonalGroupingValidationError(
+            "Day group review Function result is invalid: " + "; ".join(errors)
+        )
+    return DayGroupReviewResult(
+        grouping_result=grouping_result,
+        relation_resolutions=resolutions,
+    )
+
+
+def parse_personal_group_render_payload(
+    payload: object,
+    *,
+    group: CrossConversationGroup,
+    candidates: Sequence[SourceBackedEventDraft],
+) -> PersonalGroupRenderResult:
+    data = expect_json_object(payload, "Personal group render Function result")
+    if set(data) != {"groups"} or not isinstance(data["groups"], list):
+        raise AnalyzerProtocolError(
+            "Personal group render result must contain only a groups array."
+        )
+    raw_groups = data["groups"]
+    if len(raw_groups) != 1 or not isinstance(raw_groups[0], dict):
+        raise AnalyzerProtocolError(
+            "Personal group render result must return exactly one group."
+        )
+    raw_group = raw_groups[0]
+    expected_group_fields = {"group_id", "covered_draft_ids", "fact_items"}
+    if set(raw_group) != expected_group_fields:
+        raise AnalyzerProtocolError(
+            "Personal group render result has unexpected group fields."
+        )
+    group_id = str(raw_group["group_id"]).strip()
+    if group_id != group.group_id:
+        raise AnalyzerProtocolError(
+            "Personal group render result returned an unknown group_id."
+        )
+    raw_covered_ids = raw_group["covered_draft_ids"]
+    covered_ids = (
+        [str(value) for value in raw_covered_ids]
+        if isinstance(raw_covered_ids, list)
+        else []
+    )
+    if (
+        len(covered_ids) != len(set(covered_ids))
+        or set(covered_ids) != set(group.draft_ids)
+    ):
+        raise AnalyzerProtocolError(
+            "Personal group render result must cover every locked draft exactly once."
+        )
+    candidate_by_id = {item.draft_id: item for item in candidates}
+    allowed_message_ids = {
+        message_id
+        for draft_id in group.draft_ids
+        for message_id in candidate_by_id[draft_id].source_message_ids
+    }
+    raw_fact_items = raw_group["fact_items"]
+    if not isinstance(raw_fact_items, list):
+        raise AnalyzerProtocolError(
+            "Personal group render fact_items must be an array."
+        )
+    fact_items: list[PersonalFactItem] = []
+    by_field: dict[str, list[PersonalFactItem]] = {}
+    for index, raw_fact in enumerate(raw_fact_items):
+        if not isinstance(raw_fact, dict) or set(raw_fact) != {
+            "field",
+            "text",
+            "evidence_message_ids",
+        }:
+            raise AnalyzerProtocolError(
+                f"Personal group render fact_items[{index}] has invalid fields."
+            )
+        field_name = str(raw_fact["field"]).strip()
+        if field_name not in {"topic", "content", "object_hint"}:
+            raise AnalyzerProtocolError(
+                f"Personal group render fact_items[{index}] has an invalid field."
+            )
+        text = str(raw_fact["text"]).strip()
+        raw_evidence_ids = raw_fact["evidence_message_ids"]
+        evidence_ids = (
+            [str(value) for value in raw_evidence_ids]
+            if isinstance(raw_evidence_ids, list)
+            else []
+        )
+        if not text or not evidence_ids or len(evidence_ids) != len(set(evidence_ids)):
+            raise AnalyzerProtocolError(
+                f"Personal group render fact_items[{index}] must contain text and unique evidence."
+            )
+        invalid_evidence = sorted(set(evidence_ids).difference(allowed_message_ids))
+        if invalid_evidence:
+            raise AnalyzerProtocolError(
+                f"Personal group render fact_items[{index}] references invalid evidence: "
+                f"{invalid_evidence}."
+            )
+        fact = PersonalFactItem(
+            field_name=field_name,
+            text=text,
+            evidence_message_ids=evidence_ids,
+        )
+        fact_items.append(fact)
+        by_field.setdefault(field_name, []).append(fact)
+    if len(by_field.get("topic", [])) != 1:
+        raise AnalyzerProtocolError(
+            "Personal group render result must return exactly one topic fact."
+        )
+    if len(by_field.get("object_hint", [])) != 1:
+        raise AnalyzerProtocolError(
+            "Personal group render result must return exactly one object_hint fact."
+        )
+    content_items = by_field.get("content", [])
+    if not content_items:
+        raise AnalyzerProtocolError(
+            "Personal group render result must return at least one content fact."
+        )
+    content_evidence = {
+        message_id
+        for item in content_items
+        for message_id in item.evidence_message_ids
+    }
+    uncovered_drafts = [
+        draft_id
+        for draft_id in group.draft_ids
+        if not content_evidence.intersection(
+            candidate_by_id[draft_id].source_message_ids
+        )
+    ]
+    if uncovered_drafts:
+        raise AnalyzerProtocolError(
+            "Personal group render content evidence does not cover locked drafts: "
+            f"{uncovered_drafts}."
+        )
+    return PersonalGroupRenderResult(
+        groups=[
+            PersonalGroupRenderItem(
+                group_id=group_id,
+                covered_draft_ids=list(group.draft_ids),
+                topic=by_field["topic"][0].text,
+                content="".join(item.text for item in content_items),
+                object_hint=by_field["object_hint"][0].text,
+                fact_items=fact_items,
+            )
+        ]
+    )
 
 
 def parse_personal_grouping_function_payload(
@@ -523,6 +957,8 @@ def parse_collected_grouping_function_payload(
     allowed_semantic_reasons: Sequence[str] = (),
     allow_model_evidence_relation_ids: bool = False,
     require_member_connections: bool = True,
+    allowed_relation_ids: Sequence[str] = (),
+    allowed_draft_ids: Sequence[str] = (),
 ) -> tuple[CollectedGroupingResult, list[str]]:
     from .collected_evidence import (
         EvidenceRelation,
@@ -531,6 +967,16 @@ def parse_collected_grouping_function_payload(
     )
 
     data = expect_json_object(payload, "Collected grouping Function result")
+    unique_relation_ids = list(dict.fromkeys(allowed_relation_ids))
+    allowed_top_level_fields = {
+        "merged_groups",
+        "singleton_draft_ids",
+        "split_reason",
+        *( ["relation_resolutions"] if unique_relation_ids else [] ),
+    }
+    unexpected_top_level_fields = sorted(
+        set(data).difference(allowed_top_level_fields)
+    )
     catalog = {
         item.relation_id: item
         for item in evidence_catalog
@@ -546,10 +992,40 @@ def parse_collected_grouping_function_payload(
 
     groups: list[CollectedGroupingGroup] = []
     errors: list[str] = []
+    if unexpected_top_level_fields:
+        errors.append(
+            "unexpected_fields field=result "
+            f"fields={unexpected_top_level_fields}"
+        )
     for index, raw_group in enumerate(raw_groups, start=1):
         if not isinstance(raw_group, dict):
             errors.append(f"invalid_group field=merged_groups[{index - 1}]")
             continue
+        expected_group_fields = {
+            "group_id",
+            "draft_ids",
+            "summary_title",
+            "summary_content",
+            "summary_object_hint",
+            "semantic_reasons",
+            "reason_detail",
+            "member_connections",
+            "risk_flags",
+            *(
+                ["evidence_relation_ids"]
+                if allow_model_evidence_relation_ids
+                else []
+            ),
+        }
+        unexpected_group_fields = sorted(
+            set(raw_group).difference(expected_group_fields)
+        )
+        if unexpected_group_fields:
+            errors.append(
+                "unexpected_fields "
+                f"field=merged_groups[{index - 1}] "
+                f"fields={unexpected_group_fields}"
+            )
         group_id = str(raw_group.get("group_id", "")).strip() or f"merged-{index:03d}"
         draft_ids = [str(value) for value in raw_group.get("draft_ids", [])]
         if len(draft_ids) < 2:
@@ -755,10 +1231,92 @@ def parse_collected_grouping_function_payload(
                 draft_ids=[str(draft_id)],
             )
         )
+    relation_id_set = set(unique_relation_ids)
+    allowed_draft_id_set = set(allowed_draft_ids)
+    raw_resolutions = data.get("relation_resolutions")
+    relation_resolutions: list[CollectedGroupRelationResolution] = []
+    seen_relation_ids: set[str] = set()
+    if unique_relation_ids and not isinstance(raw_resolutions, list):
+        errors.append("relation_resolutions_missing field=relation_resolutions")
+        raw_resolutions = []
+    elif not unique_relation_ids and raw_resolutions is not None:
+        errors.append("unexpected_relation_resolutions field=relation_resolutions")
+        raw_resolutions = []
+    for index, raw_resolution in enumerate(raw_resolutions or []):
+        prefix = f"relation_resolutions[{index}]"
+        expected_fields = {
+            "relation_id",
+            "decision",
+            "connected_draft_ids",
+            "reason",
+            "evidence_draft_ids",
+        }
+        if not isinstance(raw_resolution, dict) or set(raw_resolution) != expected_fields:
+            errors.append(f"invalid_relation_resolution field={prefix}")
+            continue
+        relation_id = str(raw_resolution["relation_id"]).strip()
+        if relation_id not in relation_id_set:
+            errors.append(
+                f"unknown_relation field={prefix}.relation_id relation_id={relation_id}"
+            )
+        elif relation_id in seen_relation_ids:
+            errors.append(
+                f"duplicate_relation field={prefix}.relation_id relation_id={relation_id}"
+            )
+        seen_relation_ids.add(relation_id)
+        decision = str(raw_resolution["decision"]).strip()
+        if decision not in {"merged", "separate"}:
+            errors.append(f"invalid_relation_decision field={prefix}.decision")
+        raw_connected = raw_resolution["connected_draft_ids"]
+        connected_ids = (
+            [str(value) for value in raw_connected]
+            if isinstance(raw_connected, list)
+            else []
+        )
+        raw_evidence = raw_resolution["evidence_draft_ids"]
+        evidence_ids = (
+            [str(value) for value in raw_evidence]
+            if isinstance(raw_evidence, list)
+            else []
+        )
+        for field_name, draft_values in (
+            ("connected_draft_ids", connected_ids),
+            ("evidence_draft_ids", evidence_ids),
+        ):
+            if len(draft_values) != len(set(draft_values)):
+                errors.append(f"duplicate_relation_member field={prefix}.{field_name}")
+            unknown_ids = sorted(set(draft_values).difference(allowed_draft_id_set))
+            if allowed_draft_id_set and unknown_ids:
+                errors.append(
+                    f"unknown_relation_member field={prefix}.{field_name} "
+                    f"draft_ids={unknown_ids}"
+                )
+        reason = str(raw_resolution["reason"]).strip()
+        if not reason:
+            errors.append(f"empty_relation_reason field={prefix}.reason")
+        if not evidence_ids:
+            errors.append(f"empty_relation_evidence field={prefix}.evidence_draft_ids")
+        relation_resolutions.append(
+            CollectedGroupRelationResolution(
+                relation_id=relation_id,
+                decision=decision,
+                connected_draft_ids=connected_ids,
+                reason=reason,
+                evidence_draft_ids=evidence_ids,
+            )
+        )
+    missing_relation_ids = [
+        relation_id
+        for relation_id in unique_relation_ids
+        if relation_id not in seen_relation_ids
+    ]
+    if missing_relation_ids:
+        errors.append(f"missing_relations relation_ids={missing_relation_ids}")
     return (
         CollectedGroupingResult(
             groups=groups,
             split_reason=str(data.get("split_reason", "")).strip(),
+            relation_resolutions=relation_resolutions,
             validation_errors=errors,
             raw_function_payload=copy.deepcopy(data),
         ),

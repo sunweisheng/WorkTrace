@@ -28,8 +28,11 @@ from src.worktrace.analyzers.protocol import (
 )
 from src.worktrace.collected_merge import (
     _collected_review_result_basis_error,
+    collected_atomic_group_error,
+    collected_grouping_decision_conflict_error,
     collected_grouping_partition_error,
     collected_grouping_validation_feedback,
+    collected_relation_resolution_error,
     repair_collected_grouping_result,
 )
 from src.worktrace.config import (
@@ -174,8 +177,18 @@ def evaluate_review_result(
     candidate_group: CollectedGroupingGroup,
     review_reasons: list[str],
     config: RuntimeConfig,
+    existing_groups: list[CollectedGroupingGroup] | None = None,
+    relation_reasons: list[dict[str, object]] | None = None,
+    atomic_groups: list[list[str]] | None = None,
 ) -> dict[str, Any]:
+    existing_groups = existing_groups or [candidate_group]
+    relation_reasons = relation_reasons or []
+    atomic_groups = atomic_groups or []
     partition_error = collected_grouping_partition_error(
+        result,
+        candidate_group.draft_ids,
+    )
+    decision_conflict_error = collected_grouping_decision_conflict_error(
         result,
         candidate_group.draft_ids,
     )
@@ -185,10 +198,16 @@ def evaluate_review_result(
         reasons=review_reasons,
         config=config,
     )
+    atomic_group_error = collected_atomic_group_error(result, atomic_groups)
+    relation_resolution_error = collected_relation_resolution_error(
+        result,
+        relation_reasons,
+        existing_groups,
+    )
     repaired, repair_warnings = repair_collected_grouping_result(
         result,
         source_events,
-        [],
+        atomic_groups,
     )
     split_reason = effective_split_reason(repaired)
     split_reason_source = (
@@ -207,7 +226,10 @@ def evaluate_review_result(
         error
         for error in (
             partition_error,
+            decision_conflict_error,
             relation_error,
+            atomic_group_error,
+            relation_resolution_error,
             "missing_overall_split_reason" if split_reason_error else "",
         )
         if error
@@ -219,6 +241,9 @@ def evaluate_review_result(
         "split_reason": split_reason,
         "split_reason_source": split_reason_source,
         "repair_warnings": repair_warnings,
+        "relation_resolutions": [
+            item.to_dict() for item in result.relation_resolutions
+        ],
         "groups": [
             {
                 "group_id": group.group_id,
@@ -237,6 +262,9 @@ def evaluate_split_reason_compatibility(
     candidate_group: CollectedGroupingGroup,
     review_reasons: list[str],
     config: RuntimeConfig,
+    existing_groups: list[CollectedGroupingGroup] | None = None,
+    relation_reasons: list[dict[str, object]] | None = None,
+    atomic_groups: list[list[str]] | None = None,
 ) -> dict[str, Any]:
     split_reason = effective_split_reason(result)
     if not split_reason or len(result.groups) <= 1:
@@ -255,6 +283,9 @@ def evaluate_split_reason_compatibility(
         candidate_group=candidate_group,
         review_reasons=review_reasons,
         config=config,
+        existing_groups=existing_groups,
+        relation_reasons=relation_reasons,
+        atomic_groups=atomic_groups,
     )
     legacy_groups = list(groups_without_reasons)
     legacy_groups[0] = replace(legacy_groups[0], split_reason=split_reason)
@@ -268,6 +299,9 @@ def evaluate_split_reason_compatibility(
         candidate_group=candidate_group,
         review_reasons=review_reasons,
         config=config,
+        existing_groups=existing_groups,
+        relation_reasons=relation_reasons,
+        atomic_groups=atomic_groups,
     )
 
     return {
@@ -534,6 +568,28 @@ def replay_trace_payload(
         if isinstance(group, list)
     ]
     is_review = stage == "high_risk_review"
+    existing_groups = [
+        CollectedGroupingGroup.from_dict(item)
+        for item in trace.get("initial_groups", [])
+        if isinstance(item, dict)
+    ]
+    if is_review and not existing_groups:
+        existing_groups = [candidate_group]
+    relation_reasons = [
+        dict(item)
+        for item in trace.get("strong_relations", [])
+        if isinstance(item, dict)
+    ]
+    atomic_groups = [
+        [str(draft_id) for draft_id in group]
+        for group in trace.get("atomic_groups", deterministic_groups)
+        if isinstance(group, list)
+    ]
+    relation_ids = [
+        str(item.get("relation_id", ""))
+        for item in relation_reasons
+        if str(item.get("relation_id", ""))
+    ]
     request_kind = (
         "collected_group_review" if is_review else "collected_candidate_grouping"
     )
@@ -542,9 +598,10 @@ def replay_trace_payload(
         config=config,
         events=source_events,
         deterministic_groups=(
-            [list(candidate_group.draft_ids)] if is_review else deterministic_groups
+            atomic_groups if is_review else deterministic_groups
         ),
         include_split_reason=is_review,
+        relation_ids=relation_ids,
     )
     prompt = (
         build_collected_review_prompt(
@@ -553,6 +610,9 @@ def replay_trace_payload(
             candidate_group,
             config=config,
             review_reasons=review_reasons,
+            existing_groups=existing_groups,
+            relation_reasons=relation_reasons,
+            atomic_groups=atomic_groups,
         )
         if is_review
         else build_collected_grouping_prompt(
@@ -580,6 +640,8 @@ def replay_trace_payload(
             raw_payload,
             evidence_catalog=list(contract.evidence_catalog),
             allowed_semantic_reasons=contract.semantic_reasons,
+            allowed_relation_ids=relation_ids,
+            allowed_draft_ids=[item.draft_id for item in source_events],
         )
     else:
         result = parse_collected_grouping_payload(raw_payload)
@@ -603,12 +665,29 @@ def replay_trace_payload(
         )
     else:
         partition_error = collected_grouping_partition_error(result, expected_draft_ids)
+        decision_conflict_error = (
+            collected_grouping_decision_conflict_error(result, expected_draft_ids)
+            if is_review
+            else ""
+        )
         relation_error = (
             _collected_review_result_basis_error(
                 result,
                 source_events,
                 reasons=review_reasons,
                 config=config,
+            )
+            if is_review
+            else ""
+        )
+        atomic_group_error = (
+            collected_atomic_group_error(result, atomic_groups) if is_review else ""
+        )
+        relation_resolution_error = (
+            collected_relation_resolution_error(
+                result,
+                relation_reasons,
+                existing_groups,
             )
             if is_review
             else ""
@@ -625,7 +704,14 @@ def replay_trace_payload(
         validation_errors = list(
             dict.fromkeys(
                 error
-                for value in (partition_error, relation_error, split_reason_error)
+                for value in (
+                    partition_error,
+                    decision_conflict_error,
+                    relation_error,
+                    atomic_group_error,
+                    relation_resolution_error,
+                    split_reason_error,
+                )
                 for error in _split_validation_errors(value)
             )
         )
@@ -727,6 +813,11 @@ def replay_trace_payload(
         },
         "issue_counts": issue_counts,
         "review_trigger_reasons": review_triggers,
+        "review_context": {
+            "initial_groups": [group.to_dict() for group in existing_groups],
+            "strong_relations": relation_reasons,
+            "atomic_groups": atomic_groups,
+        },
         "new_review_trigger_count": len(review_triggers),
         "new_rule_handling": _new_rule_handling(
             mode,
@@ -751,6 +842,9 @@ def replay_trace_payload(
                 candidate_group=candidate_group,
                 review_reasons=review_reasons,
                 config=config,
+                existing_groups=existing_groups,
+                relation_reasons=relation_reasons,
+                atomic_groups=atomic_groups,
             )
             if mode == "legacy_audit"
             else {"tested": False, "reason": "current_protocol"}

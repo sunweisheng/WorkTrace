@@ -1100,7 +1100,7 @@ def test_anchor_fallback_batches_are_repacked_by_complete_input_limit() -> None:
     )
 
 
-def test_cross_conversation_merge_reconciles_token_limited_batches(
+def test_cross_conversation_merge_keeps_token_limited_batch_results(
     tmp_path: Path,
 ) -> None:
     candidates = [
@@ -1124,18 +1124,6 @@ def test_cross_conversation_merge_reconciles_token_limited_batches(
 
         def merge_day_candidates(self, target_date, batch, *, validation_feedback=""):
             self.calls.append(list(batch))
-            if all(item.draft_id.startswith("__cross_batch_summary_") for item in batch):
-                return CrossConversationGroupResult(
-                    groups=[
-                        CrossConversationGroup(
-                            group_id="summary-group",
-                            draft_ids=[item.draft_id for item in batch],
-                            primary_draft_id=batch[0].draft_id,
-                            merge_reason="同一事项的跨批连续记录。",
-                            evidence_message_ids=[batch[0].source_message_ids[0]],
-                        )
-                    ]
-                )
             return CrossConversationGroupResult(
                 groups=[
                     CrossConversationGroup(
@@ -1175,12 +1163,19 @@ def test_cross_conversation_merge_reconciles_token_limited_batches(
         candidates,
     )
 
-    assert len(analyzer.calls) == 3
+    assert len(analyzer.calls) == 2
     assert all(
         _estimate_day_merge_input_tokens("2026-07-10", batch) <= pair_limit
         for batch in analyzer.calls
     )
-    assert result.groups[0].draft_ids == [item.draft_id for item in candidates]
+    assert [group.draft_ids for group in result.groups] == [
+        [candidate.draft_id] for candidate in candidates
+    ]
+    assert all(
+        not candidate.draft_id.startswith("__cross_batch_summary_")
+        for batch in analyzer.calls
+        for candidate in batch
+    )
     assert warnings == []
     assert attempts
     assert (retries, codex_count, repair_count) == (0, 0, 0)

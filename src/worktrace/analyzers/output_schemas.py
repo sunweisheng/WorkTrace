@@ -633,6 +633,220 @@ def merge_output_schema() -> dict[str, object]:
     }
 
 
+def day_group_discovery_output_schema(
+    group_ids: list[str],
+) -> dict[str, object]:
+    unique_group_ids = list(dict.fromkeys(group_ids))
+    return {
+        "type": "object",
+        "properties": {
+            "group_checks": {
+                "type": "array",
+                "minItems": len(unique_group_ids),
+                "maxItems": len(unique_group_ids),
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "group_id": {
+                            "type": "string",
+                            "enum": unique_group_ids,
+                        },
+                        "related_group_ids": {
+                            "type": "array",
+                            "maxItems": max(0, len(unique_group_ids) - 1),
+                            "uniqueItems": True,
+                            "items": {
+                                "type": "string",
+                                "enum": unique_group_ids,
+                            },
+                        },
+                        "reason": {"type": "string", "minLength": 1},
+                    },
+                    "required": ["group_id", "related_group_ids", "reason"],
+                    "additionalProperties": False,
+                },
+            }
+        },
+        "required": ["group_checks"],
+        "additionalProperties": False,
+    }
+
+
+def day_group_discovery_typical_arguments(
+    group_ids: list[str],
+) -> dict[str, object]:
+    return {
+        "group_checks": [
+            {
+                "group_id": group_id,
+                "related_group_ids": [],
+                "reason": "结构示例，不代表实际结论",
+            }
+            for group_id in dict.fromkeys(group_ids)
+        ]
+    }
+
+
+def day_group_review_output_schema(
+    config: RuntimeConfig,
+    *,
+    draft_ids: list[str],
+    message_ids: list[str],
+    relation_ids: list[str],
+) -> dict[str, object]:
+    schema = personal_grouping_function_schema(
+        config,
+        draft_ids=draft_ids,
+        message_ids=message_ids,
+    )
+    unique_draft_ids = list(dict.fromkeys(draft_ids))
+    unique_message_ids = list(dict.fromkeys(message_ids))
+    unique_relation_ids = list(dict.fromkeys(relation_ids))
+    properties = schema["properties"]
+    assert isinstance(properties, dict)
+    relation_resolution_schema = {
+        "type": "array",
+        "minItems": len(unique_relation_ids),
+        "maxItems": len(unique_relation_ids),
+        "items": {
+            "type": "object",
+            "properties": {
+                "relation_id": {
+                    "type": "string",
+                    "enum": unique_relation_ids,
+                },
+                "decision": {
+                    "type": "string",
+                    "enum": ["merged", "separate"],
+                    "description": (
+                        "先根据关系两侧的完整内容判断：直接属于同一过程时为 merged，"
+                        "具有可独立汇报的不同目标或结果时为 separate；最终分组必须与此判断一致。"
+                    ),
+                },
+                "connected_draft_ids": {
+                    "type": "array",
+                    "maxItems": len(unique_draft_ids),
+                    "uniqueItems": True,
+                    "description": (
+                        "merged 时只填写证明关系成立所需的最少成员，且所有成员必须位于"
+                        "同一个最终组；直接两端关系必须包含左右两端。separate 时可以为空，"
+                        "也可以填写关系两侧的代表成员；填写后代表成员必须位于不同最终组。"
+                    ),
+                    "items": {
+                        "type": "string",
+                        "enum": unique_draft_ids,
+                    },
+                },
+                "reason": {"type": "string", "minLength": 1},
+                "evidence_message_ids": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": len(unique_message_ids),
+                    "uniqueItems": True,
+                    "description": (
+                        "只返回直接支持当前关系判断的最少必要消息，且必须覆盖关系各侧；"
+                        "不得复制检查范围的全部消息编号。"
+                    ),
+                    "items": {
+                        "type": "string",
+                        "enum": unique_message_ids,
+                    },
+                },
+            },
+            "required": [
+                "relation_id",
+                "decision",
+                "connected_draft_ids",
+                "reason",
+                "evidence_message_ids",
+            ],
+            "additionalProperties": False,
+        },
+    }
+    properties = {
+        "relation_resolutions": relation_resolution_schema,
+        **properties,
+    }
+    schema["properties"] = properties
+    required = schema["required"]
+    assert isinstance(required, list)
+    required.insert(0, "relation_resolutions")
+    return schema
+
+
+def personal_group_render_output_schema(
+    *,
+    group_id: str,
+    draft_ids: list[str],
+    message_ids: list[str],
+) -> dict[str, object]:
+    unique_draft_ids = list(dict.fromkeys(draft_ids))
+    unique_message_ids = list(dict.fromkeys(message_ids))
+    return {
+        "type": "object",
+        "properties": {
+            "groups": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 1,
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "group_id": {"type": "string", "enum": [group_id]},
+                        "covered_draft_ids": {
+                            "type": "array",
+                            "minItems": len(unique_draft_ids),
+                            "maxItems": len(unique_draft_ids),
+                            "uniqueItems": True,
+                            "items": {
+                                "type": "string",
+                                "enum": unique_draft_ids,
+                            },
+                        },
+                        "fact_items": {
+                            "type": "array",
+                            "minItems": 3,
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "field": {
+                                        "type": "string",
+                                        "enum": ["topic", "content", "object_hint"],
+                                    },
+                                    "text": {"type": "string", "minLength": 1},
+                                    "evidence_message_ids": {
+                                        "type": "array",
+                                        "minItems": 1,
+                                        "uniqueItems": True,
+                                        "items": {
+                                            "type": "string",
+                                            "enum": unique_message_ids,
+                                        },
+                                    },
+                                },
+                                "required": [
+                                    "field",
+                                    "text",
+                                    "evidence_message_ids",
+                                ],
+                                "additionalProperties": False,
+                            },
+                        },
+                    },
+                    "required": [
+                        "group_id",
+                        "covered_draft_ids",
+                        "fact_items",
+                    ],
+                    "additionalProperties": False,
+                },
+            }
+        },
+        "required": ["groups"],
+        "additionalProperties": False,
+    }
+
+
 def personal_grouping_function_schema(
     config: RuntimeConfig,
     *,
@@ -720,6 +934,10 @@ def personal_grouping_function_schema(
                 "type": "array",
                 "minItems": 0,
                 "maxItems": len(unique_draft_ids) // 2,
+                "description": (
+                    "只填写包含至少两个成员的最终组；与 singleton_draft_ids 合并后"
+                    "必须完整且不重复地覆盖全部合法 draft_id。"
+                ),
                 "items": group_schema,
             },
             "singleton_draft_ids": {
@@ -727,6 +945,10 @@ def personal_grouping_function_schema(
                 "minItems": 0,
                 "maxItems": len(unique_draft_ids),
                 "uniqueItems": True,
+                "description": (
+                    "填写所有未进入 merged_groups 的合法 draft_id；两部分合并后"
+                    "必须完整且不重复地覆盖全部合法 draft_id。"
+                ),
                 "items": {"type": "string", "enum": unique_draft_ids},
             },
         },
@@ -805,6 +1027,7 @@ def collected_grouping_function_schema(
     *,
     draft_ids: list[str],
     include_split_reason: bool,
+    relation_ids: list[str] | None = None,
 ) -> dict[str, object]:
     unique_draft_ids = list(dict.fromkeys(draft_ids))
     semantic_reasons = [
@@ -824,12 +1047,19 @@ def collected_grouping_function_schema(
     group_schema = {
         "type": "object",
         "properties": {
-            "group_id": {"type": "string", "minLength": 1},
+            "group_id": {
+                "type": "string",
+                "minLength": 1,
+                "description": "只命名最终有效组，不能用于传递错误、诊断或已取消方案。",
+            },
             "draft_ids": {
                 "type": "array",
                 "minItems": 2,
                 "maxItems": len(unique_draft_ids),
                 "uniqueItems": True,
+                "description": (
+                    "当前最终组的全部成员，至少两条；不得再出现在其他组或 singleton_draft_ids。"
+                ),
                 "items": {"type": "string", "enum": unique_draft_ids},
             },
             "summary_title": {"type": "string", "minLength": 1},
@@ -884,6 +1114,10 @@ def collected_grouping_function_schema(
             "type": "array",
             "minItems": 0,
             "maxItems": len(unique_draft_ids) // 2,
+            "description": (
+                "只返回最终确认成立的多事件组；已取消、拟拆分、单成员、诊断占位组，"
+                "以及仅用于表示候选关系应分开的组一律不返回。"
+            ),
             "items": group_schema,
         },
         "singleton_draft_ids": {
@@ -891,6 +1125,9 @@ def collected_grouping_function_schema(
             "minItems": 0,
             "maxItems": len(unique_draft_ids),
             "uniqueItems": True,
+            "description": (
+                "未进入最终多事件组的输入编号，每个恰好一次；不得包含已在 merged_groups 中的编号。"
+            ),
             "items": {"type": "string", "enum": unique_draft_ids},
         },
     }
@@ -898,6 +1135,69 @@ def collected_grouping_function_schema(
     if include_split_reason:
         properties = {"split_reason": {"type": "string"}, **properties}
         required = ["split_reason", *required]
+    unique_relation_ids = list(dict.fromkeys(relation_ids or []))
+    if unique_relation_ids:
+        relation_resolution_schema = {
+            "type": "array",
+            "minItems": len(unique_relation_ids),
+            "maxItems": len(unique_relation_ids),
+            "items": {
+                "type": "object",
+                "properties": {
+                    "relation_id": {
+                        "type": "string",
+                        "enum": unique_relation_ids,
+                    },
+                    "decision": {
+                        "type": "string",
+                        "enum": ["merged", "separate"],
+                        "description": (
+                            "先根据关系两侧的完整内容判断：直接属于同一过程时为 merged，"
+                            "具有可独立汇报的不同目标或结果时为 separate；最终分组必须与此判断一致。"
+                        ),
+                    },
+                    "connected_draft_ids": {
+                        "type": "array",
+                        "maxItems": len(unique_draft_ids),
+                        "uniqueItems": True,
+                        "description": (
+                            "merged 时只填写证明关系成立所需的最少成员，且所有成员必须位于"
+                            "同一个最终组；直接两端关系必须包含左右两端。separate 时可以为空，"
+                            "也可以填写关系两侧的代表成员；填写后代表成员必须位于不同最终组。"
+                        ),
+                        "items": {
+                            "type": "string",
+                            "enum": unique_draft_ids,
+                        },
+                    },
+                    "reason": {"type": "string", "minLength": 1},
+                    "evidence_draft_ids": {
+                        "type": "array",
+                        "minItems": 1,
+                        "maxItems": len(unique_draft_ids),
+                        "uniqueItems": True,
+                        "description": "必须覆盖当前关系各侧的候选事件证据。",
+                        "items": {
+                            "type": "string",
+                            "enum": unique_draft_ids,
+                        },
+                    },
+                },
+                "required": [
+                    "relation_id",
+                    "decision",
+                    "connected_draft_ids",
+                    "reason",
+                    "evidence_draft_ids",
+                ],
+                "additionalProperties": False,
+            },
+        }
+        properties = {
+            "relation_resolutions": relation_resolution_schema,
+            **properties,
+        }
+        required = ["relation_resolutions", *required]
     return {
         "type": "object",
         "properties": properties,

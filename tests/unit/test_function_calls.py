@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from src.worktrace.analyzers.function_calls import (
+    COLLECTED_GROUPING_FINAL_PARAMETER_CHECKS,
     collected_grouping_call_contract,
     personal_grouping_call_contract,
     task_function_call_spec,
@@ -13,6 +14,9 @@ from src.worktrace.analyzers.output_schemas import (
     collected_grouping_function_schema,
     collected_merge_output_schema,
     conversation_segmentation_output_schema,
+    day_group_discovery_output_schema,
+    day_group_discovery_typical_arguments,
+    day_group_review_output_schema,
     merge_output_schema,
     personal_fact_review_output_schema,
     retention_review_output_schema,
@@ -74,6 +78,13 @@ def test_all_production_function_schemas_use_strict_object_shapes() -> None:
     schemas = [
         batch_output_schema(CONFIG),
         conversation_segmentation_output_schema(),
+        day_group_discovery_output_schema(["group-001", "group-002"]),
+        day_group_review_output_schema(
+            CONFIG,
+            draft_ids=["d1", "d2"],
+            message_ids=["m1", "m2"],
+            relation_ids=["relation-001"],
+        ),
         segment_batch_output_schema(CONFIG),
         retention_review_output_schema(CONFIG),
         personal_fact_review_output_schema(_personal_fact_batch()),
@@ -89,6 +100,81 @@ def test_all_production_function_schemas_use_strict_object_shapes() -> None:
 
     for schema in schemas:
         _assert_strict_objects(schema)
+
+
+def test_day_group_discovery_schema_requires_one_check_per_group() -> None:
+    schema = day_group_discovery_output_schema(
+        ["group-001", "group-002", "group-003"]
+    )
+    checks = schema["properties"]["group_checks"]
+
+    assert checks["minItems"] == 3
+    assert checks["maxItems"] == 3
+    properties = checks["items"]["properties"]
+    assert properties["group_id"]["enum"] == [
+        "group-001",
+        "group-002",
+        "group-003",
+    ]
+    assert properties["related_group_ids"]["maxItems"] == 2
+    assert day_group_discovery_typical_arguments(
+        ["group-001", "group-002"]
+    )["group_checks"] == [
+        {
+            "group_id": "group-001",
+            "related_group_ids": [],
+            "reason": "结构示例，不代表实际结论",
+        },
+        {
+            "group_id": "group-002",
+            "related_group_ids": [],
+            "reason": "结构示例，不代表实际结论",
+        },
+    ]
+
+
+def test_day_group_review_schema_explains_relation_group_consistency() -> None:
+    schema = day_group_review_output_schema(
+        CONFIG,
+        draft_ids=["d1", "d2"],
+        message_ids=["m1", "m2"],
+        relation_ids=["relation-001"],
+    )
+    resolution = schema["properties"]["relation_resolutions"]["items"][
+        "properties"
+    ]
+
+    assert next(iter(schema["properties"])) == "relation_resolutions"
+    assert schema["required"][0] == "relation_resolutions"
+    assert "最终分组" in resolution["decision"]["description"]
+    assert "先根据关系两侧" in resolution["decision"]["description"]
+    assert "同一个最终组" in resolution["connected_draft_ids"]["description"]
+    assert "左右两端" in resolution["connected_draft_ids"]["description"]
+    assert "关系各侧" in resolution["evidence_message_ids"]["description"]
+    assert "完整且不重复" in schema["properties"]["merged_groups"]["description"]
+    assert "完整且不重复" in schema["properties"]["singleton_draft_ids"][
+        "description"
+    ]
+
+
+def test_collected_group_review_schema_explains_relation_group_consistency() -> None:
+    schema = collected_grouping_function_schema(
+        CONFIG,
+        draft_ids=["d1", "d2"],
+        include_split_reason=True,
+        relation_ids=["relation-001"],
+    )
+    resolution = schema["properties"]["relation_resolutions"]["items"][
+        "properties"
+    ]
+
+    assert next(iter(schema["properties"])) == "relation_resolutions"
+    assert schema["required"][0] == "relation_resolutions"
+    assert "最终分组" in resolution["decision"]["description"]
+    assert "先根据关系两侧" in resolution["decision"]["description"]
+    assert "同一个最终组" in resolution["connected_draft_ids"]["description"]
+    assert "左右两端" in resolution["connected_draft_ids"]["description"]
+    assert "关系各侧" in resolution["evidence_draft_ids"]["description"]
 
 
 def test_task_function_spec_applies_dynamic_enums_and_empty_array_limits() -> None:
@@ -289,7 +375,8 @@ def test_collected_grouping_contract_keeps_evidence_out_of_model_output() -> Non
     assert "member_connections" in group_properties
     structure_example = contract.function_spec.argument_structure_example
     assert structure_example is not None
-    merged_group = structure_example["merged_group"]
+    final_arguments = structure_example["valid_final_arguments"]
+    merged_group = final_arguments["merged_groups"][0]
     assert merged_group["draft_ids"] == [
         "<input_draft_id_1>",
         "<input_draft_id_2>",
@@ -297,8 +384,44 @@ def test_collected_grouping_contract_keeps_evidence_out_of_model_output() -> Non
     assert [
         item["draft_id"] for item in merged_group["member_connections"]
     ] == ["<input_draft_id_1>", "<input_draft_id_2>"]
+    assert final_arguments["singleton_draft_ids"] == ["<input_draft_id_3>"]
     assert "d1" not in str(structure_example)
     assert "d2" not in str(structure_example)
+
+
+def test_collected_grouping_final_checks_follow_function_examples() -> None:
+    contract = collected_grouping_call_contract(
+        "collected_candidate_grouping",
+        config=CONFIG,
+        events=[_collected_event("d1"), _collected_event("d2")],
+        deterministic_groups=[],
+        include_split_reason=False,
+        final_parameter_checks=COLLECTED_GROUPING_FINAL_PARAMETER_CHECKS,
+    )
+
+    prepared = contract.function_spec.prompt_with_example('{"events": []}')
+
+    assert prepared.index('"typical_function_arguments"') < prepared.index(
+        "最终 Function 参数自检"
+    )
+    assert "不得为了消除重复而扩大其他 merged_groups" in prepared
+    assert "不要为单条事件保留 merged_groups 对象" in prepared
+    assert "诊断项或占位组" in prepared
+    assert "判定分开的组合不产生组对象" in prepared
+
+
+def test_collected_grouping_initial_contract_has_no_retry_checks() -> None:
+    contract = collected_grouping_call_contract(
+        "collected_candidate_grouping",
+        config=CONFIG,
+        events=[_collected_event("d1"), _collected_event("d2")],
+        deterministic_groups=[],
+        include_split_reason=False,
+    )
+
+    prepared = contract.function_spec.prompt_with_example('{"events": []}')
+
+    assert "最终 Function 参数自检" not in prepared
 
 
 def test_collected_review_example_does_not_preselect_same_object_group() -> None:
@@ -317,3 +440,24 @@ def test_collected_review_example_does_not_preselect_same_object_group() -> None
         "d2",
     ]
     assert contract.function_spec.typical_arguments["split_reason"]
+
+
+def test_collected_review_requires_relation_resolutions_from_first_request() -> None:
+    contract = collected_grouping_call_contract(
+        "collected_group_review",
+        config=CONFIG,
+        events=[_collected_event("d1"), _collected_event("d2")],
+        deterministic_groups=[],
+        include_split_reason=True,
+        relation_ids=["relation-001"],
+    )
+
+    prepared = contract.function_spec.prompt_with_example('{"strong_relations": []}')
+
+    assert contract.function_spec.final_parameter_checks
+    assert prepared.index('"typical_function_arguments"') < prepared.index(
+        "最终 Function 参数自检"
+    )
+    assert "relation_resolutions 是必填列表" in prepared
+    assert '["relation-001"]' in prepared
+    assert "不能代替逐条关系判断" in prepared

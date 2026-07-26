@@ -125,21 +125,45 @@ def _review_summary(path: Path) -> dict[str, object]:
     for attempt in attempts:
         component_id = str(attempt.get("component_id", "unknown"))
         by_component.setdefault(component_id, []).append(attempt)
+    raw_component_records = payload.get("components", [])
+    component_records = (
+        [item for item in raw_component_records if isinstance(item, dict)]
+        if isinstance(raw_component_records, list)
+        else []
+    )
+    component_record_by_id = {
+        str(item.get("component_id", "")): item
+        for item in component_records
+        if str(item.get("component_id", ""))
+    }
+    component_ids = list(
+        dict.fromkeys([*component_record_by_id, *by_component])
+    )
     components: list[dict[str, object]] = []
-    for component_id, items in by_component.items():
-        last = items[-1]
+    for component_id in component_ids:
+        items = by_component.get(component_id, [])
+        last = items[-1] if items else {}
+        component_record = component_record_by_id.get(component_id, {})
         input_payload = last.get("input", {})
         relation_reasons = (
-            input_payload.get("relation_reasons", [])
-            if isinstance(input_payload, dict)
-            else []
+            component_record.get("relation_reasons", [])
+            or (
+                input_payload.get("relation_reasons", [])
+                if isinstance(input_payload, dict)
+                else []
+            )
         )
+        raw_result = last.get("result", {})
         components.append(
             {
                 "component_id": component_id,
+                "group_ids": component_record.get("group_ids", []),
+                "relation_sources": component_record.get(
+                    "relation_sources", []
+                ),
                 "request_count": len(items),
-                "final_status": str(last.get("status", "unknown")),
-                "final_backend": str(last.get("backend", "unknown")),
+                "final_status": str(last.get("status", "not_requested")),
+                "final_backend": str(last.get("backend", "none")),
                 "validation_error": str(last.get("validation_error", "")),
                 "candidate_draft_ids": (
                     [str(value) for value in input_payload.get("candidate_draft_ids", [])]
@@ -150,6 +174,12 @@ def _review_summary(path: Path) -> dict[str, object]:
                 "relation_reasons": relation_reasons
                 if isinstance(relation_reasons, list)
                 else [],
+                "final_groups": (
+                    raw_result.get("groups", [])
+                    if isinstance(raw_result, dict)
+                    and isinstance(raw_result.get("groups"), list)
+                    else []
+                ),
                 "attempts": [
                     {
                         "attempt": item.get("attempt"),
@@ -169,6 +199,119 @@ def _review_summary(path: Path) -> dict[str, object]:
     }
 
 
+def _discovery_summary(
+    path: Path,
+    review: dict[str, object],
+) -> dict[str, object]:
+    if not path.exists():
+        return {
+            "available": False,
+            "status": "unavailable",
+            "protocol": None,
+            "checked_group_count": None,
+            "candidate_group_count": None,
+            "candidate_groups": [],
+        }
+    payload = _read_object(path)
+    result = payload.get("result", {})
+    raw_candidates = (
+        result.get("candidate_groups", [])
+        if isinstance(result, dict)
+        else []
+    )
+    candidates = (
+        [item for item in raw_candidates if isinstance(item, dict)]
+        if isinstance(raw_candidates, list)
+        else []
+    )
+    raw_checks = result.get("group_checks") if isinstance(result, dict) else None
+    review_components = review.get("components", [])
+    components = (
+        [item for item in review_components if isinstance(item, dict)]
+        if isinstance(review_components, list)
+        else []
+    )
+    summarized_candidates: list[dict[str, object]] = []
+    for candidate in candidates:
+        group_ids = [
+            str(item) for item in candidate.get("group_ids", [])
+        ] if isinstance(candidate.get("group_ids"), list) else []
+        matched_component: dict[str, object] | None = None
+        for component in components:
+            relation_reasons = component.get("relation_reasons", [])
+            if not isinstance(relation_reasons, list):
+                continue
+            if any(
+                isinstance(reason, dict)
+                and "title_discovery" in reason.get("relation_types", [])
+                and set(str(item) for item in reason.get("group_ids", []))
+                == set(group_ids)
+                for reason in relation_reasons
+            ):
+                matched_component = component
+                break
+        summarized_candidates.append(
+            {
+                "group_ids": group_ids,
+                "reason": str(candidate.get("reason", "")),
+                "review_component_id": (
+                    matched_component.get("component_id")
+                    if matched_component is not None
+                    else None
+                ),
+                "review_final_status": (
+                    matched_component.get("final_status")
+                    if matched_component is not None
+                    else "not_found"
+                ),
+                "review_final_backend": (
+                    matched_component.get("final_backend")
+                    if matched_component is not None
+                    else "none"
+                ),
+                "reviewed_groups": (
+                    matched_component.get("final_groups", [])
+                    if matched_component is not None
+                    else []
+                ),
+            }
+        )
+    return {
+        "available": True,
+        "status": str(payload.get("status", "unknown")),
+        "protocol": payload.get("protocol"),
+        "checked_group_count": len(raw_checks) if isinstance(raw_checks, list) else None,
+        "candidate_group_count": len(summarized_candidates),
+        "input_group_count": payload.get("input_group_count"),
+        "oversized_submission": payload.get("oversized_submission"),
+        "candidate_groups": summarized_candidates,
+        "abandon_reason": str(payload.get("abandon_reason", "")),
+    }
+
+
+def _render_summary(path: Path) -> dict[str, object]:
+    if not path.exists():
+        return {
+            "available": False,
+            "status": "unavailable",
+            "groups": [],
+            "summary": None,
+        }
+    payload = _read_object(path)
+    raw_groups = payload.get("groups", [])
+    groups = (
+        [item for item in raw_groups if isinstance(item, dict)]
+        if isinstance(raw_groups, list)
+        else []
+    )
+    return {
+        "available": True,
+        "status": str(payload.get("status", "unknown")),
+        "groups": groups,
+        "summary": payload.get("summary"),
+    }
+
+
 def _load_grouping(trace_root: Path, target_date: str) -> dict[str, object]:
     merge_root = _merge_root(trace_root, target_date)
     input_payload = _read_object(merge_root / "input.json")
@@ -182,6 +325,7 @@ def _load_grouping(trace_root: Path, target_date: str) -> dict[str, object]:
     candidate_ids = [str(item.get("draft_id", "")) for item in candidates]
     candidate_ids = [item for item in candidate_ids if item]
     groups = _normalized_groups(resolved_payload)
+    review = _review_summary(merge_root / "day_group_review.json")
     return {
         "trace_root": str(trace_root.resolve()),
         "candidate_ids": candidate_ids,
@@ -195,7 +339,14 @@ def _load_grouping(trace_root: Path, target_date: str) -> dict[str, object]:
             len(item.get("draft_ids", [])) > 1 for item in groups
         ),
         "coverage": _coverage(candidate_ids, groups),
-        "review": _review_summary(merge_root / "day_group_review.json"),
+        "discovery": _discovery_summary(
+            merge_root / "day_group_discovery.json",
+            review,
+        ),
+        "review": review,
+        "content_render": _render_summary(
+            merge_root / "personal_group_render.json"
+        ),
         "warnings": resolved_payload.get("warnings", []),
         "summary": resolved_payload.get("summary"),
     }
@@ -319,6 +470,38 @@ def _render_markdown(payload: dict[str, object]) -> str:
         lines.append("| " + " | ".join(str(value).replace("|", "\\|") for value in values) + " |")
     if not any(len(group["draft_ids"]) > 1 for group in current["groups"]):
         lines.append("| - | - | - | 无多事件组 | - |")
+    discovery = current.get("discovery", {})
+    if isinstance(discovery, dict):
+        lines.extend(
+            [
+                "",
+                "## 标题发现",
+                "",
+                f"- 可用：{discovery.get('available', False)}",
+                f"- 状态：{discovery.get('status', 'unavailable')}",
+                f"- 协议：{discovery.get('protocol') or '旧记录不可用'}",
+                f"- 逐组检查数：{discovery.get('checked_group_count') if discovery.get('checked_group_count') is not None else '不可用'}",
+                f"- 候选组数：{discovery.get('candidate_group_count', '-')}",
+                "",
+            ]
+        )
+        for candidate in discovery.get("candidate_groups", []):
+            if not isinstance(candidate, dict):
+                continue
+            reviewed_groups = candidate.get("reviewed_groups", [])
+            reviewed_group_ids = [
+                item.get("draft_ids", [])
+                for item in reviewed_groups
+                if isinstance(item, dict)
+            ] if isinstance(reviewed_groups, list) else []
+            lines.append(
+                "- "
+                f"{_format_ids(candidate.get('group_ids'))}："
+                f"{candidate.get('reason') or '-'}；"
+                f"复核 {candidate.get('review_final_backend')}/"
+                f"{candidate.get('review_final_status')}；"
+                f"结果 {_format_ids(reviewed_group_ids)}"
+            )
     lines.extend(
         [
             "",
@@ -333,6 +516,29 @@ def _render_markdown(payload: dict[str, object]) -> str:
         lines.append(
             f"- {component['component_id']}：{component['final_backend']}/{component['final_status']}；候选 {_format_ids(component['candidate_draft_ids'])}"
         )
+    content_render = current.get("content_render", {})
+    if isinstance(content_render, dict):
+        lines.extend(
+            [
+                "",
+                "## 锁定成员后的内容生成",
+                "",
+                f"- 可用：{content_render.get('available', False)}",
+                f"- 状态：{content_render.get('status', 'unavailable')}",
+            ]
+        )
+        for item in content_render.get("groups", []):
+            if not isinstance(item, dict):
+                continue
+            result = item.get("result", {})
+            result = result if isinstance(result, dict) else {}
+            lines.append(
+                "- "
+                f"{item.get('group_id', '-')}：{item.get('status', '-')}；"
+                f"成员 {_format_ids(item.get('draft_ids'))}；"
+                f"标题 {result.get('topic') or '-'}；"
+                f"对象 {result.get('object_hint') or '-'}"
+            )
     return "\n".join(lines)
 
 

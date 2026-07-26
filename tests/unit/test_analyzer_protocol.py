@@ -5,12 +5,17 @@ from pathlib import Path
 
 import pytest
 
-from src.worktrace.errors import AnalyzerProtocolError, PersonalGroupingValidationError
+from src.worktrace.errors import (
+    AnalyzerProtocolError,
+    DayGroupDiscoveryValidationError,
+    PersonalGroupingValidationError,
+)
 from src.worktrace.analyzers.protocol import (
     parse_anchor_analysis_payload,
     parse_batch_analysis_payload,
     parse_collected_grouping_payload,
     parse_collected_grouping_function_payload,
+    parse_day_group_discovery_payload,
     parse_merge_payload,
     parse_personal_grouping_function_payload,
     parse_personal_fact_review_payload,
@@ -73,6 +78,223 @@ def test_protocol_parsers_accept_valid_payloads() -> None:
     assert anchor.anchor_status == "completed"
     assert batch.candidate_events == []
     assert merged.groups == []
+
+
+def test_day_group_discovery_requires_every_group_and_merges_overlapping_checks() -> None:
+    result = parse_day_group_discovery_payload(
+        {
+            "group_checks": [
+                {
+                    "group_id": "group-001",
+                    "related_group_ids": ["group-003", "group-002"],
+                    "reason": "标题可能属于同一交付过程。",
+                },
+                {
+                    "group_id": "group-002",
+                    "related_group_ids": ["group-004"],
+                    "reason": "标题可能属于同一后续动作。",
+                },
+                {
+                    "group_id": "group-003",
+                    "related_group_ids": [],
+                    "reason": "关联已由其他组提出，不重复填写。",
+                },
+                {
+                    "group_id": "group-004",
+                    "related_group_ids": [],
+                    "reason": "关联已由其他组提出，不重复填写。",
+                },
+            ]
+        },
+        allowed_group_ids=[
+            "group-001",
+            "group-002",
+            "group-003",
+            "group-004",
+        ],
+    )
+
+    assert result.to_dict() == {
+        "candidate_groups": [
+            {
+                "group_ids": [
+                    "group-001",
+                    "group-002",
+                    "group-003",
+                    "group-004",
+                ],
+                "reason": (
+                    "group-001: 标题可能属于同一交付过程。；"
+                    "group-002: 标题可能属于同一后续动作。"
+                ),
+            },
+        ],
+        "group_checks": [
+            {
+                "group_id": "group-001",
+                "related_group_ids": ["group-002", "group-003"],
+                "reason": "标题可能属于同一交付过程。",
+            },
+            {
+                "group_id": "group-002",
+                "related_group_ids": ["group-004"],
+                "reason": "标题可能属于同一后续动作。",
+            },
+            {
+                "group_id": "group-003",
+                "related_group_ids": [],
+                "reason": "关联已由其他组提出，不重复填写。",
+            },
+            {
+                "group_id": "group-004",
+                "related_group_ids": [],
+                "reason": "关联已由其他组提出，不重复填写。",
+            },
+        ],
+    }
+    assert parse_day_group_discovery_payload(
+        {
+            "group_checks": [
+                {
+                    "group_id": "group-001",
+                    "related_group_ids": [],
+                    "reason": "没有指向其他明确事项。",
+                },
+                {
+                    "group_id": "group-002",
+                    "related_group_ids": [],
+                    "reason": "没有指向其他明确事项。",
+                },
+            ]
+        },
+        allowed_group_ids=["group-001", "group-002"],
+    ).candidate_groups == []
+
+
+@pytest.mark.parametrize(
+    ("payload", "error"),
+    [
+        ({"group_checks": [], "extra": True}, "unexpected_fields"),
+        (
+            {
+                "group_checks": [
+                    {
+                        "group_id": "group-001",
+                        "related_group_ids": [],
+                        "reason": "x",
+                    }
+                ]
+            },
+            "missing_group_checks",
+        ),
+        (
+            {
+                "group_checks": [
+                    {
+                        "group_id": "group-999",
+                        "related_group_ids": [],
+                        "reason": "x",
+                    }
+                ]
+            },
+            "unknown_group",
+        ),
+        (
+            {
+                "group_checks": [
+                    {
+                        "group_id": "group-001",
+                        "related_group_ids": ["group-001"],
+                        "reason": "x",
+                    },
+                    {
+                        "group_id": "group-002",
+                        "related_group_ids": [],
+                        "reason": "y",
+                    },
+                ]
+            },
+            "self_related_group",
+        ),
+        (
+            {
+                "group_checks": [
+                    {
+                        "group_id": "group-001",
+                        "related_group_ids": [],
+                        "reason": "x",
+                    },
+                    {
+                        "group_id": "group-001",
+                        "related_group_ids": [],
+                        "reason": "y",
+                    },
+                ]
+            },
+            "duplicate_group_check",
+        ),
+        (
+            {
+                "group_checks": [
+                    {
+                        "group_id": "group-002",
+                        "related_group_ids": [],
+                        "reason": "x",
+                    },
+                    {
+                        "group_id": "group-001",
+                        "related_group_ids": [],
+                        "reason": "y",
+                    },
+                ]
+            },
+            "out_of_order_group_check",
+        ),
+        (
+            {
+                "group_checks": [
+                    {
+                        "group_id": "group-001",
+                        "related_group_ids": ["group-002", "group-002"],
+                        "reason": "x",
+                    },
+                    {
+                        "group_id": "group-002",
+                        "related_group_ids": [],
+                        "reason": "y",
+                    },
+                ]
+            },
+            "duplicate_related_group",
+        ),
+        (
+            {
+                "group_checks": [
+                    {
+                        "group_id": "group-001",
+                        "related_group_ids": ["group-002"],
+                        "reason": "",
+                    },
+                    {
+                        "group_id": "group-002",
+                        "related_group_ids": [],
+                        "reason": "y",
+                    },
+                ]
+            },
+            "empty_reason",
+        ),
+    ],
+)
+def test_day_group_discovery_rejects_invalid_candidates(
+    payload: object,
+    error: str,
+) -> None:
+    with pytest.raises(DayGroupDiscoveryValidationError, match=error):
+        parse_day_group_discovery_payload(
+            payload,
+            allowed_group_ids=["group-001", "group-002"],
+        )
 
 
 def test_personal_grouping_function_requires_exact_member_connections() -> None:
@@ -559,6 +781,104 @@ def test_collected_function_payload_preserves_invalid_raw_connections() -> None:
     assert sum(error.startswith("invalid_member_connection") for error in errors) == 2
     assert result.raw_function_payload == payload
     assert result.raw_function_payload is not payload
+
+
+def _collected_relation_payload() -> dict[str, object]:
+    return {
+        "split_reason": "",
+        "merged_groups": [
+            {
+                "group_id": "g1",
+                "draft_ids": ["d1", "d2"],
+                "summary_title": "同一事项",
+                "summary_content": "两个来源共同推进同一事项。",
+                "summary_object_hint": "同一事项",
+                "semantic_reasons": ["continuous_action"],
+                "reason_detail": "d1 的结果由 d2 继续处理。",
+                "member_connections": [
+                    {"draft_id": "d1", "connection_detail": "形成前置结果。"},
+                    {"draft_id": "d2", "connection_detail": "承接前置结果。"},
+                ],
+                "risk_flags": [],
+            }
+        ],
+        "singleton_draft_ids": ["d3"],
+        "relation_resolutions": [
+            {
+                "relation_id": "REL-001",
+                "decision": "merged",
+                "connected_draft_ids": ["d1", "d2"],
+                "reason": "两个来源存在直接承接关系。",
+                "evidence_draft_ids": ["d1", "d2"],
+            }
+        ],
+    }
+
+
+def test_collected_function_payload_accepts_complete_relation_resolution() -> None:
+    result, errors = parse_collected_grouping_function_payload(
+        _collected_relation_payload(),
+        evidence_catalog=[],
+        allowed_semantic_reasons=["continuous_action"],
+        allowed_relation_ids=["REL-001"],
+        allowed_draft_ids=["d1", "d2", "d3"],
+    )
+
+    assert errors == []
+    assert result.relation_resolutions[0].connected_draft_ids == ["d1", "d2"]
+
+
+@pytest.mark.parametrize(
+    ("mutate", "expected_error"),
+    [
+        (
+            lambda payload: payload.update({"extra": True}),
+            "unexpected_fields field=result",
+        ),
+        (
+            lambda payload: payload["merged_groups"][0].update({"extra": True}),
+            "unexpected_fields field=merged_groups[0]",
+        ),
+        (
+            lambda payload: payload.update({"relation_resolutions": []}),
+            "missing_relations",
+        ),
+        (
+            lambda payload: payload["relation_resolutions"].append(
+                dict(payload["relation_resolutions"][0])
+            ),
+            "duplicate_relation",
+        ),
+        (
+            lambda payload: payload["relation_resolutions"][0].update(
+                {"relation_id": "REL-999"}
+            ),
+            "unknown_relation",
+        ),
+        (
+            lambda payload: payload["relation_resolutions"][0].update(
+                {"evidence_draft_ids": ["d9"]}
+            ),
+            "unknown_relation_member",
+        ),
+    ],
+)
+def test_collected_function_payload_rejects_invalid_relation_contract(
+    mutate,
+    expected_error: str,
+) -> None:
+    payload = _collected_relation_payload()
+    mutate(payload)
+
+    _result, errors = parse_collected_grouping_function_payload(
+        payload,
+        evidence_catalog=[],
+        allowed_semantic_reasons=["continuous_action"],
+        allowed_relation_ids=["REL-001"],
+        allowed_draft_ids=["d1", "d2", "d3"],
+    )
+
+    assert any(expected_error in error for error in errors)
 
 
 def test_python_derives_stable_mixed_evidence_spanning_set() -> None:

@@ -197,6 +197,42 @@ def test_failover_does_not_switch_permanent_online_errors() -> None:
     assert online.calls == 1
 
 
+def test_failover_does_not_classify_grouping_connection_evidence_as_network() -> None:
+    from src.worktrace.errors import PersonalGroupingValidationError
+    from src.worktrace.llm_usage import LLMUsageRecorder
+
+    class Online:
+        def merge_day_candidates(
+            self,
+            target_date,
+            candidates,
+            *,
+            validation_feedback="",
+        ):
+            raise PersonalGroupingValidationError(
+                "member_connection_evidence_invalid field=merged_groups[0]"
+            )
+
+    class Codex:
+        def merge_day_candidates(self, *args, **kwargs):
+            raise AssertionError("Codex must not run")
+
+    recorder = LLMUsageRecorder()
+    analyzer = FailoverAnalyzer(
+        primary=Online(),
+        fallback=Codex(),
+        usage_recorder=recorder,
+    )
+
+    with pytest.raises(
+        PersonalGroupingValidationError,
+        match="member_connection_evidence_invalid",
+    ):
+        analyzer.merge_day_candidates("2026-07-23", [object()])
+
+    assert recorder.records()[0]["error_category"] == "invalid_protocol"
+
+
 def test_failover_does_not_switch_model_input_limit_errors() -> None:
     from src.worktrace.errors import ModelInputLimitError
     from src.worktrace.llm_usage import LLMUsageRecorder

@@ -11,6 +11,8 @@ from collections import Counter, defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 
+from src.worktrace.config import DEFAULT_CONFIG
+
 
 TIMING_RE = re.compile(
     r"(?P<event>[A-Za-z0-9_.-]+)\s+duration_ms=(?P<duration_ms>\d+(?:\.\d+)?)"
@@ -363,8 +365,12 @@ def _collect_day_grouping_artifact_summary(
 ) -> dict[str, object]:
     merge_root = conversation_debug_root / target_date / "_merge_day_candidates"
     grouping_path = merge_root / "grouping_attempts.json"
+    discovery_path = merge_root / "day_group_discovery.json"
     review_path = merge_root / "day_group_review.json"
+    review_replay_path = merge_root / "day_group_review_replay.json"
+    render_path = merge_root / "personal_group_render.json"
     resolved_path = merge_root / "resolved_groups.json"
+    usage_path = conversation_debug_root / target_date / "llm_usage.json"
 
     def read_attempts(path: Path) -> list[dict[str, object]]:
         if not path.exists():
@@ -374,27 +380,184 @@ def _collect_day_grouping_artifact_summary(
         return [item for item in raw_attempts if isinstance(item, dict)]
 
     grouping_attempts = read_attempts(grouping_path)
+    grouping_request_labels = [
+        str(item.get("request_label", ""))
+        for item in grouping_attempts
+        if str(item.get("request_label", ""))
+    ]
+    initial_grouping_labels = [
+        label
+        for label in grouping_request_labels
+        if label == "full-day" or label.startswith("batch-")
+    ]
+    cross_batch_summary_labels = [
+        label for label in grouping_request_labels if label.startswith("summary-")
+    ]
     review_attempts = read_attempts(review_path)
+    latest_review_status: dict[str, str] = {}
+    for attempt in review_attempts:
+        component_id = str(attempt.get("component_id", ""))
+        if component_id:
+            latest_review_status[component_id] = str(attempt.get("status", ""))
+    review_model_request_count: int | None = None
+    if usage_path.exists():
+        usage_payload = json.loads(usage_path.read_text(encoding="utf-8"))
+        raw_usage_attempts = (
+            usage_payload.get("requests", [])
+            if isinstance(usage_payload, dict)
+            else []
+        )
+        if isinstance(raw_usage_attempts, list):
+            review_model_request_count = sum(
+                isinstance(item, dict)
+                and item.get("request_kind") == "day_group_review"
+                for item in raw_usage_attempts
+            )
+    review_replay_payload: dict[str, object] = {}
+    if review_replay_path.exists():
+        loaded = json.loads(review_replay_path.read_text(encoding="utf-8"))
+        if isinstance(loaded, dict):
+            review_replay_payload = loaded
+    discovery_payload: dict[str, object] = {}
+    if discovery_path.exists():
+        loaded = json.loads(discovery_path.read_text(encoding="utf-8"))
+        if isinstance(loaded, dict):
+            discovery_payload = loaded
+    raw_discovery_attempts = discovery_payload.get("attempts", [])
+    discovery_attempts = (
+        [item for item in raw_discovery_attempts if isinstance(item, dict)]
+        if isinstance(raw_discovery_attempts, list)
+        else []
+    )
+    discovery_result = discovery_payload.get("result", {})
+    discovery_candidate_groups = (
+        discovery_result.get("candidate_groups", [])
+        if isinstance(discovery_result, dict)
+        else []
+    )
+    discovery_group_checks = (
+        discovery_result.get("group_checks")
+        if isinstance(discovery_result, dict)
+        else None
+    )
     resolved_payload: dict[str, object] = {}
     if resolved_path.exists():
         loaded = json.loads(resolved_path.read_text(encoding="utf-8"))
         if isinstance(loaded, dict):
             resolved_payload = loaded
+    render_payload: dict[str, object] = {}
+    if render_path.exists():
+        loaded = json.loads(render_path.read_text(encoding="utf-8"))
+        if isinstance(loaded, dict):
+            render_payload = loaded
+    raw_render_attempts = render_payload.get("attempts", [])
+    render_attempts = (
+        [item for item in raw_render_attempts if isinstance(item, dict)]
+        if isinstance(raw_render_attempts, list)
+        else []
+    )
 
     return {
         "path": str(merge_root.resolve()),
         "exists": resolved_path.exists(),
         "grouping_attempt_count": len(grouping_attempts),
+        "initial_grouping_batch_count": len(dict.fromkeys(initial_grouping_labels)),
+        "initial_grouping_attempt_count": len(initial_grouping_labels),
+        "cross_batch_summary_batch_count": len(
+            dict.fromkeys(cross_batch_summary_labels)
+        ),
+        "cross_batch_summary_attempt_count": len(cross_batch_summary_labels),
         "grouping_failed_attempt_count": sum(
             item.get("status") == "invalid" for item in grouping_attempts
         ),
         "grouping_repair_count": sum(
             item.get("status") == "repaired" for item in grouping_attempts
         ),
+        "discovery": {
+            "path": str(discovery_path.resolve()),
+            "available": discovery_path.exists(),
+            "status": discovery_payload.get("status")
+            if discovery_path.exists()
+            else None,
+            "protocol": discovery_payload.get("protocol")
+            if discovery_path.exists()
+            else None,
+            "attempt_count": len(discovery_attempts)
+            if discovery_path.exists()
+            else None,
+            "failed_attempt_count": sum(
+                item.get("status") in {"failed", "invalid"}
+                for item in discovery_attempts
+            )
+            if discovery_path.exists()
+            else None,
+            "candidate_group_count": len(discovery_candidate_groups)
+            if isinstance(discovery_candidate_groups, list)
+            and discovery_path.exists()
+            else None,
+            "checked_group_count": len(discovery_group_checks)
+            if isinstance(discovery_group_checks, list)
+            and discovery_path.exists()
+            else None,
+            "input_group_count": discovery_payload.get("input_group_count")
+            if discovery_path.exists()
+            else None,
+            "input_chars": discovery_payload.get("input_chars")
+            if discovery_path.exists()
+            else None,
+            "token_estimates": discovery_payload.get("token_estimates")
+            if discovery_path.exists()
+            else None,
+            "oversized_submission": discovery_payload.get(
+                "oversized_submission"
+            )
+            if discovery_path.exists()
+            else None,
+            "abandon_reason": discovery_payload.get("abandon_reason")
+            if discovery_path.exists()
+            else None,
+        },
         "review_attempt_count": len(review_attempts),
+        "review_model_request_count": review_model_request_count,
         "review_failed_attempt_count": sum(
             item.get("status") == "failed" for item in review_attempts
         ),
+        "review_failed_component_ids": [
+            component_id
+            for component_id, status in latest_review_status.items()
+            if status != "success"
+        ],
+        "review_replay": {
+            "path": str(review_replay_path.resolve()),
+            "available": review_replay_path.exists(),
+            "selected_component_ids": review_replay_payload.get(
+                "selected_component_ids"
+            )
+            if review_replay_path.exists()
+            else None,
+            "statuses": [
+                str(item.get("status", ""))
+                for item in review_replay_payload.get("runs", [])
+                if isinstance(item, dict)
+            ]
+            if isinstance(review_replay_payload.get("runs", []), list)
+            and review_replay_path.exists()
+            else None,
+        },
+        "personal_group_render": {
+            "path": str(render_path.resolve()),
+            "available": render_path.exists(),
+            "status": render_payload.get("status") if render_path.exists() else None,
+            "attempt_count": len(render_attempts) if render_path.exists() else None,
+            "failed_attempt_count": sum(
+                item.get("status") == "failed" for item in render_attempts
+            )
+            if render_path.exists()
+            else None,
+            "summary": render_payload.get("summary")
+            if render_path.exists()
+            else None,
+        },
         "resolved_group_count": len(resolved_payload.get("groups", []))
         if isinstance(resolved_payload.get("groups", []), list)
         else 0,
@@ -426,6 +589,11 @@ def main(argv: list[str] | None = None) -> int:
     ):
         raise SystemExit("--model-input-batch-target-tokens must be positive.")
     repo_root = Path.cwd()
+    effective_model_input_batch_target_tokens = (
+        args.model_input_batch_target_tokens
+        if args.model_input_batch_target_tokens is not None
+        else DEFAULT_CONFIG.model_input_batch_target_tokens
+    )
     trace_root = Path(args.trace_root) if args.trace_root else repo_root / "data" / "replay-trace" / args.date
     data_root = Path(args.data_root) if args.data_root else repo_root / "data"
     conversation_debug_root = trace_root / "conversation_debug"
@@ -585,7 +753,7 @@ def main(argv: list[str] | None = None) -> int:
         "codex_stdin_mode": args.codex_stdin_mode,
         "data_root": str(data_root.resolve()),
         "resume_requested": args.resume,
-        "model_input_batch_target_tokens": args.model_input_batch_target_tokens,
+        "model_input_batch_target_tokens": effective_model_input_batch_target_tokens,
         "trace_root": str(trace_root.resolve()),
         "run_status_path": str(status_path.resolve()),
         "returncode": completed.returncode,

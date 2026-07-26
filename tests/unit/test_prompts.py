@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from src.worktrace.analyzers.output_schemas import (
@@ -11,6 +12,9 @@ from src.worktrace.analyzers.prompts import (
     build_anchor_batch_analysis_prompt,
     build_anchor_expansion_prompt,
     build_batch_analysis_prompt,
+    build_collected_group_discovery_prompt,
+    build_day_group_discovery_prompt,
+    build_day_group_review_prompt,
     build_merge_prompt,
     serialize_message_for_prompt,
     serialize_anchor_unit_for_prompt,
@@ -29,6 +33,7 @@ from src.worktrace.models import (
     LinkMeta,
     LinkedFileTextBlock,
     NormalizedMessage,
+    CrossConversationGroup,
     SourceBackedEventDraft,
 )
 
@@ -37,6 +42,90 @@ REPO_RETENTION_POLICY = load_runtime_config_overrides(
     RuntimeConfig(),
     cwd=Path.cwd(),
 ).retention_policy
+
+
+def test_group_discovery_prompts_require_exhaustive_group_checks() -> None:
+    config = load_runtime_config_overrides(RuntimeConfig(), cwd=Path.cwd())
+    groups = [
+        {"group_id": "group-001", "title": "事项一"},
+        {"group_id": "group-002", "title": "事项二"},
+    ]
+
+    personal = build_day_group_discovery_prompt(
+        "2026-07-24",
+        groups=groups,
+        config=config,
+    )
+    collected = build_collected_group_discovery_prompt(
+        "2026-07-24",
+        groups=groups,
+        config=config,
+    )
+
+    for prompt in (personal, collected):
+        assert "提交 group_checks" in prompt
+        assert "每个输入 group_id 必须在 group_checks 中恰好作为 group_id 返回一次" in prompt
+        assert "逐组对照" in prompt
+        assert "related_group_ids" in prompt
+        assert "只展示完整覆盖结构，不表示实际组没有关联" in prompt
+        assert "固定长度片段" in prompt
+        assert '"target_date"' not in prompt
+        assert '"positive_examples"' not in prompt
+        assert '"negative_examples"' not in prompt
+        assert "candidate_groups" not in prompt
+
+
+def test_day_group_review_prompt_requires_relation_group_consistency() -> None:
+    config = load_runtime_config_overrides(RuntimeConfig(), cwd=Path.cwd())
+    candidates = [
+        SourceBackedEventDraft(
+            draft_id="d1",
+            date="2026-07-24",
+            topic="事项一",
+            content="处理事项一。",
+            source_message_ids=["m1"],
+            source_conversation_id="oc1",
+            source_slice_id="s1",
+            confidence=0.9,
+        ),
+        SourceBackedEventDraft(
+            draft_id="d2",
+            date="2026-07-24",
+            topic="事项二",
+            content="处理事项二。",
+            source_message_ids=["m2"],
+            source_conversation_id="oc2",
+            source_slice_id="s2",
+            confidence=0.9,
+        ),
+    ]
+
+    prompt = build_day_group_review_prompt(
+        "2026-07-24",
+        candidates=candidates,
+        groups=[
+            CrossConversationGroup(group_id="group-001", draft_ids=["d1"]),
+            CrossConversationGroup(group_id="group-002", draft_ids=["d2"]),
+        ],
+        relation_reasons=[
+            {
+                "relation_id": "relation-001",
+                "relation_types": ["direct_reply_or_quote"],
+                "left_draft_id": "d1",
+                "right_draft_id": "d2",
+            }
+        ],
+        config=config,
+    )
+
+    assert "先逐条填写 relation_resolutions" in prompt
+    assert "再统一处理重叠关系并形成 merged_groups" in prompt
+    assert "两部分不得冲突" in prompt
+    assert "connected_draft_ids 必须同时包含这两个编号" in prompt
+    assert "只填写证明该关系成立所需的最少成员" in prompt
+    payload = json.loads(prompt)
+    assert payload["required_draft_ids"] == ["d1", "d2"]
+    assert "逐项核对 required_draft_ids" in prompt
 
 
 def test_prompt_serialization_is_compact(tmp_path: Path) -> None:

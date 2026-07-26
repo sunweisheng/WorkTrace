@@ -65,3 +65,12 @@ def choose_preferred_text(values: list[str], *, max_length: int = 4000) -> str:
         ),
     )
     return ranked[0][1]
+
+
+def combine_group_titles(primary: str, member_titles: list[str]) -> str:
+    titles: list[str] = []
+    for value in [primary, *member_titles]:
+        title = clean_text(value)
+        if title and title not in titles:
+            titles.append(title)
+    return "；".join(titles)

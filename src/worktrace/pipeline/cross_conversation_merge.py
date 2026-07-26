@@ -1,6 +1,11 @@
 from __future__ import annotations
 
-from ..models import CrossConversationGroup, MergedEventDraft, SourceBackedEventDraft
+from ..models import (
+    CrossConversationGroup,
+    MergedEventDraft,
+    PersonalGroupRenderItem,
+    SourceBackedEventDraft,
+)
 from .retention_filter import derive_retention_metadata_from_sources
 from ..utils.link_refs import sort_referenced_link_ids
 from ..utils.text import choose_preferred_text, merge_content_texts
@@ -13,6 +18,7 @@ def materialize_grouped_merged_drafts(
     target_date: str,
     message_order: list[str],
     self_relation_order: tuple[str, ...] = (),
+    rendered_groups: dict[str, PersonalGroupRenderItem] | None = None,
 ) -> list[MergedEventDraft]:
     draft_map = {candidate.draft_id: candidate for candidate in candidates}
     candidate_order = {candidate.draft_id: index for index, candidate in enumerate(candidates)}
@@ -41,12 +47,26 @@ def materialize_grouped_merged_drafts(
             derive_retention_metadata_from_sources(items)
         )
         source_message_ids = _ordered_source_message_ids(items, message_order)
+        rendered = (rendered_groups or {}).get(group.group_id)
         merged_drafts.append(
             MergedEventDraft(
                 date=target_date,
-                topic=primary.topic or choose_preferred_text([item.topic for item in items]),
-                content=merge_content_texts([item.content for item in items]),
-                object_hint=primary.object_hint or object_hint,
+                topic=(
+                    rendered.topic
+                    if rendered is not None
+                    else primary.topic
+                    or choose_preferred_text([item.topic for item in items])
+                ),
+                content=(
+                    rendered.content
+                    if rendered is not None
+                    else merge_content_texts([item.content for item in items])
+                ),
+                object_hint=(
+                    rendered.object_hint
+                    if rendered is not None
+                    else primary.object_hint or object_hint
+                ),
                 retention_reason=retention_reason,
                 retention_detail=retention_detail,
                 action_labels=list(

@@ -160,6 +160,7 @@ class Analyzer(ABC):
         deterministic_groups: list[list[str]],
         *,
         validation_feedback: str = "",
+        previous_invalid_assignment: dict[str, object] | None = None,
     ) -> CollectedGroupingResult:
         raise NotImplementedError
 
@@ -171,6 +172,9 @@ class Analyzer(ABC):
         *,
         review_reasons: list[str] | None = None,
         validation_feedback: str = "",
+        existing_groups: list[CollectedGroupingGroup] | None = None,
+        relation_reasons: list[dict[str, object]] | None = None,
+        atomic_groups: list[list[str]] | None = None,
     ) -> CollectedGroupingResult:
         raise NotImplementedError
 

@@ -213,6 +213,122 @@ def test_trace_replay_separates_legacy_and_current_protocol(tmp_path: Path) -> N
     assert current["model_declared_evidence_relation_ids"] == []
 
 
+def test_trace_replay_restores_review_relations_and_atomic_groups(
+    tmp_path: Path,
+) -> None:
+    events = [
+        _source("d1", "file-1"),
+        _source("d2", "file-2"),
+        _source("d3", "file-3"),
+    ]
+    relation = {
+        "relation_id": "REL-001",
+        "group_ids": ["g1", "g2"],
+        "draft_ids": ["d1", "d3"],
+        "relation_types": ["title_discovery"],
+        "reason": "标题显示同一事项。",
+    }
+    raw_result = {
+        "split_reason": "",
+        "merged_groups": [
+            {
+                "group_id": "all",
+                "draft_ids": ["d1", "d2", "d3"],
+                "summary_title": "同一事项全过程",
+                "summary_content": "三条记录共同构成完整过程。",
+                "summary_object_hint": "同一事项",
+                "semantic_reasons": ["same_object"],
+                "reason_detail": "三条记录直接参与同一过程。",
+                "member_connections": [
+                    {
+                        "draft_id": draft_id,
+                        "connection_detail": "该记录直接参与共同过程。",
+                    }
+                    for draft_id in ("d1", "d2", "d3")
+                ],
+                "risk_flags": [],
+            }
+        ],
+        "singleton_draft_ids": [],
+        "relation_resolutions": [
+            {
+                "relation_id": "REL-001",
+                "decision": "merged",
+                "connected_draft_ids": ["d1", "d3"],
+                "reason": "两条记录直接处理同一事项。",
+                "evidence_draft_ids": ["d1", "d3"],
+            }
+        ],
+    }
+    trace_path = tmp_path / "step-001.json"
+    trace_path.write_text(
+        json.dumps(
+            {
+                "grouping_protocol_version": 2,
+                "step_index": 1,
+                "stage": "high_risk_review",
+                "input_events": [item.to_dict() for item in events],
+                "candidate_group": {
+                    "group_id": "component-001",
+                    "draft_ids": ["d1", "d2", "d3"],
+                },
+                "initial_groups": [
+                    {"group_id": "g1", "draft_ids": ["d1", "d2"]},
+                    {"group_id": "g2", "draft_ids": ["d3"]},
+                ],
+                "strong_relations": [relation],
+                "atomic_groups": [["d1", "d2"]],
+                "review_reasons": ["cross_initial_group_relation"],
+                "raw_result": raw_result,
+                "python_validation": {"valid": True, "errors": []},
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    evaluation, prompt, function_tool = replay_trace_payload(
+        case_id="1",
+        trace_path=trace_path,
+        target_date="2026-07-20",
+        failure_types=[],
+        config=RuntimeConfig(),
+        result_dir=None,
+    )
+
+    assert evaluation["valid"] is True
+    assert evaluation["review_context"]["strong_relations"] == [relation]
+    assert "relation_resolutions" in prompt
+    properties = function_tool["parameters"]["properties"]
+    assert "relation_resolutions" in properties
+
+    raw_result["merged_groups"][0]["draft_ids"] = ["d1", "d3"]
+    raw_result["merged_groups"][0]["member_connections"] = [
+        raw_result["merged_groups"][0]["member_connections"][0],
+        raw_result["merged_groups"][0]["member_connections"][2],
+    ]
+    raw_result["singleton_draft_ids"] = ["d2"]
+    raw_result["split_reason"] = "d2 与其余记录处理不同事项。"
+    trace_payload = json.loads(trace_path.read_text(encoding="utf-8"))
+    trace_payload["raw_result"] = raw_result
+    trace_path.write_text(
+        json.dumps(trace_payload, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    invalid, _prompt, _function_tool = replay_trace_payload(
+        case_id="1",
+        trace_path=trace_path,
+        target_date="2026-07-20",
+        failure_types=[],
+        config=RuntimeConfig(),
+        result_dir=None,
+    )
+
+    assert invalid["valid"] is False
+    assert any(error.startswith("atomic_group_split") for error in invalid["errors"])
+
+
 def test_replay_summary_counts_issues_by_stage() -> None:
     results = [
         {

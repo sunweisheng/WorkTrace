@@ -1308,6 +1308,106 @@ class MergedEventDraft:
 
 
 @dataclass(frozen=True)
+class DayGroupDiscoveryCandidate:
+    group_ids: list[str]
+    reason: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "group_ids": list(self.group_ids),
+            "reason": self.reason,
+        }
+
+
+@dataclass(frozen=True)
+class DayGroupDiscoveryCheck:
+    group_id: str
+    related_group_ids: list[str]
+    reason: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "group_id": self.group_id,
+            "related_group_ids": list(self.related_group_ids),
+            "reason": self.reason,
+        }
+
+
+@dataclass(frozen=True)
+class DayGroupDiscoveryResult:
+    candidate_groups: list[DayGroupDiscoveryCandidate] = field(default_factory=list)
+    group_checks: list[DayGroupDiscoveryCheck] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "candidate_groups": [item.to_dict() for item in self.candidate_groups],
+            "group_checks": [item.to_dict() for item in self.group_checks],
+        }
+
+
+@dataclass(frozen=True)
+class DayGroupRelationResolution:
+    relation_id: str
+    decision: str
+    connected_draft_ids: list[str]
+    reason: str
+    evidence_message_ids: list[str]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "relation_id": self.relation_id,
+            "decision": self.decision,
+            "connected_draft_ids": list(self.connected_draft_ids),
+            "reason": self.reason,
+            "evidence_message_ids": list(self.evidence_message_ids),
+        }
+
+
+@dataclass(frozen=True)
+class DayGroupReviewResult:
+    grouping_result: CrossConversationGroupResult
+    relation_resolutions: list[DayGroupRelationResolution] = field(
+        default_factory=list
+    )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "groups": [item.to_dict() for item in self.grouping_result.groups],
+            "relation_resolutions": [
+                item.to_dict() for item in self.relation_resolutions
+            ],
+        }
+
+
+@dataclass(frozen=True)
+class PersonalGroupRenderItem:
+    group_id: str
+    covered_draft_ids: list[str]
+    topic: str
+    content: str
+    object_hint: str
+    fact_items: list[PersonalFactItem] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "group_id": self.group_id,
+            "covered_draft_ids": list(self.covered_draft_ids),
+            "topic": self.topic,
+            "content": self.content,
+            "object_hint": self.object_hint,
+            "fact_items": [item.to_dict() for item in self.fact_items],
+        }
+
+
+@dataclass(frozen=True)
+class PersonalGroupRenderResult:
+    groups: list[PersonalGroupRenderItem] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"groups": [item.to_dict() for item in self.groups]}
+
+
+@dataclass(frozen=True)
 class CrossConversationGroup:
     group_id: str
     draft_ids: list[str]
@@ -1617,6 +1717,21 @@ class DayGroupingSummary:
     final_group_count: int = 0
     review_component_count: int = 0
     review_request_count: int = 0
+    cross_group_merge_count: int = 0
+    split_group_count: int = 0
+    relation_merged_count: int = 0
+    relation_separate_count: int = 0
+    review_failure_count: int = 0
+    discovery_request_count: int = 0
+    discovery_retry_count: int = 0
+    discovery_checked_group_count: int = 0
+    discovery_candidate_group_count: int = 0
+    discovery_involved_group_count: int = 0
+    discovery_failure_count: int = 0
+    discovery_oversized_submission_count: int = 0
+    content_render_request_count: int = 0
+    content_render_retry_count: int = 0
+    content_render_failure_count: int = 0
     validation_retry_count: int = 0
     codex_fallback_count: int = 0
     singleton_repair_candidate_count: int = 0
@@ -1630,6 +1745,35 @@ class DayGroupingSummary:
             final_group_count=int(data.get("final_group_count", 0)),
             review_component_count=int(data.get("review_component_count", 0)),
             review_request_count=int(data.get("review_request_count", 0)),
+            cross_group_merge_count=int(data.get("cross_group_merge_count", 0)),
+            split_group_count=int(data.get("split_group_count", 0)),
+            relation_merged_count=int(data.get("relation_merged_count", 0)),
+            relation_separate_count=int(data.get("relation_separate_count", 0)),
+            review_failure_count=int(data.get("review_failure_count", 0)),
+            discovery_request_count=int(data.get("discovery_request_count", 0)),
+            discovery_retry_count=int(data.get("discovery_retry_count", 0)),
+            discovery_checked_group_count=int(
+                data.get("discovery_checked_group_count", 0)
+            ),
+            discovery_candidate_group_count=int(
+                data.get("discovery_candidate_group_count", 0)
+            ),
+            discovery_involved_group_count=int(
+                data.get("discovery_involved_group_count", 0)
+            ),
+            discovery_failure_count=int(data.get("discovery_failure_count", 0)),
+            discovery_oversized_submission_count=int(
+                data.get("discovery_oversized_submission_count", 0)
+            ),
+            content_render_request_count=int(
+                data.get("content_render_request_count", 0)
+            ),
+            content_render_retry_count=int(
+                data.get("content_render_retry_count", 0)
+            ),
+            content_render_failure_count=int(
+                data.get("content_render_failure_count", 0)
+            ),
             validation_retry_count=int(data.get("validation_retry_count", 0)),
             codex_fallback_count=int(data.get("codex_fallback_count", 0)),
             singleton_repair_candidate_count=int(
@@ -1645,6 +1789,23 @@ class DayGroupingSummary:
             "final_group_count": self.final_group_count,
             "review_component_count": self.review_component_count,
             "review_request_count": self.review_request_count,
+            "cross_group_merge_count": self.cross_group_merge_count,
+            "split_group_count": self.split_group_count,
+            "relation_merged_count": self.relation_merged_count,
+            "relation_separate_count": self.relation_separate_count,
+            "review_failure_count": self.review_failure_count,
+            "discovery_request_count": self.discovery_request_count,
+            "discovery_retry_count": self.discovery_retry_count,
+            "discovery_checked_group_count": self.discovery_checked_group_count,
+            "discovery_candidate_group_count": self.discovery_candidate_group_count,
+            "discovery_involved_group_count": self.discovery_involved_group_count,
+            "discovery_failure_count": self.discovery_failure_count,
+            "discovery_oversized_submission_count": (
+                self.discovery_oversized_submission_count
+            ),
+            "content_render_request_count": self.content_render_request_count,
+            "content_render_retry_count": self.content_render_retry_count,
+            "content_render_failure_count": self.content_render_failure_count,
             "validation_retry_count": self.validation_retry_count,
             "codex_fallback_count": self.codex_fallback_count,
             "singleton_repair_candidate_count": self.singleton_repair_candidate_count,
@@ -1840,9 +2001,30 @@ class CollectedGroupingGroup:
 
 
 @dataclass(frozen=True)
+class CollectedGroupRelationResolution:
+    relation_id: str
+    decision: str
+    connected_draft_ids: list[str]
+    reason: str
+    evidence_draft_ids: list[str]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "relation_id": self.relation_id,
+            "decision": self.decision,
+            "connected_draft_ids": list(self.connected_draft_ids),
+            "reason": self.reason,
+            "evidence_draft_ids": list(self.evidence_draft_ids),
+        }
+
+
+@dataclass(frozen=True)
 class CollectedGroupingResult:
     groups: list[CollectedGroupingGroup] = field(default_factory=list)
     split_reason: str = ""
+    relation_resolutions: list[CollectedGroupRelationResolution] = field(
+        default_factory=list
+    )
     validation_errors: list[str] = field(default_factory=list)
     raw_function_payload: dict[str, Any] | None = field(
         default=None,
@@ -1860,15 +2042,32 @@ class CollectedGroupingResult:
         return cls(
             groups=groups,
             split_reason=split_reason,
+            relation_resolutions=[
+                CollectedGroupRelationResolution(
+                    relation_id=str(item.get("relation_id", "")),
+                    decision=str(item.get("decision", "")),
+                    connected_draft_ids=_string_list(
+                        item.get("connected_draft_ids")
+                    ),
+                    reason=str(item.get("reason", "")),
+                    evidence_draft_ids=_string_list(item.get("evidence_draft_ids")),
+                )
+                for item in _dict_list(data.get("relation_resolutions"))
+            ],
             validation_errors=_string_list(data.get("validation_errors")),
         )
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        result = {
             "split_reason": self.split_reason,
             "groups": [item.to_dict() for item in self.groups],
             "validation_errors": list(self.validation_errors),
         }
+        if self.relation_resolutions:
+            result["relation_resolutions"] = [
+                item.to_dict() for item in self.relation_resolutions
+            ]
+        return result
 
 
 @dataclass(frozen=True)
@@ -1984,6 +2183,19 @@ class CollectedMergeQualitySummary:
     high_risk_group_count: int = 0
     reviewed_group_count: int = 0
     review_split_group_count: int = 0
+    discovery_request_count: int = 0
+    discovery_retry_count: int = 0
+    discovery_checked_group_count: int = 0
+    discovery_candidate_group_count: int = 0
+    discovery_involved_group_count: int = 0
+    discovery_failure_count: int = 0
+    discovery_oversized_submission_count: int = 0
+    cross_group_merge_count: int = 0
+    split_group_count: int = 0
+    relation_merged_count: int = 0
+    relation_separate_count: int = 0
+    review_failure_count: int = 0
+    content_rewrite_failure_count: int = 0
     content_retry_count: int = 0
     shortened_prompt_count: int = 0
     review_required: bool = False
@@ -2014,6 +2226,29 @@ class CollectedMergeQualitySummary:
             high_risk_group_count=int(data.get("high_risk_group_count", 0)),
             reviewed_group_count=int(data.get("reviewed_group_count", 0)),
             review_split_group_count=int(data.get("review_split_group_count", 0)),
+            discovery_request_count=int(data.get("discovery_request_count", 0)),
+            discovery_retry_count=int(data.get("discovery_retry_count", 0)),
+            discovery_checked_group_count=int(
+                data.get("discovery_checked_group_count", 0)
+            ),
+            discovery_candidate_group_count=int(
+                data.get("discovery_candidate_group_count", 0)
+            ),
+            discovery_involved_group_count=int(
+                data.get("discovery_involved_group_count", 0)
+            ),
+            discovery_failure_count=int(data.get("discovery_failure_count", 0)),
+            discovery_oversized_submission_count=int(
+                data.get("discovery_oversized_submission_count", 0)
+            ),
+            cross_group_merge_count=int(data.get("cross_group_merge_count", 0)),
+            split_group_count=int(data.get("split_group_count", 0)),
+            relation_merged_count=int(data.get("relation_merged_count", 0)),
+            relation_separate_count=int(data.get("relation_separate_count", 0)),
+            review_failure_count=int(data.get("review_failure_count", 0)),
+            content_rewrite_failure_count=int(
+                data.get("content_rewrite_failure_count", 0)
+            ),
             content_retry_count=int(data.get("content_retry_count", 0)),
             shortened_prompt_count=int(data.get("shortened_prompt_count", 0)),
             review_required=bool(data.get("review_required", False)),

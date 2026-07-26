@@ -18,6 +18,7 @@ from .constants import DailyRunStatus
 from .delivery.feishu_cli import FeishuCliSelfDelivery
 from .errors import (
     AnalyzerProtocolError,
+    DayGroupDiscoveryValidationError,
     DeliveryError,
     RetryableAnalyzerProtocolError,
     StoreWriteError,
@@ -26,6 +27,7 @@ from .factories import AnalyzerFactory
 from .llm_usage import LLMUsageRecorder
 from .analyzers.base import Analyzer
 from .analyzers.function_calls import (
+    COLLECTED_GROUPING_FINAL_PARAMETER_CHECKS,
     FunctionCallSpec,
     collected_grouping_call_contract,
     task_function_call_spec,
@@ -35,9 +37,15 @@ from .analyzers.collected_evidence import (
     derive_group_evidence,
     derive_semantic_review_trigger_reasons,
 )
-from .analyzers.output_schemas import collected_merge_output_schema
+from .analyzers.output_schemas import (
+    collected_merge_output_schema,
+    day_group_discovery_output_schema,
+    day_group_discovery_typical_arguments,
+)
+from .analyzers.protocol import parse_day_group_discovery_payload
 from .analyzers.prompts import (
     build_collected_evidence_relation_catalog,
+    build_collected_group_discovery_prompt,
     build_collected_grouping_prompt,
     build_collected_merge_prompt,
     build_collected_review_prompt,
@@ -53,6 +61,7 @@ from .models import (
     CollectedMergeResult,
     CollectedMergeRunResult,
     CollectedSourceEvent,
+    DayGroupDiscoveryResult,
     DayDocument,
     EventFileLink,
     SelfIdentity,
@@ -66,6 +75,7 @@ from .pipeline.retention_filter import (
     filter_retained_work_events,
     retention_rejection_reason_for_event,
 )
+from .pipeline.day_event_grouping import normalize_attachment_base_name
 from .stores.markdown import MarkdownEventStore
 from .utils.dates import now_iso
 from .utils.filenames import (
@@ -74,7 +84,12 @@ from .utils.filenames import (
 )
 from .utils.hashing import file_key_from_url, stable_event_id
 from .utils.json_io import dump_json
-from .utils.text import choose_preferred_text, clean_text, merge_content_texts
+from .utils.text import (
+    choose_preferred_text,
+    clean_text,
+    combine_group_titles,
+    merge_content_texts,
+)
 from .utils.token_estimation import (
     estimate_structured_input_tokens,
 )
@@ -84,6 +99,7 @@ COLLECTED_MERGE_TIMING_STAGES = (
     "source_parse",
     "source_filter",
     "candidate_grouping",
+    "group_discovery",
     "candidate_reconciliation",
     "high_risk_review",
     "content_merge",
@@ -94,9 +110,32 @@ COLLECTED_MERGE_TIMING_STAGES = (
 
 COLLECTED_REQUEST_KIND_STAGES = {
     "collected_candidate_grouping": "candidate_grouping",
+    "collected_group_discovery": "group_discovery",
     "collected_group_review": "high_risk_review",
     "collected_event_merge": "content_merge",
 }
+
+
+@dataclass(frozen=True)
+class _CollectedDiscoveryOutcome:
+    result: DayGroupDiscoveryResult
+    warnings: list[str]
+    artifact: dict[str, object]
+    request_count: int
+    retry_count: int
+    codex_fallback_count: int
+    failure_count: int
+    oversized_submission_count: int
+
+
+@dataclass(frozen=True)
+class _CollectedReviewComponent:
+    component_id: str
+    groups: list[CollectedGroupingGroup]
+    events: list[CollectedSourceEvent]
+    relation_reasons: list[dict[str, object]]
+    review_reasons: list[str]
+    atomic_groups: list[list[str]]
 
 
 @dataclass
@@ -131,6 +170,8 @@ class CollectedMergeRunner:
         self._collected_merge_source_audit: list[dict[str, Any]] = []
         self._collected_merge_filter_diagnostics: list[dict[str, Any]] = []
         self._collected_merge_failure_warnings: list[str] = []
+        self._collected_group_discovery_artifact: dict[str, object] | None = None
+        self._collected_group_review_artifact: dict[str, object] | None = None
         self._collected_quality_counters: Counter[str] = Counter()
         self._collected_merge_stage_wall_clock_ms: Counter[str] = Counter()
         self._collected_usage_record_start_index = 0
@@ -737,10 +778,26 @@ class CollectedMergeRunner:
                 source_events,
                 deterministic_groups,
             )
+            grouping_result = replace(
+                grouping_result,
+                groups=_stabilize_collected_group_ids(grouping_result.groups),
+            )
         finally:
             self._record_collected_stage_timing(
                 "candidate_reconciliation",
                 reconciliation_started_at,
+            )
+        discovery_started_at = perf_counter()
+        try:
+            discovery_outcome = self._discover_collected_group_review_candidates(
+                target_date,
+                source_events,
+                grouping_result.groups,
+            )
+        finally:
+            self._record_collected_stage_timing(
+                "group_discovery",
+                discovery_started_at,
             )
         review_started_at = perf_counter()
         try:
@@ -748,6 +805,8 @@ class CollectedMergeRunner:
                 target_date,
                 source_events,
                 grouping_result,
+                deterministic_groups=deterministic_groups,
+                discovery_result=discovery_outcome.result,
             )
         finally:
             self._record_collected_stage_timing(
@@ -781,6 +840,9 @@ class CollectedMergeRunner:
                 source_events,
                 CollectedMergeResult(groups=rendered_groups),
             )
+        except (AnalyzerProtocolError, ValueError):
+            self._collected_quality_counters["content_rewrite_failure_count"] += 1
+            raise
         finally:
             self._record_collected_stage_timing(
                 "content_merge",
@@ -790,123 +852,643 @@ class CollectedMergeRunner:
             *deterministic_warnings,
             *grouping_warnings,
             *repair_warnings,
+            *discovery_outcome.warnings,
             *review_warnings,
             *retry_warnings,
             *final_warnings,
         ]
+
+    def _discover_collected_group_review_candidates(
+        self,
+        target_date: str,
+        source_events: list[CollectedSourceEvent],
+        groups: list[CollectedGroupingGroup],
+    ) -> _CollectedDiscoveryOutcome:
+        usage_recorder = self._llm_usage_recorder()
+        usage_record_start_index = (
+            len(usage_recorder.records()) if usage_recorder is not None else 0
+        )
+        source_by_id = {item.draft_id: item for item in source_events}
+        discovery_groups = [
+            {
+                "group_id": group.group_id,
+                "title": combine_group_titles(
+                    group.summary_title,
+                    [
+                        source_by_id[draft_id].event.title
+                        for draft_id in group.draft_ids
+                        if draft_id in source_by_id
+                    ],
+                )
+                or choose_preferred_text(
+                    [
+                        source_by_id[draft_id].event.title
+                        for draft_id in group.draft_ids
+                        if draft_id in source_by_id
+                    ]
+                ),
+            }
+            for group in groups
+        ]
+        artifact: dict[str, object] = {
+            "protocol": "group_checks_v1",
+            "status": "not_needed" if len(discovery_groups) < 2 else "running",
+            "input": {"groups": discovery_groups},
+            "input_group_count": len(discovery_groups),
+            "input_chars": len(
+                dump_json({"groups": discovery_groups}, pretty=False)
+            ),
+            "input_target_tokens": self.config.model_input_batch_target_tokens,
+            "attempts": [],
+            "usage_attempts": [],
+            "result": DayGroupDiscoveryResult().to_dict(),
+            "abandon_reason": "",
+        }
+        if len(discovery_groups) < 2:
+            return self._finish_collected_group_discovery(
+                DayGroupDiscoveryResult(),
+                artifact=artifact,
+                attempts=[],
+                retry_count=0,
+                codex_fallback_count=0,
+                usage_record_start_index=usage_record_start_index,
+            )
+
+        request_function = getattr(self.analyzer, "request_function", None)
+        if not callable(request_function):
+            artifact.update(
+                {
+                    "status": "unavailable",
+                    "abandon_reason": "Analyzer does not expose request_function.",
+                }
+            )
+            self._write_collected_group_discovery_artifact(artifact)
+            return _CollectedDiscoveryOutcome(
+                DayGroupDiscoveryResult(), [], artifact, 0, 0, 0, 0, 0
+            )
+
+        group_ids = [item["group_id"] for item in discovery_groups]
+        attempts: list[dict[str, object]] = []
+        validation_feedback = ""
+        retry_count = 0
+        codex_fallback_count = 0
+        last_context_id = ""
+
+        def request_parts(feedback: str):
+            prompt = build_collected_group_discovery_prompt(
+                target_date,
+                groups=discovery_groups,
+                config=self.config,
+                validation_feedback=feedback,
+            )
+            function_spec = task_function_call_spec(
+                "collected_group_discovery",
+                day_group_discovery_output_schema(group_ids),
+                enum_values={
+                    "group_id": group_ids,
+                    "related_group_ids": group_ids,
+                },
+                typical_arguments=day_group_discovery_typical_arguments(group_ids),
+            )
+            estimates = estimate_structured_input_tokens(
+                prompt,
+                function_spec=function_spec,
+                append_no_think=True,
+            )
+            return prompt, function_spec, estimates
+
+        for attempt_index in range(
+            self.config.day_group_validation_retry_limit + 1
+        ):
+            feedback_input = validation_feedback
+            prompt, function_spec, estimates = request_parts(validation_feedback)
+            oversized = (
+                estimates["input_estimated_tokens"]
+                > self.config.model_input_batch_target_tokens
+            )
+            last_context_id = (
+                f"collected-group-discovery:{target_date}:online-{attempt_index + 1}"
+            )
+            recorder = self._llm_usage_recorder()
+            context = (
+                recorder.request_context(last_context_id)
+                if recorder is not None
+                else nullcontext()
+            )
+            started_at = perf_counter()
+            raw_payload: object = None
+            try:
+                with context:
+                    raw_payload = request_function(
+                        prompt,
+                        function_spec=function_spec,
+                        allow_oversized_input=oversized,
+                    )
+                used_fallback = self._last_analyzer_request_used_fallback()
+                codex_fallback_count += int(used_fallback)
+                result = parse_day_group_discovery_payload(
+                    raw_payload,
+                    allowed_group_ids=group_ids,
+                )
+            except DayGroupDiscoveryValidationError as exc:
+                used_fallback = self._last_analyzer_request_used_fallback()
+                validation_feedback = str(exc)
+                attempts.append(
+                    _collected_discovery_attempt(
+                        attempt=len(attempts) + 1,
+                        context_id=last_context_id,
+                        backend="codex" if used_fallback else "online",
+                        status="invalid",
+                        started_at=started_at,
+                        validation_feedback_input=feedback_input,
+                        error=str(exc),
+                        result=raw_payload,
+                        estimates=estimates,
+                        target_tokens=self.config.model_input_batch_target_tokens,
+                        oversized=oversized,
+                    )
+                )
+                if used_fallback:
+                    return self._finish_collected_group_discovery(
+                        DayGroupDiscoveryResult(),
+                        artifact=artifact,
+                        attempts=attempts,
+                        retry_count=retry_count,
+                        codex_fallback_count=codex_fallback_count,
+                        usage_record_start_index=usage_record_start_index,
+                        abandon_reason=str(exc),
+                    )
+                if attempt_index < self.config.day_group_validation_retry_limit:
+                    retry_count += 1
+                    continue
+                break
+            except (AnalyzerProtocolError, TypeError, ValueError) as exc:
+                used_fallback = self._last_analyzer_request_used_fallback()
+                codex_fallback_count += int(used_fallback)
+                attempts.append(
+                    _collected_discovery_attempt(
+                        attempt=len(attempts) + 1,
+                        context_id=last_context_id,
+                        backend="codex" if used_fallback else "online",
+                        status="failed",
+                        started_at=started_at,
+                        validation_feedback_input=feedback_input,
+                        error=str(exc),
+                        result=raw_payload,
+                        estimates=estimates,
+                        target_tokens=self.config.model_input_batch_target_tokens,
+                        oversized=oversized,
+                    )
+                )
+                return self._finish_collected_group_discovery(
+                    DayGroupDiscoveryResult(),
+                    artifact=artifact,
+                    attempts=attempts,
+                    retry_count=retry_count,
+                    codex_fallback_count=codex_fallback_count,
+                    usage_record_start_index=usage_record_start_index,
+                    abandon_reason=str(exc),
+                )
+            attempts.append(
+                _collected_discovery_attempt(
+                    attempt=len(attempts) + 1,
+                    context_id=last_context_id,
+                    backend="codex" if used_fallback else "online",
+                    status="success",
+                    started_at=started_at,
+                    validation_feedback_input=feedback_input,
+                    error="",
+                    result=result.to_dict(),
+                    estimates=estimates,
+                    target_tokens=self.config.model_input_batch_target_tokens,
+                    oversized=oversized,
+                )
+            )
+            return self._finish_collected_group_discovery(
+                result,
+                artifact=artifact,
+                attempts=attempts,
+                retry_count=retry_count,
+                codex_fallback_count=codex_fallback_count,
+                usage_record_start_index=usage_record_start_index,
+            )
+
+        fallback = getattr(self.analyzer, "fallback_current_request", None)
+        if callable(fallback) and not self._last_analyzer_request_used_fallback():
+            prompt, function_spec, estimates = request_parts(validation_feedback)
+            oversized = (
+                estimates["input_estimated_tokens"]
+                > self.config.model_input_batch_target_tokens
+            )
+            context_id = f"collected-group-discovery:{target_date}:codex"
+            recorder = self._llm_usage_recorder()
+            context = (
+                recorder.request_context(context_id)
+                if recorder is not None
+                else nullcontext()
+            )
+            started_at = perf_counter()
+            raw_payload = None
+            codex_fallback_count += 1
+            try:
+                with context:
+                    raw_payload = fallback(
+                        "request_function",
+                        prompt,
+                        failed_request_context_id=last_context_id,
+                        error_category="validation_error",
+                        function_spec=function_spec,
+                        allow_oversized_input=oversized,
+                    )
+                result = parse_day_group_discovery_payload(
+                    raw_payload,
+                    allowed_group_ids=group_ids,
+                )
+            except (AnalyzerProtocolError, TypeError, ValueError) as exc:
+                attempts.append(
+                    _collected_discovery_attempt(
+                        attempt=len(attempts) + 1,
+                        context_id=context_id,
+                        backend="codex",
+                        status=(
+                            "invalid"
+                            if isinstance(exc, DayGroupDiscoveryValidationError)
+                            else "failed"
+                        ),
+                        started_at=started_at,
+                        validation_feedback_input=validation_feedback,
+                        error=str(exc),
+                        result=raw_payload,
+                        estimates=estimates,
+                        target_tokens=self.config.model_input_batch_target_tokens,
+                        oversized=oversized,
+                    )
+                )
+                return self._finish_collected_group_discovery(
+                    DayGroupDiscoveryResult(),
+                    artifact=artifact,
+                    attempts=attempts,
+                    retry_count=retry_count,
+                    codex_fallback_count=codex_fallback_count,
+                    usage_record_start_index=usage_record_start_index,
+                    abandon_reason=str(exc),
+                )
+            attempts.append(
+                _collected_discovery_attempt(
+                    attempt=len(attempts) + 1,
+                    context_id=context_id,
+                    backend="codex",
+                    status="success",
+                    started_at=started_at,
+                    validation_feedback_input=validation_feedback,
+                    error="",
+                    result=result.to_dict(),
+                    estimates=estimates,
+                    target_tokens=self.config.model_input_batch_target_tokens,
+                    oversized=oversized,
+                )
+            )
+            return self._finish_collected_group_discovery(
+                result,
+                artifact=artifact,
+                attempts=attempts,
+                retry_count=retry_count,
+                codex_fallback_count=codex_fallback_count,
+                usage_record_start_index=usage_record_start_index,
+            )
+
+        return self._finish_collected_group_discovery(
+            DayGroupDiscoveryResult(),
+            artifact=artifact,
+            attempts=attempts,
+            retry_count=retry_count,
+            codex_fallback_count=codex_fallback_count,
+            usage_record_start_index=usage_record_start_index,
+            abandon_reason=validation_feedback or "No valid result was returned.",
+        )
+
+    def _finish_collected_group_discovery(
+        self,
+        result: DayGroupDiscoveryResult,
+        *,
+        artifact: dict[str, object],
+        attempts: list[dict[str, object]],
+        retry_count: int,
+        codex_fallback_count: int,
+        usage_record_start_index: int,
+        abandon_reason: str = "",
+    ) -> _CollectedDiscoveryOutcome:
+        recorder = self._llm_usage_recorder()
+        usage_attempts = [
+            record
+            for record in (
+                recorder.records()[usage_record_start_index:]
+                if recorder is not None
+                else []
+            )
+            if str(record.get("request_context_id", "")).startswith(
+                "collected-group-discovery:"
+            )
+        ]
+        artifact.update(
+            {
+                "status": "abandoned" if abandon_reason else artifact["status"],
+                "attempts": attempts,
+                "usage_attempts": usage_attempts,
+                "result": result.to_dict(),
+                "abandon_reason": abandon_reason,
+                "token_estimates": (
+                    {
+                        key: attempts[0].get(key)
+                        for key in (
+                            "prompt_estimated_tokens",
+                            "online_input_estimated_tokens",
+                            "codex_input_estimated_tokens",
+                            "input_estimated_tokens",
+                        )
+                    }
+                    if attempts
+                    else {}
+                ),
+                "oversized_submission": any(
+                    item.get("oversized_submission") is True for item in attempts
+                ),
+            }
+        )
+        if not abandon_reason and artifact["status"] == "running":
+            artifact["status"] = "success"
+        request_count = len(usage_attempts) or len(attempts)
+        oversized_count = sum(
+            item.get("oversized_submission") is True for item in attempts
+        )
+        self._collected_quality_counters.update(
+            {
+                "discovery_request_count": request_count,
+                "discovery_retry_count": retry_count,
+                "discovery_checked_group_count": len(result.group_checks),
+                "discovery_candidate_group_count": len(result.candidate_groups),
+                "discovery_involved_group_count": len(
+                    {
+                        group_id
+                        for candidate in result.candidate_groups
+                        for group_id in candidate.group_ids
+                    }
+                ),
+                "discovery_failure_count": int(bool(abandon_reason)),
+                "discovery_oversized_submission_count": oversized_count,
+            }
+        )
+        self._write_collected_group_discovery_artifact(artifact)
+        warning = (
+            "Skipped collected group discovery after all attempts failed: "
+            f"{abandon_reason}"
+            if abandon_reason
+            else ""
+        )
+        return _CollectedDiscoveryOutcome(
+            result=result,
+            warnings=[warning] if warning else [],
+            artifact=artifact,
+            request_count=request_count,
+            retry_count=retry_count,
+            codex_fallback_count=codex_fallback_count,
+            failure_count=int(bool(abandon_reason)),
+            oversized_submission_count=oversized_count,
+        )
+
+    def _write_collected_group_discovery_artifact(
+        self,
+        artifact: dict[str, object],
+    ) -> None:
+        self._collected_group_discovery_artifact = artifact
+        if self._collected_merge_trace_dir is None:
+            return
+        (self._collected_merge_trace_dir / "collected_group_discovery.json").write_text(
+            dump_json(artifact, pretty=True),
+            encoding="utf-8",
+        )
 
     def _review_high_risk_groups(
         self,
         target_date: str,
         source_events: list[CollectedSourceEvent],
         grouping_result: CollectedGroupingResult,
+        *,
+        deterministic_groups: list[list[str]] | None = None,
+        discovery_result: DayGroupDiscoveryResult | None = None,
     ) -> tuple[CollectedGroupingResult, list[str]]:
-        if not self.config.high_risk_review_enabled:
-            return grouping_result, []
-
+        deterministic_groups = deterministic_groups or []
+        discovery_result = discovery_result or DayGroupDiscoveryResult()
         source_by_id = {item.draft_id: item for item in source_events}
+        high_risk_reasons_by_group_id: dict[str, list[str]] = {}
+        if self.config.high_risk_review_enabled:
+            for group in grouping_result.groups:
+                if len(group.draft_ids) == 1:
+                    continue
+                items = [
+                    source_by_id[draft_id]
+                    for draft_id in group.draft_ids
+                    if draft_id in source_by_id
+                ]
+                reasons = self._collected_group_review_reasons(group, items)
+                if reasons:
+                    high_risk_reasons_by_group_id[group.group_id] = reasons
+                    self._collected_quality_counters["high_risk_group_count"] += 1
+
+        components = build_collected_review_components(
+            grouping_result.groups,
+            source_events,
+            discovery_result=discovery_result,
+            deterministic_groups=deterministic_groups,
+            high_risk_reasons_by_group_id=high_risk_reasons_by_group_id,
+            attachment_version_suffix_patterns=(
+                self.config.attachment_version_suffix_patterns
+            ),
+            attachment_ignored_extensions=(
+                self.config.attachment_ignored_extensions
+            ),
+        )
+        if not components:
+            self._write_collected_group_review_artifact(
+                {"status": "not_needed", "components": [], "summary": {}}
+            )
+            return grouping_result, []
+        self._collected_quality_counters["review_required"] = 1
+
         review_method = getattr(self.analyzer, "review_collected_group", None)
         review_implementation = getattr(review_method, "__func__", review_method)
         has_review_capability = bool(
             callable(review_method)
             and review_implementation is not Analyzer.review_collected_group
         )
-        reviewed_by_index: dict[int, list[CollectedGroupingGroup]] = {}
-        review_jobs: list[
-            tuple[int, CollectedGroupingGroup, list[CollectedSourceEvent], list[str]]
-        ] = []
+        reviewed_by_component: dict[str, list[CollectedGroupingGroup]] = {}
+        result_by_component: dict[str, CollectedGroupingResult] = {}
+        warnings_by_component: dict[str, list[str]] = {}
         warnings: list[str] = []
-        cancel_event = Event()
-        for index, group in enumerate(grouping_result.groups):
-            if len(group.draft_ids) == 1:
-                reviewed_by_index[index] = [group]
-                continue
-            items = [
-                source_by_id[draft_id]
-                for draft_id in group.draft_ids
-                if draft_id in source_by_id
-            ]
-            reasons = self._collected_group_review_reasons(group, items)
-            if not reasons:
-                reviewed_by_index[index] = [group]
-                continue
-
-            self._collected_quality_counters["high_risk_group_count"] += 1
-            self._collected_quality_counters["review_required"] = 1
-            if not has_review_capability:
-                reviewed_by_index[index] = [group]
+        if not has_review_capability:
+            self._collected_quality_counters["review_failure_count"] += len(components)
+            for component in components:
                 warnings.append(
-                    "High-risk collected group could not be reviewed because the "
-                    f"analyzer has no review capability: group={group.group_id} "
-                    f"reasons={reasons}."
+                    "Collected review range could not be reviewed because the analyzer "
+                    f"has no review capability: component={component.component_id}."
                 )
-                continue
-            review_jobs.append((index, group, items, reasons))
+                result_by_component[component.component_id] = CollectedGroupingResult(
+                    groups=list(component.groups)
+                )
+                warnings_by_component[component.component_id] = [warnings[-1]]
+            self._finish_collected_group_review_artifact(
+                components,
+                result_by_component,
+                warnings_by_component,
+                failed_component_ids={item.component_id for item in components},
+            )
+            return grouping_result, warnings
 
         def review_job(
-            group: CollectedGroupingGroup,
-            items: list[CollectedSourceEvent],
-            reasons: list[str],
+            component: _CollectedReviewComponent,
         ) -> tuple[CollectedGroupingResult, list[str]]:
+            candidate_group = CollectedGroupingGroup(
+                group_id=component.component_id,
+                draft_ids=[item.draft_id for item in component.events],
+                risk_flags=["cross_batch"] if len(component.groups) > 1 else [],
+            )
             return self._review_collected_group_with_batching(
                 target_date,
-                items,
-                group,
-                reasons=reasons,
+                component.events,
+                candidate_group,
+                reasons=component.review_reasons,
                 depth=0,
-                cancel_event=cancel_event,
+                existing_groups=component.groups,
+                relation_reasons=component.relation_reasons,
+                atomic_groups=component.atomic_groups,
+                pre_review_groups=component.groups,
             )
 
-        if review_jobs:
-            max_workers = min(
-                self.config.max_concurrent_collected_merge_review_requests,
-                len(review_jobs),
-            )
-            executor = ThreadPoolExecutor(max_workers=max_workers)
+        max_workers = min(
+            self.config.max_concurrent_collected_merge_review_requests,
+            len(components),
+        )
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = {
-                executor.submit(review_job, group, items, reasons): (
-                    index,
-                    group,
-                    reasons,
-                )
-                for index, group, items, reasons in review_jobs
+                executor.submit(review_job, component): component
+                for component in components
             }
-            try:
-                for future in as_completed(futures):
-                    index, group, reasons = futures[future]
-                    try:
-                        reviewed, review_warnings = future.result()
-                    except NotImplementedError:
-                        reviewed_by_index[index] = [group]
-                        warnings.append(
-                            "High-risk collected group could not be reviewed because the "
-                            f"analyzer has no review capability: group={group.group_id} "
-                            f"reasons={reasons}."
-                        )
-                        continue
-                    reviewed_by_index[index] = list(reviewed.groups)
-                    warnings.extend(review_warnings)
-                    self._collected_quality_counters["reviewed_group_count"] += 1
-                    self._collected_quality_counters["review_split_group_count"] += int(
-                        len(reviewed.groups) > 1
+            for future in as_completed(futures):
+                component = futures[future]
+                try:
+                    reviewed, review_warnings = future.result()
+                except (AnalyzerProtocolError, RetryableAnalyzerProtocolError, ValueError) as exc:
+                    reviewed_by_component[component.component_id] = list(component.groups)
+                    result_by_component[component.component_id] = (
+                        CollectedGroupingResult(groups=list(component.groups))
                     )
-            except BaseException:
-                cancel_event.set()
-                for future in futures:
-                    future.cancel()
-                executor.shutdown(wait=True, cancel_futures=True)
-                raise
-            else:
-                executor.shutdown(wait=True)
+                    self._collected_quality_counters["review_failure_count"] += 1
+                    warning = (
+                        "Kept pre-review collected groups because the complete review "
+                        f"failed: component={component.component_id}: {exc}"
+                    )
+                    warnings.append(warning)
+                    warnings_by_component[component.component_id] = [warning]
+                    self._collected_merge_failure_warnings.append(warning)
+                    continue
+                reviewed_by_component[component.component_id] = list(reviewed.groups)
+                result_by_component[component.component_id] = reviewed
+                warnings_by_component[component.component_id] = list(review_warnings)
+                warnings.extend(review_warnings)
+                self._collected_quality_counters["reviewed_group_count"] += 1
+                if any(
+                    "Kept the pre-review collected" in warning
+                    for warning in review_warnings
+                ):
+                    self._collected_quality_counters["review_failure_count"] += 1
+                metrics = collected_review_component_metrics(component, reviewed)
+                self._collected_quality_counters.update(metrics)
+                self._collected_quality_counters["review_split_group_count"] += int(
+                    metrics["split_group_count"] > 0
+                )
+
+        failed_component_ids = {
+            component.component_id
+            for component in components
+            if component.component_id not in reviewed_by_component
+            or any(
+                "Kept pre-review collected groups because" in warning
+                or "Kept the pre-review collected" in warning
+                for warning in warnings_by_component.get(component.component_id, [])
+            )
+        }
+        self._finish_collected_group_review_artifact(
+            components,
+            result_by_component,
+            warnings_by_component,
+            failed_component_ids=failed_component_ids,
+        )
+
+        final_groups = replace_collected_review_components(
+            grouping_result.groups,
+            components,
+            reviewed_by_component,
+            source_events,
+        )
         return (
-            CollectedGroupingResult(
-                groups=[
-                    reviewed_group
-                    for index in range(len(grouping_result.groups))
-                    for reviewed_group in reviewed_by_index[index]
-                ]
-            ),
+            CollectedGroupingResult(groups=final_groups),
             warnings,
+        )
+
+    def _finish_collected_group_review_artifact(
+        self,
+        components: list[_CollectedReviewComponent],
+        result_by_component: dict[str, CollectedGroupingResult],
+        warnings_by_component: dict[str, list[str]],
+        *,
+        failed_component_ids: set[str],
+    ) -> None:
+        records = [
+            collected_review_component_trace_record(
+                component,
+                result_by_component.get(
+                    component.component_id,
+                    CollectedGroupingResult(groups=list(component.groups)),
+                ),
+                warnings=warnings_by_component.get(component.component_id, []),
+                failed=component.component_id in failed_component_ids,
+            )
+            for component in components
+        ]
+        artifact = {
+            "status": (
+                "success_with_warnings" if failed_component_ids else "success"
+            ),
+            "components": records,
+            "summary": {
+                "component_count": len(components),
+                "failed_component_count": len(failed_component_ids),
+                "cross_group_merge_count": sum(
+                    int(item["cross_group_merge_count"]) for item in records
+                ),
+                "split_group_count": sum(
+                    int(item["split_group_count"]) for item in records
+                ),
+                "relation_merged_count": sum(
+                    int(item["relation_merged_count"]) for item in records
+                ),
+                "relation_separate_count": sum(
+                    int(item["relation_separate_count"]) for item in records
+                ),
+            },
+        }
+        self._write_collected_group_review_artifact(artifact)
+
+    def _write_collected_group_review_artifact(
+        self,
+        artifact: dict[str, object],
+    ) -> None:
+        self._collected_group_review_artifact = artifact
+        if self._collected_merge_trace_dir is None:
+            return
+        (self._collected_merge_trace_dir / "collected_group_review.json").write_text(
+            dump_json(artifact, pretty=True),
+            encoding="utf-8",
         )
 
     def _collected_group_review_reasons(
@@ -956,6 +1538,10 @@ class CollectedMergeRunner:
         reasons: list[str],
         depth: int,
         cancel_event: Event | None = None,
+        existing_groups: list[CollectedGroupingGroup] | None = None,
+        relation_reasons: list[dict[str, object]] | None = None,
+        atomic_groups: list[list[str]] | None = None,
+        pre_review_groups: list[CollectedGroupingGroup] | None = None,
     ) -> tuple[CollectedGroupingResult, list[str]]:
         self._raise_if_collected_review_cancelled(cancel_event)
         prompt = build_collected_review_prompt(
@@ -964,26 +1550,51 @@ class CollectedMergeRunner:
                 candidate_group,
                 config=self.config,
                 review_reasons=reasons,
+                existing_groups=existing_groups,
+                relation_reasons=relation_reasons,
+                atomic_groups=atomic_groups,
             )
+        relation_ids = [
+            str(item.get("relation_id", ""))
+            for item in relation_reasons or []
+            if str(item.get("relation_id", ""))
+        ]
         contract = collected_grouping_call_contract(
             "collected_group_review",
             config=self.config,
             events=source_events,
             deterministic_groups=[list(candidate_group.draft_ids)],
             include_split_reason=True,
+            relation_ids=relation_ids,
         )
         prompt_tokens = _estimate_prepared_model_prompt_tokens(
             prompt,
             function_spec=contract.function_spec,
         )
-        if prompt_tokens <= self.config.model_input_batch_target_tokens:
-            return self._invoke_collected_review_with_retry(
+        if relation_reasons or prompt_tokens <= self.config.model_input_batch_target_tokens:
+            reviewed, review_warnings = self._invoke_collected_review_with_retry(
                 target_date,
                 source_events,
                 candidate_group,
                 reasons=reasons,
                 cancel_event=cancel_event,
+                existing_groups=existing_groups,
+                relation_reasons=relation_reasons,
+                atomic_groups=atomic_groups,
+                pre_review_groups=pre_review_groups,
             )
+            if (
+                relation_reasons
+                and prompt_tokens > self.config.model_input_batch_target_tokens
+            ):
+                review_warnings = [
+                    "Sent indivisible collected review relation component above the "
+                    f"model input batch target: component={candidate_group.group_id} "
+                    f"estimated_tokens={prompt_tokens} "
+                    f"target={self.config.model_input_batch_target_tokens}.",
+                    *review_warnings,
+                ]
+            return reviewed, review_warnings
 
         batches = self._pack_collected_review_batches(
             target_date,
@@ -1195,6 +1806,10 @@ class CollectedMergeRunner:
         *,
         reasons: list[str],
         cancel_event: Event | None = None,
+        existing_groups: list[CollectedGroupingGroup] | None = None,
+        relation_reasons: list[dict[str, object]] | None = None,
+        atomic_groups: list[list[str]] | None = None,
+        pre_review_groups: list[CollectedGroupingGroup] | None = None,
     ) -> tuple[CollectedGroupingResult, list[str]]:
         fitted_events, fit_warnings = self._fit_collected_review_events_to_limit(
             target_date,
@@ -1219,13 +1834,22 @@ class CollectedMergeRunner:
                 config=self.config,
                 review_reasons=reasons,
                 validation_feedback=validation_feedback,
+                existing_groups=existing_groups,
+                relation_reasons=relation_reasons,
+                atomic_groups=atomic_groups,
             )
+            relation_ids = [
+                str(item.get("relation_id", ""))
+                for item in relation_reasons or []
+                if str(item.get("relation_id", ""))
+            ]
             contract = collected_grouping_call_contract(
                 "collected_group_review",
                 config=self.config,
                 events=fitted_events,
                 deterministic_groups=[list(candidate_group.draft_ids)],
                 include_split_reason=True,
+                relation_ids=relation_ids,
             )
             prompt_estimates = estimate_structured_input_tokens(
                 prompt,
@@ -1236,7 +1860,7 @@ class CollectedMergeRunner:
             trace_step_index = self._start_collected_merge_trace_attempt(
                 target_date=target_date,
                 source_events=fitted_events,
-                deterministic_groups=[list(candidate_group.draft_ids)],
+                deterministic_groups=[list(group) for group in atomic_groups or []],
                 rolling_step_index=1,
                 attempt_index=attempt_index,
                 retry_reason=retry_reason,
@@ -1244,6 +1868,11 @@ class CollectedMergeRunner:
                 prompt_override=prompt,
                 extra_trace={
                     "candidate_group": candidate_group.to_dict(),
+                    "initial_groups": [
+                        group.to_dict() for group in existing_groups or [candidate_group]
+                    ],
+                    "strong_relations": list(relation_reasons or []),
+                    "atomic_groups": [list(group) for group in atomic_groups or []],
                     "review_reasons": list(reasons),
                     **(
                         {"fallback_from_step_index": fallback_from_step_index}
@@ -1264,6 +1893,12 @@ class CollectedMergeRunner:
                             error_category="python_validation_failed",
                             review_reasons=reasons,
                             validation_feedback=validation_feedback,
+                            **_accepted_collected_review_context_kwargs(
+                            getattr(self.analyzer, "fallback", self.analyzer),
+                                existing_groups=existing_groups,
+                                relation_reasons=relation_reasons,
+                                atomic_groups=atomic_groups,
+                            ),
                         )
                     elif validation_feedback and _accepts_validation_feedback(
                         self.analyzer.review_collected_group
@@ -1274,6 +1909,12 @@ class CollectedMergeRunner:
                             candidate_group,
                             review_reasons=reasons,
                             validation_feedback=validation_feedback,
+                            **_accepted_collected_review_context_kwargs(
+                                self.analyzer,
+                                existing_groups=existing_groups,
+                                relation_reasons=relation_reasons,
+                                atomic_groups=atomic_groups,
+                            ),
                         )
                     else:
                         result = self.analyzer.review_collected_group(
@@ -1281,6 +1922,12 @@ class CollectedMergeRunner:
                             fitted_events,
                             candidate_group,
                             review_reasons=reasons,
+                            **_accepted_collected_review_context_kwargs(
+                                self.analyzer,
+                                existing_groups=existing_groups,
+                                relation_reasons=relation_reasons,
+                                atomic_groups=atomic_groups,
+                            ),
                         )
             except RetryableAnalyzerProtocolError as exc:
                 if cancel_event is not None:
@@ -1324,6 +1971,15 @@ class CollectedMergeRunner:
                 result,
                 candidate_group.draft_ids,
             )
+            atomic_group_error = collected_atomic_group_error(
+                result,
+                atomic_groups or [],
+            )
+            relation_resolution_error = collected_relation_resolution_error(
+                result,
+                relation_reasons or [],
+                existing_groups or [candidate_group],
+            )
             split_reason_error = ""
             if (
                 len(candidate_group.draft_ids) > 1
@@ -1340,6 +1996,8 @@ class CollectedMergeRunner:
                     partition_error,
                     decision_conflict_error,
                     relation_error,
+                    atomic_group_error,
+                    relation_resolution_error,
                     split_reason_error,
                 )
                 if value
@@ -1354,7 +2012,7 @@ class CollectedMergeRunner:
                 repaired, repair_warnings = repair_collected_grouping_result(
                     result,
                     source_events,
-                    [],
+                    atomic_groups or [],
                 )
                 return repaired, [*warnings, *repair_warnings]
             if attempt_used_fallback:
@@ -1365,7 +2023,9 @@ class CollectedMergeRunner:
                 )
                 warnings.append(warning)
                 self._collected_merge_failure_warnings.append(warning)
-                return CollectedGroupingResult(groups=[candidate_group]), warnings
+                return CollectedGroupingResult(
+                    groups=list(pre_review_groups or [candidate_group])
+                ), warnings
             if (
                 invalid_result_count
                 >= self.config.collected_merge_missing_field_retry_limit
@@ -1392,7 +2052,9 @@ class CollectedMergeRunner:
                 )
                 warnings.append(warning)
                 self._collected_merge_failure_warnings.append(warning)
-                return CollectedGroupingResult(groups=[candidate_group]), warnings
+                return CollectedGroupingResult(
+                    groups=list(pre_review_groups or [candidate_group])
+                ), warnings
             invalid_result_count += 1
             validation_feedback = collected_grouping_validation_feedback(
                 validation_error
@@ -1417,6 +2079,20 @@ class CollectedMergeRunner:
                     f"group={candidate_group.group_id} {relation_error}"
                 )
                 retry_reason = "unsupported_merge_basis"
+            elif atomic_group_error:
+                warning = (
+                    "Retrying high-risk collected group review because an atomic "
+                    "same-event source group was split: "
+                    f"group={candidate_group.group_id} {atomic_group_error}"
+                )
+                retry_reason = "atomic_group_split"
+            elif relation_resolution_error:
+                warning = (
+                    "Retrying high-risk collected group review because a discovered "
+                    "relation was not fully resolved: "
+                    f"group={candidate_group.group_id} {relation_resolution_error}"
+                )
+                retry_reason = "invalid_relation_resolution"
             else:
                 warning = (
                     "Retrying high-risk collected group review because source coverage "
@@ -2057,7 +2733,6 @@ class CollectedMergeRunner:
             target_date,
             source_events,
             deterministic_groups,
-            depth=0,
         )
 
     def _group_collected_events_with_batching(
@@ -2065,8 +2740,6 @@ class CollectedMergeRunner:
         target_date: str,
         source_events: list[CollectedSourceEvent],
         deterministic_groups: list[list[str]],
-        *,
-        depth: int,
     ) -> tuple[CollectedGroupingResult, list[str]]:
         prompt_tokens = self._estimate_collected_grouping_prompt_tokens(
             target_date,
@@ -2079,11 +2752,7 @@ class CollectedMergeRunner:
                 target_date,
                 source_events,
                 deterministic_groups,
-                stage=(
-                    "candidate_grouping"
-                    if depth == 0
-                    else "candidate_reconciliation"
-                ),
+                stage="candidate_grouping",
             )
 
         batches = self._pack_collected_grouping_batches(
@@ -2097,7 +2766,6 @@ class CollectedMergeRunner:
             f"input_target_tokens={input_limit_tokens} batches={len(batches)}."
         ]
         partial_groups: list[CollectedGroupingGroup] = []
-        deterministic_sets = {tuple(group) for group in deterministic_groups}
         for batch_index, batch_events in enumerate(batches, start=1):
             batch_ids = {item.draft_id for item in batch_events}
             batch_deterministic = [
@@ -2116,11 +2784,7 @@ class CollectedMergeRunner:
                 target_date,
                 fitted_batch_events,
                 batch_deterministic,
-                stage=(
-                    f"candidate_grouping_batch_{batch_index}"
-                    if depth == 0
-                    else f"candidate_reconciliation_batch_{batch_index}"
-                ),
+                stage=f"candidate_grouping_batch_{batch_index}",
             )
             batch_result, batch_repair_warnings = repair_collected_grouping_result(
                 batch_result,
@@ -2132,108 +2796,7 @@ class CollectedMergeRunner:
                 [*fit_warnings, *batch_warnings, *batch_repair_warnings]
             )
 
-        if len(batches) <= 1:
-            return CollectedGroupingResult(groups=partial_groups), warnings
-        if depth >= 3:
-            warnings.append(
-                "Stopped collected candidate reconciliation after 3 levels; "
-                "all batch groups were preserved without cross-batch merging."
-            )
-            return CollectedGroupingResult(groups=partial_groups), warnings
-
-        synthetic_events, source_ids_by_synthetic = build_grouping_summary_events(
-            target_date,
-            source_events,
-            partial_groups,
-            depth=depth + 1,
-        )
-        synthetic_deterministic = [
-            [synthetic_id]
-            for synthetic_id, original_ids in source_ids_by_synthetic.items()
-            if tuple(original_ids) in deterministic_sets
-        ]
-        eligible_synthetic_ids = _cross_batch_reconciliation_ids(synthetic_events)
-        if len(eligible_synthetic_ids) < 2:
-            warnings.append(
-                "Skipped cross-batch coordination because no candidate groups share "
-                "message fingerprints or files."
-            )
-            return CollectedGroupingResult(groups=partial_groups), warnings
-        eligible_synthetic_events = [
-            item for item in synthetic_events if item.draft_id in eligible_synthetic_ids
-        ]
-        eligible_deterministic = [
-            group
-            for group in synthetic_deterministic
-            if group[0] in eligible_synthetic_ids
-        ]
-        reconciled, reconciliation_warnings = self._group_collected_events_with_batching(
-            target_date,
-            eligible_synthetic_events,
-            eligible_deterministic,
-            depth=depth + 1,
-        )
-        warnings.extend(reconciliation_warnings)
-        repaired_original_ids = {
-            draft_id
-            for partial_group in partial_groups
-            if partial_group.was_repaired
-            for draft_id in partial_group.draft_ids
-        }
-        expanded_groups = [
-            CollectedGroupingGroup(
-                group_id=f"reconciled-{index}",
-                draft_ids=_dedupe(
-                    [
-                        original_id
-                        for synthetic_id in group.draft_ids
-                        for original_id in source_ids_by_synthetic.get(
-                            synthetic_id,
-                            [],
-                        )
-                    ]
-                ),
-                summary_title=group.summary_title,
-                summary_content=group.summary_content,
-                summary_object_hint=group.summary_object_hint,
-                summary_source=group.summary_source,
-                group_reason=list(group.group_reason),
-                risk_flags=_dedupe([*group.risk_flags, "cross_batch"]),
-                was_repaired=(
-                    group.was_repaired
-                    or any(
-                        original_id in repaired_original_ids
-                        for synthetic_id in group.draft_ids
-                        for original_id in source_ids_by_synthetic.get(
-                            synthetic_id,
-                            [],
-                        )
-                    )
-                ),
-            )
-            for index, group in enumerate(reconciled.groups, start=1)
-        ]
-        reconciled_original_ids = {
-            draft_id
-            for synthetic_id in eligible_synthetic_ids
-            for draft_id in source_ids_by_synthetic.get(synthetic_id, [])
-        }
-        preserved_groups = [
-            group
-            for group in partial_groups
-            if not set(group.draft_ids).intersection(reconciled_original_ids)
-        ]
-        source_order = {
-            item.draft_id: index for index, item in enumerate(source_events)
-        }
-        return CollectedGroupingResult(
-            groups=sorted(
-                [*preserved_groups, *expanded_groups],
-                key=lambda group: min(
-                    source_order[draft_id] for draft_id in group.draft_ids
-                ),
-            )
-        ), warnings
+        return CollectedGroupingResult(groups=partial_groups), warnings
 
     def _pack_collected_grouping_batches(
         self,
@@ -2475,6 +3038,7 @@ class CollectedMergeRunner:
         attempt_index = 0
         retry_reason = "initial"
         validation_feedback = ""
+        previous_invalid_assignment: dict[str, object] | None = None
         invalid_result_count = 0
         use_fallback = False
         fallback_from_step_index = 0
@@ -2486,12 +3050,14 @@ class CollectedMergeRunner:
                 deterministic_groups,
                 config=self.config,
                 validation_feedback=validation_feedback,
+                previous_invalid_assignment=previous_invalid_assignment,
             )
             prompt_tokens = self._estimate_collected_grouping_prompt_tokens(
                 target_date,
                 source_events,
                 deterministic_groups,
                 validation_feedback=validation_feedback,
+                previous_invalid_assignment=previous_invalid_assignment,
             )
             trace_step_index = self._start_collected_merge_trace_attempt(
                 target_date=target_date,
@@ -2502,11 +3068,26 @@ class CollectedMergeRunner:
                 retry_reason=retry_reason,
                 stage=stage,
                 prompt_override=prompt,
-                extra_trace=(
-                    {"fallback_from_step_index": fallback_from_step_index}
-                    if use_fallback
-                    else None
-                ),
+                extra_trace={
+                    "final_parameter_checks": list(
+                        COLLECTED_GROUPING_FINAL_PARAMETER_CHECKS
+                    ),
+                    **(
+                        {"fallback_from_step_index": fallback_from_step_index}
+                        if use_fallback
+                        else {}
+                    ),
+                    **(
+                        {
+                            "previous_invalid_assignment": (
+                                previous_invalid_assignment
+                            )
+                        }
+                        if previous_invalid_assignment is not None
+                        else {}
+                    ),
+                }
+                or None,
             )
             try:
                 with self._llm_request_context(trace_step_index):
@@ -2519,15 +3100,20 @@ class CollectedMergeRunner:
                             failed_step_index=fallback_from_step_index,
                             error_category="python_validation_failed",
                             validation_feedback=validation_feedback,
+                            previous_invalid_assignment=previous_invalid_assignment,
                         )
-                    elif validation_feedback and _accepts_validation_feedback(
-                        self.analyzer.group_collected_events
-                    ):
+                    elif validation_feedback:
                         grouping_result = self.analyzer.group_collected_events(
                             target_date,
                             source_events,
                             deterministic_groups,
-                            validation_feedback=validation_feedback,
+                            **_accepted_collected_grouping_retry_kwargs(
+                                self.analyzer.group_collected_events,
+                                validation_feedback=validation_feedback,
+                                previous_invalid_assignment=(
+                                    previous_invalid_assignment
+                                ),
+                            ),
                         )
                     else:
                         grouping_result = self.analyzer.group_collected_events(
@@ -2587,6 +3173,9 @@ class CollectedMergeRunner:
                     validation_feedback = collected_grouping_validation_feedback(
                         partition_error
                     )
+                    previous_invalid_assignment = (
+                        compact_collected_grouping_assignment(grouping_result)
+                    )
                     retry_reason = "python_validation_fallback"
                     use_fallback = True
                     fallback_from_step_index = trace_step_index
@@ -2598,6 +3187,9 @@ class CollectedMergeRunner:
             invalid_result_count += 1
             validation_feedback = collected_grouping_validation_feedback(
                 partition_error
+            )
+            previous_invalid_assignment = compact_collected_grouping_assignment(
+                grouping_result
             )
             retry_reason = "python_validation_failed"
             warning = (
@@ -2940,6 +3532,7 @@ class CollectedMergeRunner:
         deterministic_groups: list[list[str]],
         *,
         validation_feedback: str = "",
+        previous_invalid_assignment: dict[str, object] | None = None,
     ) -> int:
         prompt = build_collected_grouping_prompt(
             target_date,
@@ -2947,6 +3540,7 @@ class CollectedMergeRunner:
             deterministic_groups,
             config=self.config,
             validation_feedback=validation_feedback,
+            previous_invalid_assignment=previous_invalid_assignment,
         )
         contract = collected_grouping_call_contract(
             "collected_candidate_grouping",
@@ -2954,6 +3548,7 @@ class CollectedMergeRunner:
             events=source_events,
             deterministic_groups=deterministic_groups,
             include_split_reason=False,
+            final_parameter_checks=COLLECTED_GROUPING_FINAL_PARAMETER_CHECKS,
         )
         return _estimate_prepared_model_prompt_tokens(
             prompt,
@@ -3464,6 +4059,8 @@ class CollectedMergeRunner:
         self._collected_merge_source_audit = []
         self._collected_merge_filter_diagnostics = []
         self._collected_merge_failure_warnings = []
+        self._collected_group_discovery_artifact = None
+        self._collected_group_review_artifact = None
         self._collected_merge_stage_wall_clock_ms = Counter()
         recorder = self._llm_usage_recorder()
         self._collected_usage_record_start_index = (
@@ -3484,6 +4081,8 @@ class CollectedMergeRunner:
             "summary.json",
             "summary.md",
             "source-audit.json",
+            "collected_group_discovery.json",
+            "collected_group_review.json",
         ):
             for stale_path in date_dir.glob(pattern):
                 if stale_path.is_file():
@@ -3524,20 +4123,35 @@ class CollectedMergeRunner:
             )
         )
         if stage.startswith("candidate_"):
+            final_parameter_checks = tuple(
+                str(item)
+                for item in (extra_trace or {}).get(
+                    "final_parameter_checks",
+                    [],
+                )
+                if str(item).strip()
+            )
             contract = collected_grouping_call_contract(
                 "collected_candidate_grouping",
                 config=self.config,
                 events=source_events,
                 deterministic_groups=deterministic_groups,
                 include_split_reason=False,
+                final_parameter_checks=final_parameter_checks,
             )
         elif stage == "high_risk_review":
+            relation_ids = [
+                str(item.get("relation_id", ""))
+                for item in (extra_trace or {}).get("strong_relations", [])
+                if isinstance(item, dict) and str(item.get("relation_id", ""))
+            ]
             contract = collected_grouping_call_contract(
                 "collected_group_review",
                 config=self.config,
                 events=source_events,
                 deterministic_groups=deterministic_groups,
                 include_split_reason=True,
+                relation_ids=relation_ids,
             )
         else:
             contract = None
@@ -3976,6 +4590,8 @@ class CollectedMergeRunner:
             "skipped_file_count": skipped_file_count,
             "partial_file_count": partial_file_count,
             "quality_summary": quality_summary.to_dict(),
+            "collected_group_discovery": self._collected_group_discovery_artifact,
+            "collected_group_review": self._collected_group_review_artifact,
             "llm_usage_summary": self._collected_merge_llm_usage_summary(),
             "stage_timing_summary": self._collected_stage_timing_summary(),
             "source_files": self._collected_merge_source_audit,
@@ -4323,7 +4939,7 @@ def build_collected_quality_summary(
     *,
     counters: Counter[str] | None = None,
 ) -> CollectedMergeQualitySummary:
-    counters = counters or Counter()
+    counters = Counter(counters or {})
     source_id_sets = [
         {
             value
@@ -4402,6 +5018,29 @@ def build_collected_quality_summary(
         high_risk_group_count=int(counters["high_risk_group_count"]),
         reviewed_group_count=int(counters["reviewed_group_count"]),
         review_split_group_count=int(counters["review_split_group_count"]),
+        discovery_request_count=int(counters["discovery_request_count"]),
+        discovery_retry_count=int(counters["discovery_retry_count"]),
+        discovery_checked_group_count=int(
+            counters["discovery_checked_group_count"]
+        ),
+        discovery_candidate_group_count=int(
+            counters["discovery_candidate_group_count"]
+        ),
+        discovery_involved_group_count=int(
+            counters["discovery_involved_group_count"]
+        ),
+        discovery_failure_count=int(counters["discovery_failure_count"]),
+        discovery_oversized_submission_count=int(
+            counters["discovery_oversized_submission_count"]
+        ),
+        cross_group_merge_count=int(counters["cross_group_merge_count"]),
+        split_group_count=int(counters["split_group_count"]),
+        relation_merged_count=int(counters["relation_merged_count"]),
+        relation_separate_count=int(counters["relation_separate_count"]),
+        review_failure_count=int(counters["review_failure_count"]),
+        content_rewrite_failure_count=int(
+            counters["content_rewrite_failure_count"]
+        ),
         content_retry_count=int(counters["content_retry_count"]),
         shortened_prompt_count=int(counters["shortened_prompt_count"]),
         review_required=bool(counters["review_required"]),
@@ -4455,6 +5094,39 @@ def aggregate_collected_quality_summaries(
         reviewed_group_count=sum(item.reviewed_group_count for item in summaries),
         review_split_group_count=sum(
             item.review_split_group_count for item in summaries
+        ),
+        discovery_request_count=sum(
+            item.discovery_request_count for item in summaries
+        ),
+        discovery_retry_count=sum(item.discovery_retry_count for item in summaries),
+        discovery_checked_group_count=sum(
+            item.discovery_checked_group_count for item in summaries
+        ),
+        discovery_candidate_group_count=sum(
+            item.discovery_candidate_group_count for item in summaries
+        ),
+        discovery_involved_group_count=sum(
+            item.discovery_involved_group_count for item in summaries
+        ),
+        discovery_failure_count=sum(
+            item.discovery_failure_count for item in summaries
+        ),
+        discovery_oversized_submission_count=sum(
+            item.discovery_oversized_submission_count for item in summaries
+        ),
+        cross_group_merge_count=sum(
+            item.cross_group_merge_count for item in summaries
+        ),
+        split_group_count=sum(item.split_group_count for item in summaries),
+        relation_merged_count=sum(
+            item.relation_merged_count for item in summaries
+        ),
+        relation_separate_count=sum(
+            item.relation_separate_count for item in summaries
+        ),
+        review_failure_count=sum(item.review_failure_count for item in summaries),
+        content_rewrite_failure_count=sum(
+            item.content_rewrite_failure_count for item in summaries
         ),
         content_retry_count=sum(item.content_retry_count for item in summaries),
         shortened_prompt_count=sum(item.shortened_prompt_count for item in summaries),
@@ -4550,6 +5222,19 @@ def render_collected_merge_trace_summary(summary: dict[str, Any]) -> str:
         f"| High-risk groups | {quality.get('high_risk_group_count', 0)} |",
         f"| Reviewed groups | {quality.get('reviewed_group_count', 0)} |",
         f"| Review-split groups | {quality.get('review_split_group_count', 0)} |",
+        f"| Discovery requests | {quality.get('discovery_request_count', 0)} |",
+        f"| Discovery retries | {quality.get('discovery_retry_count', 0)} |",
+        f"| Discovery checked groups | {quality.get('discovery_checked_group_count', 0)} |",
+        f"| Discovery candidate groups | {quality.get('discovery_candidate_group_count', 0)} |",
+        f"| Discovery involved groups | {quality.get('discovery_involved_group_count', 0)} |",
+        f"| Discovery failures | {quality.get('discovery_failure_count', 0)} |",
+        f"| Discovery oversized submissions | {quality.get('discovery_oversized_submission_count', 0)} |",
+        f"| Cross-group merges | {quality.get('cross_group_merge_count', 0)} |",
+        f"| Split initial groups | {quality.get('split_group_count', 0)} |",
+        f"| Relations merged | {quality.get('relation_merged_count', 0)} |",
+        f"| Relations kept separate | {quality.get('relation_separate_count', 0)} |",
+        f"| Review failures | {quality.get('review_failure_count', 0)} |",
+        f"| Content rewrite failures | {quality.get('content_rewrite_failure_count', 0)} |",
         f"| Content retries | {quality.get('content_retry_count', 0)} |",
         f"| Shortened prompts | {quality.get('shortened_prompt_count', 0)} |",
         f"| Review required | {str(bool(quality.get('review_required', False))).lower()} |",
@@ -4725,6 +5410,535 @@ def build_synthetic_collected_source_events(
     ]
 
 
+def _collected_discovery_attempt(
+    *,
+    attempt: int,
+    context_id: str,
+    backend: str,
+    status: str,
+    started_at: float,
+    validation_feedback_input: str,
+    error: str,
+    result: object,
+    estimates: dict[str, int],
+    target_tokens: int,
+    oversized: bool,
+) -> dict[str, object]:
+    return {
+        "attempt": attempt,
+        "request_context_id": context_id,
+        "backend": backend,
+        "status": status,
+        "duration_ms": round((perf_counter() - started_at) * 1000, 3),
+        "validation_feedback_input": validation_feedback_input,
+        "error": error,
+        "result": result if isinstance(result, dict) else {},
+        **estimates,
+        "input_target_tokens": target_tokens,
+        "oversized_submission": oversized,
+    }
+
+
+def _stabilize_collected_group_ids(
+    groups: list[CollectedGroupingGroup],
+) -> list[CollectedGroupingGroup]:
+    return [
+        replace(group, group_id=f"collected-group-{index:03d}")
+        for index, group in enumerate(groups, start=1)
+    ]
+
+
+def build_collected_review_components(
+    groups: list[CollectedGroupingGroup],
+    source_events: list[CollectedSourceEvent],
+    *,
+    discovery_result: DayGroupDiscoveryResult,
+    deterministic_groups: list[list[str]],
+    high_risk_reasons_by_group_id: dict[str, list[str]],
+    attachment_version_suffix_patterns: Sequence[str],
+    attachment_ignored_extensions: Sequence[str],
+) -> list[_CollectedReviewComponent]:
+    source_by_id = {item.draft_id: item for item in source_events}
+    source_order = {item.draft_id: index for index, item in enumerate(source_events)}
+    group_index_by_id = {group.group_id: index for index, group in enumerate(groups)}
+    group_index_by_draft = {
+        draft_id: index
+        for index, group in enumerate(groups)
+        for draft_id in group.draft_ids
+    }
+    adjacency: dict[int, set[int]] = {index: set() for index in range(len(groups))}
+    required_indexes = {
+        group_index_by_id[group_id]
+        for group_id in high_risk_reasons_by_group_id
+        if group_id in group_index_by_id
+    }
+    relation_specs: list[tuple[set[int], dict[str, object]]] = []
+
+    def add_relation(indexes: set[int], reason: dict[str, object]) -> None:
+        if len(indexes) < 2:
+            return
+        ordered = sorted(indexes)
+        for left, right in zip(ordered, ordered[1:]):
+            adjacency[left].add(right)
+            adjacency[right].add(left)
+        required_indexes.update(indexes)
+        relation_specs.append((indexes, reason))
+
+    for relation in build_collected_evidence_relation_catalog(
+        source_events,
+        excluded_draft_ids=set(),
+    ):
+        indexes = {
+            group_index_by_draft[draft_id]
+            for draft_id in relation.draft_ids
+            if draft_id in group_index_by_draft
+        }
+        add_relation(
+            indexes,
+            {
+                "relation_types": [relation.relation_type],
+                "group_ids": [groups[index].group_id for index in sorted(indexes)],
+                "draft_ids": list(relation.draft_ids),
+                "evidence_relation_id": relation.relation_id,
+            },
+        )
+
+    ignored_extensions = {
+        value.strip().casefold()
+        for value in attachment_ignored_extensions
+        if value.strip()
+    }
+    attachment_names_by_group: list[dict[str, set[str]]] = []
+    for group in groups:
+        names: dict[str, set[str]] = defaultdict(set)
+        for draft_id in group.draft_ids:
+            source_event = source_by_id.get(draft_id)
+            if source_event is None:
+                continue
+            for link in source_event.event.file_links:
+                title = clean_text(link.title)
+                if link.link_type != "attachment" or not title:
+                    continue
+                suffix = Path(title).suffix.casefold()
+                if suffix and suffix in ignored_extensions:
+                    continue
+                base_name = normalize_attachment_base_name(
+                    title,
+                    attachment_version_suffix_patterns,
+                )
+                if base_name:
+                    names[base_name].add(draft_id)
+        attachment_names_by_group.append(names)
+    for left_index, left_names in enumerate(attachment_names_by_group):
+        for right_index in range(left_index + 1, len(groups)):
+            shared_names = sorted(
+                set(left_names).intersection(attachment_names_by_group[right_index])
+            )
+            for base_name in shared_names:
+                add_relation(
+                    {left_index, right_index},
+                    {
+                        "relation_types": ["same_attachment_base_name"],
+                        "group_ids": [
+                            groups[left_index].group_id,
+                            groups[right_index].group_id,
+                        ],
+                        "draft_ids": sorted(
+                            [
+                                *left_names[base_name],
+                                *attachment_names_by_group[right_index][base_name],
+                            ],
+                            key=source_order.__getitem__,
+                        ),
+                        "shared_attachment_base_names": [base_name],
+                    },
+                )
+
+    discovery_pair_reasons: dict[tuple[int, int], list[str]] = {}
+    for check in discovery_result.group_checks:
+        source_index = group_index_by_id.get(check.group_id)
+        if source_index is None:
+            continue
+        for related_group_id in check.related_group_ids:
+            related_index = group_index_by_id.get(related_group_id)
+            if related_index is None or related_index == source_index:
+                continue
+            pair = tuple(sorted((source_index, related_index)))
+            reasons = discovery_pair_reasons.setdefault(pair, [])
+            reason = clean_text(check.reason)
+            if reason and reason not in reasons:
+                reasons.append(reason)
+
+    if discovery_pair_reasons:
+        for (left_index, right_index), reasons in discovery_pair_reasons.items():
+            add_relation(
+                {left_index, right_index},
+                {
+                    "relation_types": ["title_discovery"],
+                    "group_ids": [
+                        groups[left_index].group_id,
+                        groups[right_index].group_id,
+                    ],
+                    "reason": "；".join(reasons),
+                },
+            )
+    else:
+        for candidate in discovery_result.candidate_groups:
+            indexes = {
+                group_index_by_id[group_id]
+                for group_id in candidate.group_ids
+                if group_id in group_index_by_id
+            }
+            add_relation(
+                indexes,
+                {
+                    "relation_types": ["title_discovery"],
+                    "group_ids": list(candidate.group_ids),
+                    "reason": candidate.reason,
+                },
+            )
+
+
+    components: list[_CollectedReviewComponent] = []
+    visited: set[int] = set()
+    for start_index in sorted(required_indexes):
+        if start_index in visited:
+            continue
+        stack = [start_index]
+        indexes: list[int] = []
+        while stack:
+            current = stack.pop()
+            if current in visited:
+                continue
+            visited.add(current)
+            indexes.append(current)
+            stack.extend(sorted(adjacency[current] - visited, reverse=True))
+        indexes.sort()
+        component_groups = [groups[index] for index in indexes]
+        component_ids = {
+            draft_id for group in component_groups for draft_id in group.draft_ids
+        }
+        component_events = [
+            item for item in source_events if item.draft_id in component_ids
+        ]
+        raw_relations = [
+            reason
+            for relation_indexes, reason in relation_specs
+            if relation_indexes.issubset(indexes)
+        ]
+        component_id = f"collected-review-{len(components) + 1:03d}"
+        relation_reasons = [
+            {
+                "relation_id": f"{component_id}-relation-{index:03d}",
+                **reason,
+            }
+            for index, reason in enumerate(raw_relations, start=1)
+        ]
+        review_reasons = _dedupe(
+            [
+                reason
+                for group in component_groups
+                for reason in high_risk_reasons_by_group_id.get(group.group_id, [])
+            ]
+            + (["cross_initial_group_relation"] if relation_reasons else [])
+        )
+        atomic_groups = [
+            list(atomic_group)
+            for atomic_group in deterministic_groups
+            if set(atomic_group).issubset(component_ids)
+        ]
+        components.append(
+            _CollectedReviewComponent(
+                component_id=component_id,
+                groups=component_groups,
+                events=component_events,
+                relation_reasons=relation_reasons,
+                review_reasons=review_reasons,
+                atomic_groups=atomic_groups,
+            )
+        )
+    return components
+
+
+def replace_collected_review_components(
+    groups: list[CollectedGroupingGroup],
+    components: list[_CollectedReviewComponent],
+    reviewed_by_component: dict[str, list[CollectedGroupingGroup]],
+    source_events: list[CollectedSourceEvent],
+) -> list[CollectedGroupingGroup]:
+    replacement_by_group_id: dict[str, list[CollectedGroupingGroup]] = {}
+    for component in components:
+        replacement = reviewed_by_component.get(component.component_id)
+        if replacement is None:
+            continue
+        for group in component.groups:
+            replacement_by_group_id[group.group_id] = replacement
+    combined: list[CollectedGroupingGroup] = []
+    emitted_replacements: set[int] = set()
+    for group in groups:
+        replacement = replacement_by_group_id.get(group.group_id)
+        if replacement is None:
+            combined.append(group)
+            continue
+        identity = id(replacement)
+        if identity in emitted_replacements:
+            continue
+        emitted_replacements.add(identity)
+        combined.extend(replacement)
+    source_order = {item.draft_id: index for index, item in enumerate(source_events)}
+    combined.sort(
+        key=lambda group: min(source_order[draft_id] for draft_id in group.draft_ids)
+    )
+    return _stabilize_collected_group_ids(combined)
+
+
+def collected_atomic_group_error(
+    result: CollectedGroupingResult,
+    atomic_groups: list[list[str]],
+) -> str:
+    returned_group_by_draft = {
+        draft_id: index
+        for index, group in enumerate(result.groups)
+        for draft_id in group.draft_ids
+    }
+    split_atoms = [
+        atomic_group
+        for atomic_group in atomic_groups
+        if len(
+            {
+                returned_group_by_draft.get(draft_id)
+                for draft_id in atomic_group
+            }
+        )
+        > 1
+    ]
+    if not split_atoms:
+        return ""
+    return f"atomic_group_split field=atomic_groups groups={split_atoms}"
+
+
+def collected_relation_resolution_error(
+    result: CollectedGroupingResult,
+    relation_reasons: list[dict[str, object]],
+    existing_groups: list[CollectedGroupingGroup],
+) -> str:
+    if not relation_reasons:
+        return ""
+    relation_by_id = {
+        str(item.get("relation_id", "")): item for item in relation_reasons
+    }
+    resolution_by_id = {
+        item.relation_id: item for item in result.relation_resolutions
+    }
+    if set(resolution_by_id) != set(relation_by_id):
+        return (
+            "relation_resolution_coverage_error field=relation_resolutions "
+            f"expected={sorted(relation_by_id)} actual={sorted(resolution_by_id)}"
+        )
+    returned_group_by_draft = {
+        draft_id: index
+        for index, group in enumerate(result.groups)
+        for draft_id in group.draft_ids
+    }
+    original_by_id = {group.group_id: group for group in existing_groups}
+    errors: list[str] = []
+    for relation_id, relation in relation_by_id.items():
+        resolution = resolution_by_id[relation_id]
+        relation_groups = [
+            original_by_id[str(group_id)]
+            for group_id in relation.get("group_ids", [])
+            if str(group_id) in original_by_id
+        ]
+        relation_draft_ids = {
+            str(value)
+            for value in relation.get("draft_ids", [])
+            if str(value) in returned_group_by_draft
+        }
+        eligible_by_group = [
+            [
+                draft_id
+                for draft_id in group.draft_ids
+                if not relation_draft_ids or draft_id in relation_draft_ids
+            ]
+            for group in relation_groups
+        ]
+        eligible_by_group = [side for side in eligible_by_group if side]
+        joined = any(
+            returned_group_by_draft[left_id] == returned_group_by_draft[right_id]
+            for left_index, left_side in enumerate(eligible_by_group)
+            for right_side in eligible_by_group[left_index + 1 :]
+            for left_id in left_side
+            for right_id in right_side
+        )
+        evidence_ids = set(resolution.evidence_draft_ids)
+        if resolution.decision == "merged":
+            connected_ids = resolution.connected_draft_ids
+            connected_groups = {
+                group.group_id
+                for group in relation_groups
+                if set(group.draft_ids).intersection(connected_ids)
+            }
+            returned_indexes = {
+                returned_group_by_draft.get(draft_id) for draft_id in connected_ids
+            }
+            if (
+                len(connected_ids) < 2
+                or len(returned_indexes) != 1
+                or None in returned_indexes
+                or len(connected_groups) < 2
+                or not joined
+            ):
+                errors.append(
+                    f"merged_relation_not_reflected relation_id={relation_id}"
+                )
+            if not set(connected_ids).issubset(evidence_ids):
+                errors.append(
+                    f"merged_relation_evidence_incomplete relation_id={relation_id}"
+                )
+            continue
+        connected_ids = resolution.connected_draft_ids
+        if connected_ids:
+            connected_groups = {
+                group.group_id
+                for group in relation_groups
+                if set(group.draft_ids).intersection(connected_ids)
+            }
+            returned_indexes = {
+                returned_group_by_draft.get(draft_id) for draft_id in connected_ids
+            }
+            if (
+                len(connected_ids) < 2
+                or len(connected_groups) < 2
+                or len(returned_indexes) < 2
+                or None in returned_indexes
+            ):
+                errors.append(
+                    f"separate_relation_representatives_invalid relation_id={relation_id}"
+                )
+            if not set(connected_ids).issubset(evidence_ids):
+                errors.append(
+                    f"separate_relation_evidence_incomplete relation_id={relation_id}"
+                )
+            continue
+        if joined:
+            errors.append(f"separate_relation_conflict relation_id={relation_id}")
+        if any(not evidence_ids.intersection(side) for side in eligible_by_group):
+            errors.append(
+                f"separate_relation_evidence_incomplete relation_id={relation_id}"
+            )
+    return "; ".join(errors)
+
+
+def collected_review_component_metrics(
+    component: _CollectedReviewComponent,
+    result: CollectedGroupingResult,
+) -> dict[str, int]:
+    returned_group_by_draft = {
+        draft_id: index
+        for index, group in enumerate(result.groups)
+        for draft_id in group.draft_ids
+    }
+    original_group_by_draft = {
+        draft_id: group.group_id
+        for group in component.groups
+        for draft_id in group.draft_ids
+    }
+    return {
+        "cross_group_merge_count": sum(
+            len(
+                {
+                    original_group_by_draft[draft_id]
+                    for draft_id in group.draft_ids
+                }
+            )
+            >= 2
+            for group in result.groups
+        ),
+        "split_group_count": sum(
+            len(
+                {
+                    returned_group_by_draft[draft_id]
+                    for draft_id in group.draft_ids
+                }
+            )
+            >= 2
+            for group in component.groups
+        ),
+        "relation_merged_count": sum(
+            item.decision == "merged" for item in result.relation_resolutions
+        ),
+        "relation_separate_count": sum(
+            item.decision == "separate" for item in result.relation_resolutions
+        ),
+    }
+
+
+def collected_review_component_trace_record(
+    component: _CollectedReviewComponent,
+    result: CollectedGroupingResult,
+    *,
+    warnings: list[str],
+    failed: bool,
+) -> dict[str, object]:
+    metrics = collected_review_component_metrics(component, result)
+    relation_sources = _dedupe(
+        [
+            str(relation_type)
+            for relation in component.relation_reasons
+            for relation_type in relation.get("relation_types", [])
+        ]
+    )
+    return {
+        "component_id": component.component_id,
+        "status": "failed" if failed else "success_with_warnings" if warnings else "success",
+        "initial_groups": [group.to_dict() for group in component.groups],
+        "reviewable_draft_ids": [item.draft_id for item in component.events],
+        "relation_sources": relation_sources,
+        "relation_reasons": list(component.relation_reasons),
+        "review_reasons": list(component.review_reasons),
+        "atomic_groups": [list(group) for group in component.atomic_groups],
+        "final_groups": [group.to_dict() for group in result.groups],
+        "relation_resolutions": [
+            item.to_dict() for item in result.relation_resolutions
+        ],
+        "cross_group_merge_count": metrics["cross_group_merge_count"],
+        "split_group_count": metrics["split_group_count"],
+        "relation_merged_count": metrics["relation_merged_count"],
+        "relation_separate_count": metrics["relation_separate_count"],
+        "warnings": list(warnings),
+    }
+
+
+def _accepted_collected_review_context_kwargs(
+    analyzer: object,
+    *,
+    existing_groups: list[CollectedGroupingGroup] | None,
+    relation_reasons: list[dict[str, object]] | None,
+    atomic_groups: list[list[str]] | None,
+) -> dict[str, object]:
+    method = getattr(analyzer, "review_collected_group", None)
+    if not callable(method):
+        return {}
+    try:
+        parameters = inspect.signature(method).parameters
+    except (TypeError, ValueError):
+        return {}
+    accepts_kwargs = any(
+        parameter.kind == inspect.Parameter.VAR_KEYWORD
+        for parameter in parameters.values()
+    )
+    values: dict[str, object] = {
+        "existing_groups": existing_groups,
+        "relation_reasons": relation_reasons,
+        "atomic_groups": atomic_groups,
+    }
+    return {
+        key: value
+        for key, value in values.items()
+        if value is not None and (accepts_kwargs or key in parameters)
+    }
+
+
 def build_collected_relation_components(
     source_events: list[CollectedSourceEvent],
     deterministic_groups: list[list[str]],
@@ -4775,23 +5989,6 @@ def build_collected_relation_components(
         grouped.values(),
         key=lambda items: min(order[item.draft_id] for item in items),
     )
-
-
-def _cross_batch_reconciliation_ids(
-    summary_events: list[CollectedSourceEvent],
-) -> set[str]:
-    eligible_ids: set[str] = set()
-    for index, left in enumerate(summary_events):
-        left_messages = set(left.event.evidence_fingerprints)
-        left_files = set(left.event.file_keys)
-        for right in summary_events[index + 1 :]:
-            has_shared_message = bool(
-                left_messages.intersection(right.event.evidence_fingerprints)
-            )
-            has_shared_file = bool(left_files.intersection(right.event.file_keys))
-            if has_shared_message or has_shared_file:
-                eligible_ids.update((left.draft_id, right.draft_id))
-    return eligible_ids
 
 
 def build_grouping_summary_events(
@@ -5150,12 +6347,21 @@ def repair_collected_merge_result(
         if not normalized_ids:
             continue
         locked_in_group = [draft_id for draft_id in normalized_ids if draft_id in locked_members]
-        if locked_in_group:
-            expected_locked_group = locked_map[locked_in_group[0]]
-            if set(locked_in_group) != set(expected_locked_group):
-                changed_locked.extend(locked_in_group)
-                continue
-            normalized_ids = list(expected_locked_group)
+        touched_locked_groups = {
+            locked_map[draft_id] for draft_id in locked_in_group
+        }
+        incomplete_locked_groups = [
+            locked_group
+            for locked_group in touched_locked_groups
+            if not set(locked_group).issubset(normalized_ids)
+        ]
+        if incomplete_locked_groups:
+            changed_locked.extend(
+                draft_id
+                for locked_group in incomplete_locked_groups
+                for draft_id in locked_group
+            )
+            continue
         for draft_id in normalized_ids:
             seen.add(draft_id)
         membership_unchanged = bool(
@@ -5316,6 +6522,7 @@ def repair_collected_grouping_result(
     return CollectedGroupingResult(
         groups=repaired_groups,
         split_reason=_collected_grouping_split_reason(grouping_result),
+        relation_resolutions=list(grouping_result.relation_resolutions),
     ), warnings
 
 
@@ -5376,10 +6583,12 @@ def collected_grouping_validation_feedback(error: str) -> str:
     if "duplicate_draft_id" in error or "duplicate_group_member" in error:
         instructions.append(
             "每个 draft_id 只能出现一次；在多事件组和 singleton_draft_ids 中二选一。"
+            "如果说明中已经否定某个合并组，先从 merged_groups 删除该组再提交最终参数。"
         )
     if "merged_group_too_small" in error:
         instructions.append(
-            "只有一条事件时不要返回 merged_groups 对象，只放入 singleton_draft_ids。"
+            "只有一条事件时不要返回 merged_groups 对象，只放入 singleton_draft_ids；"
+            "不得保留一个单成员组后再在 reason_detail 中说明它应作为单条。"
         )
     if "member_connection" in error:
         instructions.append(
@@ -5402,9 +6611,41 @@ def collected_grouping_validation_feedback(error: str) -> str:
         instructions.append(
             "拆成多个组时必须在顶层 split_reason 写明各组的具体业务差异。"
         )
+    if "relation_resolution_coverage_error" in error:
+        instructions.append(
+            "relation_resolutions 是独立必填列表；按 expected 中的 relation_id "
+            "逐条返回且每个编号恰好一次，不能用最终分组结果代替。"
+        )
     if not instructions:
         instructions.append("按错误中的字段、组编号和事件编号修正后重新提交。")
     return error + "\n处理要求：\n- " + "\n- ".join(dict.fromkeys(instructions))
+
+
+def compact_collected_grouping_assignment(
+    grouping_result: CollectedGroupingResult,
+) -> dict[str, object]:
+    merged_groups = [
+        {
+            "group_id": group.group_id,
+            "draft_ids": list(group.draft_ids),
+            "semantic_reasons": list(group.semantic_reasons),
+            "member_connection_draft_ids": [
+                item.draft_id for item in group.member_connections
+            ],
+            "reason_detail": group.reason_detail,
+        }
+        for group in grouping_result.groups
+        if len(group.draft_ids) >= 2
+    ]
+    singleton_draft_ids = [
+        group.draft_ids[0]
+        for group in grouping_result.groups
+        if len(group.draft_ids) == 1
+    ]
+    return {
+        "merged_groups": merged_groups,
+        "singleton_draft_ids": singleton_draft_ids,
+    }
 
 
 def _build_singleton_collected_group(
@@ -5683,6 +6924,31 @@ def _accepts_validation_feedback(method: object) -> bool:
         parameter.kind is inspect.Parameter.VAR_KEYWORD
         for parameter in parameters.values()
     )
+
+
+def _accepted_collected_grouping_retry_kwargs(
+    method: object,
+    *,
+    validation_feedback: str,
+    previous_invalid_assignment: dict[str, object] | None,
+) -> dict[str, object]:
+    try:
+        parameters = inspect.signature(method).parameters
+    except (TypeError, ValueError):
+        return {}
+    accepts_kwargs = any(
+        parameter.kind is inspect.Parameter.VAR_KEYWORD
+        for parameter in parameters.values()
+    )
+    values: dict[str, object] = {
+        "validation_feedback": validation_feedback,
+        "previous_invalid_assignment": previous_invalid_assignment,
+    }
+    return {
+        key: value
+        for key, value in values.items()
+        if value is not None and (accepts_kwargs or key in parameters)
+    }
 
 
 def _sort_self_relations(

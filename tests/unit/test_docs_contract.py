@@ -65,7 +65,7 @@ def test_docs_define_retention_review_model_and_python_boundaries() -> None:
     for content in (documents[0], documents[1], documents[3]):
         assert "retention_review_summary" in content
         assert "model_input_batch_target_tokens" in content
-        assert "5200" in content
+        assert "7000" in content
 
 
 def test_docs_define_personal_fact_review_evidence_boundary() -> None:
@@ -89,7 +89,7 @@ def test_docs_define_personal_fact_review_evidence_boundary() -> None:
         assert "fact_risk_flags" in content
         assert "personal_fact_review_summary" in content
         assert "model_input_batch_target_tokens" in content
-        assert "5200" in content
+        assert "7000" in content
 
 
 def test_docs_describe_single_source_fact_review_protocol_and_concurrency() -> None:
@@ -208,7 +208,8 @@ def test_docs_describe_two_level_collected_merge_and_full_content_grouping() -> 
     ).read_text(encoding="utf-8")
 
     for content in documents:
-        assert "LLM 使用事件正文发现候选组" in content
+        assert "LLM 使用事件正文" in content
+        assert "collected_group_discovery" in content
         assert "轻量 LLM 发现候选组" not in content
         assert "部门负责人" in content
         assert "中心负责人" in content
@@ -256,7 +257,7 @@ def test_docs_describe_coverage_review_and_python_quality_calculation() -> None:
         assert "fact_items" in content
         assert "高风险" in content
         assert "model_input_batch_target_tokens" in content
-        assert "5200" in content
+        assert "7000" in content
         assert "Python" in content and "计算" in content
 
 
@@ -330,8 +331,8 @@ def test_docs_match_failover_and_collected_merge_optimizations() -> None:
     assert "codex_request_interval_min_seconds" in content
     assert "online_request_retry_limit" in content
     assert "当前请求" in content
-    assert "单条候选直接保留" in content
-    assert "共同消息指纹或共同文件" in content
+    assert "单条事件组直接保留" in content
+    assert "标题候选、共同消息、共同文件" in content
     assert "split_reason" in content
     assert "最多三路" in content
     assert "在线文字请求之间不增加随机等待" in content
@@ -388,7 +389,7 @@ def test_current_docs_describe_python_computed_collected_evidence() -> None:
     combined = "\n".join(documents)
     assert "不创建临时目录" in combined
     assert "reason_detail" in combined
-    assert "旧记录" in combined or "旧结果" in combined
+    assert "旧 trace" in combined
     assert "内部 `evidence_relation_ids`" in combined
 
 
@@ -415,7 +416,8 @@ def test_collected_merge_docs_describe_protocol_v2_review_and_replay() -> None:
     assert "legacy_audit" in combined
     assert "current" in combined
     assert "model_call_count" in combined
-    assert "补入缺失成员或删除该合并" in combined
+    assert "关系逐条处理" in combined
+    assert "不可拆成员块" in combined
     assert "调试模式只增加" in combined and "不改变线路和次数" in combined
 
 
@@ -505,7 +507,8 @@ def test_detailed_design_is_the_current_code_source_of_truth() -> None:
     assert "reaction" in content
     assert "ConversationSegmentUnit" in content
     assert "_analyze_anchor_fallback" in content
-    assert "全日事件分组与强关联漏合并复核" in content
+    assert "全日事件分组、标题发现与完整内容复核" in content
+    assert "personal_group_render" in content
     assert "day_group_review_all" in content
     assert "关系优先分批" in content
 

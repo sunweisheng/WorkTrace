@@ -8,6 +8,7 @@ import pytest
 from src.worktrace.config import (
     RuntimeConfig,
     load_conversation_blacklist_overrides,
+    load_llm_timeout_seconds,
     load_runtime_config_overrides,
     load_online_llm_settings,
     parse_dotenv_lines,
@@ -50,6 +51,21 @@ def test_load_online_llm_settings_reads_local_env(tmp_path: Path) -> None:
     assert settings.stream_enabled is False
     assert settings.tls_verify is False
     assert settings.reasoning_effort == "none"
+
+
+def test_load_llm_timeout_seconds_does_not_require_online_credentials(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / ".env").write_text(
+        "WORKTRACE_LLM_TIMEOUT_SECONDS=1200\n",
+        encoding="utf-8",
+    )
+
+    assert load_llm_timeout_seconds(
+        RuntimeConfig(),
+        cwd=tmp_path,
+        environ={},
+    ) == 1200
 
 
 def test_load_online_llm_settings_prefers_process_environment(tmp_path: Path) -> None:
@@ -146,7 +162,7 @@ def test_runtime_config_disables_streaming_by_default() -> None:
 def test_runtime_config_uses_model_input_batch_target_by_default() -> None:
     config = RuntimeConfig()
 
-    assert config.model_input_batch_target_tokens == 5200
+    assert config.model_input_batch_target_tokens == 7000
     assert not hasattr(config, "collected_merge_prompt_char_threshold")
 
 
@@ -383,10 +399,33 @@ def test_repo_collected_merge_config_matches_review_defaults() -> None:
         item["key"]: item for item in grouping_payload["group_reason_definitions"]
     }
     assert grouping_payload["personal_grouping_negative_examples"]
+    assert grouping_payload["personal_grouping_positive_examples"]
+    assert grouping_payload["personal_group_discovery_rules"]
+    assert grouping_payload["attachment_name_normalization"][
+        "version_suffix_patterns"
+    ]
     assert definitions["same_object"]["acceptance_rules"]
     assert definitions["same_object"]["rejection_rules"]
     assert definitions["continuous_action"]["acceptance_rules"]
     assert definitions["same_deliverable_batch"]["rejection_rules"]
+
+
+def test_load_runtime_config_rejects_invalid_attachment_version_pattern(
+    tmp_path: Path,
+) -> None:
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    payload = json.loads(
+        Path("config/event_grouping.json").read_text(encoding="utf-8")
+    )
+    payload["attachment_name_normalization"]["version_suffix_patterns"] = ["("]
+    (config_dir / "event_grouping.json").write_text(
+        json.dumps(payload, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="version suffix pattern is invalid"):
+        load_runtime_config_overrides(RuntimeConfig(), cwd=tmp_path)
 
 
 @pytest.mark.parametrize(

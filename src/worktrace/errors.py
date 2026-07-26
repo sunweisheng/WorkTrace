@@ -26,6 +26,10 @@ class PersonalGroupingValidationError(AnalyzerProtocolError):
         self.partial_result = partial_result
 
 
+class DayGroupDiscoveryValidationError(AnalyzerProtocolError):
+    """Raised when title-only day-group discovery violates its task contract."""
+
+
 class RetryableAnalyzerProtocolError(AnalyzerProtocolError):
     """Raised when retrying the same analyzer request may succeed."""
 

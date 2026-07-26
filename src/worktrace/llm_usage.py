@@ -71,52 +71,78 @@ class LLMUsageRecorder:
         estimated_input_tokens: int | None = None,
         input_target_tokens: int | None = None,
         oversized_singleton: bool = False,
+        function_arguments_repair_kind: str | None = None,
+        function_arguments_repair_count: int | None = None,
+        function_arguments_json_error_line: int | None = None,
+        function_arguments_json_error_column: int | None = None,
+        function_arguments_json_error_position: int | None = None,
+        function_arguments_sha256: str | None = None,
     ) -> dict[str, int | None]:
         usage = extract_usage(payload)
-        with self._lock:
-            self._records.append(
+        record: dict[str, bool | int | str | None] = {
+            "request_kind": request_kind,
+            "request_context_id": getattr(
+                self._context,
+                "request_context_id",
+                None,
+            ),
+            "backend": backend,
+            "status": status,
+            "fallback_from": fallback_from,
+            "fallback_to": fallback_to,
+            "error_category": error_category,
+            "token_usage_status": (
+                "reported"
+                if any(value is not None for value in usage.values())
+                else "unavailable"
+            ),
+            "duration_ms": round(duration_ms, 3) if duration_ms is not None else None,
+            "prompt_chars": prompt_chars,
+            "estimated_input_tokens": estimated_input_tokens,
+            "input_target_tokens": input_target_tokens,
+            "input_target_overage_tokens": (
+                max(estimated_input_tokens - input_target_tokens, 0)
+                if estimated_input_tokens is not None
+                and input_target_tokens is not None
+                else None
+            ),
+            "oversized_singleton": oversized_singleton,
+            "input_estimate_difference_tokens": (
+                usage["input_tokens"] - estimated_input_tokens
+                if usage["input_tokens"] is not None
+                and estimated_input_tokens is not None
+                else None
+            ),
+            "codex_wait_ms": (
+                round(codex_wait_ms, 3)
+                if codex_wait_ms is not None
+                else None
+            ),
+            **usage,
+        }
+        if function_arguments_repair_kind is not None:
+            record.update(
                 {
-                    "request_kind": request_kind,
-                    "request_context_id": getattr(
-                        self._context,
-                        "request_context_id",
-                        None,
+                    "function_arguments_repair_kind": (
+                        function_arguments_repair_kind
                     ),
-                    "backend": backend,
-                    "status": status,
-                    "fallback_from": fallback_from,
-                    "fallback_to": fallback_to,
-                    "error_category": error_category,
-                    "token_usage_status": (
-                        "reported"
-                        if any(value is not None for value in usage.values())
-                        else "unavailable"
+                    "function_arguments_repair_count": (
+                        function_arguments_repair_count
                     ),
-                    "duration_ms": round(duration_ms, 3) if duration_ms is not None else None,
-                    "prompt_chars": prompt_chars,
-                    "estimated_input_tokens": estimated_input_tokens,
-                    "input_target_tokens": input_target_tokens,
-                    "input_target_overage_tokens": (
-                        max(estimated_input_tokens - input_target_tokens, 0)
-                        if estimated_input_tokens is not None
-                        and input_target_tokens is not None
-                        else None
+                    "function_arguments_json_error_line": (
+                        function_arguments_json_error_line
                     ),
-                    "oversized_singleton": oversized_singleton,
-                    "input_estimate_difference_tokens": (
-                        usage["input_tokens"] - estimated_input_tokens
-                        if usage["input_tokens"] is not None
-                        and estimated_input_tokens is not None
-                        else None
+                    "function_arguments_json_error_column": (
+                        function_arguments_json_error_column
                     ),
-                    "codex_wait_ms": (
-                        round(codex_wait_ms, 3)
-                        if codex_wait_ms is not None
-                        else None
+                    "function_arguments_json_error_position": (
+                        function_arguments_json_error_position
                     ),
-                    **usage,
+                    "function_arguments_sha256": function_arguments_sha256,
                 }
             )
+        with self._lock:
+            self._records.append(record)
         return usage
 
     def summary(self) -> dict[str, object]:
@@ -142,6 +168,10 @@ class LLMUsageRecorder:
             "fallback_count": sum(1 for record in records if record.get("fallback_to")),
             "oversized_singleton_request_count": sum(
                 record.get("oversized_singleton") is True for record in records
+            ),
+            "function_arguments_repair_count": sum(
+                int(record.get("function_arguments_repair_count") or 0)
+                for record in records
             ),
             "codex_wait_ms": _basic_duration_summary(
                 [record.get("codex_wait_ms") for record in records]

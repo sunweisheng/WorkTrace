@@ -11,7 +11,7 @@ from pathlib import Path
 from time import perf_counter, sleep
 from typing import Any, Callable, Sequence
 
-from ..config import RuntimeConfig
+from ..config import RuntimeConfig, load_llm_timeout_seconds
 from ..errors import AnalyzerProtocolError, ModelInputLimitError
 from ..logging_utils import log_timing
 from ..llm_usage import LLMUsageRecorder
@@ -45,6 +45,7 @@ from ..utils.token_estimation import (
 )
 from .base import Analyzer, is_indivisible_collected_request, oversized_input_kwargs
 from .function_calls import (
+    COLLECTED_GROUPING_FINAL_PARAMETER_CHECKS,
     FunctionCallSpec,
     collected_grouping_call_contract,
     function_call_spec,
@@ -381,7 +382,9 @@ class CodexAnalyzer(Analyzer):
                 validation_feedback=validation_feedback,
             ),
             function_spec=contract.function_spec,
-            **oversized_input_kwargs(len(candidates) == 1),
+            **oversized_input_kwargs(
+                len(candidates) == 1 or bool(validation_feedback)
+            ),
         )
         return parse_personal_grouping_function_payload(
             payload,
@@ -421,6 +424,7 @@ class CodexAnalyzer(Analyzer):
         deterministic_groups: list[list[str]],
         *,
         validation_feedback: str = "",
+        previous_invalid_assignment: dict[str, object] | None = None,
     ) -> CollectedGroupingResult:
         contract = collected_grouping_call_contract(
             "collected_candidate_grouping",
@@ -428,6 +432,7 @@ class CodexAnalyzer(Analyzer):
             events=events,
             deterministic_groups=deterministic_groups,
             include_split_reason=False,
+            final_parameter_checks=COLLECTED_GROUPING_FINAL_PARAMETER_CHECKS,
         )
         payload = self.request_function(
             build_collected_grouping_prompt(
@@ -436,11 +441,13 @@ class CodexAnalyzer(Analyzer):
                 deterministic_groups,
                 config=self.config,
                 validation_feedback=validation_feedback,
+                previous_invalid_assignment=previous_invalid_assignment,
             ),
             function_spec=contract.function_spec,
             **oversized_input_kwargs(
                 is_indivisible_collected_request(events, deterministic_groups)
                 or bool(validation_feedback)
+                or previous_invalid_assignment is not None
             ),
         )
         result, _ = parse_collected_grouping_function_payload(
@@ -458,13 +465,22 @@ class CodexAnalyzer(Analyzer):
         *,
         review_reasons: list[str] | None = None,
         validation_feedback: str = "",
+        existing_groups: list[CollectedGroupingGroup] | None = None,
+        relation_reasons: list[dict[str, object]] | None = None,
+        atomic_groups: list[list[str]] | None = None,
     ) -> CollectedGroupingResult:
+        relation_ids = [
+            str(item.get("relation_id", ""))
+            for item in relation_reasons or []
+            if str(item.get("relation_id", ""))
+        ]
         contract = collected_grouping_call_contract(
             "collected_group_review",
             config=self.config,
             events=events,
             deterministic_groups=[list(candidate_group.draft_ids)],
             include_split_reason=True,
+            relation_ids=relation_ids,
         )
         payload = self.request_function(
             build_collected_review_prompt(
@@ -474,6 +490,9 @@ class CodexAnalyzer(Analyzer):
                 config=self.config,
                 review_reasons=review_reasons,
                 validation_feedback=validation_feedback,
+                existing_groups=existing_groups,
+                relation_reasons=relation_reasons,
+                atomic_groups=atomic_groups,
             ),
             function_spec=contract.function_spec,
             **oversized_input_kwargs(True),
@@ -482,6 +501,8 @@ class CodexAnalyzer(Analyzer):
             payload,
             evidence_catalog=list(contract.evidence_catalog),
             allowed_semantic_reasons=contract.semantic_reasons,
+            allowed_relation_ids=relation_ids,
+            allowed_draft_ids=[item.draft_id for item in events],
         )
         return result
 
@@ -573,6 +594,7 @@ class CodexAnalyzer(Analyzer):
             schema_handle.close()
 
         wait_seconds = self.request_pacer.wait_for_turn()
+        timeout_seconds = load_llm_timeout_seconds(self.config, cwd=self.cwd)
         started_at = perf_counter()
         try:
             if self.config.codex_stdin_mode:
@@ -594,7 +616,7 @@ class CodexAnalyzer(Analyzer):
                 result = self.command_runner(
                     tuple(args),
                     cwd=self.cwd,
-                    timeout=self.config.analyzer_timeout_seconds,
+                    timeout=timeout_seconds,
                     input_text=command_prompt,
                 )
             else:
@@ -616,7 +638,7 @@ class CodexAnalyzer(Analyzer):
                 result = self.command_runner(
                     tuple(args),
                     cwd=self.cwd,
-                    timeout=self.config.analyzer_timeout_seconds,
+                    timeout=timeout_seconds,
                 )
         except subprocess.TimeoutExpired as exc:
             output_path.unlink(missing_ok=True)

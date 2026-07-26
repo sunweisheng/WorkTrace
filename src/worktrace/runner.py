@@ -22,6 +22,7 @@ from .constants import DailyRunStatus
 from .errors import (
     AnalyzerProtocolError,
     ChatSourceError,
+    DayGroupDiscoveryValidationError,
     DeliveryError,
     ModelInputLimitError,
     PersonalGroupingValidationError,
@@ -39,6 +40,8 @@ from .models import (
     ConversationSegmentUnit,
     CrossConversationGroup,
     CrossConversationGroupResult,
+    DayGroupDiscoveryResult,
+    DayGroupReviewResult,
     DayGroupingSummary,
     DailyRunResult,
     EventFileLink,
@@ -49,6 +52,8 @@ from .models import (
     PersonalFactReviewItemResult,
     PersonalFactReviewResult,
     PersonalFactReviewSummary,
+    PersonalGroupRenderItem,
+    PersonalGroupRenderResult,
     RetentionReviewBatch,
     RetentionReviewResult,
     RetentionReviewSummary,
@@ -60,13 +65,23 @@ from .models import (
 from .analyzers.output_schemas import (
     anchor_batch_output_schema,
     conversation_segmentation_output_schema,
-    merge_output_schema,
+    day_group_discovery_output_schema,
+    day_group_discovery_typical_arguments,
+    day_group_review_output_schema,
+    personal_group_render_output_schema,
+)
+from .analyzers.protocol import (
+    parse_day_group_discovery_payload,
+    parse_day_group_review_payload,
+    parse_personal_group_render_payload,
 )
 from .analyzers.prompts import (
     build_anchor_batch_analysis_prompt,
     build_conversation_segmentation_prompt,
+    build_day_group_discovery_prompt,
     build_day_group_review_prompt,
     build_merge_prompt,
+    build_personal_group_render_prompt,
     build_conversation_segmentation_message_refs,
 )
 from .reaction_catalog import ReactionCatalog, ReactionCatalogStore, enrich_message_reactions
@@ -96,7 +111,9 @@ from .pipeline.cross_conversation_merge import (
 )
 from .pipeline.day_event_grouping import (
     DayGroupReviewComponent,
+    build_day_group_discovery_groups,
     build_day_group_review_components,
+    build_day_group_review_typical_arguments,
     replace_reviewed_day_group_components,
     validate_day_group_review_result,
 )
@@ -139,7 +156,7 @@ from .pipeline.validation import (
 from .utils.link_refs import build_message_link_id
 from .utils.hashing import file_key_from_attachment_id, file_key_from_url
 from .utils.json_io import dump_json
-from .utils.text import choose_preferred_text, clean_text, merge_content_texts
+from .utils.text import choose_preferred_text, clean_text
 from .utils.token_estimation import estimate_structured_input_tokens
 
 logger = logging.getLogger("worktrace")
@@ -179,6 +196,29 @@ class _AnchorSegmentationOutcome:
     failure_category: str
     model_call_count: int
     started_at: float
+
+
+@dataclass(frozen=True)
+class _DayGroupDiscoveryOutcome:
+    result: DayGroupDiscoveryResult
+    warnings: list[str]
+    artifact: dict[str, object]
+    request_count: int
+    retry_count: int
+    codex_fallback_count: int
+    failure_count: int
+    oversized_submission_count: int
+
+
+@dataclass(frozen=True)
+class _PersonalGroupRenderOutcome:
+    rendered_groups: dict[str, PersonalGroupRenderItem]
+    warnings: list[str]
+    artifact: dict[str, object]
+    request_count: int
+    retry_count: int
+    codex_fallback_count: int
+    failure_count: int
 
 
 @dataclass
@@ -462,25 +502,42 @@ class DailyTraceRunner:
                     )
                     warning_messages.extend(merge_batch_warnings)
                     initial_group_count = len(group_result.groups)
+                    discovery_outcome = self._discover_day_group_review_candidates(
+                        target_date=target_date,
+                        groups=group_result.groups,
+                        candidates=all_candidates,
+                    )
+                    warning_messages.extend(discovery_outcome.warnings)
                     (
                         reviewed_groups,
                         review_warnings,
                         review_attempts,
+                        review_components,
                         review_component_count,
                         review_request_count,
                         review_retry_count,
                         review_codex_fallback_count,
+                        review_metrics,
                     ) = self._review_strongly_related_day_groups(
                         target_date=target_date,
                         groups=group_result.groups,
                         candidates=all_candidates,
                         messages=filtered_messages,
+                        discovery_result=discovery_outcome.result,
                     )
                     warning_messages.extend(review_warnings)
                     group_result = replace(group_result, groups=reviewed_groups)
+                    render_outcome = self._render_personal_multi_groups(
+                        target_date=target_date,
+                        groups=group_result.groups,
+                        candidates=all_candidates,
+                    )
+                    warning_messages.extend(render_outcome.warnings)
                     day_grouping_warnings = [
                         *merge_batch_warnings,
+                        *discovery_outcome.warnings,
                         *review_warnings,
+                        *render_outcome.warnings,
                     ]
                     day_grouping_summary = DayGroupingSummary(
                         candidate_count=len(all_candidates),
@@ -488,11 +545,56 @@ class DailyTraceRunner:
                         final_group_count=len(group_result.groups),
                         review_component_count=review_component_count,
                         review_request_count=review_request_count,
+                        cross_group_merge_count=review_metrics[
+                            "cross_group_merge_count"
+                        ],
+                        split_group_count=review_metrics["split_group_count"],
+                        relation_merged_count=review_metrics[
+                            "relation_merged_count"
+                        ],
+                        relation_separate_count=review_metrics[
+                            "relation_separate_count"
+                        ],
+                        review_failure_count=review_metrics[
+                            "review_failure_count"
+                        ],
+                        discovery_request_count=(
+                            discovery_outcome.request_count
+                        ),
+                        discovery_retry_count=discovery_outcome.retry_count,
+                        discovery_checked_group_count=len(
+                            discovery_outcome.result.group_checks
+                        ),
+                        discovery_candidate_group_count=len(
+                            discovery_outcome.result.candidate_groups
+                        ),
+                        discovery_involved_group_count=len(
+                            {
+                                group_id
+                                for candidate_group in (
+                                    discovery_outcome.result.candidate_groups
+                                )
+                                for group_id in candidate_group.group_ids
+                            }
+                        ),
+                        discovery_failure_count=discovery_outcome.failure_count,
+                        discovery_oversized_submission_count=(
+                            discovery_outcome.oversized_submission_count
+                        ),
+                        content_render_request_count=render_outcome.request_count,
+                        content_render_retry_count=render_outcome.retry_count,
+                        content_render_failure_count=render_outcome.failure_count,
                         validation_retry_count=(
-                            validation_retry_count + review_retry_count
+                            validation_retry_count
+                            + discovery_outcome.retry_count
+                            + review_retry_count
+                            + render_outcome.retry_count
                         ),
                         codex_fallback_count=(
-                            codex_fallback_count + review_codex_fallback_count
+                            codex_fallback_count
+                            + discovery_outcome.codex_fallback_count
+                            + review_codex_fallback_count
+                            + render_outcome.codex_fallback_count
                         ),
                         singleton_repair_candidate_count=singleton_repair_count,
                         warning_count=len(day_grouping_warnings),
@@ -501,7 +603,10 @@ class DailyTraceRunner:
                         target_date=target_date,
                         candidates=all_candidates,
                         grouping_attempts=grouping_attempts,
+                        discovery_artifact=discovery_outcome.artifact,
                         review_attempts=review_attempts,
+                        review_components=review_components,
+                        render_artifact=render_outcome.artifact,
                         groups=group_result.groups,
                         warnings=day_grouping_warnings,
                         summary=day_grouping_summary,
@@ -514,6 +619,7 @@ class DailyTraceRunner:
                         self_relation_order=tuple(
                             item.key for item in self.config.self_relation_types
                         ),
+                        rendered_groups=render_outcome.rendered_groups,
                     )
                     merged_drafts = validate_merged_event_drafts(
                         merged_drafts,
@@ -2959,125 +3065,12 @@ class DailyTraceRunner:
             singleton_repair_count += batch_repair_count
             local_groups.extend(result.groups)
 
-        (
-            summaries,
-            original_ids_by_summary,
-            primary_id_by_summary,
-            source_group_by_summary,
-        ) = (
-            _build_cross_batch_summary_candidates(
-                target_date=target_date,
-                candidates=candidates,
-                groups=local_groups,
-                content_char_limit=self.config.prompt_message_char_limit,
-            )
-        )
-        if len(summaries) == 1:
-            summary_groups = [
-                CrossConversationGroup(
-                    group_id="cross-summary-single",
-                    draft_ids=[summaries[0].draft_id],
-                    primary_draft_id=summaries[0].draft_id,
-                    merge_reason="单条保留",
-                    evidence_message_ids=[],
-                )
-            ]
-        else:
-            summary_batches = _pack_day_merge_candidates(
-                target_date=target_date,
-                candidates=summaries,
-                input_limit=self.config.model_input_batch_target_tokens,
-                config=self.config,
-            )
-            summary_groups: list[CrossConversationGroup] = []
-            for batch_index, batch in enumerate(summary_batches, start=1):
-                if len(batch) == 1:
-                    summary = batch[0]
-                    summary_groups.append(
-                        CrossConversationGroup(
-                            group_id=f"cross-summary-{batch_index:03d}-single",
-                            draft_ids=[summary.draft_id],
-                            primary_draft_id=summary.draft_id,
-                            merge_reason="单条保留",
-                            evidence_message_ids=[],
-                        )
-                    )
-                    continue
-                (
-                    result,
-                    batch_warnings,
-                    batch_attempts,
-                    batch_retry_count,
-                    batch_codex_count,
-                    batch_repair_count,
-                ) = self._request_valid_day_groups(
-                    target_date,
-                    batch,
-                    request_label=f"summary-{batch_index:03d}",
-                )
-                warnings.extend(batch_warnings)
-                attempts.extend(batch_attempts)
-                validation_retry_count += batch_retry_count
-                codex_fallback_count += batch_codex_count
-                singleton_repair_count += batch_repair_count
-                summary_groups.extend(result.groups)
-
-        mapped_groups: list[CrossConversationGroup] = []
-        for group_index, group in enumerate(summary_groups, start=1):
-            source_groups = [
-                source_group_by_summary[summary_id]
-                for summary_id in group.draft_ids
-                if summary_id in source_group_by_summary
-            ]
-            draft_ids = list(
-                dict.fromkeys(
-                    draft_id
-                    for summary_id in group.draft_ids
-                    for draft_id in original_ids_by_summary.get(summary_id, [])
-                )
-            )
-            if not draft_ids:
-                continue
-            primary_draft_id = primary_id_by_summary.get(
-                group.primary_draft_id,
-                draft_ids[0],
-            )
-            if primary_draft_id not in draft_ids:
-                primary_draft_id = draft_ids[0]
-            if len(source_groups) == 1:
-                merge_reason = source_groups[0].merge_reason
-                evidence_message_ids = list(
-                    source_groups[0].evidence_message_ids
-                )
-            else:
-                merge_reason = group.merge_reason
-                evidence_message_ids = list(
-                    dict.fromkeys(
-                        [
-                            *group.evidence_message_ids,
-                            *(
-                                message_id
-                                for source_group in source_groups
-                                for message_id in source_group.evidence_message_ids
-                            ),
-                        ]
-                    )
-                )
-            mapped_groups.append(
-                CrossConversationGroup(
-                    group_id=f"cross-reconciled-{group_index:03d}",
-                    draft_ids=draft_ids,
-                    primary_draft_id=primary_draft_id,
-                    merge_reason=merge_reason,
-                    evidence_message_ids=evidence_message_ids,
-                )
-            )
-        mapped_result = validate_cross_conversation_groups(
-            CrossConversationGroupResult(groups=mapped_groups),
+        validated_result = validate_cross_conversation_groups(
+            CrossConversationGroupResult(groups=local_groups),
             candidates,
         )
         return (
-            mapped_result,
+            validated_result,
             warnings,
             attempts,
             validation_retry_count,
@@ -3312,162 +3305,516 @@ class DailyTraceRunner:
         )
         return bool(checker()) if callable(checker) else False
 
-    def _review_strongly_related_day_groups(
+    def _discover_day_group_review_candidates(
         self,
         *,
         target_date: str,
         groups: list[CrossConversationGroup],
         candidates: list[SourceBackedEventDraft],
-        messages: list[NormalizedMessage],
+    ) -> _DayGroupDiscoveryOutcome:
+        started_at = perf_counter()
+        discovery_groups = build_day_group_discovery_groups(groups, candidates)
+        artifact: dict[str, object] = {
+            "protocol": "group_checks_v1",
+            "status": "not_needed" if len(discovery_groups) < 2 else "running",
+            "input": {"groups": discovery_groups},
+            "input_group_count": len(discovery_groups),
+            "input_chars": len(
+                dump_json({"groups": discovery_groups}, pretty=False)
+            ),
+            "input_target_tokens": self.config.model_input_batch_target_tokens,
+            "attempts": [],
+            "usage_attempts": [],
+            "result": DayGroupDiscoveryResult().to_dict(),
+            "abandon_reason": "",
+        }
+        if len(discovery_groups) < 2:
+            return _DayGroupDiscoveryOutcome(
+                result=DayGroupDiscoveryResult(),
+                warnings=[],
+                artifact=artifact,
+                request_count=0,
+                retry_count=0,
+                codex_fallback_count=0,
+                failure_count=0,
+                oversized_submission_count=0,
+            )
+
+        analyzer = self.dependencies.analyzer
+        request_function = getattr(analyzer, "request_function", None)
+        if not callable(request_function):
+            artifact["status"] = "unavailable"
+            artifact["abandon_reason"] = "Analyzer does not expose request_function."
+            return _DayGroupDiscoveryOutcome(
+                result=DayGroupDiscoveryResult(),
+                warnings=[],
+                artifact=artifact,
+                request_count=0,
+                retry_count=0,
+                codex_fallback_count=0,
+                failure_count=0,
+                oversized_submission_count=0,
+            )
+
+        group_ids = [item["group_id"] for item in discovery_groups]
+        attempts: list[dict[str, object]] = []
+        validation_feedback = ""
+        retry_count = 0
+        codex_fallback_count = 0
+        last_context_id = ""
+        last_prompt = ""
+        last_function_spec = None
+        last_estimates: dict[str, int] = {}
+
+        def request_parts(feedback: str):
+            prompt = build_day_group_discovery_prompt(
+                target_date,
+                groups=discovery_groups,
+                config=self.config,
+                validation_feedback=feedback,
+            )
+            function_spec = task_function_call_spec(
+                "day_group_discovery",
+                day_group_discovery_output_schema(group_ids),
+                enum_values={
+                    "group_id": group_ids,
+                    "related_group_ids": group_ids,
+                },
+                typical_arguments=day_group_discovery_typical_arguments(group_ids),
+            )
+            estimates = estimate_structured_input_tokens(
+                prompt,
+                function_spec=function_spec,
+                append_no_think=True,
+            )
+            return prompt, function_spec, estimates
+
+        def finish(
+            result: DayGroupDiscoveryResult,
+            *,
+            warning: str = "",
+            abandon_reason: str = "",
+        ) -> _DayGroupDiscoveryOutcome:
+            recorder = getattr(analyzer, "usage_recorder", None)
+            records = (
+                recorder.records()
+                if callable(getattr(recorder, "records", None))
+                else []
+            )
+            context_prefix = f"day-group-discovery:{target_date}:"
+            usage_attempts = [
+                record
+                for record in records
+                if str(record.get("request_context_id", "")).startswith(
+                    context_prefix
+                )
+            ]
+            artifact.update(
+                {
+                    "status": "abandoned" if abandon_reason else "success",
+                    "attempts": attempts,
+                    "usage_attempts": usage_attempts,
+                    "result": result.to_dict(),
+                    "abandon_reason": abandon_reason,
+                    "token_estimates": (
+                        {
+                            key: attempts[0].get(key)
+                            for key in (
+                                "prompt_estimated_tokens",
+                                "online_input_estimated_tokens",
+                                "codex_input_estimated_tokens",
+                                "input_estimated_tokens",
+                            )
+                        }
+                        if attempts
+                        else {}
+                    ),
+                    "oversized_submission": any(
+                        attempt.get("oversized_submission") is True
+                        for attempt in attempts
+                    ),
+                }
+            )
+            request_count = len(usage_attempts) or len(attempts)
+            oversized_submission_count = (
+                sum(
+                    record.get("oversized_singleton") is True
+                    for record in usage_attempts
+                )
+                if usage_attempts
+                else sum(
+                    attempt.get("oversized_submission") is True
+                    for attempt in attempts
+                )
+            )
+            log_timing(
+                logger,
+                "runner.stage.completed",
+                started_at,
+                stage="day_group_discovery_all",
+                request_count=request_count,
+                retry_count=retry_count,
+                candidate_group_count=len(result.candidate_groups),
+                status="abandoned" if abandon_reason else "success",
+            )
+            return _DayGroupDiscoveryOutcome(
+                result=result,
+                warnings=[warning] if warning else [],
+                artifact=artifact,
+                request_count=request_count,
+                retry_count=retry_count,
+                codex_fallback_count=codex_fallback_count,
+                failure_count=int(bool(abandon_reason)),
+                oversized_submission_count=oversized_submission_count,
+            )
+
+        for attempt_index in range(
+            self.config.day_group_validation_retry_limit + 1
+        ):
+            attempt_feedback = validation_feedback
+            last_prompt, last_function_spec, last_estimates = request_parts(
+                validation_feedback
+            )
+            oversized = (
+                last_estimates["input_estimated_tokens"]
+                > self.config.model_input_batch_target_tokens
+            )
+            last_context_id = (
+                f"day-group-discovery:{target_date}:online-{attempt_index + 1}"
+            )
+            recorder = getattr(analyzer, "usage_recorder", None)
+            context = (
+                recorder.request_context(last_context_id)
+                if callable(getattr(recorder, "request_context", None))
+                else nullcontext()
+            )
+            attempt_started_at = perf_counter()
+            raw_payload: object = None
+            fallback_counted = False
+            try:
+                with context:
+                    raw_payload = request_function(
+                        last_prompt,
+                        function_spec=last_function_spec,
+                        allow_oversized_input=oversized,
+                    )
+                used_fallback = self._last_analyzer_request_used_fallback()
+                codex_fallback_count += int(used_fallback)
+                fallback_counted = used_fallback
+                result = parse_day_group_discovery_payload(
+                    raw_payload,
+                    allowed_group_ids=group_ids,
+                )
+            except DayGroupDiscoveryValidationError as exc:
+                used_fallback = self._last_analyzer_request_used_fallback()
+                if used_fallback and not fallback_counted:
+                    codex_fallback_count += 1
+                validation_feedback = str(exc)
+                attempts.append(
+                    {
+                        "attempt": len(attempts) + 1,
+                        "request_context_id": last_context_id,
+                        "backend": "codex" if used_fallback else "online",
+                        "status": "invalid",
+                        "duration_ms": round(
+                            (perf_counter() - attempt_started_at) * 1000,
+                            3,
+                        ),
+                        "validation_feedback_input": attempt_feedback,
+                        "error": validation_feedback,
+                        "result": raw_payload if isinstance(raw_payload, dict) else {},
+                        **last_estimates,
+                        "input_target_tokens": self.config.model_input_batch_target_tokens,
+                        "oversized_submission": oversized,
+                    }
+                )
+                if used_fallback:
+                    break
+                if attempt_index < self.config.day_group_validation_retry_limit:
+                    retry_count += 1
+                    continue
+                break
+            except (AnalyzerProtocolError, TypeError, ValueError) as exc:
+                used_fallback = self._last_analyzer_request_used_fallback()
+                if used_fallback and not fallback_counted:
+                    codex_fallback_count += 1
+                attempts.append(
+                    {
+                        "attempt": len(attempts) + 1,
+                        "request_context_id": last_context_id,
+                        "backend": "codex" if used_fallback else "online",
+                        "status": "failed",
+                        "duration_ms": round(
+                            (perf_counter() - attempt_started_at) * 1000,
+                            3,
+                        ),
+                        "validation_feedback_input": attempt_feedback,
+                        "error": str(exc),
+                        "result": raw_payload if isinstance(raw_payload, dict) else {},
+                        **last_estimates,
+                        "input_target_tokens": self.config.model_input_batch_target_tokens,
+                        "oversized_submission": oversized,
+                    }
+                )
+                warning = (
+                    "Skipped day group discovery after request retries failed: "
+                    f"{exc}"
+                )
+                return finish(
+                    DayGroupDiscoveryResult(),
+                    warning=warning,
+                    abandon_reason=str(exc),
+                )
+            attempts.append(
+                {
+                    "attempt": len(attempts) + 1,
+                    "request_context_id": last_context_id,
+                    "backend": "codex" if used_fallback else "online",
+                    "status": "success",
+                    "duration_ms": round(
+                        (perf_counter() - attempt_started_at) * 1000,
+                        3,
+                    ),
+                    "validation_feedback_input": attempt_feedback,
+                    "error": "",
+                    "result": result.to_dict(),
+                    **last_estimates,
+                    "input_target_tokens": self.config.model_input_batch_target_tokens,
+                    "oversized_submission": oversized,
+                }
+            )
+            return finish(result)
+
+        fallback = getattr(analyzer, "fallback_current_request", None)
+        if callable(fallback) and not self._last_analyzer_request_used_fallback():
+            last_prompt, last_function_spec, last_estimates = request_parts(
+                validation_feedback
+            )
+            oversized = (
+                last_estimates["input_estimated_tokens"]
+                > self.config.model_input_batch_target_tokens
+            )
+            context_id = f"day-group-discovery:{target_date}:codex"
+            recorder = getattr(analyzer, "usage_recorder", None)
+            context = (
+                recorder.request_context(context_id)
+                if callable(getattr(recorder, "request_context", None))
+                else nullcontext()
+            )
+            attempt_started_at = perf_counter()
+            raw_payload = None
+            codex_fallback_count += 1
+            try:
+                with context:
+                    raw_payload = fallback(
+                        "request_function",
+                        last_prompt,
+                        failed_request_context_id=last_context_id,
+                        error_category="validation_error",
+                        function_spec=last_function_spec,
+                        allow_oversized_input=oversized,
+                    )
+                result = parse_day_group_discovery_payload(
+                    raw_payload,
+                    allowed_group_ids=group_ids,
+                )
+            except (AnalyzerProtocolError, TypeError, ValueError) as exc:
+                attempts.append(
+                    {
+                        "attempt": len(attempts) + 1,
+                        "request_context_id": context_id,
+                        "backend": "codex",
+                        "status": (
+                            "invalid"
+                            if isinstance(exc, DayGroupDiscoveryValidationError)
+                            else "failed"
+                        ),
+                        "duration_ms": round(
+                            (perf_counter() - attempt_started_at) * 1000,
+                            3,
+                        ),
+                        "validation_feedback_input": validation_feedback,
+                        "error": str(exc),
+                        "result": raw_payload if isinstance(raw_payload, dict) else {},
+                        **last_estimates,
+                        "input_target_tokens": self.config.model_input_batch_target_tokens,
+                        "oversized_submission": oversized,
+                    }
+                )
+                warning = (
+                    "Skipped day group discovery after validation retries failed: "
+                    f"{exc}"
+                )
+                return finish(
+                    DayGroupDiscoveryResult(),
+                    warning=warning,
+                    abandon_reason=str(exc),
+                )
+            attempts.append(
+                {
+                    "attempt": len(attempts) + 1,
+                    "request_context_id": context_id,
+                    "backend": "codex",
+                    "status": "success",
+                    "duration_ms": round(
+                        (perf_counter() - attempt_started_at) * 1000,
+                        3,
+                    ),
+                    "validation_feedback_input": validation_feedback,
+                    "error": "",
+                    "result": result.to_dict(),
+                    **last_estimates,
+                    "input_target_tokens": self.config.model_input_batch_target_tokens,
+                    "oversized_submission": oversized,
+                }
+            )
+            return finish(result)
+
+        reason = validation_feedback or "No valid discovery result was returned."
+        warning = (
+            "Skipped day group discovery after validation retries failed: "
+            f"{reason}"
+        )
+        return finish(
+            DayGroupDiscoveryResult(),
+            warning=warning,
+            abandon_reason=reason,
+        )
+
+    def _review_day_group_component(
+        self,
+        *,
+        target_date: str,
+        component: DayGroupReviewComponent,
+        initial_validation_feedback: str = "",
     ) -> tuple[
-        list[CrossConversationGroup],
-        list[str],
+        str,
+        DayGroupReviewResult | None,
         list[dict[str, object]],
-        int,
-        int,
+        list[str],
         int,
         int,
     ]:
-        components = build_day_group_review_components(groups, candidates, messages)
-        if not components:
-            return groups, [], [], 0, 0, 0, 0
-        request_function = getattr(self.dependencies.analyzer, "request_function", None)
+        analyzer = self.dependencies.analyzer
+        request_function = getattr(analyzer, "request_function", None)
         if not callable(request_function):
-            return groups, [], [], len(components), 0, 0, 0
+            return component.component_id, None, [], [], 0, 0
 
-        all_started_at = perf_counter()
-        worker_count = min(
-            len(components),
-            self.config.max_concurrent_day_group_review_requests,
+        attempts: list[dict[str, object]] = []
+        validation_feedback = initial_validation_feedback
+        retry_count = 0
+        codex_fallback_count = 0
+        last_context_id = ""
+        review_input = {
+            "candidate_draft_ids": [item.draft_id for item in component.candidates],
+            "groups": [item.to_dict() for item in component.groups],
+            "relation_reasons": list(component.relation_reasons),
+        }
+        draft_ids = [item.draft_id for item in component.candidates]
+        message_ids = list(
+            dict.fromkeys(
+                message_id
+                for item in component.candidates
+                for message_id in item.source_message_ids
+            )
         )
+        relation_ids = [
+            str(item["relation_id"]) for item in component.relation_reasons
+        ]
+        allowed_semantic_reasons = [
+            item.key
+            for item in self.config.collected_group_reason_definitions
+            if item.supports_semantic_merge and not item.evidence_relation
+        ]
 
-        def review_component(
-            component: DayGroupReviewComponent,
-        ) -> tuple[
-            str,
-            CrossConversationGroupResult | None,
-            list[dict[str, object]],
-            list[str],
-            int,
-            int,
-        ]:
-            attempts: list[dict[str, object]] = []
-            validation_feedback = ""
-            retry_count = 0
-            codex_fallback_count = 0
-            review_input = {
-                "candidate_draft_ids": [
-                    item.draft_id for item in component.candidates
+        def request_parts(feedback: str):
+            prompt = build_day_group_review_prompt(
+                target_date,
+                candidates=component.candidates,
+                groups=component.groups,
+                relation_reasons=component.relation_reasons,
+                config=self.config,
+                validation_feedback=feedback,
+            )
+            function_spec = task_function_call_spec(
+                "day_group_review",
+                day_group_review_output_schema(
+                    self.config,
+                    draft_ids=draft_ids,
+                    message_ids=message_ids,
+                    relation_ids=relation_ids,
+                ),
+                draft_ids=draft_ids,
+                message_ids=message_ids,
+                typical_arguments=build_day_group_review_typical_arguments(
+                    component
+                ),
+            )
+            estimates = estimate_structured_input_tokens(
+                prompt,
+                function_spec=function_spec,
+                append_no_think=True,
+            )
+            return prompt, function_spec, estimates
+
+        def failure_result(exc: Exception):
+            return (
+                component.component_id,
+                None,
+                attempts,
+                [
+                    "Kept existing day groups because local review failed: "
+                    f"{component.component_id}: {exc}"
                 ],
-                "groups": [item.to_dict() for item in component.groups],
-                "relation_reasons": list(component.relation_reasons),
-            }
-            for attempt_index in range(
-                self.config.day_group_validation_retry_limit + 1
-            ):
-                prompt = build_day_group_review_prompt(
-                    target_date,
-                    candidates=component.candidates,
-                    groups=component.groups,
-                    relation_reasons=component.relation_reasons,
-                    config=self.config,
-                    validation_feedback=validation_feedback,
-                )
-                function_spec = task_function_call_spec(
-                    "day_group_review",
-                    merge_output_schema(),
-                    draft_ids=[item.draft_id for item in component.candidates],
-                    message_ids=list(
-                        dict.fromkeys(
-                            message_id
-                            for item in component.candidates
-                            for message_id in item.source_message_ids
-                    )
-                    ),
-                )
-                estimated_tokens = estimate_structured_input_tokens(
-                    prompt,
-                    function_spec=function_spec,
-                    append_no_think=True,
-                )["input_estimated_tokens"]
-                started_at = perf_counter()
-                fallback_counted = False
-                raw_result: CrossConversationGroupResult | None = None
-                try:
+                retry_count,
+                codex_fallback_count,
+            )
+
+        for attempt_index in range(
+            self.config.day_group_validation_retry_limit + 1
+        ):
+            feedback_input = validation_feedback
+            prompt, function_spec, estimates = request_parts(validation_feedback)
+            oversized = (
+                estimates["input_estimated_tokens"]
+                > self.config.model_input_batch_target_tokens
+            )
+            last_context_id = (
+                f"day-group-review:{target_date}:{component.component_id}:"
+                f"online-{attempt_index + 1}"
+            )
+            recorder = getattr(analyzer, "usage_recorder", None)
+            context = (
+                recorder.request_context(last_context_id)
+                if callable(getattr(recorder, "request_context", None))
+                else nullcontext()
+            )
+            started_at = perf_counter()
+            payload: object = None
+            try:
+                with context:
                     payload = request_function(
                         prompt,
                         function_spec=function_spec,
-                        allow_oversized_input=(
-                            estimated_tokens
-                            > self.config.model_input_batch_target_tokens
-                        ),
+                        allow_oversized_input=oversized,
                     )
-                    used_fallback = self._last_analyzer_request_used_fallback()
-                    codex_fallback_count += int(used_fallback)
-                    fallback_counted = used_fallback
-                    if not isinstance(payload, dict):
-                        raise AnalyzerProtocolError(
-                            "Day group review response must be an object."
-                        )
-                    raw_result = CrossConversationGroupResult.from_dict(payload)
-                    validated = validate_day_group_review_result(
-                        raw_result,
-                        component,
-                    )
-                except (AnalyzerProtocolError, TypeError, ValueError) as exc:
-                    used_fallback = self._last_analyzer_request_used_fallback()
-                    if used_fallback and not fallback_counted:
-                        codex_fallback_count += 1
-                    validation_feedback = str(exc)
-                    attempts.append(
-                        {
-                            "component_id": component.component_id,
-                            "attempt": attempt_index + 1,
-                            "backend": "codex" if used_fallback else "online",
-                            "status": "failed",
-                            "validation_error": validation_feedback,
-                            "input": review_input,
-                            "prompt": prompt,
-                            **(
-                                {"result": raw_result.to_dict()}
-                                if raw_result is not None
-                                else {}
-                            ),
-                        }
-                    )
-                    log_timing(
-                        logger,
-                        "runner.stage.completed",
-                        started_at,
-                        stage="day_group_review",
-                        component_id=component.component_id,
-                        retry_round=attempt_index,
-                        status="failed",
-                    )
-                    if attempt_index < self.config.day_group_validation_retry_limit:
-                        retry_count += 1
-                        continue
-                    return (
-                        component.component_id,
-                        None,
-                        attempts,
-                        [
-                            "Kept existing day groups because local review failed: "
-                            f"{component.component_id}: {exc}"
-                        ],
-                        retry_count,
-                        codex_fallback_count,
-                    )
+            except (AnalyzerProtocolError, TypeError, ValueError) as exc:
+                used_fallback = self._last_analyzer_request_used_fallback()
+                codex_fallback_count += int(used_fallback)
                 attempts.append(
                     {
                         "component_id": component.component_id,
-                        "attempt": attempt_index + 1,
+                        "attempt": len(attempts) + 1,
                         "backend": "codex" if used_fallback else "online",
-                        "status": "success",
-                        "validation_error": "",
+                        "status": "failed",
+                        "failure_kind": "request",
+                        "validation_error": str(exc),
+                        "validation_feedback_input": feedback_input,
                         "input": review_input,
                         "prompt": prompt,
-                        "result": validated.to_dict(),
+                        **estimates,
+                        "input_target_tokens": self.config.model_input_batch_target_tokens,
+                        "oversized_submission": oversized,
                     }
                 )
                 log_timing(
@@ -3477,22 +3824,291 @@ class DailyTraceRunner:
                     stage="day_group_review",
                     component_id=component.component_id,
                     retry_round=attempt_index,
-                    status="success",
+                    status="failed",
+                    failure_kind="request",
                 )
-                return (
-                    component.component_id,
-                    validated,
-                    attempts,
-                    [],
-                    retry_count,
-                    codex_fallback_count,
+                return failure_result(exc)
+
+            used_fallback = self._last_analyzer_request_used_fallback()
+            codex_fallback_count += int(used_fallback)
+            raw_result: DayGroupReviewResult | None = None
+            try:
+                raw_result = parse_day_group_review_payload(
+                    payload,
+                    candidates=component.candidates,
+                    allowed_semantic_reasons=allowed_semantic_reasons,
+                    allowed_relation_ids=relation_ids,
                 )
-            raise AssertionError("Day group review retry loop ended unexpectedly.")
+                validated = validate_day_group_review_result(raw_result, component)
+            except (AnalyzerProtocolError, TypeError, ValueError) as exc:
+                validation_feedback = _day_group_review_validation_feedback(
+                    str(exc),
+                    component,
+                )
+                attempts.append(
+                    {
+                        "component_id": component.component_id,
+                        "attempt": len(attempts) + 1,
+                        "backend": "codex" if used_fallback else "online",
+                        "status": "failed",
+                        "failure_kind": "validation",
+                        "validation_error": validation_feedback,
+                        "validation_feedback_input": feedback_input,
+                        "input": review_input,
+                        "prompt": prompt,
+                        "raw_function_payload": payload,
+                        **(
+                            {"result": raw_result.to_dict()}
+                            if raw_result is not None
+                            else {}
+                        ),
+                        **estimates,
+                        "input_target_tokens": self.config.model_input_batch_target_tokens,
+                        "oversized_submission": oversized,
+                    }
+                )
+                log_timing(
+                    logger,
+                    "runner.stage.completed",
+                    started_at,
+                    stage="day_group_review",
+                    component_id=component.component_id,
+                    retry_round=attempt_index,
+                    status="failed",
+                    failure_kind="validation",
+                )
+                if used_fallback:
+                    return failure_result(exc)
+                if attempt_index < self.config.day_group_validation_retry_limit:
+                    retry_count += 1
+                    continue
+                break
+
+            attempts.append(
+                {
+                    "component_id": component.component_id,
+                    "attempt": len(attempts) + 1,
+                    "backend": "codex" if used_fallback else "online",
+                    "status": "success",
+                    "failure_kind": "",
+                    "validation_error": "",
+                    "validation_feedback_input": feedback_input,
+                    "input": review_input,
+                    "prompt": prompt,
+                    "result": validated.to_dict(),
+                    **estimates,
+                    "input_target_tokens": self.config.model_input_batch_target_tokens,
+                    "oversized_submission": oversized,
+                }
+            )
+            log_timing(
+                logger,
+                "runner.stage.completed",
+                started_at,
+                stage="day_group_review",
+                component_id=component.component_id,
+                retry_round=attempt_index,
+                status="success",
+            )
+            return (
+                component.component_id,
+                validated,
+                attempts,
+                [],
+                retry_count,
+                codex_fallback_count,
+            )
+
+        fallback = getattr(analyzer, "fallback_current_request", None)
+        if callable(fallback) and not self._last_analyzer_request_used_fallback():
+            prompt, function_spec, estimates = request_parts(validation_feedback)
+            oversized = (
+                estimates["input_estimated_tokens"]
+                > self.config.model_input_batch_target_tokens
+            )
+            context_id = (
+                f"day-group-review:{target_date}:{component.component_id}:codex"
+            )
+            recorder = getattr(analyzer, "usage_recorder", None)
+            context = (
+                recorder.request_context(context_id)
+                if callable(getattr(recorder, "request_context", None))
+                else nullcontext()
+            )
+            started_at = perf_counter()
+            raw_result = None
+            payload = None
+            codex_fallback_count += 1
+            try:
+                with context:
+                    payload = fallback(
+                        "request_function",
+                        prompt,
+                        failed_request_context_id=last_context_id,
+                        error_category="validation_error",
+                        function_spec=function_spec,
+                        allow_oversized_input=oversized,
+                    )
+                raw_result = parse_day_group_review_payload(
+                    payload,
+                    candidates=component.candidates,
+                    allowed_semantic_reasons=allowed_semantic_reasons,
+                    allowed_relation_ids=relation_ids,
+                )
+                validated = validate_day_group_review_result(raw_result, component)
+            except (AnalyzerProtocolError, TypeError, ValueError) as exc:
+                fallback_failure_kind = (
+                    "validation" if payload is not None else "request"
+                )
+                fallback_error = (
+                    _day_group_review_validation_feedback(str(exc), component)
+                    if fallback_failure_kind == "validation"
+                    else str(exc)
+                )
+                attempts.append(
+                    {
+                        "component_id": component.component_id,
+                        "attempt": len(attempts) + 1,
+                        "backend": "codex",
+                        "status": "failed",
+                        "failure_kind": fallback_failure_kind,
+                        "validation_error": fallback_error,
+                        "validation_feedback_input": validation_feedback,
+                        "input": review_input,
+                        "prompt": prompt,
+                        **(
+                            {"raw_function_payload": payload}
+                            if payload is not None
+                            else {}
+                        ),
+                        **(
+                            {"result": raw_result.to_dict()}
+                            if raw_result is not None
+                            else {}
+                        ),
+                        **estimates,
+                        "input_target_tokens": self.config.model_input_batch_target_tokens,
+                        "oversized_submission": oversized,
+                    }
+                )
+                log_timing(
+                    logger,
+                    "runner.stage.completed",
+                    started_at,
+                    stage="day_group_review",
+                    component_id=component.component_id,
+                    retry_round=self.config.day_group_validation_retry_limit + 1,
+                    status="failed",
+                    failure_kind=attempts[-1]["failure_kind"],
+                )
+                return failure_result(exc)
+
+            attempts.append(
+                {
+                    "component_id": component.component_id,
+                    "attempt": len(attempts) + 1,
+                    "backend": "codex",
+                    "status": "success",
+                    "failure_kind": "",
+                    "validation_error": "",
+                    "validation_feedback_input": validation_feedback,
+                    "input": review_input,
+                    "prompt": prompt,
+                    "result": validated.to_dict(),
+                    **estimates,
+                    "input_target_tokens": self.config.model_input_batch_target_tokens,
+                    "oversized_submission": oversized,
+                }
+            )
+            log_timing(
+                logger,
+                "runner.stage.completed",
+                started_at,
+                stage="day_group_review",
+                component_id=component.component_id,
+                retry_round=self.config.day_group_validation_retry_limit + 1,
+                status="success",
+            )
+            return (
+                component.component_id,
+                validated,
+                attempts,
+                [],
+                retry_count,
+                codex_fallback_count,
+            )
+
+        return failure_result(AnalyzerProtocolError(validation_feedback))
+
+    def _review_strongly_related_day_groups(
+        self,
+        *,
+        target_date: str,
+        groups: list[CrossConversationGroup],
+        candidates: list[SourceBackedEventDraft],
+        messages: list[NormalizedMessage],
+        discovery_result: DayGroupDiscoveryResult | None = None,
+    ) -> tuple[
+        list[CrossConversationGroup],
+        list[str],
+        list[dict[str, object]],
+        list[dict[str, object]],
+        int,
+        int,
+        int,
+        int,
+        dict[str, int],
+    ]:
+        components = build_day_group_review_components(
+            groups,
+            candidates,
+            messages,
+            discovery_result=discovery_result,
+            attachment_version_suffix_patterns=(
+                self.config.attachment_version_suffix_patterns
+            ),
+            attachment_ignored_mime_type_prefixes=(
+                self.config.attachment_ignored_mime_type_prefixes
+            ),
+        )
+        component_records = [
+            {
+                "component_id": component.component_id,
+                "group_ids": [group.group_id for group in component.groups],
+                "relation_sources": list(component.relation_sources),
+                "relation_reasons": list(component.relation_reasons),
+            }
+            for component in components
+        ]
+        if not components:
+            return groups, [], [], [], 0, 0, 0, 0, _empty_day_review_metrics()
+        request_function = getattr(self.dependencies.analyzer, "request_function", None)
+        if not callable(request_function):
+            return (
+                groups,
+                [],
+                [],
+                component_records,
+                len(components),
+                0,
+                0,
+                0,
+                {
+                    **_empty_day_review_metrics(),
+                    "review_failure_count": len(components),
+                },
+            )
+
+        all_started_at = perf_counter()
+        worker_count = min(
+            len(components),
+            self.config.max_concurrent_day_group_review_requests,
+        )
 
         results: list[
             tuple[
                 str,
-                CrossConversationGroupResult | None,
+                DayGroupReviewResult | None,
                 list[dict[str, object]],
                 list[str],
                 int,
@@ -3500,12 +4116,19 @@ class DailyTraceRunner:
             ]
         ] = []
         with ThreadPoolExecutor(max_workers=worker_count) as executor:
-            futures = [executor.submit(review_component, item) for item in components]
+            futures = [
+                executor.submit(
+                    self._review_day_group_component,
+                    target_date=target_date,
+                    component=item,
+                )
+                for item in components
+            ]
             for future in futures:
                 results.append(future.result())
 
         replacements = {
-            component_id: result
+            component_id: result.grouping_result
             for component_id, result, _attempts, _warnings, _retry_count, _codex_count in results
             if result is not None
         }
@@ -3521,12 +4144,34 @@ class DailyTraceRunner:
         ]
         retry_count = sum(item[4] for item in results)
         codex_fallback_count = sum(item[5] for item in results)
+        recorder = getattr(self.dependencies.analyzer, "usage_recorder", None)
+        records = (
+            recorder.records()
+            if callable(getattr(recorder, "records", None))
+            else []
+        )
+        context_prefix = f"day-group-review:{target_date}:"
+        usage_attempts = [
+            record
+            for record in records
+            if str(record.get("request_context_id", "")).startswith(context_prefix)
+        ]
+        request_count = len(usage_attempts) if usage_attempts else len(attempts)
         reviewed_groups = replace_reviewed_day_group_components(
             groups,
             replacements,
             components,
             candidates,
         )
+        result_by_component_id = {item[0]: item[1] for item in results}
+        component_records = [
+            _day_group_review_component_record(
+                component,
+                result_by_component_id.get(component.component_id),
+            )
+            for component in components
+        ]
+        review_metrics = _day_group_review_metrics(components, result_by_component_id)
         log_timing(
             logger,
             "runner.stage.completed",
@@ -3534,18 +4179,430 @@ class DailyTraceRunner:
             stage="day_group_review_all",
             component_count=len(components),
             worker_count=worker_count,
-            request_count=len(attempts),
+            request_count=request_count,
             retry_count=retry_count,
         )
         return (
             reviewed_groups,
             warnings,
             attempts,
+            component_records,
             len(components),
-            len(attempts),
+            request_count,
             retry_count,
             codex_fallback_count,
+            review_metrics,
         )
+
+    def _render_personal_multi_groups(
+        self,
+        *,
+        target_date: str,
+        groups: list[CrossConversationGroup],
+        candidates: list[SourceBackedEventDraft],
+    ) -> _PersonalGroupRenderOutcome:
+        multi_groups = [group for group in groups if len(group.draft_ids) > 1]
+        artifact: dict[str, object] = {
+            "status": "not_needed" if not multi_groups else "success",
+            "groups": [],
+            "attempts": [],
+        }
+        if not multi_groups:
+            return _PersonalGroupRenderOutcome({}, [], artifact, 0, 0, 0, 0)
+        request_function = getattr(self.dependencies.analyzer, "request_function", None)
+        if not callable(request_function):
+            warning = (
+                "Kept deterministic personal group content because the analyzer has "
+                "no personal group render capability."
+            )
+            artifact.update({"status": "failed", "failure_reason": warning})
+            return _PersonalGroupRenderOutcome(
+                {}, [warning], artifact, 0, 0, 0, len(multi_groups)
+            )
+
+        all_started_at = perf_counter()
+        worker_count = min(
+            len(multi_groups),
+            self.config.max_concurrent_day_group_review_requests,
+        )
+        results: list[
+            tuple[
+                str,
+                PersonalGroupRenderItem | None,
+                list[dict[str, object]],
+                list[str],
+                int,
+                int,
+            ]
+        ] = []
+        with ThreadPoolExecutor(max_workers=worker_count) as executor:
+            futures = [
+                executor.submit(
+                    self._render_one_personal_group,
+                    target_date=target_date,
+                    group=group,
+                    candidates=candidates,
+                )
+                for group in multi_groups
+            ]
+            for future in futures:
+                results.append(future.result())
+        rendered_groups = {
+            group_id: item
+            for group_id, item, _attempts, _warnings, _retries, _codex in results
+            if item is not None
+        }
+        attempts = [
+            attempt
+            for _group_id, _item, group_attempts, _warnings, _retries, _codex in results
+            for attempt in group_attempts
+        ]
+        warnings = [
+            warning
+            for _group_id, _item, _attempts, group_warnings, _retries, _codex in results
+            for warning in group_warnings
+        ]
+        retry_count = sum(item[4] for item in results)
+        codex_fallback_count = sum(item[5] for item in results)
+        failure_count = len(multi_groups) - len(rendered_groups)
+        recorder = getattr(self.dependencies.analyzer, "usage_recorder", None)
+        records = (
+            recorder.records()
+            if callable(getattr(recorder, "records", None))
+            else []
+        )
+        usage_attempts = [
+            record
+            for record in records
+            if str(record.get("request_context_id", "")).startswith(
+                f"personal-group-render:{target_date}:"
+            )
+        ]
+        request_count = len(usage_attempts) if usage_attempts else len(attempts)
+        artifact.update(
+            {
+                "status": "success_with_warnings" if warnings else "success",
+                "groups": [
+                    {
+                        "group_id": group.group_id,
+                        "draft_ids": list(group.draft_ids),
+                        "status": (
+                            "success"
+                            if group.group_id in rendered_groups
+                            else "fallback"
+                        ),
+                        "result": (
+                            rendered_groups[group.group_id].to_dict()
+                            if group.group_id in rendered_groups
+                            else {}
+                        ),
+                    }
+                    for group in multi_groups
+                ],
+                "attempts": attempts,
+                "usage_attempts": usage_attempts,
+                "summary": {
+                    "group_count": len(multi_groups),
+                    "request_count": request_count,
+                    "retry_count": retry_count,
+                    "codex_fallback_count": codex_fallback_count,
+                    "failure_count": failure_count,
+                },
+            }
+        )
+        log_timing(
+            logger,
+            "runner.stage.completed",
+            all_started_at,
+            stage="personal_group_render_all",
+            group_count=len(multi_groups),
+            worker_count=worker_count,
+            request_count=request_count,
+            retry_count=retry_count,
+            failure_count=failure_count,
+        )
+        return _PersonalGroupRenderOutcome(
+            rendered_groups,
+            warnings,
+            artifact,
+            request_count,
+            retry_count,
+            codex_fallback_count,
+            failure_count,
+        )
+
+    def _render_one_personal_group(
+        self,
+        *,
+        target_date: str,
+        group: CrossConversationGroup,
+        candidates: list[SourceBackedEventDraft],
+    ) -> tuple[
+        str,
+        PersonalGroupRenderItem | None,
+        list[dict[str, object]],
+        list[str],
+        int,
+        int,
+    ]:
+        analyzer = self.dependencies.analyzer
+        request_function = getattr(analyzer, "request_function")
+        candidate_by_id = {item.draft_id: item for item in candidates}
+        group_candidates = [candidate_by_id[draft_id] for draft_id in group.draft_ids]
+        message_ids = list(
+            dict.fromkeys(
+                message_id
+                for item in group_candidates
+                for message_id in item.source_message_ids
+            )
+        )
+        attempts: list[dict[str, object]] = []
+        validation_feedback = ""
+        retry_count = 0
+        codex_fallback_count = 0
+        last_context_id = ""
+
+        def request_parts(feedback: str):
+            prompt = build_personal_group_render_prompt(
+                target_date,
+                group=group,
+                candidates=group_candidates,
+                config=self.config,
+                validation_feedback=feedback,
+            )
+            primary = group_candidates[0]
+            typical_content = [
+                {
+                    "field": "content",
+                    "text": item.content or "该成员属于同一事项。",
+                    "evidence_message_ids": item.source_message_ids[:1],
+                }
+                for item in group_candidates
+            ]
+            function_spec = task_function_call_spec(
+                "personal_group_render",
+                personal_group_render_output_schema(
+                    group_id=group.group_id,
+                    draft_ids=list(group.draft_ids),
+                    message_ids=message_ids,
+                ),
+                draft_ids=group.draft_ids,
+                message_ids=message_ids,
+                typical_arguments={
+                    "groups": [
+                        {
+                            "group_id": group.group_id,
+                            "covered_draft_ids": list(group.draft_ids),
+                            "fact_items": [
+                                {
+                                    "field": "topic",
+                                    "text": primary.topic or "同一事项处理",
+                                    "evidence_message_ids": primary.source_message_ids[:1],
+                                },
+                                *typical_content,
+                                {
+                                    "field": "object_hint",
+                                    "text": primary.object_hint or "具体事项",
+                                    "evidence_message_ids": primary.source_message_ids[:1],
+                                },
+                            ],
+                        }
+                    ]
+                },
+            )
+            estimates = estimate_structured_input_tokens(
+                prompt,
+                function_spec=function_spec,
+                append_no_think=True,
+            )
+            return prompt, function_spec, estimates
+
+        def failure(exc: Exception):
+            return (
+                group.group_id,
+                None,
+                attempts,
+                [
+                    "Kept deterministic personal group content because content render "
+                    f"failed: group={group.group_id}: {exc}"
+                ],
+                retry_count,
+                codex_fallback_count,
+            )
+
+        for attempt_index in range(self.config.day_group_validation_retry_limit + 1):
+            feedback_input = validation_feedback
+            prompt, function_spec, estimates = request_parts(validation_feedback)
+            oversized = (
+                estimates["input_estimated_tokens"]
+                > self.config.model_input_batch_target_tokens
+            )
+            last_context_id = (
+                f"personal-group-render:{target_date}:{group.group_id}:"
+                f"online-{attempt_index + 1}"
+            )
+            recorder = getattr(analyzer, "usage_recorder", None)
+            context = (
+                recorder.request_context(last_context_id)
+                if callable(getattr(recorder, "request_context", None))
+                else nullcontext()
+            )
+            started_at = perf_counter()
+            payload: object = None
+            try:
+                with context:
+                    payload = request_function(
+                        prompt,
+                        function_spec=function_spec,
+                        allow_oversized_input=oversized,
+                    )
+                used_fallback = self._last_analyzer_request_used_fallback()
+                codex_fallback_count += int(used_fallback)
+                result = parse_personal_group_render_payload(
+                    payload,
+                    group=group,
+                    candidates=group_candidates,
+                )
+            except (AnalyzerProtocolError, TypeError, ValueError) as exc:
+                used_fallback = self._last_analyzer_request_used_fallback()
+                if used_fallback and payload is None:
+                    codex_fallback_count += 1
+                failure_kind = "validation" if payload is not None else "request"
+                validation_feedback = str(exc)
+                attempts.append(
+                    {
+                        "group_id": group.group_id,
+                        "attempt": len(attempts) + 1,
+                        "request_context_id": last_context_id,
+                        "backend": "codex" if used_fallback else "online",
+                        "status": "failed",
+                        "failure_kind": failure_kind,
+                        "validation_error": validation_feedback,
+                        "validation_feedback_input": feedback_input,
+                        "prompt": prompt,
+                        "result": payload if isinstance(payload, dict) else {},
+                        **estimates,
+                        "input_target_tokens": self.config.model_input_batch_target_tokens,
+                        "oversized_submission": oversized,
+                        "duration_ms": round((perf_counter() - started_at) * 1000, 3),
+                    }
+                )
+                if failure_kind == "request" or used_fallback:
+                    return failure(exc)
+                if attempt_index < self.config.day_group_validation_retry_limit:
+                    retry_count += 1
+                    continue
+                break
+            rendered = result.groups[0]
+            attempts.append(
+                {
+                    "group_id": group.group_id,
+                    "attempt": len(attempts) + 1,
+                    "request_context_id": last_context_id,
+                    "backend": "codex" if used_fallback else "online",
+                    "status": "success",
+                    "failure_kind": "",
+                    "validation_error": "",
+                    "validation_feedback_input": feedback_input,
+                    "prompt": prompt,
+                    "result": rendered.to_dict(),
+                    **estimates,
+                    "input_target_tokens": self.config.model_input_batch_target_tokens,
+                    "oversized_submission": oversized,
+                    "duration_ms": round((perf_counter() - started_at) * 1000, 3),
+                }
+            )
+            return (
+                group.group_id,
+                rendered,
+                attempts,
+                [],
+                retry_count,
+                codex_fallback_count,
+            )
+
+        fallback = getattr(analyzer, "fallback_current_request", None)
+        if callable(fallback) and not self._last_analyzer_request_used_fallback():
+            prompt, function_spec, estimates = request_parts(validation_feedback)
+            oversized = (
+                estimates["input_estimated_tokens"]
+                > self.config.model_input_batch_target_tokens
+            )
+            context_id = f"personal-group-render:{target_date}:{group.group_id}:codex"
+            recorder = getattr(analyzer, "usage_recorder", None)
+            context = (
+                recorder.request_context(context_id)
+                if callable(getattr(recorder, "request_context", None))
+                else nullcontext()
+            )
+            started_at = perf_counter()
+            payload = None
+            codex_fallback_count += 1
+            try:
+                with context:
+                    payload = fallback(
+                        "request_function",
+                        prompt,
+                        failed_request_context_id=last_context_id,
+                        error_category="validation_error",
+                        function_spec=function_spec,
+                        allow_oversized_input=oversized,
+                    )
+                result = parse_personal_group_render_payload(
+                    payload,
+                    group=group,
+                    candidates=group_candidates,
+                )
+            except (AnalyzerProtocolError, TypeError, ValueError) as exc:
+                attempts.append(
+                    {
+                        "group_id": group.group_id,
+                        "attempt": len(attempts) + 1,
+                        "request_context_id": context_id,
+                        "backend": "codex",
+                        "status": "failed",
+                        "failure_kind": (
+                            "validation" if payload is not None else "request"
+                        ),
+                        "validation_error": str(exc),
+                        "validation_feedback_input": validation_feedback,
+                        "prompt": prompt,
+                        "result": payload if isinstance(payload, dict) else {},
+                        **estimates,
+                        "input_target_tokens": self.config.model_input_batch_target_tokens,
+                        "oversized_submission": oversized,
+                        "duration_ms": round((perf_counter() - started_at) * 1000, 3),
+                    }
+                )
+                return failure(exc)
+            rendered = result.groups[0]
+            attempts.append(
+                {
+                    "group_id": group.group_id,
+                    "attempt": len(attempts) + 1,
+                    "request_context_id": context_id,
+                    "backend": "codex",
+                    "status": "success",
+                    "failure_kind": "",
+                    "validation_error": "",
+                    "validation_feedback_input": validation_feedback,
+                    "prompt": prompt,
+                    "result": rendered.to_dict(),
+                    **estimates,
+                    "input_target_tokens": self.config.model_input_batch_target_tokens,
+                    "oversized_submission": oversized,
+                    "duration_ms": round((perf_counter() - started_at) * 1000, 3),
+                }
+            )
+            return (
+                group.group_id,
+                rendered,
+                attempts,
+                [],
+                retry_count,
+                codex_fallback_count,
+            )
+        return failure(AnalyzerProtocolError(validation_feedback))
 
     def _dump_merge_debug_artifacts(
         self,
@@ -3553,7 +4610,10 @@ class DailyTraceRunner:
         target_date: str,
         candidates: list[SourceBackedEventDraft],
         grouping_attempts: list[dict[str, object]],
+        discovery_artifact: dict[str, object],
         review_attempts: list[dict[str, object]],
+        review_components: list[dict[str, object]],
+        render_artifact: dict[str, object],
         groups: list[CrossConversationGroup],
         warnings: list[str],
         summary: DayGroupingSummary,
@@ -3579,8 +4639,23 @@ class DailyTraceRunner:
             dump_json({"attempts": grouping_attempts}, pretty=True) + "\n",
             encoding="utf-8",
         )
+        (merge_dir / "day_group_discovery.json").write_text(
+            dump_json(discovery_artifact, pretty=True) + "\n",
+            encoding="utf-8",
+        )
         (merge_dir / "day_group_review.json").write_text(
-            dump_json({"attempts": review_attempts}, pretty=True) + "\n",
+            dump_json(
+                {
+                    "components": review_components,
+                    "attempts": review_attempts,
+                },
+                pretty=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        (merge_dir / "personal_group_render.json").write_text(
+            dump_json(render_artifact, pretty=True) + "\n",
             encoding="utf-8",
         )
         (merge_dir / "resolved_groups.json").write_text(
@@ -4128,6 +5203,158 @@ def _estimate_day_merge_input_tokens(
     )["input_estimated_tokens"]
 
 
+def _empty_day_review_metrics() -> dict[str, int]:
+    return {
+        "cross_group_merge_count": 0,
+        "split_group_count": 0,
+        "relation_merged_count": 0,
+        "relation_separate_count": 0,
+        "review_failure_count": 0,
+    }
+
+
+def _day_group_review_validation_feedback(
+    error: str,
+    component: DayGroupReviewComponent,
+) -> str:
+    required_draft_ids = [
+        candidate.draft_id for candidate in component.candidates
+    ]
+    return (
+        f"上次返回未通过校验：{error}。请重新提交完整结果；逐项核对 "
+        f"required_draft_ids={required_draft_ids}，每个编号必须恰好出现在 "
+        "merged_groups 或 singleton_draft_ids 中一次，不得遗漏、重复或增加编号。"
+    )
+
+
+def _day_group_review_metrics(
+    components: list[DayGroupReviewComponent],
+    result_by_component_id: dict[str, DayGroupReviewResult | None],
+) -> dict[str, int]:
+    metrics = _empty_day_review_metrics()
+    for component in components:
+        result = result_by_component_id.get(component.component_id)
+        if result is None:
+            metrics["review_failure_count"] += 1
+            continue
+        returned_group_by_draft = {
+            draft_id: index
+            for index, group in enumerate(result.grouping_result.groups)
+            for draft_id in group.draft_ids
+        }
+        original_group_by_draft = {
+            draft_id: group.group_id
+            for group in component.groups
+            for draft_id in group.draft_ids
+        }
+        metrics["cross_group_merge_count"] += sum(
+            len(
+                {
+                    original_group_by_draft[draft_id]
+                    for draft_id in group.draft_ids
+                }
+            )
+            >= 2
+            for group in result.grouping_result.groups
+        )
+        metrics["split_group_count"] += sum(
+            len(
+                {
+                    returned_group_by_draft[draft_id]
+                    for draft_id in group.draft_ids
+                }
+            )
+            >= 2
+            for group in component.groups
+        )
+        metrics["relation_merged_count"] += sum(
+            resolution.decision == "merged"
+            for resolution in result.relation_resolutions
+        )
+        metrics["relation_separate_count"] += sum(
+            resolution.decision == "separate"
+            for resolution in result.relation_resolutions
+        )
+    return metrics
+
+
+def _day_group_review_component_record(
+    component: DayGroupReviewComponent,
+    result: DayGroupReviewResult | None,
+) -> dict[str, object]:
+    record: dict[str, object] = {
+        "component_id": component.component_id,
+        "initial_groups": [group.to_dict() for group in component.groups],
+        "reviewable_draft_ids": [
+            candidate.draft_id for candidate in component.candidates
+        ],
+        "relation_sources": list(component.relation_sources),
+        "relation_reasons": list(component.relation_reasons),
+        "status": "failed" if result is None else "success",
+    }
+    if result is None:
+        record.update(
+            {
+                "final_groups": [group.to_dict() for group in component.groups],
+                "relation_resolutions": [],
+                "split_initial_group_ids": [],
+                "cross_group_merges": [],
+            }
+        )
+        return record
+
+    final_groups = result.grouping_result.groups
+    returned_group_by_draft = {
+        draft_id: index
+        for index, group in enumerate(final_groups)
+        for draft_id in group.draft_ids
+    }
+    original_group_by_draft = {
+        draft_id: group.group_id
+        for group in component.groups
+        for draft_id in group.draft_ids
+    }
+    record.update(
+        {
+            "final_groups": [group.to_dict() for group in final_groups],
+            "relation_resolutions": [
+                item.to_dict() for item in result.relation_resolutions
+            ],
+            "split_initial_group_ids": [
+                group.group_id
+                for group in component.groups
+                if len(
+                    {
+                        returned_group_by_draft[draft_id]
+                        for draft_id in group.draft_ids
+                    }
+                )
+                >= 2
+            ],
+            "cross_group_merges": [
+                {
+                    "draft_ids": list(group.draft_ids),
+                    "initial_group_ids": sorted(
+                        {
+                            original_group_by_draft[draft_id]
+                            for draft_id in group.draft_ids
+                        }
+                    ),
+                }
+                for group in final_groups
+                if len(
+                    {
+                        original_group_by_draft[draft_id]
+                        for draft_id in group.draft_ids
+                    }
+                )
+                >= 2
+            ],
+        }
+    )
+    return record
+
+
 def _pack_candidates_by_input_limit(
     *,
     candidates: list[SourceBackedEventDraft],
@@ -4172,85 +5399,6 @@ def _pack_day_merge_candidates(
     if current:
         batches.append(current)
     return batches
-
-
-def _build_cross_batch_summary_candidates(
-    *,
-    target_date: str,
-    candidates: list[SourceBackedEventDraft],
-    groups: list[CrossConversationGroup],
-    content_char_limit: int,
-) -> tuple[
-    list[SourceBackedEventDraft],
-    dict[str, list[str]],
-    dict[str, str],
-    dict[str, CrossConversationGroup],
-]:
-    candidate_by_id = {candidate.draft_id: candidate for candidate in candidates}
-    summaries: list[SourceBackedEventDraft] = []
-    original_ids_by_summary: dict[str, list[str]] = {}
-    primary_id_by_summary: dict[str, str] = {}
-    source_group_by_summary: dict[str, CrossConversationGroup] = {}
-    used_ids = set(candidate_by_id)
-    for index, group in enumerate(groups, start=1):
-        members = [
-            candidate_by_id[draft_id]
-            for draft_id in group.draft_ids
-            if draft_id in candidate_by_id
-        ]
-        if not members:
-            continue
-        primary = candidate_by_id.get(group.primary_draft_id)
-        if primary not in members:
-            primary = members[0]
-        summary_id = f"__cross_batch_summary_{index:03d}"
-        while summary_id in used_ids:
-            summary_id = f"_{summary_id}"
-        used_ids.add(summary_id)
-        content = merge_content_texts([item.content for item in members])
-        content = _bounded_text_excerpt(content, max(content_char_limit, 1))
-        summaries.append(
-            replace(
-                primary,
-                draft_id=summary_id,
-                date=target_date,
-                topic=primary.topic
-                or choose_preferred_text([item.topic for item in members]),
-                content=content,
-                object_hint=primary.object_hint
-                or choose_preferred_text([item.object_hint for item in members]),
-                source_message_ids=list(
-                    dict.fromkeys(
-                        message_id
-                        for item in members
-                        for message_id in item.source_message_ids
-                    )
-                ),
-            )
-        )
-        original_ids_by_summary[summary_id] = [item.draft_id for item in members]
-        primary_id_by_summary[summary_id] = primary.draft_id
-        source_group_by_summary[summary_id] = group
-    return (
-        summaries,
-        original_ids_by_summary,
-        primary_id_by_summary,
-        source_group_by_summary,
-    )
-
-
-def _bounded_text_excerpt(value: str, limit: int) -> str:
-    value = clean_text(value)
-    if len(value) <= limit:
-        return value
-    if limit <= 3:
-        return value[:limit]
-    available = limit - 3
-    prefix_length = available // 2
-    suffix_length = available - prefix_length
-    return f"{value[:prefix_length].rstrip()}...{value[-suffix_length:].lstrip()}"[
-        :limit
-    ]
 
 
 def _anchor_unit_to_slice(anchor_unit: AnchorUnit) -> ConversationSlice:

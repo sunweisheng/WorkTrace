@@ -549,8 +549,8 @@ def build_merge_prompt(
             }
             for item in reason_definitions
         },
-        "negative_examples": list(
-            runtime_config.personal_grouping_negative_examples
+        "positive_examples": list(
+            runtime_config.personal_grouping_positive_examples
         ),
         "negative_examples": list(
             runtime_config.personal_grouping_negative_examples
@@ -591,19 +591,33 @@ def build_day_group_review_prompt(
     return dump_json(
         {
             "instruction": (
-                "复核存在结构化强关联但仍被分开的完整事件组是否属于同一实际事项。"
-                "只调用指定 Function 一次提交 groups，不展示推理过程。"
+                "复核存在标题或结构关系的候选事件，并在当前检查范围内重新分组。"
+                "只调用指定 Function 一次提交分组和 relation_resolutions，"
+                "不展示推理过程。"
             ),
             "rules": [
                 *config.personal_group_review_rules,
-                "每个 existing_group 的全部 draft_ids 必须始终一起出现，不得拆散。",
-                "所有 draft_id 必须且只能返回一次。",
-                "多事件组必须填写具体 merge_reason 和合法 evidence_message_ids。",
-                "单例组填写单条保留，evidence_message_ids 返回空数组。",
+                "existing_groups 只表示初步结果，可以在当前检查范围内拆开并重新组合。",
+                "每个 draft_id 必须且只能出现在 merged_groups 或 singleton_draft_ids 中一次。",
+                "提交前逐项核对 required_draft_ids；其与 merged_groups、singleton_draft_ids 的完整并集必须完全相同，不得遗漏、重复或增加编号。",
+                "多事件组必须填写共同对象、配置允许的语义依据、逐成员关系和各自证据。",
+                "先逐条填写 relation_resolutions，判断关系两侧是否直接属于同一过程；再统一处理重叠关系并形成 merged_groups 和 singleton_draft_ids，两部分不得冲突。",
+                "每个 strong_relations 项必须在 relation_resolutions 中按 relation_id 恰好返回一次。",
+                "decision=merged 时，connected_draft_ids 只填写证明该关系成立所需的最少成员，且这些成员必须真实位于同一个最终组。",
+                "带 left_draft_id 和 right_draft_id 的关系决定合并时，connected_draft_ids 必须同时包含这两个编号。",
+                "标题关系决定合并时，connected_draft_ids 至少包含来自两个相关初步组、且最终位于同一组的成员。",
+                "decision=separate 时，connected_draft_ids 可以为空；也可以填写关系两侧的代表成员，但这些成员必须位于不同最终组。无论是否填写，都要用具体差异和关系各侧证据说明为何分开。",
+                "标题发现包含多个初步组时，只要最终组连接了其中至少两个初步组的相关成员即可确认该关系。",
+                "每条关系的 evidence_message_ids 只返回直接支持该关系两侧判断的最少必要消息，不得复制当前检查范围的全部消息编号。",
             ],
             "target_date": target_date,
             "validation_feedback": validation_feedback,
+            "positive_examples": list(config.personal_grouping_positive_examples),
+            "negative_examples": list(config.personal_grouping_negative_examples),
             "strong_relations": relation_reasons,
+            "required_draft_ids": [
+                draft_id for group in groups for draft_id in group.draft_ids
+            ],
             "existing_groups": [group.to_dict() for group in groups],
             "candidates": [
                 {
@@ -627,6 +641,97 @@ def build_day_group_review_prompt(
     )
 
 
+def build_day_group_discovery_prompt(
+    target_date: str,
+    *,
+    groups: list[dict[str, str]],
+    config: RuntimeConfig,
+    validation_feedback: str = "",
+) -> str:
+    return dump_json(
+        {
+            "instruction": (
+                "仅根据当天现有组的编号和标题，逐组检查可能遗漏的关联。"
+                "只调用指定 Function 一次提交 group_checks，不展示推理过程。"
+            ),
+            "rules": [
+                *config.personal_group_discovery_rules,
+                "每个输入 group_id 必须在 group_checks 中恰好作为 group_id 返回一次，并保持输入顺序。",
+                "related_group_ids 只能填写其他合法编号，可以为空，也可以包含一个或多个编号，不要求另一组对称重复填写。",
+                "typical_function_arguments 中的空 related_group_ids 只展示完整覆盖结构，不表示实际组没有关联，必须重新逐组比较输入标题。",
+                "逐组对照当天全部标题后再填写；有可能关联时说明标题显示的具体关系，没有候选时说明标题为什么不足以指向另一个明确事项。",
+                "reason 必须非空，只说明标题检查结果，不得声称已经完成最终合并。",
+            ],
+            **(
+                {"retry_validation_errors": validation_feedback}
+                if validation_feedback.strip()
+                else {}
+            ),
+            "groups": [
+                {
+                    "group_id": str(group["group_id"]),
+                    "title": str(group["title"]),
+                }
+                for group in groups
+            ],
+        },
+        pretty=True,
+    )
+
+
+def build_personal_group_render_prompt(
+    target_date: str,
+    *,
+    group: CrossConversationGroup,
+    candidates: list[SourceBackedEventDraft],
+    config: RuntimeConfig,
+    validation_feedback: str = "",
+) -> str:
+    candidate_by_id = {item.draft_id: item for item in candidates}
+    return dump_json(
+        {
+            "instruction": (
+                "为成员已经锁定的个人多事件组重新生成与成员范围一致的标题、正文和具体对象。"
+                "只调用指定 Function 一次提交 groups，不重新分组，不展示推理过程。"
+            ),
+            "rules": [
+                *config.personal_grouping_rules,
+                "locked_group 的成员已经确定，covered_draft_ids 必须原样返回。",
+                "fact_items 只返回 topic、content 和 object_hint；topic 和 object_hint 各一项，content 可以有一项或多项并按正文顺序排列。",
+                "标题和具体对象必须准确覆盖全部成员；范围较宽的完整过程使用能够概括全部成员的标题，具体交付过程使用具体标题。",
+                "正文应整合前因、动作、决定、结果和待办，不按候选逐条罗列，不补充来源中没有的事实。",
+                "每个 fact_item 必须引用支持其文字的合法消息证据，所有成员至少由一项 content 证据覆盖。",
+            ],
+            "positive_examples": list(config.personal_grouping_positive_examples),
+            "negative_examples": list(config.personal_grouping_negative_examples),
+            "target_date": target_date,
+            "validation_feedback": validation_feedback,
+            "locked_group": {
+                "group_id": group.group_id,
+                "draft_ids": list(group.draft_ids),
+                "merge_reason": group.merge_reason,
+                "members": [
+                    {
+                        "draft_id": draft_id,
+                        "topic": candidate_by_id[draft_id].topic,
+                        "content": candidate_by_id[draft_id].content,
+                        "object_hint": candidate_by_id[draft_id].object_hint,
+                        "source_message_ids": candidate_by_id[
+                            draft_id
+                        ].source_message_ids,
+                        "fact_items": [
+                            item.to_dict()
+                            for item in candidate_by_id[draft_id].fact_items
+                        ],
+                    }
+                    for draft_id in group.draft_ids
+                ],
+            },
+        },
+        pretty=True,
+    )
+
+
 def build_collected_merge_prompt(
     target_date: str,
     events: list[CollectedSourceEvent],
@@ -642,6 +747,44 @@ def build_collected_merge_prompt(
     )
 
 
+def build_collected_group_discovery_prompt(
+    target_date: str,
+    *,
+    groups: list[dict[str, str]],
+    config: RuntimeConfig,
+    validation_feedback: str = "",
+) -> str:
+    return dump_json(
+        {
+            "instruction": (
+                "仅根据当前部门事件组的编号和标题，逐组检查可能遗漏的关联。"
+                "只调用指定 Function 一次提交 group_checks，不展示推理过程。"
+            ),
+            "rules": [
+                *config.collected_group_discovery_rules,
+                "每个输入 group_id 必须在 group_checks 中恰好作为 group_id 返回一次，并保持输入顺序。",
+                "related_group_ids 只能填写其他合法编号，可以为空，也可以包含一个或多个编号，不要求另一组对称重复填写。",
+                "typical_function_arguments 中的空 related_group_ids 只展示完整覆盖结构，不表示实际组没有关联，必须重新逐组比较输入标题。",
+                "逐组对照当前范围全部标题后再填写；有可能关联时说明标题显示的具体关系，没有候选时说明标题为什么不足以指向另一个明确事项。",
+                "reason 必须非空，只说明标题检查结果，不得声称已经完成最终合并。",
+            ],
+            **(
+                {"retry_validation_errors": validation_feedback}
+                if validation_feedback.strip()
+                else {}
+            ),
+            "groups": [
+                {
+                    "group_id": str(group["group_id"]),
+                    "title": str(group["title"]),
+                }
+                for group in groups
+            ],
+        },
+        pretty=True,
+    )
+
+
 def build_collected_grouping_prompt(
     target_date: str,
     events: list[CollectedSourceEvent],
@@ -649,6 +792,7 @@ def build_collected_grouping_prompt(
     *,
     config: RuntimeConfig | None = None,
     validation_feedback: str = "",
+    previous_invalid_assignment: dict[str, object] | None = None,
 ) -> str:
     runtime_config = config or RuntimeConfig()
     reason_definitions = runtime_config.collected_group_reason_definitions
@@ -663,13 +807,15 @@ def build_collected_grouping_prompt(
         ),
         "rules": [
             "每个输入 draft_id 必须且只能出现在 merged_groups 或 singleton_draft_ids 中一次。",
-            "deterministic_groups 必须原样保留，不能拆分或加入其他组。",
+            "deterministic_groups 的内部成员不可拆开，但整个成员块可以与其他直接相关事件合并。",
             "判断每个多事件组时，必须逐项遵守 group_reason_definitions 中配置的成立条件和排除条件。",
             "evidence_relation_catalog 只用于判断；共同消息和共同文件的有效编号由 Python 在返回分组后自动计算，不要在结果中返回证据编号。",
             "拿不准是否同一事项时必须分开。",
             (
                 "candidate_discovery_context 只用于发现需要对照判断的候选，"
-                "不是输出分组；不得复制 candidate_set_id 或直接按其中的 draft_ids 合并。"
+                "不是输出分组；不得复制 comparison_id 或直接按其中的 member_refs 合并。"
+                "对比后判定分开的候选组合不返回任何组对象，只把各事件放入其他合法组或"
+                " singleton_draft_ids。"
             ),
             (
                 "merged_groups 中每组至少两条记录，必须返回非空 summary_title、summary_content、"
@@ -678,6 +824,11 @@ def build_collected_grouping_prompt(
             ),
             "merged_groups 的 member_connections 必须逐条覆盖本组全部 draft_id，每个编号恰好一次，并具体说明该事件与共同对象、动作链或交付批次的直接关系。",
             "不合并的记录只放入 singleton_draft_ids，不要为它生成组对象。",
+            (
+                "先完成全部判断，再构造最终 Function 参数；如果 reason_detail 已判断某个组应取消、"
+                "拆开或改为单条，最终参数必须删除该 merged_groups 项，并按最终决定把成员只放入"
+                "其他合法组或 singleton_draft_ids，不得保留被自身说明否定的组。"
+            ),
             (
                 "semantic_reasons 只选择实际成立的语义依据；不得直接返回 shared_message、"
                 "shared_file、same_conversation、evidence_relation_ids 或内部 group_reason。"
@@ -701,9 +852,14 @@ def build_collected_grouping_prompt(
             if validation_feedback.strip()
             else {}
         ),
+        **(
+            {"previous_invalid_assignment": previous_invalid_assignment}
+            if previous_invalid_assignment is not None
+            else {}
+        ),
         "deterministic_groups": deterministic_groups,
         "candidate_discovery_context": {
-            "same_conversation_candidate_sets": (
+            "same_conversation_comparison_sets": (
                 _build_collected_conversation_candidate_sets(
                     events,
                     excluded_draft_ids=deterministic_ids,
@@ -749,12 +905,22 @@ def build_collected_review_prompt(
     config: RuntimeConfig | None = None,
     review_reasons: list[str] | None = None,
     validation_feedback: str = "",
+    existing_groups: list[CollectedGroupingGroup] | None = None,
+    relation_reasons: list[dict[str, object]] | None = None,
+    atomic_groups: list[list[str]] | None = None,
 ) -> str:
     runtime_config = config or RuntimeConfig()
     reason_definitions = runtime_config.collected_group_reason_definitions
     semantic_reason_keys = [
         item.key for item in reason_definitions if item.supports_semantic_merge
     ]
+    required_relation_resolution_ids = list(
+        dict.fromkeys(
+            str(item.get("relation_id", ""))
+            for item in relation_reasons or []
+            if str(item.get("relation_id", "")).strip()
+        )
+    )
     computed_review_reasons: list[str] = []
     if len(candidate_group.draft_ids) >= runtime_config.high_risk_source_event_count:
         computed_review_reasons.append("source_event_count")
@@ -789,14 +955,16 @@ def build_collected_review_prompt(
     )
     protocol = {
         "instruction": (
-            "结合完整上下文复核一个高风险多人事件候选组最合适的组织方式。"
-            "可以保留原组，也可以拆成多个子组，不预设方向。只调用一次当前指定的 Function，"
+            "结合完整上下文复核当前部门事件检查范围最合适的组织方式。"
+            "初步组可以拆开并与其他组成员重新组合，不预设方向。只调用一次当前指定的 Function，"
             "不生成正式汇总正文，不要输出普通文本或推理过程。"
         ),
         "rules": [
+            *runtime_config.collected_group_review_rules,
             "所有输入 draft_id 必须且只能出现在 merged_groups 或 singleton_draft_ids 中一次。",
-            "判断每个多事件组时，必须逐项参考 group_reason_definitions，并结合完整上下文选择保留或拆分；不得因单一表面差异预设结论。",
-            "文件、文件指纹、版本、时期、状态、地区和项目归属不同都不能单独决定拆分；同样，名称或格式相似也不能单独决定合并。",
+            "existing_groups 只表示初步结果，可以在当前检查范围内拆开并重新组合。",
+            "atomic_groups 的内部成员不可拆开，但整个成员块可以和其他直接相关事件合并。",
+            "判断每个多事件组时，必须逐项参考 group_reason_definitions，并结合完整上下文选择保留或拆分。",
             "多成员组放入 merged_groups 并返回非空候选摘要和 reason_detail；单成员只放入 singleton_draft_ids。",
             "每个多成员组的 member_connections 必须逐条覆盖本组全部 draft_id，每个编号恰好一次，并说明该事件与共同对象、动作链或交付批次的直接关系。",
             (
@@ -807,6 +975,12 @@ def build_collected_review_prompt(
                 "semantic_reasons 只能返回配置允许的语义依据；evidence_relation_catalog 只用于判断，"
                 "共同消息和共同文件编号由 Python 自动计算，不要在结果中返回。"
             ),
+            "先逐条填写 relation_resolutions，判断关系两侧是否直接属于同一过程；再统一处理重叠关系并形成 merged_groups 和 singleton_draft_ids，两部分不得冲突。",
+            "strong_relations 中每个 relation_id 必须在 relation_resolutions 中恰好返回一次。",
+            "decision=merged 时，connected_draft_ids 只填写证明该关系成立所需的最少成员，且这些成员必须真实位于同一个最终组。",
+            "带 left_draft_id 和 right_draft_id 的关系决定合并时，connected_draft_ids 必须同时包含这两个编号。",
+            "标题关系决定合并时，connected_draft_ids 至少包含来自两个相关初步组、且最终位于同一组的成员。",
+            "decision=separate 时，connected_draft_ids 可以为空；也可以填写关系两侧的代表成员，但这些成员必须位于不同最终组。无论是否填写，都要用具体业务差异和关系各侧的 evidence_draft_ids 说明为何分开。",
             *(
                 [
                     "本组的来源仅因同一会话跨越多个没有共同消息或共同文件的部分。"
@@ -835,6 +1009,15 @@ def build_collected_review_prompt(
         "target_date": target_date,
         "review_reasons": effective_review_reasons,
         **(
+            {
+                "required_relation_resolution_ids": (
+                    required_relation_resolution_ids
+                )
+            }
+            if required_relation_resolution_ids
+            else {}
+        ),
+        **(
             {"retry_validation_errors": validation_feedback}
             if validation_feedback.strip()
             else {}
@@ -848,8 +1031,13 @@ def build_collected_review_prompt(
             "risk_flags": list(candidate_group.risk_flags),
             "was_repaired": candidate_group.was_repaired,
         },
+        "existing_groups": [
+            group.to_dict() for group in (existing_groups or [candidate_group])
+        ],
+        "strong_relations": list(relation_reasons or []),
+        "atomic_groups": [list(group) for group in atomic_groups or []],
         "candidate_discovery_context": {
-            "same_conversation_candidate_sets": (
+            "same_conversation_comparison_sets": (
                 _build_collected_conversation_candidate_sets(
                     events,
                     excluded_draft_ids=set(),
@@ -1447,8 +1635,9 @@ def _build_collected_conversation_candidate_sets(
     )
     return [
         {
-            "candidate_set_id": f"context-{index:03d}",
-            "draft_ids": list(draft_ids),
+            "comparison_id": f"context-{index:03d}",
+            "member_refs": list(draft_ids),
+            "presumed_same_event": False,
         }
         for index, draft_ids in enumerate(member_groups, start=1)
     ]

@@ -11,12 +11,16 @@ CHAT_COMPLETIONS_TIMING_PREFIX = "chat_completions_http.timing "
 PARALLEL_ACCUMULATED_STAGES = {
     "analyze_segment_batch": "analyze_segment_batches_all",
     "day_group_review": "day_group_review_all",
+    "personal_group_render": "personal_group_render_all",
     "personal_fact_review": "personal_fact_review_all",
     "segment_conversation": "segment_conversations_all",
 }
 WALL_CLOCK_STAGES = {
     "analyze_segment_batches_all",
+    "day_group_discovery_all",
     "day_group_review_all",
+    "merge_day_candidates",
+    "personal_group_render_all",
     "personal_fact_review_all",
     "segment_conversations_all",
 }
@@ -474,6 +478,28 @@ def _request_kind_duration_summary(
     return _build_basic_stats(values)
 
 
+def _request_context_duration_summary(
+    summary: dict[str, object],
+    request_kind: str,
+    *,
+    context_prefixes: tuple[str, ...],
+) -> dict[str, object]:
+    llm_usage_summary = summary.get("llm_usage_summary", {})
+    requests = (
+        llm_usage_summary.get("requests", [])
+        if isinstance(llm_usage_summary, dict)
+        else []
+    )
+    values = [
+        _to_float(item.get("duration_ms"))
+        for item in requests
+        if isinstance(item, dict)
+        and item.get("request_kind") == request_kind
+        and str(item.get("request_context_id", "")).startswith(context_prefixes)
+    ]
+    return _build_basic_stats(values)
+
+
 def _collect_day_grouping_timing(summary: dict[str, object]) -> dict[str, object]:
     legacy_workstream_values = [
         _to_float(item.get("duration_ms"))
@@ -486,9 +512,41 @@ def _collect_day_grouping_timing(summary: dict[str, object]) -> dict[str, object
         and item.get("request_kind")
         in {"workstream_assignment", "unassigned_workstream_assignment"}
     ]
+    artifact_summary = summary.get("day_grouping_artifact_summary", {})
+    discovery_summary = (
+        artifact_summary.get("discovery", {})
+        if isinstance(artifact_summary, dict)
+        else {}
+    )
+    discovery_available = bool(
+        isinstance(discovery_summary, dict)
+        and discovery_summary.get("available") is True
+    )
     return {
         "initial_grouping_request_accumulated_ms": (
             _request_kind_duration_summary(summary, "day_candidate_merge")
+        ),
+        "initial_grouping_first_pass_request_accumulated_ms": (
+            _request_context_duration_summary(
+                summary,
+                "day_candidate_merge",
+                context_prefixes=("day-group:full-day:", "day-group:batch-"),
+            )
+        ),
+        "removed_summary_regrouping_request_accumulated_ms": (
+            _request_context_duration_summary(
+                summary,
+                "day_candidate_merge",
+                context_prefixes=("day-group:summary-",),
+            )
+        ),
+        "title_discovery_available": discovery_available,
+        "title_discovery_request_accumulated_ms": (
+            _request_kind_duration_summary(summary, "day_group_discovery")
+        ),
+        "title_discovery_wall_clock_ms": _stage_duration_summary(
+            summary,
+            "day_group_discovery_all",
         ),
         "local_review_request_accumulated_ms": (
             _request_kind_duration_summary(summary, "day_group_review")
@@ -496,6 +554,13 @@ def _collect_day_grouping_timing(summary: dict[str, object]) -> dict[str, object
         "local_review_wall_clock_ms": _stage_duration_summary(
             summary,
             "day_group_review_all",
+        ),
+        "content_render_request_accumulated_ms": (
+            _request_kind_duration_summary(summary, "personal_group_render")
+        ),
+        "content_render_wall_clock_ms": _stage_duration_summary(
+            summary,
+            "personal_group_render_all",
         ),
         "merge_day_candidates_wall_clock_ms": _stage_duration_summary(
             summary,
@@ -548,12 +613,24 @@ def _build_day_grouping_comparison(
 ) -> dict[str, object]:
     keys = (
         "initial_grouping_request_accumulated_ms",
+        "initial_grouping_first_pass_request_accumulated_ms",
+        "removed_summary_regrouping_request_accumulated_ms",
+        "title_discovery_request_accumulated_ms",
+        "title_discovery_wall_clock_ms",
         "local_review_request_accumulated_ms",
         "local_review_wall_clock_ms",
+        "content_render_request_accumulated_ms",
+        "content_render_wall_clock_ms",
         "merge_day_candidates_wall_clock_ms",
         "legacy_workstream_request_accumulated_ms",
     )
-    return {key: _comparison_metric(baseline, current, key) for key in keys}
+    return {
+        "title_discovery_available": {
+            "baseline": bool(baseline.get("title_discovery_available")),
+            "current": bool(current.get("title_discovery_available")),
+        },
+        **{key: _comparison_metric(baseline, current, key) for key in keys},
+    }
 
 
 def _build_hook_vs_http_summary(

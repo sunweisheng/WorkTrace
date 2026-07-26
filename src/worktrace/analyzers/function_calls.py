@@ -8,6 +8,17 @@ from typing import Any, Mapping, Sequence
 from .collected_evidence import EvidenceRelation
 
 
+COLLECTED_GROUPING_FINAL_PARAMETER_CHECKS = (
+    "只提交最终决定，不保留分析过程、备选方案或已否定的分组方案。",
+    "先确定所有依据成立的多事件组；每组至少两条且字段完整，不得用 group_id 或空字段返回错误说明、诊断项或占位组。",
+    "如果说明已经否定某个合并组，必须从 merged_groups 中实际删除该组。",
+    "candidate_discovery_context 中对比后判定分开的组合不产生组对象；只通过各事件的最终归属表达结果。",
+    "再把未进入任何合法多事件组的事件放入 singleton_draft_ids，不要为单条事件保留 merged_groups 对象。",
+    "不得为了消除重复而扩大其他 merged_groups 的成员范围，也不得让同一事件同时出现在两部分。",
+    "提交前核对全部输入 draft_id，合计必须恰好出现一次。",
+)
+
+
 _FUNCTION_METADATA = {
     "batch_analysis": (
         "submit_batch_analysis",
@@ -41,13 +52,25 @@ _FUNCTION_METADATA = {
         "submit_day_candidate_groups",
         "提交同一天候选事件的跨会话分组结果。",
     ),
+    "day_group_discovery": (
+        "submit_day_group_discovery",
+        "逐组提交仅根据标题完成的个人事件漏合并检查。",
+    ),
     "day_group_review": (
         "submit_day_group_review",
         "提交存在强关联的个人事件组局部复核结果。",
     ),
+    "personal_group_render": (
+        "submit_personal_group_render",
+        "提交成员已经锁定的个人多事件组标题、正文和具体对象。",
+    ),
     "collected_candidate_grouping": (
         "submit_collected_grouping_result",
         "提交多人事件候选分组，完整覆盖每个来源事件且不得重复。",
+    ),
+    "collected_group_discovery": (
+        "submit_collected_group_discovery",
+        "逐组提交仅根据标题完成的部门事件漏合并检查。",
     ),
     "collected_group_review": (
         "submit_collected_group_review_result",
@@ -76,6 +99,7 @@ class FunctionCallSpec:
     parameters: dict[str, object]
     typical_arguments: dict[str, object]
     argument_structure_example: dict[str, object] | None = None
+    final_parameter_checks: tuple[str, ...] = ()
 
     def tool(self) -> dict[str, object]:
         return {
@@ -96,24 +120,45 @@ class FunctionCallSpec:
             payload = None
         if isinstance(payload, dict):
             payload.pop("required_output_schema", None)
+            payload["typical_function_arguments_note"] = (
+                "仅用于展示字段结构；其中的分组、decision 和理由都是占位值，"
+                "不代表当前输入的结论，不得复制。"
+            )
             payload["typical_function_arguments"] = self.typical_arguments
             if self.argument_structure_example is not None:
                 payload["function_argument_structure_example"] = (
                     self.argument_structure_example
                 )
-            return json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True)
-        prepared = (
-            prompt.rstrip()
-            + "\n\n典型 Function 参数示例：\n"
-            + json.dumps(self.typical_arguments, ensure_ascii=False, indent=2)
-        )
-        if self.argument_structure_example is not None:
+            prepared = json.dumps(
+                payload,
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+            )
+        else:
+            prepared = (
+                prompt.rstrip()
+                + "\n\n典型 Function 参数示例：\n"
+                + json.dumps(self.typical_arguments, ensure_ascii=False, indent=2)
+            )
+            if self.argument_structure_example is not None:
+                prepared += (
+                    "\n\nFunction 参数结构示例：\n"
+                    + json.dumps(
+                        self.argument_structure_example,
+                        ensure_ascii=False,
+                        indent=2,
+                    )
+                )
+        if self.final_parameter_checks:
             prepared += (
-                "\n\nFunction 参数结构示例：\n"
-                + json.dumps(
-                    self.argument_structure_example,
-                    ensure_ascii=False,
-                    indent=2,
+                "\n\n最终 Function 参数自检：\n"
+                + "\n".join(
+                    f"{index}. {instruction}"
+                    for index, instruction in enumerate(
+                        self.final_parameter_checks,
+                        start=1,
+                    )
                 )
             )
         return prepared
@@ -179,6 +224,8 @@ def collected_grouping_call_contract(
     events: list[object],
     deterministic_groups: list[list[str]],
     include_split_reason: bool,
+    relation_ids: list[str] | None = None,
+    final_parameter_checks: Sequence[str] = (),
 ) -> CollectedGroupingCallContract:
     from .output_schemas import collected_grouping_function_schema
     from .prompts import build_collected_evidence_relation_catalog
@@ -243,32 +290,68 @@ def collected_grouping_call_contract(
             ),
             **typical_arguments,
         }
+    unique_relation_ids = list(dict.fromkeys(relation_ids or []))
+    relation_final_checks = (
+        (
+            "strong_relations 非空时，relation_resolutions 是必填列表；"
+            "即使最终分组已经表达合并或拆分结论，也不得省略。"
+        ),
+        (
+            "relation_resolutions 中的 relation_id 必须与本次要求完全一致，"
+            "每个编号恰好一次："
+            + json.dumps(unique_relation_ids, ensure_ascii=False)
+            + "。"
+        ),
+        (
+            "merged_groups、singleton_draft_ids 和 split_reason 不能代替逐条关系判断；"
+            "提交前单独核对 relation_resolutions 的数量和编号。"
+        ),
+    ) if unique_relation_ids else ()
+    if unique_relation_ids:
+        typical_arguments = {
+            "relation_resolutions": [
+                {
+                    "relation_id": relation_id,
+                    "decision": "separate",
+                    "connected_draft_ids": [],
+                    "reason": "结构占位理由，不代表当前关系应当分开。",
+                    "evidence_draft_ids": draft_ids[:2] or draft_ids[:1],
+                }
+                for relation_id in unique_relation_ids
+            ],
+            **typical_arguments,
+        }
     argument_structure_example = None
     if not typical_groups:
         argument_structure_example = {
             "note": (
-                "仅展示 merged_groups 单项的字段结构；占位值不属于输入，"
-                "也不表示任何实际事件应合并。"
+                "仅展示一致的最终参数结构；占位值不属于输入，也不表示任何实际事件应合并。"
+                "若另一个候选组合经对比后应分开，不要增加第二个 merged_groups 项。"
             ),
-            "merged_group": {
-                "group_id": "<group_id>",
-                "draft_ids": ["<input_draft_id_1>", "<input_draft_id_2>"],
-                "summary_title": "<summary_title>",
-                "summary_content": "<summary_content>",
-                "summary_object_hint": "<summary_object_hint>",
-                "semantic_reasons": ["<allowed_semantic_reason>"],
-                "reason_detail": "<reason_detail>",
-                "member_connections": [
+            "valid_final_arguments": {
+                "merged_groups": [
                     {
-                        "draft_id": "<input_draft_id_1>",
-                        "connection_detail": "<direct_connection_detail>",
-                    },
-                    {
-                        "draft_id": "<input_draft_id_2>",
-                        "connection_detail": "<direct_connection_detail>",
-                    },
+                        "group_id": "<group_id>",
+                        "draft_ids": ["<input_draft_id_1>", "<input_draft_id_2>"],
+                        "summary_title": "<summary_title>",
+                        "summary_content": "<summary_content>",
+                        "summary_object_hint": "<summary_object_hint>",
+                        "semantic_reasons": ["<allowed_semantic_reason>"],
+                        "reason_detail": "<reason_detail>",
+                        "member_connections": [
+                            {
+                                "draft_id": "<input_draft_id_1>",
+                                "connection_detail": "<direct_connection_detail>",
+                            },
+                            {
+                                "draft_id": "<input_draft_id_2>",
+                                "connection_detail": "<direct_connection_detail>",
+                            },
+                        ],
+                        "risk_flags": [],
+                    }
                 ],
-                "risk_flags": [],
+                "singleton_draft_ids": ["<input_draft_id_3>"],
             },
         }
     spec = function_call_spec(
@@ -277,9 +360,14 @@ def collected_grouping_call_contract(
             config,
             draft_ids=draft_ids,
             include_split_reason=include_split_reason,
+            relation_ids=unique_relation_ids,
         ),
         typical_arguments=typical_arguments,
         argument_structure_example=argument_structure_example,
+        final_parameter_checks=(
+            *relation_final_checks,
+            *final_parameter_checks,
+        ),
     )
     return CollectedGroupingCallContract(
         function_spec=spec,
@@ -294,6 +382,7 @@ def function_call_spec(
     *,
     typical_arguments: dict[str, object] | None = None,
     argument_structure_example: dict[str, object] | None = None,
+    final_parameter_checks: Sequence[str] = (),
     enum_values: Mapping[str, Sequence[str]] | None = None,
     exact_array_lengths: Mapping[str, int] | None = None,
 ) -> FunctionCallSpec:
@@ -322,6 +411,7 @@ def function_call_spec(
             if argument_structure_example is not None
             else None
         ),
+        final_parameter_checks=tuple(final_parameter_checks),
     )
 
 

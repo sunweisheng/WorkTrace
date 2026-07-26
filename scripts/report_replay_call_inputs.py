@@ -329,8 +329,9 @@ def _day_group_review_records(
 ) -> list[CallInputRecord]:
     merge_root = debug_root / "_merge_day_candidates"
     review_path = merge_root / "day_group_review.json"
+    replay_path = merge_root / "day_group_review_replay.json"
     input_path = merge_root / "input.json"
-    if not review_path.exists():
+    if not review_path.exists() and not replay_path.exists():
         return []
 
     input_payload = _load_json(input_path) if input_path.exists() else {}
@@ -345,15 +346,33 @@ def _day_group_review_records(
         for item in candidates
         if str(item.get("draft_id", ""))
     }
-    payload = _load_json(review_path)
-    raw_attempts = payload.get("attempts", [])
-    attempts = (
-        [item for item in raw_attempts if isinstance(item, dict)]
-        if isinstance(raw_attempts, list)
-        else []
-    )
+    attempts_with_sources: list[tuple[dict[str, object], Path, str]] = []
+    if review_path.exists():
+        payload = _load_json(review_path)
+        raw_attempts = payload.get("attempts", [])
+        if isinstance(raw_attempts, list):
+            attempts_with_sources.extend(
+                (item, review_path, "")
+                for item in raw_attempts
+                if isinstance(item, dict)
+            )
+    if replay_path.exists():
+        replay_payload = _load_json(replay_path)
+        raw_runs = replay_payload.get("runs", [])
+        if isinstance(raw_runs, list):
+            for run in raw_runs:
+                if not isinstance(run, dict):
+                    continue
+                raw_attempts = run.get("attempts", [])
+                if not isinstance(raw_attempts, list):
+                    continue
+                attempts_with_sources.extend(
+                    (item, replay_path, "失败范围重放")
+                    for item in raw_attempts
+                    if isinstance(item, dict)
+                )
     records: list[CallInputRecord] = []
-    for attempt in attempts:
+    for attempt, source_path, category_prefix in attempts_with_sources:
         attempt_input = attempt.get("input", {})
         candidate_ids = (
             [str(item) for item in attempt_input.get("candidate_draft_ids", [])]
@@ -385,14 +404,177 @@ def _day_group_review_records(
         records.append(
             CallInputRecord(
                 category=(
-                    f"强关联局部复核（{component_id}，第 {attempt_number} 次，"
+                    f"{category_prefix}强关联局部复核（{component_id}，"
+                    f"第 {attempt_number} 次，"
                     f"{backend}/{status}）"
                 ),
-                purpose="判断强关联跨组候选是否属于同一实际事项，且不拆散已有合法组。",
-                source_path=review_path,
+                purpose="结合完整内容重新判断检查范围内候选应保留、拆分还是跨组重新组合。",
+                source_path=source_path,
                 item_count=count,
                 time_range="当前强关联组件",
                 content_summary=content_summary,
+            )
+        )
+    return records
+
+
+def _day_group_discovery_records(
+    debug_root: Path,
+    *,
+    max_excerpts: int,
+    max_chars: int,
+) -> list[CallInputRecord]:
+    path = debug_root / "_merge_day_candidates" / "day_group_discovery.json"
+    if not path.exists():
+        return []
+    payload = _load_json(path)
+    input_payload = payload.get("input", {})
+    raw_groups = (
+        input_payload.get("groups", [])
+        if isinstance(input_payload, dict)
+        else []
+    )
+    groups = (
+        [item for item in raw_groups if isinstance(item, dict)]
+        if isinstance(raw_groups, list)
+        else []
+    )
+    title_excerpts = [
+        f"{_truncate(item.get('group_id'), 40)}: {_truncate(item.get('title'), max_chars)}"
+        for item in groups[:max_excerpts]
+    ]
+    raw_usage = payload.get("usage_attempts", [])
+    usage_attempts = (
+        [item for item in raw_usage if isinstance(item, dict)]
+        if isinstance(raw_usage, list)
+        else []
+    )
+    usage_by_context: dict[str, list[dict[str, object]]] = {}
+    for usage in usage_attempts:
+        context_id = str(usage.get("request_context_id", ""))
+        usage_by_context.setdefault(context_id, []).append(usage)
+    raw_attempts = payload.get("attempts", [])
+    attempts = (
+        [item for item in raw_attempts if isinstance(item, dict)]
+        if isinstance(raw_attempts, list)
+        else []
+    )
+    records: list[CallInputRecord] = []
+    for attempt in attempts:
+        context_id = str(attempt.get("request_context_id", ""))
+        usage = usage_by_context.get(context_id, [])
+        actual_tokens = [
+            str(item["input_tokens"])
+            for item in usage
+            if isinstance(item.get("input_tokens"), int)
+        ]
+        attempt_result = attempt.get("result", {})
+        raw_checks = (
+            attempt_result.get("group_checks")
+            if isinstance(attempt_result, dict)
+            else None
+        )
+        checked_count = len(raw_checks) if isinstance(raw_checks, list) else None
+        metrics = (
+            f"输入字符 {payload.get('input_chars', '-')}; "
+            f"Online 估算 {attempt.get('online_input_estimated_tokens', '-')}; "
+            f"Codex 估算 {attempt.get('codex_input_estimated_tokens', '-')}; "
+            f"最终估算 {attempt.get('input_estimated_tokens', '-')}; "
+            f"实际 input token {', '.join(actual_tokens) if actual_tokens else '不可用'}; "
+            f"超过目标 {'是' if attempt.get('oversized_submission') else '否'}; "
+            f"逐组检查 {checked_count if checked_count is not None else '不可用'}/{len(groups)}"
+        )
+        summary = "；".join(title_excerpts) if title_excerpts else "没有组标题。"
+        records.append(
+            CallInputRecord(
+                category=(
+                    "标题发现（第 "
+                    f"{attempt.get('attempt', 0)} 次，"
+                    f"{attempt.get('backend', 'unknown')}/"
+                    f"{attempt.get('status', 'unknown')}）"
+                ),
+                purpose="仅根据全部现有组的编号和标题寻找可能漏合并的组。",
+                source_path=path,
+                item_count=len(groups),
+                time_range="仅编号与标题",
+                content_summary=f"{metrics}；{summary}",
+            )
+        )
+    return records
+
+
+def _personal_group_render_records(
+    debug_root: Path,
+    *,
+    max_excerpts: int,
+    max_chars: int,
+) -> list[CallInputRecord]:
+    path = debug_root / "_merge_day_candidates" / "personal_group_render.json"
+    if not path.exists():
+        return []
+    payload = _load_json(path)
+    raw_groups = payload.get("groups", [])
+    group_rows = (
+        [item for item in raw_groups if isinstance(item, dict)]
+        if isinstance(raw_groups, list)
+        else []
+    )
+    draft_ids_by_group = {
+        str(item.get("group_id", "")): [
+            str(value) for value in item.get("draft_ids", [])
+        ]
+        for item in group_rows
+        if str(item.get("group_id", ""))
+        and isinstance(item.get("draft_ids"), list)
+    }
+    raw_usage = payload.get("usage_attempts", [])
+    usage_attempts = (
+        [item for item in raw_usage if isinstance(item, dict)]
+        if isinstance(raw_usage, list)
+        else []
+    )
+    usage_by_context: dict[str, list[dict[str, object]]] = {}
+    for usage in usage_attempts:
+        usage_by_context.setdefault(
+            str(usage.get("request_context_id", "")), []
+        ).append(usage)
+    raw_attempts = payload.get("attempts", [])
+    attempts = (
+        [item for item in raw_attempts if isinstance(item, dict)]
+        if isinstance(raw_attempts, list)
+        else []
+    )
+    records: list[CallInputRecord] = []
+    for attempt in attempts:
+        group_id = str(attempt.get("group_id", "unknown"))
+        draft_ids = draft_ids_by_group.get(group_id, [])
+        context_id = str(attempt.get("request_context_id", ""))
+        actual_tokens = [
+            str(item["input_tokens"])
+            for item in usage_by_context.get(context_id, [])
+            if isinstance(item.get("input_tokens"), int)
+        ]
+        summary = (
+            f"成员 {_truncate(', '.join(draft_ids), max_chars)}；"
+            f"Online 估算 {attempt.get('online_input_estimated_tokens', '-')}；"
+            f"Codex 估算 {attempt.get('codex_input_estimated_tokens', '-')}；"
+            f"最终估算 {attempt.get('input_estimated_tokens', '-')}；"
+            f"实际 input token {', '.join(actual_tokens) if actual_tokens else '不可用'}；"
+            f"超过目标 {'是' if attempt.get('oversized_submission') else '否'}"
+        )
+        records.append(
+            CallInputRecord(
+                category=(
+                    f"锁定成员后的内容生成（{group_id}，第 "
+                    f"{attempt.get('attempt', 0)} 次，"
+                    f"{attempt.get('backend', 'unknown')}/"
+                    f"{attempt.get('status', 'unknown')}）"
+                ),
+                purpose="为已经确定成员的多事件组重新生成覆盖全部成员的标题、正文和具体对象。",
+                source_path=path,
+                item_count=len(draft_ids),
+                time_range="最终成员范围",
+                content_summary=summary,
             )
         )
     return records
@@ -492,7 +674,17 @@ def main(argv: list[str] | None = None) -> int:
             max_excerpts=args.max_message_excerpts,
             max_chars=args.max_excerpt_chars,
         ),
+        *_day_group_discovery_records(
+            debug_root,
+            max_excerpts=args.max_message_excerpts,
+            max_chars=args.max_excerpt_chars,
+        ),
         *_day_group_review_records(
+            debug_root,
+            max_excerpts=args.max_message_excerpts,
+            max_chars=args.max_excerpt_chars,
+        ),
+        *_personal_group_render_records(
             debug_root,
             max_excerpts=args.max_message_excerpts,
             max_chars=args.max_excerpt_chars,

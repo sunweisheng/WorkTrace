@@ -45,6 +45,8 @@ def test_usage_recorder_reports_output_tokens_and_missing_values() -> None:
     assert record["input_target_overage_tokens"] == 700
     assert record["oversized_singleton"] is True
     assert summary["oversized_singleton_request_count"] == 1
+    assert summary["function_arguments_repair_count"] == 0
+    assert "function_arguments_repair_kind" not in record
 
 
 def test_usage_recorder_marks_codex_tokens_unavailable() -> None:

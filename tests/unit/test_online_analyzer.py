@@ -16,6 +16,7 @@ from src.worktrace.analyzers.output_schemas import (
 )
 from src.worktrace.analyzers.function_calls import function_call_spec
 from src.worktrace.analyzers.online import (
+    _NonStreamRequestTimeoutError,
     OnlineLLMAnalyzer,
     _FirstStreamEventTimeoutError,
     _apply_soft_no_think,
@@ -25,7 +26,9 @@ from src.worktrace.analyzers.online import (
     _extract_text_from_responses_stream_event,
     _extract_function_arguments_from_responses_payload,
     _extract_stream_function_arguments,
+    _parse_function_arguments_with_diagnostics,
     _read_first_stream_event,
+    _read_non_stream_response,
 )
 from src.worktrace.config import (
     OnlineLLMSettings,
@@ -41,12 +44,14 @@ from src.worktrace.errors import (
 from src.worktrace.models import (
     AnalysisBatch,
     ConversationSlice,
+    CollectedSourceEvent,
     NormalizedMessage,
     PersonalFactReviewBatch,
     PersonalFactReviewCandidate,
     RetentionReviewBatch,
     RetentionReviewCandidate,
     SourceBackedEventDraft,
+    WorkEvent,
 )
 from src.worktrace.utils.token_estimation import (
     estimate_model_input_tokens,
@@ -208,6 +213,102 @@ def test_online_analyzer_uses_retention_review_protocol(
     assert captured["function_spec"].parameters["properties"]["results"]["minItems"] == 1
 
 
+def test_online_day_grouping_allows_retry_feedback_to_cross_input_target(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = load_runtime_config_overrides(
+        RuntimeConfig(data_root=tmp_path / "data"),
+        cwd=Path.cwd(),
+    )
+    analyzer = OnlineLLMAnalyzer(config=config, cwd=tmp_path)
+    captured: dict[str, object] = {}
+    candidate = sample_retention_review_batch().candidates[0].candidate
+
+    def fake_invoke(prompt, *, function_spec, allow_oversized_input=False):
+        captured.update(
+            prompt=prompt,
+            function_spec=function_spec,
+            allow_oversized_input=allow_oversized_input,
+        )
+        return {
+            "merged_groups": [],
+            "singleton_draft_ids": [candidate.draft_id],
+        }
+
+    monkeypatch.setattr(analyzer, "_invoke_online", fake_invoke)
+
+    result = analyzer.merge_day_candidates(
+        candidate.date,
+        [candidate],
+        validation_feedback="member_connection_evidence_invalid",
+    )
+
+    assert result.groups[0].draft_ids == [candidate.draft_id]
+    assert captured["allow_oversized_input"] is True
+    assert "member_connection_evidence_invalid" in str(captured["prompt"])
+
+
+def test_online_collected_grouping_adds_assignment_only_on_validation_retry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = load_runtime_config_overrides(
+        RuntimeConfig(data_root=tmp_path / "data"),
+        cwd=Path.cwd(),
+    )
+    analyzer = OnlineLLMAnalyzer(config=config, cwd=tmp_path)
+    captured: list[dict[str, object]] = []
+    events = [
+        CollectedSourceEvent(
+            draft_id,
+            draft_id,
+            f"{draft_id}.md",
+            WorkEvent("2026-07-22", draft_id, draft_id, f"处理 {draft_id}"),
+        )
+        for draft_id in ("d1", "d2")
+    ]
+    previous = {
+        "merged_groups": [],
+        "singleton_draft_ids": ["d1"],
+    }
+
+    def fake_invoke(prompt, *, function_spec, allow_oversized_input=False):
+        captured.append(
+            {
+                "prompt": prompt,
+                "function_spec": function_spec,
+                "allow_oversized_input": allow_oversized_input,
+            }
+        )
+        return {
+            "merged_groups": [],
+            "singleton_draft_ids": ["d1", "d2"],
+        }
+
+    monkeypatch.setattr(analyzer, "_invoke_online", fake_invoke)
+
+    analyzer.group_collected_events("2026-07-22", events, [])
+    analyzer.group_collected_events(
+        "2026-07-22",
+        events,
+        [],
+        validation_feedback="duplicate_draft_id",
+        previous_invalid_assignment=previous,
+    )
+
+    initial_prompt = json.loads(str(captured[0]["prompt"]))
+    retry_prompt = json.loads(str(captured[1]["prompt"]))
+    assert "previous_invalid_assignment" not in initial_prompt
+    assert captured[0]["function_spec"].final_parameter_checks
+    assert retry_prompt["previous_invalid_assignment"] == previous
+    assert (
+        captured[1]["function_spec"].final_parameter_checks
+        == captured[0]["function_spec"].final_parameter_checks
+    )
+    assert captured[1]["allow_oversized_input"] is True
+
+
 def test_online_analyzer_uses_personal_fact_review_protocol(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -243,12 +344,39 @@ def test_online_analyzer_uses_personal_fact_review_protocol(
 
     monkeypatch.setattr(analyzer, "_invoke_online", fake_invoke)
 
-    result = analyzer.review_personal_event_facts(sample_personal_fact_review_batch())
+    batch = sample_personal_fact_review_batch()
+    candidate = batch.candidates[0]
+    context_message = replace(
+        candidate.messages[0],
+        message_id="context-only",
+        text="仅用于理解前后关系",
+    )
+    batch = replace(
+        batch,
+        candidates=[
+            replace(
+                candidate,
+                messages=[context_message, *candidate.messages],
+            )
+        ],
+    )
+
+    result = analyzer.review_personal_event_facts(batch)
 
     assert result.results[0].supported is False
     assert captured["function_spec"].request_kind == "personal_fact_review"
     assert "messages 才是事实来源" in str(captured["prompt"])
-    assert captured["function_spec"].parameters["properties"]["results"]["maxItems"] == 1
+    parameters = captured["function_spec"].parameters
+    assert parameters["properties"]["results"]["maxItems"] == 1
+    evidence_items = parameters["properties"]["results"]["items"]["properties"][
+        "fact_items"
+    ]["properties"]["topic"]["properties"]["evidence_message_ids"]["items"]
+    assert evidence_items["enum"] == candidate.allowed_evidence_message_ids
+
+    prompt_messages = json.loads(captured["prompt"])["input"]["candidates"][0][
+        "messages"
+    ]
+    assert [item["role"] for item in prompt_messages] == ["context", "evidence"]
 
 
 def build_settings(**overrides: object) -> OnlineLLMSettings:
@@ -426,6 +554,38 @@ def test_first_stream_event_timeout_closes_the_pending_stream() -> None:
     assert observed_read_timeouts == [1.0]
 
 
+def test_non_stream_request_timeout_is_a_total_deadline() -> None:
+    closed = Event()
+
+    class FakeResponse:
+        def model_dump(self):
+            return function_response(
+                {"candidate_events": [], "context_requests": []}
+            )
+
+    class BlockingResponses:
+        def create(self, **kwargs):
+            closed.wait(timeout=1)
+            return FakeResponse()
+
+    class FakeClient:
+        responses = BlockingResponses()
+
+        def close(self):
+            closed.set()
+
+    started_at = monotonic()
+    with pytest.raises(_NonStreamRequestTimeoutError):
+        _read_non_stream_response(
+            FakeClient(),
+            {"stream": False},
+            timeout_seconds=0.05,
+        )
+
+    assert monotonic() - started_at < 0.5
+    assert closed.is_set()
+
+
 def test_extract_text_from_responses_payload() -> None:
     assert _extract_text_from_responses_payload(
         {"output_text": '{"candidate_events":[],"context_requests":[]}'}
@@ -454,6 +614,103 @@ def test_non_stream_response_rejects_multiple_function_calls() -> None:
             response,
             expected_name="submit_batch_analysis",
         )
+
+
+def test_function_arguments_repairs_one_duplicate_comma_outside_string() -> None:
+    parsed = _parse_function_arguments_with_diagnostics(
+        '{"merged_groups": []\n,, "singleton_draft_ids": ["d1"]}'
+    )
+
+    assert parsed.payload == {
+        "merged_groups": [],
+        "singleton_draft_ids": ["d1"],
+    }
+    assert parsed.repair is not None
+    assert parsed.repair.kind == "single_duplicate_comma_outside_string"
+    assert parsed.repair.count == 1
+    assert parsed.repair.json_error_line == 2
+    assert parsed.repair.json_error_column == 2
+    assert len(parsed.repair.arguments_sha256) == 64
+
+
+def test_function_arguments_repairs_one_trailing_comma_outside_string() -> None:
+    parsed = _parse_function_arguments_with_diagnostics(
+        '{"merged_groups": [], "singleton_draft_ids": ["d1"],\n}'
+    )
+
+    assert parsed.payload == {
+        "merged_groups": [],
+        "singleton_draft_ids": ["d1"],
+    }
+    assert parsed.repair is not None
+    assert parsed.repair.kind == "single_trailing_comma_outside_string"
+    assert parsed.repair.count == 1
+    assert parsed.repair.json_error_line == 1
+    assert parsed.repair.json_error_column > 0
+
+
+def test_function_arguments_does_not_repair_commas_inside_string() -> None:
+    parsed = _parse_function_arguments_with_diagnostics(
+        '{"reason_detail": "逗号,,属于正文", "singleton_draft_ids": []}'
+    )
+
+    assert parsed.payload == {
+        "reason_detail": "逗号,,属于正文",
+        "singleton_draft_ids": [],
+    }
+    assert parsed.repair is None
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        '{"a": 1,, "b": 2,, "c": 3}',
+        '{"a": [1,], "b": 2,}',
+        '{"a": 1 "b": 2}',
+    ],
+)
+def test_function_arguments_rejects_ambiguous_or_unrelated_json_errors(
+    arguments: str,
+) -> None:
+    with pytest.raises(RetryableAnalyzerProtocolError, match="not valid JSON"):
+        _parse_function_arguments_with_diagnostics(arguments)
+
+
+def test_online_analyzer_records_function_arguments_repair(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    analyzer = OnlineLLMAnalyzer(
+        config=RuntimeConfig(data_root=tmp_path / "data"),
+        cwd=tmp_path,
+        settings_loader=lambda *args, **kwargs: build_settings(),
+    )
+    parsed = _parse_function_arguments_with_diagnostics(
+        '{"candidate_events": [],, "context_requests": []}'
+    )
+
+    def fake_invoke(settings, body, *, function_spec):
+        return (
+            parsed.payload,
+            {"usage": {"input_tokens": 10, "output_tokens": 5}},
+            parsed.repair,
+        )
+
+    monkeypatch.setattr(analyzer, "_invoke_via_sdk", fake_invoke)
+
+    result = analyzer.analyze_batch("2026-06-23", sample_batch())
+
+    assert result.candidate_events == []
+    record = analyzer.usage_recorder.records()[0]
+    assert (
+        record["function_arguments_repair_kind"]
+        == "single_duplicate_comma_outside_string"
+    )
+    assert record["function_arguments_repair_count"] == 1
+    assert record["function_arguments_json_error_line"] == 1
+    assert record["function_arguments_json_error_column"] > 0
+    assert len(str(record["function_arguments_sha256"])) == 64
+    assert analyzer.usage_recorder.summary()["function_arguments_repair_count"] == 1
 
 
 def test_stream_response_rejects_multiple_function_calls() -> None:

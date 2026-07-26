@@ -13,8 +13,11 @@ from src.worktrace.collected_merge import (
     CollectedMergeRunner,
     aggregate_collected_quality_summaries,
     build_collected_quality_summary,
+    build_collected_review_components,
     build_grouping_summary_events,
+    collected_relation_resolution_error,
     collected_grouping_validation_feedback,
+    compact_collected_grouping_assignment,
     extract_person_name_from_filename,
     repair_collected_grouping_result,
 )
@@ -25,7 +28,11 @@ from src.worktrace.analyzers.prompts import (
     build_collected_render_prompt,
     build_collected_review_prompt,
 )
-from src.worktrace.config import EventMetadataItem, RuntimeConfig
+from src.worktrace.config import (
+    EventMetadataItem,
+    RuntimeConfig,
+    load_runtime_config_overrides,
+)
 from src.worktrace.errors import (
     AnalyzerProtocolError,
     DeliveryError,
@@ -34,6 +41,8 @@ from src.worktrace.errors import (
 from src.worktrace.llm_usage import LLMUsageRecorder
 from src.worktrace.models import (
     CollectedFactItem,
+    CollectedGroupMemberConnection,
+    CollectedGroupRelationResolution,
     CollectedGroupingGroup,
     CollectedGroupingResult,
     CollectedMergeGroup,
@@ -41,6 +50,9 @@ from src.worktrace.models import (
     CollectedMergeResult,
     CollectedMergeRunResult,
     CollectedSourceEvent,
+    DayGroupDiscoveryCandidate,
+    DayGroupDiscoveryCheck,
+    DayGroupDiscoveryResult,
     DayDocument,
     EventFileLink,
     SelfIdentity,
@@ -62,6 +74,62 @@ def test_grouping_validation_feedback_explains_partial_evidence_action() -> None
     assert "uncovered_draft_ids=['d3']" in feedback
     assert "加入缺失成员" in feedback
     assert "删除该合并" in feedback
+
+
+def test_grouping_validation_feedback_requires_final_decision_only() -> None:
+    feedback = collected_grouping_validation_feedback(
+        "merged_group_too_small group_id=g1; duplicate_draft_id draft_ids=['d1']"
+    )
+
+    assert "先从 merged_groups 删除该组再提交最终参数" in feedback
+    assert "不得保留一个单成员组" in feedback
+
+
+def test_grouping_validation_feedback_requires_relation_resolution_list() -> None:
+    feedback = collected_grouping_validation_feedback(
+        "relation_resolution_coverage_error field=relation_resolutions "
+        "expected=['relation-001'] actual=[]"
+    )
+
+    assert "relation_resolutions 是独立必填列表" in feedback
+    assert "每个编号恰好一次" in feedback
+
+
+def test_compact_invalid_grouping_assignment_excludes_summary_text() -> None:
+    result = CollectedGroupingResult(
+        groups=[
+            CollectedGroupingGroup(
+                "g1",
+                ["d1", "d2"],
+                summary_title="不应复制的标题",
+                summary_content="不应复制的摘要正文",
+                summary_object_hint="不应复制的对象",
+                semantic_reasons=["continuous_action"],
+                reason_detail="上一版判断说明",
+                member_connections=[
+                    CollectedGroupMemberConnection("d1", "说明一"),
+                    CollectedGroupMemberConnection("d2", "说明二"),
+                ],
+            ),
+            CollectedGroupingGroup("singleton-001", ["d3"]),
+        ]
+    )
+
+    compact = compact_collected_grouping_assignment(result)
+
+    assert compact == {
+        "merged_groups": [
+            {
+                "group_id": "g1",
+                "draft_ids": ["d1", "d2"],
+                "semantic_reasons": ["continuous_action"],
+                "member_connection_draft_ids": ["d1", "d2"],
+                "reason_detail": "上一版判断说明",
+            }
+        ],
+        "singleton_draft_ids": ["d3"],
+    }
+    assert "不应复制" not in str(compact)
 
 
 class FakeAnalyzer:
@@ -2139,9 +2207,20 @@ def test_collected_grouping_prompt_uses_same_day_conversation_candidates() -> No
     )
     payload = json.loads(prompt)
 
+    assert any(
+        "不得保留被自身说明否定的组" in rule for rule in payload["rules"]
+    )
+    assert any(
+        "判定分开的候选组合不返回任何组对象" in rule
+        for rule in payload["rules"]
+    )
     assert payload["candidate_discovery_context"] == {
-        "same_conversation_candidate_sets": [
-            {"candidate_set_id": "context-001", "draft_ids": ["d1", "d2"]}
+        "same_conversation_comparison_sets": [
+            {
+                "comparison_id": "context-001",
+                "member_refs": ["d1", "d2"],
+                "presumed_same_event": False,
+            }
         ]
     }
     assert "conversation_groups" not in payload
@@ -2528,17 +2607,22 @@ def test_relation_priority_batches_preserve_same_conversation_candidates(
     ).run("2026-06-29")
 
     assert 1 < result.merged_event_count < 12
-    assert any(
-        "Skipped cross-batch coordination" in warning
-        for warning in result.warning_messages
-    )
     assert len(analyzer.grouping_calls) > 1
+    assert all(
+        not item.draft_id.startswith("__grouping_summary_")
+        for call in analyzer.grouping_calls
+        for item in call["events"]
+    )
     assert len(analyzer.merge_calls) > 1
     summary = json.loads(
         (trace_root / "2026-06-29" / "summary.json").read_text(encoding="utf-8")
     )
     assert max(step["input_estimated_tokens"] for step in summary["steps"]) <= 5200
     assert {step["input_target_tokens"] for step in summary["steps"]} == {5200}
+    assert not any(
+        step["stage"].startswith("candidate_reconciliation")
+        for step in summary["steps"]
+    )
     output = MarkdownEventStore(config=RuntimeConfig()).parse_day_document(
         Path(result.output_path or "").read_text(encoding="utf-8")
     )
@@ -2651,9 +2735,10 @@ def test_relation_priority_batches_match_july_14_event_scale(tmp_path: Path) -> 
     stages = {step["stage"] for step in summary["steps"]}
     assert any(stage.startswith("candidate_grouping_batch_") for stage in stages)
     assert not any(stage.startswith("candidate_reconciliation") for stage in stages)
-    assert any(
-        "Skipped cross-batch coordination" in warning
-        for warning in summary["warning_messages"]
+    assert all(
+        not item.draft_id.startswith("__grouping_summary_")
+        for call in analyzer.grouping_calls
+        for item in call["events"]
     )
     assert "content_merge" in stages
     output = MarkdownEventStore(config=RuntimeConfig()).parse_day_document(
@@ -3040,6 +3125,34 @@ def test_high_risk_review_prompt_computes_broad_object_reason() -> None:
     )
 
     assert prompt["review_reasons"] == ["broad_object"]
+
+
+def test_high_risk_review_prompt_lists_required_relation_resolutions() -> None:
+    events = [
+        CollectedSourceEvent(
+            draft_id,
+            draft_id,
+            f"{draft_id}.md",
+            _event(event_id=draft_id, title=draft_id, content=f"事实 {draft_id}"),
+        )
+        for draft_id in ("d1", "d2")
+    ]
+    prompt = json.loads(
+        build_collected_review_prompt(
+            "2026-06-29",
+            events,
+            CollectedGroupingGroup("g1", ["d1", "d2"]),
+            relation_reasons=[
+                {
+                    "relation_id": "relation-001",
+                    "group_ids": ["g1", "g2"],
+                    "draft_ids": ["d1", "d2"],
+                }
+            ],
+        )
+    )
+
+    assert prompt["required_relation_resolution_ids"] == ["relation-001"]
 
 
 def test_review_basis_accepts_mixed_message_and_file_connection() -> None:
@@ -3607,7 +3720,11 @@ def test_high_risk_review_runs_three_multi_groups_in_parallel(tmp_path: Path) ->
         "2026-06-29", events, CollectedGroupingResult(groups=groups)
     )
 
-    assert [group.group_id for group in reviewed.groups] == ["g0", "g1", "g2"]
+    assert [group.group_id for group in reviewed.groups] == [
+        "collected-group-001",
+        "collected-group-002",
+        "collected-group-003",
+    ]
 
 
 def test_high_risk_review_keeps_all_groups_after_codex_validation_failure(
@@ -3624,6 +3741,9 @@ def test_high_risk_review_keeps_all_groups_after_codex_validation_failure(
             *,
             review_reasons=None,
             validation_feedback="",
+            existing_groups=None,
+            relation_reasons=None,
+            atomic_groups=None,
         ):
             route.append(f"online:{candidate_group.group_id}")
             return CollectedGroupingResult(
@@ -3639,6 +3759,9 @@ def test_high_risk_review_keeps_all_groups_after_codex_validation_failure(
             *,
             review_reasons=None,
             validation_feedback="",
+            existing_groups=None,
+            relation_reasons=None,
+            atomic_groups=None,
         ):
             route.append(f"codex:{candidate_group.group_id}")
             return CollectedGroupingResult(
@@ -3684,17 +3807,71 @@ def test_high_risk_review_keeps_all_groups_after_codex_validation_failure(
         ["d4", "d5"],
     ]
     assert route == [
-        "online:g0",
-        "online:g0",
-        "codex:g0",
-        "online:g1",
-        "online:g1",
-        "codex:g1",
-        "online:g2",
-        "online:g2",
-        "codex:g2",
+        "online:collected-review-001",
+        "online:collected-review-001",
+        "codex:collected-review-001",
+        "online:collected-review-002",
+        "online:collected-review-002",
+        "codex:collected-review-002",
+        "online:collected-review-003",
+        "online:collected-review-003",
+        "codex:collected-review-003",
     ]
     assert sum("Kept the pre-review collected group" in item for item in warnings) == 3
+
+
+def test_failover_forwards_complete_collected_review_context() -> None:
+    captured: dict[str, object] = {}
+
+    class Online:
+        def review_collected_group(
+            self,
+            target_date,
+            events,
+            candidate_group,
+            *,
+            review_reasons=None,
+            validation_feedback="",
+            existing_groups=None,
+            relation_reasons=None,
+            atomic_groups=None,
+        ):
+            captured.update(
+                existing_groups=existing_groups,
+                relation_reasons=relation_reasons,
+                atomic_groups=atomic_groups,
+            )
+            return CollectedGroupingResult(groups=[candidate_group])
+
+    candidate_group = CollectedGroupingGroup("review-001", ["d1", "d2"])
+    existing_groups = [
+        CollectedGroupingGroup("g1", ["d1"]),
+        CollectedGroupingGroup("g2", ["d2"]),
+    ]
+    relation_reasons = [
+        {
+            "relation_id": "relation-001",
+            "group_ids": ["g1", "g2"],
+            "draft_ids": ["d1", "d2"],
+        }
+    ]
+    atomic_groups = [["d1"]]
+    analyzer = FailoverAnalyzer(Online(), Online(), LLMUsageRecorder())
+
+    analyzer.review_collected_group(
+        "2026-07-22",
+        [],
+        candidate_group,
+        existing_groups=existing_groups,
+        relation_reasons=relation_reasons,
+        atomic_groups=atomic_groups,
+    )
+
+    assert captured == {
+        "existing_groups": existing_groups,
+        "relation_reasons": relation_reasons,
+        "atomic_groups": atomic_groups,
+    }
 
 
 def test_high_risk_review_keeps_concurrent_groups_after_validation_failure(
@@ -3712,6 +3889,9 @@ def test_high_risk_review_keeps_concurrent_groups_after_validation_failure(
             *,
             review_reasons=None,
             validation_feedback="",
+            existing_groups=None,
+            relation_reasons=None,
+            atomic_groups=None,
         ):
             route.append(f"online:{candidate_group.group_id}")
             online_calls[candidate_group.group_id] = (
@@ -3730,6 +3910,9 @@ def test_high_risk_review_keeps_concurrent_groups_after_validation_failure(
             *,
             review_reasons=None,
             validation_feedback="",
+            existing_groups=None,
+            relation_reasons=None,
+            atomic_groups=None,
         ):
             route.append(f"codex:{candidate_group.group_id}")
             return CollectedGroupingResult(
@@ -3769,10 +3952,10 @@ def test_high_risk_review_keeps_concurrent_groups_after_validation_failure(
         ["d0", "d1"],
         ["d2", "d3"],
     ]
-    assert route.count("online:g0") == 2
-    assert route.count("online:g1") == 2
-    assert route.count("codex:g0") == 1
-    assert route.count("codex:g1") == 1
+    assert route.count("online:collected-review-001") == 2
+    assert route.count("online:collected-review-002") == 2
+    assert route.count("codex:collected-review-001") == 1
+    assert route.count("codex:collected-review-002") == 1
     assert sum("Kept the pre-review collected group" in item for item in warnings) == 2
 
 
@@ -3815,6 +3998,7 @@ def test_candidate_grouping_uses_codex_after_online_local_retry_only(
     tmp_path: Path,
 ) -> None:
     route: list[str] = []
+    correction_contexts: list[tuple[str, str, object]] = []
 
     class Online:
         def __init__(self) -> None:
@@ -3827,9 +4011,17 @@ def test_candidate_grouping_uses_codex_after_online_local_retry_only(
             deterministic_groups,
             *,
             validation_feedback="",
+            previous_invalid_assignment=None,
         ):
             self.calls += 1
             route.append("online")
+            correction_contexts.append(
+                (
+                    "online",
+                    validation_feedback,
+                    previous_invalid_assignment,
+                )
+            )
             draft_ids = [item.draft_id for item in events]
             if self.calls <= 2:
                 draft_ids = draft_ids[:1]
@@ -3845,8 +4037,16 @@ def test_candidate_grouping_uses_codex_after_online_local_retry_only(
             deterministic_groups,
             *,
             validation_feedback="",
+            previous_invalid_assignment=None,
         ):
             route.append("codex")
+            correction_contexts.append(
+                (
+                    "codex",
+                    validation_feedback,
+                    previous_invalid_assignment,
+                )
+            )
             return CollectedGroupingResult(
                 groups=[
                     CollectedGroupingGroup(
@@ -3891,6 +4091,10 @@ def test_candidate_grouping_uses_codex_after_online_local_retry_only(
     assert grouped.groups[0].draft_ids == ["d0", "d1"]
     assert next_grouped.groups[0].draft_ids == ["d0", "d1"]
     assert route == ["online", "online", "codex", "online"]
+    assert correction_contexts[0] == ("online", "", None)
+    assert correction_contexts[1][1:]
+    assert correction_contexts[1][1:] == correction_contexts[2][1:]
+    assert correction_contexts[3] == ("online", "", None)
     assert any("with Codex" in warning for warning in warnings)
 
 
@@ -3908,6 +4112,9 @@ def test_high_risk_review_uses_codex_after_online_local_retry(
             *,
             review_reasons=None,
             validation_feedback="",
+            existing_groups=None,
+            relation_reasons=None,
+            atomic_groups=None,
         ):
             route.append("online")
             return CollectedGroupingResult(
@@ -3923,6 +4130,9 @@ def test_high_risk_review_uses_codex_after_online_local_retry(
             *,
             review_reasons=None,
             validation_feedback="",
+            existing_groups=None,
+            relation_reasons=None,
+            atomic_groups=None,
         ):
             route.append("codex")
             return CollectedGroupingResult(
@@ -4187,6 +4397,7 @@ def test_collected_content_coverage_terminal_failure_does_not_write_output(
 
     expected_output = inbox / "2026-06-29-管理者-merged.md"
     assert result.output_path is None
+    assert result.quality_summary.content_rewrite_failure_count == 1
     assert not expected_output.exists()
     assert any("did not preserve source coverage" in item for item in result.warning_messages)
 
@@ -4338,6 +4549,10 @@ def test_collected_quality_summary_is_deterministic_and_trace_matches(
     )
 
     assert trace_summary["quality_summary"] == result.quality_summary.to_dict()
+    assert trace_summary["collected_group_review"]["status"] == "not_needed"
+    assert (
+        trace_root / "2026-06-29" / "collected_group_review.json"
+    ).exists()
     assert result.to_dict()["quality_summary"] == trace_summary["quality_summary"]
     assert trace_summary["stage_timing_summary"] == (
         result.outputs[0].stage_timing_summary
@@ -4345,8 +4560,9 @@ def test_collected_quality_summary_is_deterministic_and_trace_matches(
     assert set(trace_summary["stage_timing_summary"]) == {
         "source_parse",
         "source_filter",
-        "candidate_grouping",
-        "candidate_reconciliation",
+            "candidate_grouping",
+            "group_discovery",
+            "candidate_reconciliation",
         "high_risk_review",
         "content_merge",
         "markdown_write",
@@ -4358,3 +4574,636 @@ def test_collected_quality_summary_is_deterministic_and_trace_matches(
     assert "## Quality Summary" in trace_markdown
     assert "## Stage Timings" in trace_markdown
     assert "Request accumulated ms" in trace_markdown
+
+
+def test_collected_review_can_split_initial_group_and_merge_across_groups(
+    tmp_path: Path,
+) -> None:
+    class RegroupAnalyzer(ReviewAnalyzer):
+        def review_collected_group(
+            self,
+            target_date,
+            events,
+            candidate_group,
+            *,
+            review_reasons=None,
+            existing_groups=None,
+            relation_reasons=None,
+            atomic_groups=None,
+        ):
+            relation_id = relation_reasons[0]["relation_id"]
+            return CollectedGroupingResult(
+                split_reason="d2 只有背景关系，d1 与 d3 直接参与同一交付过程。",
+                groups=[
+                    CollectedGroupingGroup(
+                        "regrouped",
+                        ["d1", "d3"],
+                        summary_title="交付物修改与归档",
+                        summary_content="完成交付物修改后归档。",
+                        summary_object_hint="交付物",
+                        group_reason=["continuous_action"],
+                        member_connections=[
+                            CollectedGroupMemberConnection("d1", "完成修改。"),
+                            CollectedGroupMemberConnection("d3", "完成归档。"),
+                        ],
+                    ),
+                    CollectedGroupingGroup("background", ["d2"]),
+                ],
+                relation_resolutions=[
+                    CollectedGroupRelationResolution(
+                        relation_id=relation_id,
+                        decision="merged",
+                        connected_draft_ids=["d1", "d3"],
+                        reason="d1 的修改结果由 d3 继续归档。",
+                        evidence_draft_ids=["d1", "d3"],
+                    )
+                ],
+            )
+
+    events = [
+        CollectedSourceEvent(
+            draft_id,
+            f"人员{index}",
+            f"人员{index}.md",
+            _event(event_id=f"e{index}", title=title, content=title),
+        )
+        for index, (draft_id, title) in enumerate(
+            (("d1", "修改交付物"), ("d2", "宽泛需求"), ("d3", "归档交付物")),
+            start=1,
+        )
+    ]
+    runner = _build_runner(tmp_path, analyzer=RegroupAnalyzer())
+
+    reviewed, warnings = runner._review_high_risk_groups(
+        "2026-06-29",
+        events,
+        CollectedGroupingResult(
+            groups=[
+                CollectedGroupingGroup("g1", ["d1", "d2"]),
+                CollectedGroupingGroup("g2", ["d3"]),
+            ]
+        ),
+        discovery_result=DayGroupDiscoveryResult(
+            [DayGroupDiscoveryCandidate(["g1", "g2"], "标题显示同一交付物。")]
+        ),
+    )
+
+    assert [group.draft_ids for group in reviewed.groups] == [["d1", "d3"], ["d2"]]
+    assert warnings == []
+    assert runner._collected_quality_counters["cross_group_merge_count"] == 1
+    assert runner._collected_quality_counters["split_group_count"] == 1
+    assert runner._collected_quality_counters["relation_merged_count"] == 1
+    review_artifact = runner._collected_group_review_artifact
+    assert review_artifact is not None
+    assert review_artifact["components"][0]["initial_groups"][0]["draft_ids"] == [
+        "d1",
+        "d2",
+    ]
+    assert review_artifact["components"][0]["final_groups"][0]["draft_ids"] == [
+        "d1",
+        "d3",
+    ]
+
+
+def test_collected_review_retries_relation_separation_without_both_side_evidence(
+    tmp_path: Path,
+) -> None:
+    class RelationRetryAnalyzer(ReviewAnalyzer):
+        def __init__(self) -> None:
+            super().__init__()
+            self.calls = 0
+
+        def review_collected_group(
+            self,
+            target_date,
+            events,
+            candidate_group,
+            *,
+            review_reasons=None,
+            validation_feedback="",
+            existing_groups=None,
+            relation_reasons=None,
+            atomic_groups=None,
+        ):
+            self.calls += 1
+            relation_id = relation_reasons[0]["relation_id"]
+            if self.calls == 1:
+                return CollectedGroupingResult(
+                    split_reason="两个初步组保持分开。",
+                    groups=[
+                        CollectedGroupingGroup("original", ["d1", "d2"]),
+                        CollectedGroupingGroup("single", ["d3"]),
+                    ],
+                    relation_resolutions=[
+                        CollectedGroupRelationResolution(
+                            relation_id,
+                            "separate",
+                            [],
+                            "业务对象不同。",
+                            ["d1"],
+                        )
+                    ],
+                )
+            assert "separate_relation_evidence_incomplete" in validation_feedback
+            return CollectedGroupingResult(
+                split_reason="d2 仅为背景信息。",
+                groups=[
+                    CollectedGroupingGroup(
+                        "connected",
+                        ["d1", "d3"],
+                        group_reason=["continuous_action"],
+                    ),
+                    CollectedGroupingGroup("background", ["d2"]),
+                ],
+                relation_resolutions=[
+                    CollectedGroupRelationResolution(
+                        relation_id,
+                        "merged",
+                        ["d1", "d3"],
+                        "两个来源前后承接。",
+                        ["d1", "d3"],
+                    )
+                ],
+            )
+
+    events = [
+        CollectedSourceEvent(
+            f"d{index}",
+            f"人员{index}",
+            f"人员{index}.md",
+            _event(event_id=f"e{index}", title=f"事项{index}", content=f"事实{index}"),
+        )
+        for index in range(1, 4)
+    ]
+    analyzer = RelationRetryAnalyzer()
+    runner = _build_runner(tmp_path, analyzer=analyzer)
+
+    reviewed, warnings = runner._review_high_risk_groups(
+        "2026-06-29",
+        events,
+        CollectedGroupingResult(
+            groups=[
+                CollectedGroupingGroup("g1", ["d1", "d2"]),
+                CollectedGroupingGroup("g2", ["d3"]),
+            ]
+        ),
+        discovery_result=DayGroupDiscoveryResult(
+            [DayGroupDiscoveryCandidate(["g1", "g2"], "标题可能相关。")]
+        ),
+    )
+
+    assert analyzer.calls == 2
+    assert [group.draft_ids for group in reviewed.groups] == [["d1", "d3"], ["d2"]]
+    assert any("relation was not fully resolved" in warning for warning in warnings)
+
+
+def test_collected_same_event_id_atom_cannot_split_but_can_join_larger_group(
+    tmp_path: Path,
+) -> None:
+    class AtomicRetryAnalyzer(ReviewAnalyzer):
+        def __init__(self) -> None:
+            super().__init__()
+            self.calls = 0
+
+        def review_collected_group(
+            self,
+            target_date,
+            events,
+            candidate_group,
+            *,
+            review_reasons=None,
+            validation_feedback="",
+            existing_groups=None,
+            relation_reasons=None,
+            atomic_groups=None,
+        ):
+            self.calls += 1
+            relation_id = relation_reasons[0]["relation_id"]
+            if self.calls == 1:
+                groups = [
+                    CollectedGroupingGroup("invalid", ["d1", "d3"]),
+                    CollectedGroupingGroup("split-atom", ["d2"]),
+                ]
+                split_reason = "重新组合。"
+                connected = ["d1", "d3"]
+            else:
+                assert "atomic_group_split" in validation_feedback
+                groups = [
+                    CollectedGroupingGroup(
+                        "valid",
+                        ["d1", "d2", "d3"],
+                        group_reason=["continuous_action"],
+                    )
+                ]
+                split_reason = ""
+                connected = ["d1", "d3"]
+            return CollectedGroupingResult(
+                split_reason=split_reason,
+                groups=groups,
+                relation_resolutions=[
+                    CollectedGroupRelationResolution(
+                        relation_id,
+                        "merged",
+                        connected,
+                        "相关来源属于同一连续事项。",
+                        connected,
+                    )
+                ],
+            )
+
+    duplicate_a = _event(event_id="same", title="重复来源", content="相同内容")
+    duplicate_b = replace(duplicate_a)
+    events = [
+        CollectedSourceEvent("d1", "甲", "甲.md", duplicate_a),
+        CollectedSourceEvent("d2", "乙", "乙.md", duplicate_b),
+        CollectedSourceEvent(
+            "d3",
+            "丙",
+            "丙.md",
+            _event(event_id="next", title="后续动作", content="继续处理"),
+        ),
+    ]
+    analyzer = AtomicRetryAnalyzer()
+    runner = _build_runner(tmp_path, analyzer=analyzer)
+
+    reviewed, _ = runner._review_high_risk_groups(
+        "2026-06-29",
+        events,
+        CollectedGroupingResult(
+            groups=[
+                CollectedGroupingGroup("g1", ["d1", "d2"]),
+                CollectedGroupingGroup("g2", ["d3"]),
+            ]
+        ),
+        deterministic_groups=[["d1", "d2"]],
+        discovery_result=DayGroupDiscoveryResult(
+            [DayGroupDiscoveryCandidate(["g1", "g2"], "标题显示连续动作。")]
+        ),
+    )
+
+    assert analyzer.calls == 2
+    assert [group.draft_ids for group in reviewed.groups] == [["d1", "d2", "d3"]]
+
+
+def test_collected_attachment_versions_create_review_relation_only_when_base_matches(
+    tmp_path: Path,
+) -> None:
+    config = load_runtime_config_overrides(RuntimeConfig(), cwd=Path.cwd())
+
+    def source(draft_id: str, title: str, filename: str) -> CollectedSourceEvent:
+        return CollectedSourceEvent(
+            draft_id,
+            draft_id,
+            f"{draft_id}.md",
+            replace(
+                _event(event_id=draft_id, title=title, content=title),
+                file_links=[EventFileLink(f"https://example/{draft_id}", filename, "attachment")],
+            ),
+        )
+
+    events = [
+        source("d1", "基础文件", "奖励表-2026.xlsx"),
+        source("d2", "版本文件", "奖励表-2026-V2.0.xlsx"),
+        source("d3", "其他年份", "奖励表-2025.xlsx"),
+        source("d4", "其他扩展名", "奖励表-2026.pdf"),
+        source("d5", "图片", "奖励表-2026-V3.0.png"),
+    ]
+    groups = [
+        CollectedGroupingGroup(f"g{index}", [event.draft_id])
+        for index, event in enumerate(events, start=1)
+    ]
+
+    components = build_collected_review_components(
+        groups,
+        events,
+        discovery_result=DayGroupDiscoveryResult(),
+        deterministic_groups=[],
+        high_risk_reasons_by_group_id={},
+        attachment_version_suffix_patterns=config.attachment_version_suffix_patterns,
+        attachment_ignored_extensions=config.attachment_ignored_extensions,
+    )
+
+    assert len(components) == 1
+    assert [group.group_id for group in components[0].groups] == ["g1", "g2"]
+    assert components[0].relation_reasons[0]["relation_types"] == [
+        "same_attachment_base_name"
+    ]
+
+
+def test_collected_shared_evidence_builds_review_scope_without_discovery(
+    tmp_path: Path,
+) -> None:
+    config = load_runtime_config_overrides(RuntimeConfig(), cwd=Path.cwd())
+    shared_message = "sha256:" + "a" * 64
+    shared_file = "sha256:" + "b" * 64
+    events = [
+        CollectedSourceEvent(
+            "d1",
+            "人员1",
+            "人员1.md",
+            _event(
+                event_id="e1",
+                title="事项1",
+                content="内容1",
+                evidence_fingerprints=[shared_message],
+            ),
+        ),
+        CollectedSourceEvent(
+            "d2",
+            "人员2",
+            "人员2.md",
+            _event(
+                event_id="e2",
+                title="事项2",
+                content="内容2",
+                evidence_fingerprints=[shared_message],
+                file_keys=[shared_file],
+            ),
+        ),
+        CollectedSourceEvent(
+            "d3",
+            "人员3",
+            "人员3.md",
+            _event(
+                event_id="e3",
+                title="事项3",
+                content="内容3",
+                file_keys=[shared_file],
+            ),
+        ),
+    ]
+    groups = [
+        CollectedGroupingGroup(f"g{index}", [event.draft_id])
+        for index, event in enumerate(events, start=1)
+    ]
+
+    components = build_collected_review_components(
+        groups,
+        events,
+        discovery_result=DayGroupDiscoveryResult(),
+        deterministic_groups=[],
+        high_risk_reasons_by_group_id={},
+        attachment_version_suffix_patterns=config.attachment_version_suffix_patterns,
+        attachment_ignored_extensions=config.attachment_ignored_extensions,
+    )
+
+    assert len(components) == 1
+    assert [group.group_id for group in components[0].groups] == ["g1", "g2", "g3"]
+    assert [
+        relation["relation_types"] for relation in components[0].relation_reasons
+    ] == [["shared_message"], ["shared_file"]]
+
+
+def test_collected_discovery_keeps_multi_group_scope_with_pairwise_relations(
+    tmp_path: Path,
+) -> None:
+    config = load_runtime_config_overrides(RuntimeConfig(), cwd=Path.cwd())
+    events = [
+        CollectedSourceEvent(
+            f"d{index}",
+            f"人员{index}",
+            f"人员{index}.md",
+            _event(event_id=f"e{index}", title=f"事项{index}", content=f"内容{index}"),
+        )
+        for index in range(1, 5)
+    ]
+    groups = [
+        CollectedGroupingGroup(f"g{index}", [event.draft_id])
+        for index, event in enumerate(events, start=1)
+    ]
+    discovery = DayGroupDiscoveryResult(
+        candidate_groups=[
+            DayGroupDiscoveryCandidate(["g1", "g2", "g3", "g4"], "标题可能相关。")
+        ],
+        group_checks=[
+            DayGroupDiscoveryCheck("g1", ["g2", "g3"], "标题可能相关。"),
+            DayGroupDiscoveryCheck("g2", ["g4"], "标题可能存在承接。"),
+            DayGroupDiscoveryCheck("g3", [], "没有新增关系。"),
+            DayGroupDiscoveryCheck("g4", [], "没有新增关系。"),
+        ],
+    )
+
+    components = build_collected_review_components(
+        groups,
+        events,
+        discovery_result=discovery,
+        deterministic_groups=[],
+        high_risk_reasons_by_group_id={},
+        attachment_version_suffix_patterns=config.attachment_version_suffix_patterns,
+        attachment_ignored_extensions=config.attachment_ignored_extensions,
+    )
+
+    assert len(components) == 1
+    assert [relation["group_ids"] for relation in components[0].relation_reasons] == [
+        ["g1", "g2"],
+        ["g1", "g3"],
+        ["g2", "g4"],
+    ]
+
+
+def test_collected_separate_relation_may_name_representatives() -> None:
+    groups = [
+        CollectedGroupingGroup("g1", ["d1"]),
+        CollectedGroupingGroup("g2", ["d2"]),
+    ]
+    result = CollectedGroupingResult(
+        groups=groups,
+        relation_resolutions=[
+            CollectedGroupRelationResolution(
+                relation_id="relation-001",
+                decision="separate",
+                connected_draft_ids=["d1", "d2"],
+                reason="完整内容显示为两个独立事项。",
+                evidence_draft_ids=["d1", "d2"],
+            )
+        ],
+    )
+
+    error = collected_relation_resolution_error(
+        result,
+        [
+            {
+                "relation_id": "relation-001",
+                "relation_types": ["title_discovery"],
+                "group_ids": ["g1", "g2"],
+            }
+        ],
+        groups,
+    )
+
+    assert error == ""
+
+
+def test_collected_group_discovery_submits_only_ids_and_titles_and_keeps_oversized_whole(
+    tmp_path: Path,
+) -> None:
+    class DiscoveryAnalyzer(TwoStageAnalyzer):
+        def __init__(self) -> None:
+            super().__init__()
+            self.requests = []
+
+        def request_function(self, prompt, *, function_spec, allow_oversized_input=False):
+            self.requests.append(
+                (json.loads(prompt), function_spec, allow_oversized_input)
+            )
+            return {
+                "group_checks": [
+                    {
+                        "group_id": "collected-group-001",
+                        "related_group_ids": ["collected-group-002"],
+                        "reason": "标题显示连续过程。",
+                    },
+                    {
+                        "group_id": "collected-group-002",
+                        "related_group_ids": [],
+                        "reason": "关系已由其他组提出。",
+                    },
+                    {
+                        "group_id": "collected-group-003",
+                        "related_group_ids": [],
+                        "reason": "标题未显示其他明确事项。",
+                    },
+                ]
+            }
+
+    analyzer = DiscoveryAnalyzer()
+    runner = _build_runner(
+        tmp_path,
+        analyzer=analyzer,
+        config=replace(
+            load_runtime_config_overrides(RuntimeConfig(), cwd=Path.cwd()),
+            data_root=tmp_path / "data",
+            model_input_batch_target_tokens=100,
+        ),
+    )
+    events = [
+        CollectedSourceEvent(
+            f"d{index}",
+            f"人员{index}",
+            f"人员{index}.md",
+            _event(event_id=f"e{index}", title="长标题" * 200, content="不应提交"),
+        )
+        for index in range(1, 4)
+    ]
+    groups = [
+        CollectedGroupingGroup(
+            f"collected-group-{index:03d}",
+            [event.draft_id],
+            summary_title=event.event.title,
+        )
+        for index, event in enumerate(events, start=1)
+    ]
+
+    outcome = runner._discover_collected_group_review_candidates(
+        "2026-06-29", events, groups
+    )
+
+    assert len(analyzer.requests) == 1
+    prompt, function_spec, oversized = analyzer.requests[0]
+    assert all(set(item) == {"group_id", "title"} for item in prompt["groups"])
+    assert "events" not in prompt
+    assert function_spec.request_kind == "collected_group_discovery"
+    assert oversized is True
+    assert outcome.result.candidate_groups[0].group_ids == [
+        "collected-group-001",
+        "collected-group-002",
+    ]
+    assert outcome.artifact["oversized_submission"] is True
+
+
+def test_collected_group_discovery_title_covers_every_initial_member(
+    tmp_path: Path,
+) -> None:
+    class DiscoveryAnalyzer(TwoStageAnalyzer):
+        def __init__(self) -> None:
+            super().__init__()
+            self.prompt = None
+
+        def request_function(self, prompt, *, function_spec, allow_oversized_input=False):
+            self.prompt = json.loads(prompt)
+            return {
+                "group_checks": [
+                    {
+                        "group_id": "collected-group-001",
+                        "related_group_ids": [],
+                        "reason": "标题未显示其他明确事项。",
+                    },
+                    {
+                        "group_id": "collected-group-002",
+                        "related_group_ids": [],
+                        "reason": "标题未显示其他明确事项。",
+                    },
+                ]
+            }
+
+    analyzer = DiscoveryAnalyzer()
+    runner = _build_runner(tmp_path, analyzer=analyzer)
+    events = [
+        CollectedSourceEvent(
+            "d1",
+            "人员1",
+            "人员1.md",
+            _event(event_id="e1", title="成员事项一", content="事实一"),
+        ),
+        CollectedSourceEvent(
+            "d2",
+            "人员2",
+            "人员2.md",
+            _event(event_id="e2", title="成员事项二", content="事实二"),
+        ),
+        CollectedSourceEvent(
+            "d3",
+            "人员3",
+            "人员3.md",
+            _event(event_id="e3", title="另一组", content="事实三"),
+        ),
+    ]
+    groups = [
+        CollectedGroupingGroup(
+            "collected-group-001",
+            ["d1", "d2"],
+            summary_title="初步组标题",
+        ),
+        CollectedGroupingGroup(
+            "collected-group-002",
+            ["d3"],
+            summary_title="另一组",
+        ),
+    ]
+
+    runner._discover_collected_group_review_candidates(
+        "2026-06-29", events, groups
+    )
+
+    assert analyzer.prompt["groups"][0] == {
+        "group_id": "collected-group-001",
+        "title": "初步组标题；成员事项一；成员事项二",
+    }
+
+
+def test_collected_group_discovery_failure_does_not_block_markdown(
+    tmp_path: Path,
+) -> None:
+    class FailingDiscoveryAnalyzer(TwoStageAnalyzer):
+        def request_function(self, prompt, *, function_spec, allow_oversized_input=False):
+            raise AnalyzerProtocolError("discovery unavailable")
+
+    inbox = tmp_path / "merge_inbox" / "2026" / "06" / "29"
+    _write_day_doc(
+        inbox / "2026-06-29-张三.md",
+        [
+            _event(event_id="e1", title="事项一", content="事实一"),
+            _event(event_id="e2", title="事项二", content="事实二"),
+        ],
+        tmp_path,
+    )
+
+    result = _build_runner(
+        tmp_path,
+        analyzer=FailingDiscoveryAnalyzer(),
+    ).run("2026-06-29")
+
+    assert result.output_path is not None
+    assert Path(result.output_path).exists()
+    assert result.quality_summary.discovery_failure_count == 1
+    assert any("Skipped collected group discovery" in item for item in result.warning_messages)
