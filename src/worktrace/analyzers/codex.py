@@ -280,8 +280,12 @@ class CodexAnalyzer(Analyzer):
         self,
         batch: RetentionReviewBatch,
     ) -> RetentionReviewResult:
-        references = message_reference_ids(
-            [message for item in batch.candidates for message in item.messages]
+        allowed_message_ids = list(
+            dict.fromkeys(
+                message_id
+                for item in batch.candidates
+                for message_id in item.allowed_evidence_message_ids
+            )
         )
         payload = self.request_function(
             self.build_retention_review_prompt(batch),
@@ -289,8 +293,8 @@ class CodexAnalyzer(Analyzer):
                 "retention_review",
                 retention_review_output_schema(self.config),
                 draft_ids=[item.candidate.draft_id for item in batch.candidates],
+                message_ids=allowed_message_ids,
                 result_count=len(batch.candidates),
-                **references,
             ),
             **oversized_input_kwargs(
                 batch.oversized_singleton or batch.oversized_retry

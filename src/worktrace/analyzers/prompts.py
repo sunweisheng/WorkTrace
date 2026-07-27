@@ -73,10 +73,10 @@ EVENT_TITLE_RULE = (
 )
 
 ATTACHMENT_FILE_NAME_RULE = (
-    "附件元数据中的 file_name 仅用于识别文件：当消息明确是在发送、查看、审核、"
-    "转交或处理该附件时，topic 和 object_hint 必须写明 file_name，并将 attachment_id "
-    "填入 referenced_attachment_ids。附件发送后的明确转交、查看或审核指令属于后续任务，"
-    "必须以 follow_up_assigned 输出；不得根据文件名推断文件正文事实。"
+    "附件元数据中的 file_name 仅用于识别文件。候选按个人保留规则确认可提炼后，"
+    "如果实质事实明确涉及发送、查看、审核、转交或处理该附件，topic 和 object_hint "
+    "必须写明 file_name，并将 attachment_id 填入 referenced_attachment_ids；"
+    "不得根据文件名推断文件正文事实。"
 )
 
 
@@ -341,7 +341,6 @@ def build_segment_batch_analysis_prompt(
             "一个 candidate 只能描述一条工作线；若同一 segment 同时出现两个命名项目、产品、政策或不相干业务对象，必须拆成多个 candidate_events。",
             ATTACHMENT_FILE_NAME_RULE,
             "图片和文件附件默认只提供元数据；判断依赖其内容时，必须返回 attachment_text 的 context_requests，并给出对应消息和附件 ID，不要猜测图片或文件内容。",
-            "本人提出的问题、风险和待确认事项本身可以提炼，不要求已有处理结果。",
             EVENT_TITLE_RULE,
             "表情是本人回复证据，但不能单凭表情描述事项已完成、已同意或已拒绝。",
             *_build_personal_retention_rules(runtime_config),

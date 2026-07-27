@@ -398,6 +398,55 @@ def test_segment_prompt_recombines_context_and_primary_messages_in_time_order() 
         "follow_up_assigned 必须包含明确业务对象" in rule
         for rule in payload["rules"]
     )
+    assert any(
+        "即使会议主题具体，也不要提炼为事件" in rule
+        for rule in payload["rules"]
+    )
+    assert any(
+        "之后没有实质反馈，或只有收到、已看、好的等简单确认时，不要提炼为事件"
+        in rule
+        for rule in payload["rules"]
+    )
+    assert any(
+        "已明确要求提交总结、审核结论、修改结果等具体产出" in rule
+        for rule in payload["rules"]
+    )
+    assert any(
+        "明确要求或确认执行合并、修改、校验、比对、去重、检查" in rule
+        for rule in payload["rules"]
+    )
+    assert any(
+        "已经完成的数据核查、问题排查或异常确认及其明确结论" in rule
+        for rule in payload["rules"]
+    )
+    assert any(
+        "这一排查事实与本人直接相关，必须提炼业务事件" in rule
+        for rule in payload["rules"]
+    )
+    assert any(
+        "不得忽略排查对象和结论" in rule
+        for rule in payload["rules"]
+    )
+    assert any(
+        "事件事实不依赖同消息中的配图或附件内容" in rule
+        for rule in payload["rules"]
+    )
+    assert any(
+        "不得请求读取配图或附件内容" in rule
+        for rule in payload["rules"]
+    )
+    assert any(
+        "不得因补读没有返回新内容而丢弃候选" in rule
+        for rule in payload["rules"]
+    )
+    assert any(
+        "对责任进行猜测或提出尚未采用的建议" in rule
+        for rule in payload["rules"]
+    )
+    assert not any(
+        "本人提出的问题、风险和待确认事项本身可以提炼" in rule
+        for rule in payload["rules"]
+    )
     assert any("图片和文件附件默认只提供元数据" in rule for rule in payload["rules"])
     assert [item["id"] for item in prompt_messages] == ["om_1", "om_2"]
     assert [item["role"] for item in prompt_messages] == ["context", "primary"]

@@ -196,9 +196,22 @@ def test_online_analyzer_uses_retention_review_protocol(
 
     monkeypatch.setattr(analyzer, "_invoke_online", fake_invoke)
 
+    batch = sample_retention_review_batch()
+    candidate = batch.candidates[0]
+    context_message = replace(
+        candidate.messages[0],
+        message_id="context-only",
+        text="仅用于理解前后关系",
+    )
     result = analyzer.review_retention_candidates(
         replace(
-            sample_retention_review_batch(),
+            batch,
+            candidates=[
+                replace(
+                    candidate,
+                    messages=[context_message, *candidate.messages],
+                )
+            ],
             retry_feedback="证据消息不属于当前候选。",
             oversized_retry=True,
         )
@@ -211,6 +224,16 @@ def test_online_analyzer_uses_retention_review_protocol(
     assert captured["allow_oversized_input"] is True
     assert captured["function_spec"].parameters != retention_review_output_schema(config)
     assert captured["function_spec"].parameters["properties"]["results"]["minItems"] == 1
+    evidence_items = captured["function_spec"].parameters["properties"]["results"][
+        "items"
+    ]["properties"]["routine_signals"]["items"]["properties"][
+        "evidence_message_ids"
+    ]["items"]
+    assert evidence_items["enum"] == candidate.allowed_evidence_message_ids
+    prompt_messages = json.loads(captured["prompt"])["input"]["candidates"][0][
+        "messages"
+    ]
+    assert [item["role"] for item in prompt_messages] == ["context", "evidence"]
 
 
 def test_online_day_grouping_allows_retry_feedback_to_cross_input_target(

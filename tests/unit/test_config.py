@@ -516,6 +516,22 @@ def test_repo_retention_policy_is_loaded_from_config() -> None:
         item.key for item in policy.fact_risk_signals
     }
     assert policy.fact_review_rules
+    prompt_rules_text = "\n".join(policy.prompt_rules)
+    assert "即使会议主题具体，也不要提炼为事件" in prompt_rules_text
+    assert "忽略会议安排，只提炼有独立记录价值的业务内容" in prompt_rules_text
+    assert (
+        "之后没有实质反馈，或只有收到、已看、好的等简单确认时，不要提炼为事件"
+        in prompt_rules_text
+    )
+    assert "已明确要求提交总结、审核结论、修改结果等具体产出" in prompt_rules_text
+    assert "明确要求或确认执行合并、修改、校验、比对、去重、检查" in prompt_rules_text
+    assert "对责任进行猜测或提出尚未采用的建议" in prompt_rules_text
+    assert "已经完成的数据核查、问题排查或异常确认及其明确结论" in prompt_rules_text
+    assert "这一排查事实与本人直接相关，必须提炼业务事件" in prompt_rules_text
+    assert "不得忽略排查对象和结论" in prompt_rules_text
+    assert "事件事实不依赖同消息中的配图或附件内容" in prompt_rules_text
+    assert "不得请求读取配图或附件内容" in prompt_rules_text
+    assert "不得因补读没有返回新内容而丢弃候选" in prompt_rules_text
     assert "审核" in policy.generic_object_hints
     assert "工作" in policy.repeated_low_information_suffixes
     assert {item.key for item in policy.routine_signals} == {

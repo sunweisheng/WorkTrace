@@ -140,9 +140,22 @@ def test_codex_analyzer_uses_retention_review_protocol(
 
     monkeypatch.setattr(analyzer, "_invoke_codex", fake_invoke)
 
+    batch = sample_retention_review_batch()
+    candidate = batch.candidates[0]
+    context_message = replace(
+        candidate.messages[0],
+        message_id="context-only",
+        text="仅用于理解前后关系",
+    )
     result = analyzer.review_retention_candidates(
         replace(
-            sample_retention_review_batch(),
+            batch,
+            candidates=[
+                replace(
+                    candidate,
+                    messages=[context_message, *candidate.messages],
+                )
+            ],
             retry_feedback="证据消息不属于当前候选。",
             oversized_retry=True,
         )
@@ -156,6 +169,14 @@ def test_codex_analyzer_uses_retention_review_protocol(
     function_spec = captured["function_spec"]
     assert isinstance(function_spec, FunctionCallSpec)
     assert captured["output_schema"] == function_spec.parameters
+    evidence_items = function_spec.parameters["properties"]["results"]["items"][
+        "properties"
+    ]["routine_signals"]["items"]["properties"]["evidence_message_ids"]["items"]
+    assert evidence_items["enum"] == candidate.allowed_evidence_message_ids
+    prompt_messages = json.loads(captured["prompt"])["input"]["candidates"][0][
+        "messages"
+    ]
+    assert [item["role"] for item in prompt_messages] == ["context", "evidence"]
 
 
 def test_codex_analyzer_uses_personal_fact_review_protocol(

@@ -44,6 +44,28 @@ REPO_RETENTION_POLICY = load_runtime_config_overrides(
 ).retention_policy
 
 
+TEMPORARY_COORDINATION_RULE_SNIPPETS = (
+    "即使会议主题具体，也不要提炼为事件",
+    "忽略会议安排，只提炼有独立记录价值的业务内容",
+    "之后没有实质反馈，或只有收到、已看、好的等简单确认时，不要提炼为事件",
+    "只围绕这些实质内容提炼，不把听取或查看附件本身作为事件",
+    "明确要求或确认执行合并、修改、校验、比对、去重、检查",
+    "已明确要求提交总结、审核结论、修改结果等具体产出",
+    "对责任进行猜测或提出尚未采用的建议",
+    "已经完成的数据核查、问题排查或异常确认及其明确结论",
+    "这一排查事实与本人直接相关，必须提炼业务事件",
+    "不得忽略排查对象和结论",
+    "事件事实不依赖同消息中的配图或附件内容",
+    "不得请求读取配图或附件内容",
+    "不得因补读没有返回新内容而丢弃候选",
+)
+
+
+def _assert_temporary_coordination_rules(prompt: str) -> None:
+    for snippet in TEMPORARY_COORDINATION_RULE_SNIPPETS:
+        assert snippet in prompt
+
+
 def test_group_discovery_prompts_require_exhaustive_group_checks() -> None:
     config = load_runtime_config_overrides(RuntimeConfig(), cwd=Path.cwd())
     groups = [
@@ -276,7 +298,8 @@ def test_batch_prompt_uses_original_message_ids_and_slim_rules(tmp_path: Path) -
     assert "不要写 message id、open_id、conversation_id 或 om_/ou_/oc_ 等内部标识。" in prompt
     assert "不要只写泛泛的价值判断" in prompt
     assert "follow_up_assigned 必须包含明确业务对象" in prompt
-    assert "首次分析拿不准临时协作是否关联真实业务任务时" in prompt
+    assert "不符合以上任何明确排除条件" in prompt
+    _assert_temporary_coordination_rules(prompt)
     assert "正例：本人要求他人汇报、本人审批、本人同步、本人催办、本人推进，都算与本人直接相关。" in prompt
     assert "反例：他人之间讨论自己的工作、自己的承诺、自己的处理进度，即使本人在该会话里发过言，也不算与本人直接相关。" in prompt
     assert "如果当前消息是在纠正、澄清或替换前文对象" in prompt
@@ -406,6 +429,7 @@ def test_anchor_prompt_serialization_is_compact(tmp_path: Path) -> None:
     assert "例如：已同步给老板、老板未回复可视为已知悉" in prompt
     assert "本人参与、回复或被询问，只能证明事项与本人有关" in prompt
     assert "单纯询问人员当前状态、位置或是否可用" in prompt
+    _assert_temporary_coordination_rules(prompt)
     assert "私人饭局、约饭、离职告别聚餐、同事口碑评价、人际寒暄，不要提炼为事项。" in prompt
     assert "个人请假、家庭原因、孩子学校证明、个人行程报备，不要提炼为工作事件。" in prompt
     assert "泛泛完成审核或审批但没有具体业务对象" in prompt
@@ -527,6 +551,7 @@ def test_anchor_expansion_prompt_includes_previous_result_and_expansion(tmp_path
     assert "私人饭局、约饭、离职告别聚餐、同事口碑评价、人际寒暄，不要提炼为事项。" in prompt
     assert "个人请假、家庭原因、孩子学校证明、个人行程报备，不要提炼为工作事件。" in prompt
     assert "follow_up_assigned 必须包含明确业务对象" in prompt
+    _assert_temporary_coordination_rules(prompt)
     assert "泛泛完成审核或审批但没有具体业务对象" in prompt
     assert "只有同时具备具体对象、保留理由、保留依据的工作事件才输出" in prompt
     assert "人名只在明确责任分工、任务指派或确认沟通对象时保留" in prompt
@@ -649,7 +674,8 @@ def test_anchor_batch_prompt_includes_low_retention_rules(tmp_path: Path) -> Non
     assert "retention_detail 表示保留依据/来源证据" in prompt
     assert "不要写 message id、open_id、conversation_id 或 om_/ou_/oc_ 等内部标识。" in prompt
     assert "follow_up_assigned 必须包含明确业务对象" in prompt
-    assert "首次分析拿不准临时协作是否关联真实业务任务时" in prompt
+    assert "不符合以上任何明确排除条件" in prompt
+    _assert_temporary_coordination_rules(prompt)
 
 
 def test_media_messages_are_compressed_for_prompt(tmp_path: Path) -> None:
@@ -1143,7 +1169,8 @@ def test_prompt_serialization_includes_reply_context_and_attachments(tmp_path: P
         ),
         config=config,
     )
-    assert "附件发送后的明确转交、查看或审核指令属于后续任务" in prompt
+    assert "候选按个人保留规则确认可提炼后" in prompt
+    assert "附件发送后的明确转交、查看或审核指令属于后续任务" not in prompt
     assert reply_payload["reply_to"]["links"][0]["link_id"] == "om_1#link1"
 
 
