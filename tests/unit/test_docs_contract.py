@@ -66,6 +66,23 @@ def test_docs_define_retention_review_model_and_python_boundaries() -> None:
         assert "retention_review_summary" in content
         assert "model_input_batch_target_tokens" in content
         assert "7000" in content
+    for content in documents[:2]:
+        assert "allowed_evidence_message_ids" in content
+
+
+def test_docs_describe_current_personal_retention_boundaries() -> None:
+    documents = [
+        Path("README.md").read_text(encoding="utf-8"),
+        Path("docs/detailed-design.md").read_text(encoding="utf-8"),
+        Path("docs/employee-guide.md").read_text(encoding="utf-8"),
+    ]
+
+    for content in documents:
+        assert "会议时间、参会人和沟通渠道的确定不属于业务决策" in content
+        assert "附件存在、文件名明确或确认已查看都不能单独作为保留理由" in content
+        assert "数据核查或问题排查已经完成" in content
+        assert "排查对象和结论" in content
+        assert "提交总结、审核结论或修改结果" in content
 
 
 def test_docs_define_personal_fact_review_evidence_boundary() -> None:
@@ -607,11 +624,20 @@ def test_docs_describe_attachment_file_name_and_image_privacy_boundaries() -> No
     detailed = Path("docs/detailed-design.md").read_text(encoding="utf-8")
     employee = Path("docs/employee-guide.md").read_text(encoding="utf-8")
     privacy = Path("docs/privacy-note.md").read_text(encoding="utf-8")
+    anchor_protocol = Path("docs/anchor-analysis-protocol.md").read_text(
+        encoding="utf-8"
+    )
+    segmentation = Path("docs/conversation-slice-retry-design.md").read_text(
+        encoding="utf-8"
+    )
 
     for content in (readme, detailed):
         assert "附件文件名" in content
         assert "不能" in content and "推断" in content and "正文" in content
         assert "无效附件引用" in content
+    for content in (readme, detailed, anchor_protocol, segmentation):
+        assert "候选已按个人保留规则确认可提炼后" in content
+        assert "仅发送、查看或确认附件本身不能使候选成为事件" in content
     for content in (employee, privacy):
         assert "附件文件名" in content
         assert "本人发送" in content
