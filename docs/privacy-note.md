@@ -39,7 +39,7 @@ WorkTrace 的目标是帮你回顾你自己的工作事项，不是偷偷收集�
 - 默认强制 `/no_think`
 - 请求体显式关闭推理过程
 - 消息正文中的裸链接会压缩为占位文本，但链接 URL、标题和临时引用 ID 仍会作为结构化元数据进入模型输入；飞书文档正文只在模型明确请求时读取
-- 你可以通过 `config/conversation_blacklist.json` 在消息采集前彻底排除指定会话
+- 你可以复制 `config/conversation_blacklist.example.json`，通过仅保存在本机的 `config/conversation_blacklist.json` 在消息采集前彻底排除指定会话
 - 正式运行默认不保存原始聊天；`--debug-output` 会保存裁剪后的上下文和模型输出，只应临时开启
 - 多人汇总会发送已收集 Markdown 中的事件正文、必要来源姓名和临时 draft ID；共同消息、共同文件和同日会话只转换成临时关系，不发送原始消息 ID、会话 ID 或长指纹
 

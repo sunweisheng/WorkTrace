@@ -136,7 +136,7 @@ flowchart TD
 - 当前用户在目标日期发送过消息
 - 当前用户在目标日期对消息做过 reaction
 
-`config/conversation_blacklist.json` 中的会话会在发现和拉取阶段同时排除。随后按会话分页拉取目标日期内消息并标准化文本、reply/quote、链接、附件和 reaction。为补齐私聊 reply/quote 直接关系或模型明确请求的相邻上下文，系统还可能临时读取目标日期之外的直接关联消息；事件日期仍固定为目标日期。
+每位使用者应从 `config/conversation_blacklist.example.json` 复制一份本地 `config/conversation_blacklist.json`，再填写自己需要屏蔽的会话 ID。实际黑名单不纳入 Git 管理，其中的会话会在发现和拉取阶段同时排除。随后按会话分页拉取目标日期内消息并标准化文本、reply/quote、链接、附件和 reaction。为补齐私聊 reply/quote 直接关系或模型明确请求的相邻上下文，系统还可能临时读取目标日期之外的直接关联消息；事件日期仍固定为目标日期。
 
 ### 2. 初始窗口、分段与分段批处理
 
@@ -374,7 +374,8 @@ WORKTRACE_COLLECTED_MERGE_MISSING_FIELD_RETRY_LIMIT=1
 | --- | --- |
 | `config/event_rules.json` | 敏感事件、普通事件排除和本人指派三类关键词 |
 | `config/event_metadata.json` | 主要动作和本人参与方式的英文键、中文显示名和排序 |
-| `config/conversation_blacklist.json` | 在消息采集前排除整个会话 |
+| `config/conversation_blacklist.example.json` | 会话黑名单示例，不包含个人会话 ID |
+| `config/conversation_blacklist.json` | 个人本地配置，在消息采集前排除整个会话，不纳入 Git 管理 |
 | `config/conversation_window.json` | 群聊锚点聚合、初始上下文和按需扩窗轮数 |
 | `config/llm_retry.json` | Online 请求级重试、分段/提炼/全日分组结果质量重试、流式首次返回超时、Codex 调用间隔，以及切分、提炼、个人事实复核、个人完整内容复核和多人完整复核并发数 |
 | `config/retention_policy.json` | 个人事件保留提示、既有业务词、临时协作复核、事实复核条件和模型信号定义 |

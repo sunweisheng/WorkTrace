@@ -229,3 +229,6 @@ tmp-first-batch-prompt.txt
 codex-analyze*.json
 worktrace-codex*.json
 worktrace-hook-*.json
+
+# Per-user conversation blacklist
+config/conversation_blacklist.json

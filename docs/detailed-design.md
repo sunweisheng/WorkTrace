@@ -474,7 +474,8 @@ CLI 会开启 `collected_merge_trace_enabled`，并保留环境配置的 trace �
 
 - `config/event_rules.json`：三类业务关键词
 - `config/event_metadata.json`：主要动作和参与方式的英文键、中文显示名和排序
-- `config/conversation_blacklist.json`：整会话排除
+- `config/conversation_blacklist.example.json`：不含个人会话 ID 的黑名单示例
+- `config/conversation_blacklist.json`：仅保存在使用者本机的整会话排除配置，不纳入 Git 管理
 - `config/conversation_window.json`：初始窗口聚合和按需扩窗阈值
 - `config/llm_retry.json`：Online 请求级重试、分段/提炼/全日分组结果质量重试、流式首次返回超时、Codex 间隔，以及切分、提炼、个人事实复核、个人完整内容复核和多人完整复核并发数
 - `config/retention_policy.json`：个人保留提示、既有业务词、临时协作复核、个人事实复核条件和模型信号定义

@@ -387,7 +387,7 @@ Markdown 默认只保留结构化工作事件，不会默认附带整段原始�
 
 ### 10.4 我担心会不会把私人聊天都读走
 
-当前默认只处理你在目标日期里发过消息或做过 reaction 的会话，并且目标是提取与你直接相关的工作事项，不是抓取全部聊天内容。若某个会话明确不应读取，可以把会话 ID 加入 `config/conversation_blacklist.json`。
+当前默认只处理你在目标日期里发过消息或做过 reaction 的会话，并且目标是提取与你直接相关的工作事项，不是抓取全部聊天内容。若某个会话明确不应读取，先把 `config/conversation_blacklist.example.json` 复制为本地 `config/conversation_blacklist.json`，再加入会话 ID。实际黑名单只保存在本机，不纳入 Git 管理。
 
 如果你想快速向同事解释当前边界，也可以直接转这份短说明：
 

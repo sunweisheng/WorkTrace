@@ -128,7 +128,8 @@ flowchart LR
 | `.env` / 环境变量 | 在线模型和多人汇总 trace/retry 覆盖项 |
 | `config/event_rules.json` | 敏感、排除和本人指派关键词 |
 | `config/event_metadata.json` | 本人参与方式英文键、中文显示名和排序 |
-| `config/conversation_blacklist.json` | 整会话排除 |
+| `config/conversation_blacklist.example.json` | 不含个人会话 ID 的黑名单示例 |
+| `config/conversation_blacklist.json` | 仅保存在使用者本机的整会话排除配置，不纳入 Git 管理 |
 | `config/conversation_window.json` | 群聊锚点聚合、初始上下文和按需扩窗阈值 |
 | `config/llm_retry.json` | Online 请求级重试、分段/提炼/全日分组结果质量重试、流式首次返回超时、Codex 间隔，以及切分、提炼、个人事实复核、个人完整内容复核和多人完整复核并发数 |
 | `config/retention_policy.json` | 个人事件保留提示、结构化业务词、临时协作复核、事实复核条件和模型信号定义 |
