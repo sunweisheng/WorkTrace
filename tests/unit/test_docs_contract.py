@@ -670,6 +670,43 @@ def test_readme_mentions_quick_usage_examples() -> None:
     assert "YYYY-MM-DD-登录人姓名-merged.md" in content
 
 
+def test_support_report_user_and_skill_contract() -> None:
+    readme = Path("README.md").read_text(encoding="utf-8")
+    skill = Path("SKILL.md").read_text(encoding="utf-8")
+    employee = Path("docs/employee-guide.md").read_text(encoding="utf-8")
+    privacy = Path("docs/privacy-note.md").read_text(encoding="utf-8")
+    combined = "\n".join((readme, skill, employee, privacy))
+
+    for trigger in (
+        "运行报错",
+        "帮我排查",
+        "速度太慢",
+        "结果不对",
+        "生成诊断报告",
+        "用调试模式重新跑",
+    ):
+        assert trigger in skill
+    assert "python3 -m src.worktrace.cli --date YYYY-MM-DD --debug-output" in skill
+    assert (
+        "python3 -m src.worktrace.cli --debug-output "
+        "merge-collected --date YYYY-MM-DD"
+    ) in skill
+    for status in (
+        "generated_with_llm",
+        "generated_after_llm_failure",
+        "blocked",
+        "failed",
+    ):
+        assert status in readme
+        assert status in skill
+    assert "support_report.path" in combined
+    assert "data/debug/support_reports/worktrace-support-<随机编号>.md" in combined
+    assert "绝不能发送完整 `data/debug` 目录" in combined
+    assert "不生成 ZIP" in combined
+    assert "大模型整理失败" in combined
+    assert "不自动上传或发送" in combined
+
+
 def test_collected_merge_docs_use_debug_output_cli_flag() -> None:
     command = (
         "python3 -m src.worktrace.cli --debug-output "

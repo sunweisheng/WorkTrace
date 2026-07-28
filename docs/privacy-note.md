@@ -42,9 +42,13 @@ WorkTrace 的目标是帮你回顾你自己的工作事项，不是偷偷收集�
 - 你可以复制 `config/conversation_blacklist.example.json`，通过仅保存在本机的 `config/conversation_blacklist.json` 在消息采集前彻底排除指定会话
 - 正式运行默认不保存原始聊天；`--debug-output` 会保存裁剪后的上下文和模型输出，只应临时开启
 - 多人汇总会发送已收集 Markdown 中的事件正文、必要来源姓名和临时 draft ID；共同消息、共同文件和同日会话只转换成临时关系，不发送原始消息 ID、会话 ID 或长指纹
+- 调试结束后会额外调用一次报告模型，但报告模型只读取 Python 已脱敏的编号状态、数量、墙钟耗时、token、重试、备用线路、写入和送达结果，不读取聊天、事件文字、prompt、原始模型返回或日志原文
+- 可分享的诊断材料只有 `data/debug/support_reports/worktrace-support-<随机编号>.md`；完整 `data/debug` 目录不能外发，也不能由 Codex 自行整理成外发材料
+- 安全报告写入前会扫描姓名、用户目录、飞书 ID、网址、联系方式、日期、文件名和密钥样式；未通过时不保留报告文件
 
 ## 5. 你有自主权
 
 - 你会先收到由飞书机器人发给你自己的 Markdown
 - 你可以先审阅、修改，再决定是否转发
+- 诊断报告不会自动上传或发送；需要排障时只发送 CLI `support_report.path` 指向的单个 Markdown，不发送 ZIP 或原始 trace
 - 如果你对配置或隐私边界有疑虑，应先停下来确认，而不是直接运行

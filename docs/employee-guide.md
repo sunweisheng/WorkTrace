@@ -298,7 +298,14 @@ python3 -m src.worktrace.cli --date 2026-06-23 --resume
 
 未完成任务的分段和提炼结果临时保存在 `data/cache/llm/YYYY/MM/YYYY-MM-DD/`。普通重跑会先删除旧日报、当天中间结果和当天个人调试目录，从头生成；`--resume` 保留这些内容，并只复用输入完全一致的中间结果。Markdown 成功写入后，中间结果自动清理。
 
-如果你需要让技术同事帮你排查“为什么提炼成了这个事件”或“为什么几个事件被合并到一起”，可以在命令后面加上调试开关：
+如果遇到无法启动、运行失败、速度太慢、模型反复重试、事件遗漏、错误合并、文件未生成或结果未送达，直接在 Codex 中说：
+
+- `用调试模式重新跑 2026-06-23 的个人日报，并生成可以发给维护人员的诊断报告`
+- `2026-06-23 的多人汇总结果不对，帮我用调试模式排查并生成诊断报告`
+
+Codex 会自动执行正确命令并等待结束。调试可能重新生成日报并再次发送给你自己，结束后还会增加一次独立的大模型调用，用来整理已经由 Python 脱敏和计算好的诊断事实。
+
+开发者需要直接执行时，个人日报命令是：
 
 ```bash
 python3 -m src.worktrace.cli --date 2026-06-23 --debug-output
@@ -309,6 +316,21 @@ Windows 也可以这样执行：
 ```powershell
 python -m src.worktrace.cli --date 2026-06-23 --debug-output
 ```
+
+多人汇总命令是：
+
+```bash
+python3 -m src.worktrace.cli --debug-output merge-collected --date YYYY-MM-DD
+```
+
+运行结束后，查看 CLI JSON 中的 `support_report`：
+
+- `generated_with_llm`：可以只发送 `support_report.path` 指向的 Markdown
+- `generated_after_llm_failure`：基础报告可以发送，但大模型分析没有完成
+- `blocked`：隐私检查没有通过，不要发送任何原始调试文件
+- `failed`：报告没有生成成功，也不要把原始 trace 当作诊断报告发送
+
+安全报告是单个 `data/debug/support_reports/worktrace-support-<随机编号>.md`。WorkTrace 不会自动上传或发送它，也不会生成 ZIP。只把这一份 Markdown 发给维护人员，绝不能发送完整 `data/debug` 目录。
 
 开启后，系统会把调试文件写到本地：
 
@@ -349,7 +371,7 @@ data/debug/conversations/2026-06-23/_merge_day_candidates/
 
 管理人员开启多人汇总 trace 后，`source-audit.json` 会记录新旧来源文件、部分读取和过滤数量；`collected_group_discovery.json` 记录全部初步组标题和标题候选，`collected_group_review.json` 记录不可拆重复来源块、检查范围、关系处理、跨组合并和初步组拆分。每个 step JSON 与 prompt 在候选、复核和正文请求前保存，失败时也会生成 summary。`summary.json` 和 `summary.md` 还会记录 Python 计算的输入/输出数量、来源覆盖、标题发现、完整复核和内容重写统计，便于定位失败批次、重试过程以及“哪些共同证据支持合并”或“为什么被拆开”。
 
-请注意：这些调试文件可能包含裁剪后的聊天上下文、附件正文、图片摘要和模型输出，只建议在排障时临时开启。
+请注意：这些原始调试文件可能包含裁剪后的聊天上下文、附件正文、图片摘要、prompt 和模型输出，只建议在排障时临时开启，不能外发。报告模型不会读取这些原始内容；它只读取 Python 生成的编号状态、数量、耗时、token、重试、备用线路和送达结果。最终安全报告还会扫描姓名、路径、内部 ID、网址、联系方式、日期、文件名和密钥样式，未通过时不会保留文件。
 
 ## 9. 你会看到什么结果
 

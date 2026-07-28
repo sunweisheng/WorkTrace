@@ -1814,6 +1814,34 @@ class DayGroupingSummary:
 
 
 @dataclass(frozen=True)
+class SupportReportReference:
+    status: str
+    path: str | None
+    llm_status: str
+    privacy_check: str
+    schema_version: int = 1
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> SupportReportReference:
+        return cls(
+            status=str(data["status"]),
+            path=None if data.get("path") is None else str(data["path"]),
+            llm_status=str(data.get("llm_status", "")),
+            privacy_check=str(data.get("privacy_check", "")),
+            schema_version=int(data.get("schema_version", 1)),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "status": self.status,
+            "path": self.path,
+            "llm_status": self.llm_status,
+            "privacy_check": self.privacy_check,
+            "schema_version": self.schema_version,
+        }
+
+
+@dataclass(frozen=True)
 class DailyRunResult:
     target_date: str
     conversation_count: int
@@ -1836,6 +1864,7 @@ class DailyRunResult:
         default_factory=PersonalFactReviewSummary
     )
     day_grouping_summary: DayGroupingSummary = field(default_factory=DayGroupingSummary)
+    support_report: SupportReportReference | None = None
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> DailyRunResult:
@@ -1871,10 +1900,15 @@ class DailyRunResult:
                 if isinstance(data.get("day_grouping_summary", {}), dict)
                 else {}
             ),
+            support_report=(
+                SupportReportReference.from_dict(data["support_report"])
+                if isinstance(data.get("support_report"), dict)
+                else None
+            ),
         )
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        payload = {
             "target_date": self.target_date,
             "conversation_count": self.conversation_count,
             "message_count": self.message_count,
@@ -1893,6 +1927,9 @@ class DailyRunResult:
             "personal_fact_review_summary": self.personal_fact_review_summary.to_dict(),
             "day_grouping_summary": self.day_grouping_summary.to_dict(),
         }
+        if self.support_report is not None:
+            payload["support_report"] = self.support_report.to_dict()
+        return payload
 
 
 @dataclass(frozen=True)
@@ -2352,6 +2389,7 @@ class CollectedMergeRunResult:
     self_delivery_error: str = ""
     outputs: list[CollectedMergeOutput] = field(default_factory=list)
     stage_timing_summary: dict[str, dict[str, float]] = field(default_factory=dict)
+    support_report: SupportReportReference | None = None
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> CollectedMergeRunResult:
@@ -2389,10 +2427,15 @@ class CollectedMergeRunResult:
             stage_timing_summary=_stage_timing_summary(
                 data.get("stage_timing_summary")
             ),
+            support_report=(
+                SupportReportReference.from_dict(data["support_report"])
+                if isinstance(data.get("support_report"), dict)
+                else None
+            ),
         )
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        payload = {
             "status": self.status,
             "target_date": self.target_date,
             "input_dir": self.input_dir,
@@ -2413,6 +2456,9 @@ class CollectedMergeRunResult:
                 for stage, metrics in self.stage_timing_summary.items()
             },
         }
+        if self.support_report is not None:
+            payload["support_report"] = self.support_report.to_dict()
+        return payload
 
 
 @dataclass(frozen=True)

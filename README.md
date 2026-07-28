@@ -11,12 +11,25 @@ WorkTrace 是一个个人工作事件整理工具。它从当前用户在指定�
 
 ## 快速使用说明
 
-对 Agent 说：
+### 直接告诉 Codex 这样做
+
+正常使用时，直接在 Codex 中说：
 
 - `帮我生成 2026-07-06 的个人事件MD`
 - `帮我合并 2026-07-06 的部门事件MD`
 
-或直接执行：
+遇到无法启动、运行失败、速度太慢、模型反复重试、事件遗漏、错误合并、文件未生成或结果未送达时，不需要自己打开终端。直接对 Codex 说：
+
+- `用调试模式重新跑 2026-07-06 的个人日报，并生成可以发给维护人员的诊断报告`
+- `2026-07-06 的多人汇总结果不对，帮我用调试模式排查并生成诊断报告`
+
+Codex 会自动选择正确命令、等待运行结束并检查 CLI 返回的 `support_report`。诊断报告是单个 `data/debug/support_reports/worktrace-support-<随机编号>.md`，其中 Python 负责脱敏、计数、耗时排序和比例计算，大模型只根据编号诊断事实整理问题分析和建议。
+
+只把 `support_report.path` 指向的 Markdown 发给维护人员，绝不能发送完整 `data/debug` 目录。原始调试目录可能包含聊天、prompt 和模型返回；安全诊断报告不包含目标日期、姓名、本机路径、飞书 ID、聊天正文、事件文字、文件名、网址、模型名称、模型地址、密钥、prompt、原始返回、原始错误或日志原文。WorkTrace 不会自动上传或发送这份报告。
+
+调试模式会重新运行任务，个人日报可能再次发送给本人；正式日报和多人汇总线路不变，但运行结束后会增加一次独立的诊断报告模型调用。即使正式运行的 preflight 没有通过，CLI 也会继续尝试生成说明环境问题的报告；如果报告模型全部失败，仍会生成含 Python 统计并标明“大模型整理失败”的基础 Markdown。
+
+开发者也可以直接执行：
 
 ```bash
 python3 -m src.worktrace.cli --preflight
@@ -364,7 +377,7 @@ WORKTRACE_COLLECTED_MERGE_MISSING_FIELD_RETRY_LIMIT=1
 
 固定结构的 Online 调用使用各任务自己的 Function 参数结构，设置 `strict:true` 并用 `tool_choice` 强制调用一次预期 Function；非流式默认读取一次完整 Function 调用，显式开启流式时按调用 ID 拼接参数片段后再统一解析和校验。Online 非流式请求和 Codex 备用请求共同把 `WORKTRACE_LLM_TIMEOUT_SECONDS` 作为整次请求的总时限，未配置时为 180 秒；不能只依赖会被分段响应反复刷新的单次读超时。普通文字总结和图片理解不强制使用 Function Calling。preflight 发送真实 Function Calling 探针，不支持时直接报错，不回退到旧结构化输出方式。
 
-在线文字请求之间不增加等待。遇到网络、超时、429、5xx、流式 JSON 异常、空结果或无效 JSON 时，当前请求按 `online_request_retry_limit=1` 在首次失败后立即再试 Online 1 次；第二次仍失败才交给 Codex，后续请求仍先走在线线路。模型结果通过传输但未通过 Python 结构、编号、证据或覆盖校验时，固定执行 Online 首次请求、Online 局部重试 1 次、Codex 当前请求备用 1 次。技术线路全部失败后直接执行该节点的失败处理，不占用结果质量重试，也不重新从 Online 开始一轮；结果不合法时，具体校验错误必须进入下一次请求。个人全日分组会保留合法组并把其余候选拆成单例；个人和部门标题发现失败时按没有候选继续；个人与部门完整复核失败时保留复核前分组；个人内容重写失败时确定性拼接并告警；多人正式正文在 Codex 后仍失败或不合法时终止当前 scope 且不写文件。调试模式只增加 trace 和日志，不改变这些线路或次数。401、403、TLS 证书和请求参数错误不会重试，也不会切换。
+在线文字请求之间不增加等待。遇到网络、超时、429、5xx、流式 JSON 异常、空结果或无效 JSON 时，当前请求按 `online_request_retry_limit=1` 在首次失败后立即再试 Online 1 次；第二次仍失败才交给 Codex，后续请求仍先走在线线路。模型结果通过传输但未通过 Python 结构、编号、证据或覆盖校验时，固定执行 Online 首次请求、Online 局部重试 1 次、Codex 当前请求备用 1 次。技术线路全部失败后直接执行该节点的失败处理，不占用结果质量重试，也不重新从 Online 开始一轮；结果不合法时，具体校验错误必须进入下一次请求。个人全日分组会保留合法组并把其余候选拆成单例；个人和部门标题发现失败时按没有候选继续；个人与部门完整复核失败时保留复核前分组；个人内容重写失败时确定性拼接并告警；多人正式正文在 Codex 后仍失败或不合法时终止当前 scope 且不写文件。正式流程中的调试模式只增加 trace 和日志，不改变线路和次数；任务结束后另有一次只读取安全诊断事实的报告模型调用。401、403、TLS 证书和请求参数错误不会重试，也不会切换。
 
 个人调试的 `llm_usage.json` 和多人 trace 的每个 step 都保存线路、成功或失败、切换方向、耗时及安全错误类别等调用记录；多人 `summary.json` 另汇总在线/Codex 耗时、切换次数和 Codex 等待。
 
@@ -381,6 +394,7 @@ WORKTRACE_COLLECTED_MERGE_MISSING_FIELD_RETRY_LIMIT=1
 | `config/retention_policy.json` | 个人事件保留提示、既有业务词、临时协作复核、事实复核条件和模型信号定义 |
 | `config/event_grouping.json` | 个人与多人共同使用的分组说明、合并理由、成立条件和排除条件；具体中文语义判断不写入 Python |
 | `config/collected_merge.json` | 多人汇总高风险复核开关、事件数/文件数阈值和复核条件 |
+| `config/support_report.json` | 外发诊断报告的安全说明、问题分类、允许值、慢速阶段规则、建议选项和隐私扫描规则 |
 | `config/attachment_text.json` | 文本附件扩窗的开关、扩展名、数量和大小限制 |
 | `config/image_summary.json` | 图片摘要开关、提示词、数量和大小限制 |
 | `config/reaction_catalogs/*.json` | reaction 的名称、说明、语义和资源路径 |
@@ -422,13 +436,22 @@ python3 -m src.worktrace.cli --preflight
 
 ## 调试与排障
 
+普通用户优先直接让 Codex 执行调试模式。个人日报和多人汇总都会在原有 trace 之外生成一个安全诊断 Markdown，路径由 CLI JSON 的 `support_report.path` 返回。CLI 还会返回 `support_report.status`、`llm_status`、`privacy_check` 和 `schema_version`：
+
+- `generated_with_llm`：Python 统计、大模型分析和隐私检查都已完成，可以只发送该 Markdown
+- `generated_after_llm_failure`：基础 Markdown 可以发送，但大模型分析未完成
+- `blocked`：隐私检查未通过，没有可发送报告；不要自行整理或发送原始 trace
+- `failed`：报告没有生成成功；不能把这次结果说成已有安全报告，也不要发送原始 trace
+
+报告生成失败不会改变个人日报或多人汇总原本的退出状态。不开启 `--debug-output` 时不生成诊断报告；调试模式不生成 ZIP，也不生成报告 JSON 文件。
+
 个人日报调试：
 
 ```bash
 python3 -m src.worktrace.cli --date 2026-07-06 --debug-output
 ```
 
-调试产物位于 `data/debug/conversations/<target_date>/`，可能包含：
+安全诊断报告固定写入 `data/debug/support_reports/`。个人原始调试产物位于 `data/debug/conversations/<target_date>/`，可能包含：
 
 普通个人重跑会先删除该日期的旧调试目录；使用 `--resume` 时保留，便于中断后续跑和对照已有调试产物。
 
@@ -473,13 +496,15 @@ python3 -m src.worktrace.cli --debug-output merge-collected --date YYYY-MM-DD
 
 该参数会开启多人 trace，默认写入 `data/debug/collected_merge/<target_date>/`，并保留 `.env` 中 `WORKTRACE_COLLECTED_MERGE_TRACE_ROOT` 指定的目录。`source-audit.json` 记录来源解析；`collected_group_discovery.json` 记录协议版本、全部编号标题、估算、超限、逐组检查、Python 形成的候选和尝试结果；`collected_group_review.json` 记录初步组、待处理关系、不可拆成员块、跨组合并、初步组拆分和最终组。每次模型调用前还会写入 step JSON 与 prompt；候选 step 保留 `input_events` 和 `deterministic_groups`，复核 step 的 Function 定义包含当前关系编号，并保存 `initial_groups`、`strong_relations`、`atomic_groups` 与 Python 校验错误。`summary.json`、`summary.md` 在模型失败时也会生成，并记录 Python 计算的质量统计、阶段耗时、失败步骤、`boundary_warnings` 和线路切换。
 
+诊断报告生成器不会把上述原始调试内容交给报告模型。Python 只提取固定运行状态、数量、墙钟耗时、token、重试、备用线路、写入和送达结果，并先计算阶段排序与占比；报告模型通过专用 Function Calling 选择 `config/support_report.json` 中的整体判断、问题分类、严重程度、原因和建议。模型返回的事实编号、字段和允许值会再次校验，最终 Markdown 写入前还会执行一次隐私扫描。
+
 `scripts/diagnose_collected_merge_rolling.py` 的每个模型步骤也会在调用前写入 `status=running`，并实时输出步骤状态；完成或异常后，同一个 `step-NNN.json` 会更新为 `success` 或 `failed`。调试文件保持 `running` 只表示调用尚未返回，不能据此判断模型无响应。
 
 `python3 scripts/replay_collected_review_failures.py` 可离线回放候选分组和完整复核 step。旧 trace 使用 `legacy_audit`，不补造初步组、关系或不可拆成员块；新 trace 使用 `current` 恢复 `initial_groups`、`strong_relations` 和 `atomic_groups` 并执行完整校验。`--output-dir` 只写 prompt、Function 定义和汇总，不调用模型，也不生成正式 Markdown。
 
 429、HTTP 5xx、连接失败、超时、流式 JSON 异常及空或无效 JSON 返回会让当前文字请求立即再试 Online 1 次，仍失败才由 Codex 重做；后续请求仍优先在线。临时协作复核或个人事实复核的结果缺失、重复、覆盖不完整或证据非法属于结果质量校验，仍只重试当前复核批次。401、403、TLS 证书和请求参数错误不会重试，也不会切换。过滤诊断只记录阶段、类别、来源文件、来源人员、事件 ID 和标题，不记录命中关键词或完整敏感正文。
 
-调试文件可能包含裁剪后的聊天、附件正文、图片摘要和模型输出，只应临时启用，不应提交或长期保留。
+调试文件可能包含裁剪后的聊天、附件正文、图片摘要和模型输出，只应临时启用，不应提交或长期保留，更不能作为外发材料。需要排障时只分享 `support_report.path` 指向的 Markdown。
 
 ## 安装
 

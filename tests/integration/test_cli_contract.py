@@ -10,7 +10,17 @@ from src.worktrace.models import (
     CollectedMergeRunResult,
     DailyRunResult,
     RetentionReviewSummary,
+    SupportReportReference,
 )
+
+
+def _fake_support_report(**_kwargs) -> SupportReportReference:
+    return SupportReportReference(
+        status="generated_with_llm",
+        path="data/debug/support_reports/worktrace-support-12345678.md",
+        llm_status="success",
+        privacy_check="passed",
+    )
 
 
 def test_cli_returns_structured_json_for_invalid_input(capsys) -> None:
@@ -69,6 +79,7 @@ def test_cli_returns_runner_result(capsys, tmp_path) -> None:
     assert payload["target_date"] == "2026-06-22"
     assert payload["status"] == DailyRunStatus.SUCCESS.value
     assert payload["event_count"] == 2
+    assert "support_report" not in payload
     assert payload["retention_review_summary"] == {
         "selected_candidate_count": 2,
         "reviewed_candidate_count": 2,
@@ -162,6 +173,7 @@ def test_cli_debug_output_enables_default_debug_directory(capsys, tmp_path) -> N
         config=RuntimeConfig(data_root=tmp_path / "data"),
         preflight_func=fake_preflight,
         run_func=fake_run,
+        support_report_func=_fake_support_report,
     )
 
     captured = capsys.readouterr()
@@ -214,6 +226,7 @@ def test_cli_debug_output_cleans_configured_debug_directory(capsys, tmp_path) ->
         ),
         preflight_func=fake_preflight,
         run_func=fake_run,
+        support_report_func=_fake_support_report,
     )
 
     captured = capsys.readouterr()
@@ -266,6 +279,7 @@ def test_cli_resume_preserves_existing_debug_directory(capsys, tmp_path) -> None
         config=RuntimeConfig(data_root=tmp_path / "data"),
         preflight_func=fake_preflight,
         run_func=fake_run,
+        support_report_func=_fake_support_report,
     )
 
     captured = capsys.readouterr()
@@ -371,6 +385,7 @@ def test_cli_debug_output_enables_collected_merge_trace(capsys, tmp_path) -> Non
             collected_merge_trace_root=trace_root,
         ),
         collected_run_func=fake_run,
+        support_report_func=_fake_support_report,
     )
 
     captured = capsys.readouterr()
@@ -382,3 +397,93 @@ def test_cli_debug_output_enables_collected_merge_trace(capsys, tmp_path) -> Non
     assert captured_config.collected_merge_trace_enabled is True
     assert captured_config.collected_merge_trace_root == trace_root
     assert captured_config.conversation_debug_root is None
+    assert payload["support_report"]["status"] == "generated_with_llm"
+    assert payload["support_report"]["privacy_check"] == "passed"
+
+
+def test_cli_debug_preflight_failure_still_generates_support_report(
+    capsys, tmp_path
+) -> None:
+    report_calls: list[dict[str, object]] = []
+
+    def fake_preflight(config, *, cwd):
+        from src.worktrace.preflight import PreflightReport
+
+        return PreflightReport(
+            ok=False,
+            error_summary="Missing online LLM configuration",
+        )
+
+    def fake_report(**kwargs):
+        report_calls.append(kwargs)
+        return _fake_support_report(**kwargs)
+
+    exit_code = main(
+        ["--date", "2026-06-22", "--debug-output"],
+        config=RuntimeConfig(data_root=tmp_path / "data"),
+        preflight_func=fake_preflight,
+        support_report_func=fake_report,
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert exit_code == 1
+    assert payload["status"] == DailyRunStatus.FAILED.value
+    assert payload["support_report"]["status"] == "generated_with_llm"
+    assert len(report_calls) == 1
+    assert report_calls[0]["run_mode"] == "personal"
+
+
+def test_cli_support_report_failure_does_not_change_run_exit_status(
+    capsys, tmp_path
+) -> None:
+    def fake_preflight(config, *, cwd):
+        from src.worktrace.preflight import PreflightReport
+
+        return PreflightReport(ok=True)
+
+    def fake_run(*, target_date, config):
+        return DailyRunResult(
+            target_date=target_date,
+            conversation_count=0,
+            message_count=0,
+            slice_count=0,
+            batch_count=0,
+            event_count=0,
+            skipped_slice_count=0,
+            warning_count=0,
+            status=DailyRunStatus.SUCCESS.value,
+            output_path=str(tmp_path / "daily.md"),
+            error_summary="",
+        )
+
+    def failed_report(**_kwargs):
+        raise OSError("report failed")
+
+    exit_code = main(
+        ["--date", "2026-06-22", "--debug-output"],
+        config=RuntimeConfig(data_root=tmp_path / "data"),
+        preflight_func=fake_preflight,
+        run_func=fake_run,
+        support_report_func=failed_report,
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert exit_code == 0
+    assert payload["status"] == DailyRunStatus.SUCCESS.value
+    assert payload["support_report"] == {
+        "status": "failed",
+        "path": None,
+        "llm_status": "failed",
+        "privacy_check": "not_run",
+        "schema_version": 1,
+    }
+
+
+def test_cli_invalid_debug_request_is_blocked_without_report_file(capsys) -> None:
+    exit_code = main(["--date", "not-a-date", "--debug-output"])
+
+    payload = json.loads(capsys.readouterr().out)
+    assert exit_code == 2
+    assert payload["status"] == DailyRunStatus.INVALID_INPUT.value
+    assert payload["support_report"]["status"] == "blocked"
+    assert payload["support_report"]["path"] is None

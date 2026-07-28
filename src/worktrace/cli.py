@@ -5,6 +5,7 @@ import shutil
 import sys
 from dataclasses import replace
 from pathlib import Path
+from time import perf_counter
 from typing import Callable
 
 from .config import (
@@ -16,7 +17,12 @@ from .config import (
 from .constants import DailyRunStatus
 from .errors import AnalyzerProtocolError, InvalidInputError
 from .logging_utils import configure_logging
-from .models import CollectedMergeRunResult, DailyRunResult, PreflightResult
+from .models import (
+    CollectedMergeRunResult,
+    DailyRunResult,
+    PreflightResult,
+    SupportReportReference,
+)
 from .reaction_catalogs.base import ReactionCatalogSyncResult
 from .reaction_catalog import ReactionCatalogError
 from .preflight import run_preflight_checks
@@ -24,6 +30,7 @@ from .runner import run_daily_trace
 from .pipeline.llm_checkpoints import clear_day_llm_checkpoints
 from .utils.filenames import parse_worktrace_markdown_filename
 from .utils.json_io import dump_json
+from .support_report import generate_support_report
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -39,7 +46,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--debug-output",
         dest="debug_output",
         action="store_true",
-        help="Enable personal debug artifacts or merge-collected trace output.",
+        help="Enable debug artifacts and generate a privacy-checked support Markdown.",
     )
     parser.add_argument(
         "--resume",
@@ -153,6 +160,7 @@ def execute(
     run_func=run_target_day,
     collected_run_func=run_collected_merge,
     sync_reaction_catalog_func: Callable[..., ReactionCatalogSyncResult] = run_sync_reaction_catalog,
+    support_report_func=generate_support_report,
 ) -> tuple[DailyRunResult | PreflightResult | CollectedMergeRunResult | ReactionCatalogSyncResult, int]:
     logger = configure_logging()
 
@@ -181,11 +189,23 @@ def execute(
             )
         return result, 0
     if args.command == "merge-collected":
+        run_started_at = perf_counter()
         try:
             target_date = validate_target_date(args.target_date)
         except InvalidInputError as exc:
-            return build_invalid_input_result(args.target_date, str(exc)), 2
+            result = build_invalid_input_result(args.target_date, str(exc))
+            if args.debug_output:
+                result = replace(result, support_report=_blocked_support_report())
+            return result, 2
         result = collected_run_func(target_date=target_date, config=replace(effective_config))
+        result = _attach_support_report(
+            result,
+            enabled=args.debug_output,
+            run_mode="collected_merge",
+            config=effective_config,
+            elapsed_ms=(perf_counter() - run_started_at) * 1000,
+            support_report_func=support_report_func,
+        )
         if result.status == DailyRunStatus.INVALID_INPUT.value:
             return result, 2
         if result.status == DailyRunStatus.FAILED.value:
@@ -204,25 +224,83 @@ def execute(
     try:
         target_date = validate_target_date(args.target_date)
     except InvalidInputError as exc:
-        return build_invalid_input_result(
+        result = build_invalid_input_result(
             None if argv is None else _extract_raw_date(argv), str(exc)
-        ), 2
+        )
+        if args.debug_output:
+            result = replace(result, support_report=_blocked_support_report())
+        return result, 2
 
     logger.info("Starting WorkTrace run", extra={"target_date": target_date, "stage": "cli"})
 
+    run_started_at = perf_counter()
     report = preflight_func(effective_config, cwd=Path.cwd())
     if not report.ok:
-        return build_failed_result(target_date, report.error_summary), 1
+        result = _attach_support_report(
+            build_failed_result(target_date, report.error_summary),
+            enabled=args.debug_output,
+            run_mode="personal",
+            config=effective_config,
+            elapsed_ms=(perf_counter() - run_started_at) * 1000,
+            support_report_func=support_report_func,
+        )
+        return result, 1
 
     if not args.resume:
         _clear_previous_personal_run(effective_config, target_date)
 
     result = run_func(target_date=target_date, config=replace(effective_config))
+    result = _attach_support_report(
+        result,
+        enabled=args.debug_output,
+        run_mode="personal",
+        config=effective_config,
+        elapsed_ms=(perf_counter() - run_started_at) * 1000,
+        support_report_func=support_report_func,
+    )
     if result.status == DailyRunStatus.INVALID_INPUT.value:
         return result, 2
     if result.status == DailyRunStatus.FAILED.value:
         return result, 1
     return result, 0
+
+
+def _attach_support_report(
+    result: DailyRunResult | CollectedMergeRunResult,
+    *,
+    enabled: bool,
+    run_mode: str,
+    config: RuntimeConfig,
+    elapsed_ms: float,
+    support_report_func,
+) -> DailyRunResult | CollectedMergeRunResult:
+    if not enabled:
+        return result
+    try:
+        reference = support_report_func(
+            result=result,
+            run_mode=run_mode,
+            config=config,
+            cwd=Path.cwd(),
+            elapsed_ms=elapsed_ms,
+        )
+    except Exception:
+        reference = SupportReportReference(
+            status="failed",
+            path=None,
+            llm_status="failed",
+            privacy_check="not_run",
+        )
+    return replace(result, support_report=reference)
+
+
+def _blocked_support_report() -> SupportReportReference:
+    return SupportReportReference(
+        status="blocked",
+        path=None,
+        llm_status="not_run",
+        privacy_check="not_run",
+    )
 
 
 def _extract_raw_date(argv: list[str]) -> str | None:
@@ -261,6 +339,7 @@ def main(
     run_func=run_target_day,
     collected_run_func=run_collected_merge,
     sync_reaction_catalog_func: Callable[..., ReactionCatalogSyncResult] = run_sync_reaction_catalog,
+    support_report_func=generate_support_report,
 ) -> int:
     result, exit_code = execute(
         argv,
@@ -269,6 +348,7 @@ def main(
         run_func=run_func,
         collected_run_func=collected_run_func,
         sync_reaction_catalog_func=sync_reaction_catalog_func,
+        support_report_func=support_report_func,
     )
     sys.stdout.write(dump_json(result.to_dict(), pretty=True))
     sys.stdout.write("\n")

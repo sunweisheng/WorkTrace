@@ -1,6 +1,6 @@
 ---
 name: worktrace
-description: 帮员工从指定日期里与自己直接相关的飞书工作聊天中提炼工作事件，生成脱敏后的个人 Markdown，并把结果先发给员工自己；也支持管理人员把多人已生成的 WorkTrace Markdown 放入 merge_inbox 后做团队汇总合并。默认“跑某日数据”指个人日报，只有用户明确提到合并、收集、管理、团队汇总或 merge_inbox 时才执行多人合并。
+description: 帮员工从指定日期里与自己直接相关的飞书工作聊天中提炼工作事件，生成脱敏后的个人 Markdown，并把结果先发给员工自己；也支持管理人员把多人已生成的 WorkTrace Markdown 放入 merge_inbox 后做团队汇总合并。用户提到运行报错、帮我排查、速度太慢、结果不对、生成诊断报告、用调试模式重新跑时，也使用本 skill 自动执行调试并生成安全 Markdown 报告。默认“跑某日数据”指个人日报，只有用户明确提到合并、收集、管理、团队汇总或 merge_inbox 时才执行多人合并。
 ---
 
 # WorkTrace
@@ -23,14 +23,17 @@ WorkTrace 另有一个管理人员汇总模式：管理人员先收集多人已�
 - 用户明确说“合并 29 日收集的 MD”“管理人员汇总”“团队汇总”“多人合并”“merge_inbox 里的文件”“生成部门事件MD”时，执行管理人员汇总流程。
 - 如果用户身份是管理人员，但表达仍然只是“跑一下 29 日数据”，不要直接推断为多人合并；应先确认是个人日报还是合并已收集 Markdown。
 - 如果用户同时提到“收集的文件/多人 Markdown/合并”，即使没有写出 `merge-collected`，也按管理人员汇总流程处理。
+- 用户说“运行报错”“帮我排查”“速度太慢”“结果不对”“生成诊断报告”“用调试模式重新跑”时，按调试诊断流程执行。能从当前对话确定日期和个人/多人方式时直接运行；确实无法判断运行方式时只询问一次。
 
-每次使用前，都必须先检查用户是否已经提供本地在线模型配置；如果没有配置，必须中止执行并明确要求用户先提供：
+普通生成每次使用前都必须先检查用户是否已经提供本地在线模型配置；如果没有配置，必须中止普通生成并明确要求用户先提供：
 
 - 必须在仓库本地单独配置在线模型参数
 - 推荐使用仓库根目录 `.env`
 - `WORKTRACE_LLM_BASE_URL`、`WORKTRACE_LLM_MODEL`、`WORKTRACE_LLM_API_KEY` 缺一不可
 - `WORKTRACE_LLM_REASONING_EFFORT` 默认应为 `none`
 - 这些内容不能提交到 git 仓库
+
+诊断请求例外：不要因为配置缺失或 preflight 失败而由 Codex 提前中止。仍要执行带 `--debug-output` 的 CLI，让 WorkTrace 生成能够说明环境问题的安全诊断报告；正式日报流程是否继续仍由 CLI 自己决定。
 
 优先按以下流程执行：
 
@@ -41,7 +44,7 @@ WorkTrace 另有一个管理人员汇总模式：管理人员先收集多人已�
 5. 仅在需要语义提取时调用在线模型做批量分析。
 6. 主流程默认且强制使用 `/no_think` 与请求体关闭推理配置。
 7. 在线文字请求不等待；Online 非流式请求和 Codex 备用请求都以 `WORKTRACE_LLM_TIMEOUT_SECONDS`（未配置时 180 秒）作为整次请求总时限，Online 到点后关闭当前连接。发生网络、超时、429、5xx、流式 JSON 异常、空结果或无效 JSON 时，按 `config/llm_retry.json` 的 `online_request_retry_limit=1` 只对当前请求再试 Online 1 次，仍失败才切到 Codex，下一请求仍优先在线。Codex 按同一配置的 `0-1` 秒范围调用；图片摘要只走在线图片能力。
-8. 调试模式只增加 trace 和日志，不改变模型线路。除非用户明确要求做单独的 Codex 后端诊断，否则不得通过临时配置、包装命令或代码参数把整次个人日报或多人汇总强制切到 Codex。
+8. 调试模式只为正式日报或多人汇总增加 trace 和日志，不改变正式模型线路。任务结束后另有一次独立的诊断报告模型调用；报告模型只读取 Python 已脱敏并计算好的编号事实。除非用户明确要求做单独的 Codex 后端诊断，否则不得通过临时配置、包装命令或代码参数把整次个人日报或多人汇总强制切到 Codex。
 9. 在线请求成功返回、但结果未通过 Python 证据或结构校验时，先按程序现有配置用 Online 局部重试当前请求；结果质量错误在局部重试用尽后，只把带有最后校验错误的当前请求交给 Codex 再执行一次。技术请求经过 Online 重试和 Codex 备用仍失败时直接执行该节点的失败策略，不消耗结果质量重试，也不重新从 Online 开始一轮。Codex 结果合法时继续流程，下一请求仍优先 Online；普通结构化任务中 Codex 失败或结果仍不合法时停止整次生成。全日分组的专用边界是：Codex 技术调用失败时终止；Codex 返回但仍非法时保留完全合法组，其余候选拆成单例并记录 warning。标题发现全部尝试失败时按没有候选继续并记录 warning；局部复核失败或持续非法时保留复核前分组并记录 warning。不得擅自增加重试次数、重新运行整次流程或把整次流程切换到 Codex。
 
 个人日报临时协作复核约定：
@@ -84,6 +87,35 @@ WorkTrace 另有一个管理人员汇总模式：管理人员先收集多人已�
 python -m src.worktrace.cli --date YYYY-MM-DD
 ```
 
+## 调试诊断执行规则
+
+开始执行前用一句自然语言告知用户：调试会重新运行任务，个人日报可能再次发送给本人，结束后还会增加一次报告模型调用；不要增加确认循环。
+
+个人调试固定执行：
+
+```bash
+python3 -m src.worktrace.cli --date YYYY-MM-DD --debug-output
+```
+
+多人汇总调试固定执行：
+
+```bash
+python3 -m src.worktrace.cli --debug-output merge-collected --date YYYY-MM-DD
+```
+
+执行后必须：
+
+1. 等待命令完全结束并读取最终 CLI JSON，不要只看中途日志。
+2. 检查 `support_report.status`、`support_report.privacy_check` 和 `support_report.path` 指向的文件是否真实存在。
+3. `generated_with_llm` 且 `privacy_check=passed` 时，把准确的 Markdown 路径交给用户。
+4. `generated_after_llm_failure` 且 `privacy_check=passed` 时，说明基础报告可以发送，但大模型分析部分未完成。
+5. `blocked` 或 `failed` 时，明确说明没有可发送的安全报告，绝不能把原始 trace 说成诊断报告或建议用户发送。
+6. 不自动上传或发送报告，只把本地路径交给当前用户。不开启 `--debug-output` 时不要寻找或生成报告。
+
+外发材料必须由 WorkTrace 报告生成器产生并通过隐私检查。不得自行读取原始聊天、prompt、模型返回或完整 trace 后整理外发内容；不得发送完整 `data/debug` 目录。报告只允许是 `data/debug/support_reports/worktrace-support-<随机编号>.md` 指向的单个 Markdown，不生成或索要 ZIP。
+
+报告模型先按当前请求规则尝试 Online，再使用 Codex 备用；如果 Online 配置本身不可用，可以直接尝试 Codex。这个例外只属于独立报告调用，不改变个人日报或多人汇总的正式模型线路。
+
 管理人员汇总命令：
 
 ```bash
@@ -115,7 +147,7 @@ python3 -m src.worktrace.cli --debug-output merge-collected --date YYYY-MM-DD
 - 每个合并范围输出本目录 `YYYY-MM-DD-登录人姓名-merged.md`。
 - 团队汇总文件会公开保留来源人员，并在隐藏信息中逐级保留来源事件 ID；中心结果还公开显示从上游 `*-merged.md` 文件名提取并逐级保留的来源负责人。
 - 缺少当前登录人的个人 MD 时静默执行普通汇总，不产生 warning。
-- 输入/输出数量、字符数、覆盖率、校验错误、重试原因、复核触发和阶段耗时全部由 Python 计算，并进入 CLI JSON 与 trace summary；阶段实际耗时看 `wall_clock_ms`，并发请求负载看 `request_accumulated_ms`，不能把请求累计耗时当作实际等待时间。调试模式只增加记录，不改变 Online 局部重试 1 次和当前请求 Codex 备用 1 次的线路；不要求每一级事件数必须减少。
+- 输入/输出数量、字符数、覆盖率、校验错误、重试原因、复核触发和阶段耗时全部由 Python 计算，并进入 CLI JSON 与 trace summary；阶段实际耗时看 `wall_clock_ms`，并发请求负载看 `request_accumulated_ms`，不能把请求累计耗时当作实际等待时间。调试记录不改变 Online 局部重试 1 次和当前请求 Codex 备用 1 次的正式线路；结束后独立执行报告模型调用，不要求每一级事件数必须减少。
 - 多人汇总的 `--debug-output` 会直接开启 trace，默认写入 `data/debug/collected_merge/<target_date>/`；除原 step 和汇总外，还写入 `collected_group_discovery.json` 与 `collected_group_review.json`。如果 `.env` 配置了 `WORKTRACE_COLLECTED_MERGE_TRACE_ROOT`，继续使用该目录。也可通过 `WORKTRACE_COLLECTED_MERGE_TRACE=true` 长期开启。
 - `python3 scripts/replay_collected_review_failures.py --trace-root <trace目录> --steps <编号列表> --output-dir <输出目录>` 可离线复盘候选分组和高风险复核。旧 trace 使用 `legacy_audit`，不补造 `member_connections`；新实验结果使用 `current` 完整执行新协议校验。该脚本不调用模型，也不生成正式 Markdown。
 - 每个生成的团队汇总文件都会通过飞书 CLI 机器人身份发送给当前登录用户自己。
@@ -130,6 +162,8 @@ python3 -m src.worktrace.cli --debug-output merge-collected --date YYYY-MM-DD
 - 个人日报和多人汇总统一使用默认值为 `7000` 的 `model_input_batch_target_tokens` 作为模型输入估算目标，不另设多人合并字符阈值。分批和调用前检查必须调用同一个 Python 估算函数，并取 Online Function 定义与 `tool_choice`、Codex 完整 output-schema 两种估算的较大值；模型名、URL、API Key、timeout 和 stream 不计入。会话分段窗口、锚点降级批次、全日候选分组及多人汇总等仍可拆的组合输入必须继续拆分；最小必要输入仍超过目标时允许发送，并在调试记录中保存两条线路估算、目标值、超限原因、实际 token 和估算差。该值不是 HTTP 字节数或服务端上下文上限。
 - `WORKTRACE_LLM_STREAM` 是 Online 文字和图片请求的唯一流式开关，默认 `false`。每次请求重新读取配置，创建并关闭独立 OpenAI 和 HTTP 客户端；固定结构请求强制且只允许调用一次预期 Function，显式开启流式时按调用 ID 拼接 Function 参数。普通文字或图片理解不强制 Function Calling。请求级可重试错误按配置再试 Online 1 次，仍失败才将当前请求交给 Codex；Python 校验失败则先用 Online 局部重试当前请求并反馈具体错误，结果质量局部重试用尽后再将当前请求交给 Codex 一次。下一请求重新优先 Online。Codex 失败或结果仍不合法时停止整次生成。调试、诊断或一次运行失败都不构成整次切换后端的授权；需要改变全局后端或重试次数时，先停止并取得用户明确同意。
 - 原始聊天内容不应长期落盘，长期保留的只有结构化事件清单。
+- 安全诊断报告的数量、耗时、排序、比例、token、重试和送达统计必须由 Python 计算；大模型只解释编号事实并从 `config/support_report.json` 的允许项中选择判断和建议。
+- 报告模型不得读取目标日期、姓名、本机路径、飞书 ID、聊天正文、事件文字、文件名、URL、模型名称、模型地址、密钥、prompt、原始模型返回、原始错误或日志原文。
 - 最终对员工可见的 Markdown 应优先保留 `日期`、`事件标题`、`内容`、`具体对象`、中文 `保留理由`、作为来源证据的 `保留依据`、`涉及文件`。
 - 员工最终产物不应显示群名、open_id、消息 ID、会话 ID 或参与人名单；事件正文可在责任分工、任务指派、确认沟通对象等确有必要时保留姓名。
 - 管理人员汇总产物例外：允许显示来源人员和上游来源负责人；来源事件 ID 只在隐藏信息中保留，用于团队事项追溯。

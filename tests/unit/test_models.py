@@ -29,6 +29,7 @@ from src.worktrace.models import (
     SelfIdentity,
     SourceBackedEventDraft,
     StoreWriteResult,
+    SupportReportReference,
     WorkEvent,
 )
 from src.worktrace.utils.json_io import dump_json, load_json_object
@@ -195,6 +196,12 @@ def test_model_roundtrip(sample_message: NormalizedMessage) -> None:
         self_delivery_status="pending",
         self_delivery_target="",
         self_delivery_error="",
+        support_report=SupportReportReference(
+            status="generated_with_llm",
+            path="data/debug/support_reports/worktrace-support-12345678.md",
+            llm_status="success",
+            privacy_check="passed",
+        ),
     )
 
     payloads = [
