@@ -1097,6 +1097,46 @@ def test_collected_merge_delivers_all_outputs_to_self(
     ]
 
 
+def test_collected_merge_skips_self_delivery_when_disabled(tmp_path: Path) -> None:
+    inbox = tmp_path / "merge_inbox" / "2026" / "06" / "29"
+    _write_day_doc(
+        inbox / "2026-06-29-张三.md",
+        [
+            _event(
+                event_id="evt-disabled-delivery",
+                title="关闭发送的合并测试",
+                content="张三确认合并后的 Markdown 只保存在本地。",
+                object_hint="自送达开关",
+                retention_detail="确认关闭自送达时仍生成部门汇总。",
+            )
+        ],
+        tmp_path,
+    )
+    delivered: list[str] = []
+
+    class CapturingDelivery:
+        def deliver_to_self(self, *, self_identity, markdown_path):
+            delivered.append(markdown_path.name)
+            return ("success", self_identity.open_id)
+
+    config = RuntimeConfig(
+        data_root=tmp_path / "data",
+        self_delivery_enabled=False,
+    )
+    result = _build_runner(
+        tmp_path,
+        config=config,
+        delivery_channel=CapturingDelivery(),
+    ).run("2026-06-29")
+
+    assert result.status == "success"
+    assert result.self_delivery_status == "disabled"
+    assert result.self_delivery_target == ""
+    assert result.self_delivery_error == ""
+    assert [output.self_delivery_status for output in result.outputs] == ["disabled"]
+    assert delivered == []
+
+
 def test_collected_merge_delivery_failure_only_warns(tmp_path: Path) -> None:
     inbox = tmp_path / "merge_inbox" / "2026" / "06" / "29"
     inbox.mkdir(parents=True)

@@ -97,7 +97,9 @@ sequenceDiagram
         LLM-->>Runner: 覆盖锁定成员的标题、正文和对象
     end
     Runner->>Store: replace_day(...)
-    Runner->>Delivery: deliver_to_self(...)
+    opt config/self_delivery.json enabled=true
+        Runner->>Delivery: deliver_to_self(...)
+    end
     Runner-->>CLI: DailyRunResult JSON
 ```
 
@@ -304,7 +306,7 @@ data/YYYY/MM/YYYY-MM-DD-姓名.md
 
 无会话、无消息、候选被全部过滤或最终事件为空，都走成功空覆盖并生成合法 Markdown。
 
-写入后 `FeishuCliSelfDelivery` 规范化发送文件名，使用 bot 身份向当前 user `open_id` 发送文件。发送错误不会删除已写入文件，运行状态变为 `success_with_warnings`。
+写入后，`config/self_delivery.json` 的 `enabled` 默认是 `true`。开启时，`FeishuCliSelfDelivery` 规范化发送文件名，使用 bot 身份向当前 user `open_id` 发送文件；发送错误不会删除已写入文件，运行状态变为 `success_with_warnings`。关闭时不调用飞书 CLI，Markdown 保持已写入状态，结果的 `self_delivery_status` 为 `disabled`。
 
 ## 6. 三层过滤模型
 

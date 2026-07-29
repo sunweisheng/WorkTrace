@@ -63,3 +63,32 @@ def test_runner_empty_day_is_success(tmp_path: Path) -> None:
     assert result.event_count == 0
     assert result.output_path is not None
     assert Path(result.output_path).name == "2026-06-22-Me.md"
+
+
+def test_runner_empty_day_skips_self_delivery_when_disabled(tmp_path: Path) -> None:
+    class NoDelivery:
+        def deliver_to_self(self, *, self_identity, markdown_path):
+            raise AssertionError("Self delivery must be disabled.")
+
+    config = RuntimeConfig(
+        data_root=tmp_path / "data",
+        self_delivery_enabled=False,
+    )
+    runner = DailyTraceRunner(
+        config=config,
+        dependencies=RuntimeDependencies(
+            chat_source=EmptySource(),
+            content_resolver=EmptyResolver(),
+            analyzer=EmptyAnalyzer(),
+            delivery_channel=NoDelivery(),
+            event_store=MarkdownEventStore(config=config),
+        ),
+    )
+
+    result = runner.run("2026-06-22")
+
+    assert result.status == DailyRunStatus.SUCCESS.value
+    assert result.output_path is not None
+    assert result.self_delivery_status == "disabled"
+    assert result.self_delivery_target == ""
+    assert result.self_delivery_error == ""

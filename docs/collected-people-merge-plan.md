@@ -299,6 +299,8 @@ WORKTRACE_COLLECTED_MERGE_TRACE_ROOT=data/debug/collected_merge
 
 `summary.json` 和 `summary.md` 还包含 Python 计算的 `quality_summary` 与 `stage_timing_summary`。前者记录输入/过滤后/输出事件数、来源覆盖、标题发现请求、逐组检查与候选、跨组合并、初步组拆分、关系成立、证据分开、复核失败、内容重写失败、正文重试和提示缩短；后者记录各阶段墙钟耗时和请求累计耗时。比例只用于人工检查，不作为强制减少门槛；一个人部门或当天没有重复事项时，输出事件数允许等于输入事件数。并发请求耗时不能相加后当作实际运行耗时。
 
+每个 scope 写入 Markdown 后，默认由飞书 CLI 发送给当前登录用户。把 `config/self_delivery.json` 的 `enabled` 改为 `false` 可同时关闭个人日报和多人汇总的这一步；此时不会调用飞书 CLI，`self_delivery_status` 返回 `disabled`，不影响 Markdown、统计或其他合并流程。
+
 `python3 scripts/replay_collected_review_failures.py --trace-root <trace目录> --steps <编号列表> --output-dir <输出目录>` 可以直接离线回放候选分组和完整复核 step；原有 `--inventory`、`--ids`、`--result-dir` 和 `--output-dir` 继续可用。旧 trace 使用 `legacy_audit`，不补造初步组、关系处理或不可拆成员块；新 trace 使用 `current` 恢复 `initial_groups`、`strong_relations` 和 `atomic_groups`，并完整执行关系覆盖与成员块校验。脚本明确记录 `model_call_count: 0`，不调用模型，也不生成正式 Markdown。
 
 ## 13. JSON 结果

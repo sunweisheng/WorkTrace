@@ -721,6 +721,7 @@ class DailyTraceRunner:
                 self.dependencies.delivery_channel,
                 self_identity=self_identity,
                 markdown_path=Path(write_result.output_path),
+                enabled=self.config.self_delivery_enabled,
             )
             if delivery_error:
                 warning_messages.append(delivery_error)
@@ -1194,6 +1195,7 @@ class DailyTraceRunner:
             self.dependencies.delivery_channel,
             self_identity=self_identity,
             markdown_path=Path(write_result.output_path),
+            enabled=self.config.self_delivery_enabled,
         )
         if delivery_error:
             warning_messages.append(delivery_error)
@@ -5643,7 +5645,15 @@ def _conversation_slice_signature(
     )
 
 
-def _deliver_markdown_to_self(delivery_channel, *, self_identity, markdown_path: Path) -> tuple[str, str, str]:
+def _deliver_markdown_to_self(
+    delivery_channel,
+    *,
+    self_identity,
+    markdown_path: Path,
+    enabled: bool,
+) -> tuple[str, str, str]:
+    if not enabled:
+        return "disabled", "", ""
     try:
         status, target = delivery_channel.deliver_to_self(
             self_identity=self_identity,

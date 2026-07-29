@@ -676,6 +676,7 @@ class CollectedMergeRunner:
                 self.delivery_channel,
                 self_identity=self_identity,
                 markdown_path=output_path,
+                enabled=self.config.self_delivery_enabled,
             )
         )
         self._record_collected_stage_timing("self_delivery", self_delivery_started_at)
@@ -5378,6 +5379,8 @@ def summarize_self_delivery_status(outputs: list[CollectedMergeOutput]) -> str:
         return "failed"
     if "success" in statuses:
         return "success"
+    if "disabled" in statuses:
+        return "disabled"
     return ""
 
 
@@ -6967,7 +6970,10 @@ def _deliver_markdown_to_self(
     *,
     self_identity: SelfIdentity,
     markdown_path: Path,
+    enabled: bool,
 ) -> tuple[str, str, str]:
+    if not enabled:
+        return "disabled", "", ""
     try:
         status, target = delivery_channel.deliver_to_self(
             self_identity=self_identity,

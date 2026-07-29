@@ -40,7 +40,7 @@ WorkTrace 另有一个管理人员汇总模式：管理人员先收集多人已�
 1. 确认目标日期。
 2. 在仓库根目录执行 WorkTrace 的 Python 入口，而不是直接在 `SKILL.md` 中实现业务逻辑。
 3. 让 Python 负责聊天抓取、窗口裁剪、批量组装、模型信号和证据校验、固定保留规则、统计、全日分组完整性、文件链接聚合、Markdown 写入和自送达。
-4. 每日 Markdown 文件创建成功后，通过飞书 CLI 机器人身份把结果发给当前登录用户自己。
+4. 每日 Markdown 文件创建成功后，按 `config/self_delivery.json` 的 `enabled` 决定是否通过飞书 CLI 机器人身份发给当前登录用户自己；默认开启。
 5. 仅在需要语义提取时调用在线模型做批量分析。
 6. 主流程默认且强制使用 `/no_think` 与请求体关闭推理配置。
 7. 在线文字请求不等待；Online 非流式请求和 Codex 备用请求都以 `WORKTRACE_LLM_TIMEOUT_SECONDS`（未配置时 180 秒）作为整次请求总时限，Online 到点后关闭当前连接。发生网络、超时、429、5xx、流式 JSON 异常、空结果或无效 JSON 时，按 `config/llm_retry.json` 的 `online_request_retry_limit=1` 只对当前请求再试 Online 1 次，仍失败才切到 Codex，下一请求仍优先在线。Codex 按同一配置的 `0-1` 秒范围调用；图片摘要只走在线图片能力。
@@ -89,7 +89,7 @@ python -m src.worktrace.cli --date YYYY-MM-DD
 
 ## 调试诊断执行规则
 
-开始执行前用一句自然语言告知用户：调试会重新运行任务，个人日报可能再次发送给本人，结束后还会增加一次报告模型调用；不要增加确认循环。
+开始执行前用一句自然语言告知用户：调试会重新运行任务；自送达开启时，个人日报可能再次发送给本人，结束后还会增加一次报告模型调用；不要增加确认循环。
 
 个人调试固定执行：
 
@@ -150,7 +150,7 @@ python3 -m src.worktrace.cli --debug-output merge-collected --date YYYY-MM-DD
 - 输入/输出数量、字符数、覆盖率、校验错误、重试原因、复核触发和阶段耗时全部由 Python 计算，并进入 CLI JSON 与 trace summary；阶段实际耗时看 `wall_clock_ms`，并发请求负载看 `request_accumulated_ms`，不能把请求累计耗时当作实际等待时间。调试记录不改变 Online 局部重试 1 次和当前请求 Codex 备用 1 次的正式线路；结束后独立执行报告模型调用，不要求每一级事件数必须减少。
 - 多人汇总的 `--debug-output` 会直接开启 trace，默认写入 `data/debug/collected_merge/<target_date>/`；除原 step 和汇总外，还写入 `collected_group_discovery.json` 与 `collected_group_review.json`。如果 `.env` 配置了 `WORKTRACE_COLLECTED_MERGE_TRACE_ROOT`，继续使用该目录。也可通过 `WORKTRACE_COLLECTED_MERGE_TRACE=true` 长期开启。
 - `python3 scripts/replay_collected_review_failures.py --trace-root <trace目录> --steps <编号列表> --output-dir <输出目录>` 可离线复盘候选分组和高风险复核。旧 trace 使用 `legacy_audit`，不补造 `member_connections`；新实验结果使用 `current` 完整执行新协议校验。该脚本不调用模型，也不生成正式 Markdown。
-- 每个生成的团队汇总文件都会通过飞书 CLI 机器人身份发送给当前登录用户自己。
+- 每个生成的团队汇总文件默认都会通过飞书 CLI 机器人身份发送给当前登录用户自己。将 `config/self_delivery.json` 的 `enabled` 设为 `false` 后不发送，结果 `self_delivery_status` 为 `disabled`。
 - 更多细节见 `docs/collected-people-merge-plan.md`。
 
 ## 约束
@@ -168,8 +168,8 @@ python3 -m src.worktrace.cli --debug-output merge-collected --date YYYY-MM-DD
 - 员工最终产物不应显示群名、open_id、消息 ID、会话 ID 或参与人名单；事件正文可在责任分工、任务指派、确认沟通对象等确有必要时保留姓名。
 - 管理人员汇总产物例外：允许显示来源人员和上游来源负责人；来源事件 ID 只在隐藏信息中保留，用于团队事项追溯。
 - 文档链接的主要用途是帮助员工以后回忆事件细节，不是让模型围绕链接做推理。
-- 每次成功生成当天 Markdown 文件后，都应通过飞书 CLI 机器人身份将结果发送给当前登录用户自己，作为自送达副本。
-- 管理人员汇总模式生成规范化的 `YYYY-MM-DD-登录人姓名-merged.md`，并把每个结果文件发送给当前登录用户自己。
+- 每次成功生成当天 Markdown 文件后，默认通过飞书 CLI 机器人身份将结果发送给当前登录用户自己，作为自送达副本。`config/self_delivery.json` 的 `enabled` 可关闭这一步，不影响文件生成。
+- 管理人员汇总模式生成规范化的 `YYYY-MM-DD-登录人姓名-merged.md`，并在自送达开启时把每个结果文件发送给当前登录用户自己。
 
 员工可以直接说：
 

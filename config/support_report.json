@@ -101,6 +101,7 @@
     "written": "已写入",
     "not_written": "未写入",
     "not_attempted": "未尝试",
+    "disabled": "已关闭",
     "unknown": "unknown",
     "source_parse": "来源解析",
     "source_filter": "来源筛选",

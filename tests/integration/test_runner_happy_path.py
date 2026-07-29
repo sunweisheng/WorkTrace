@@ -147,6 +147,35 @@ def test_runner_happy_path(tmp_path: Path) -> None:
     assert not (tmp_path / "data" / "debug" / "conversations").exists()
 
 
+def test_runner_skips_self_delivery_when_disabled(tmp_path: Path) -> None:
+    class NoDelivery:
+        def deliver_to_self(self, *, self_identity, markdown_path):
+            raise AssertionError("Self delivery must be disabled.")
+
+    config = RuntimeConfig(
+        data_root=tmp_path / "data",
+        self_delivery_enabled=False,
+    )
+    runner = DailyTraceRunner(
+        config=config,
+        dependencies=RuntimeDependencies(
+            chat_source=FakeSource(),
+            content_resolver=FakeResolver(),
+            analyzer=FakeAnalyzer(),
+            delivery_channel=NoDelivery(),
+            event_store=MarkdownEventStore(config=config),
+        ),
+    )
+
+    result = runner.run("2026-06-22")
+
+    assert result.status == DailyRunStatus.SUCCESS.value
+    assert result.output_path is not None
+    assert result.self_delivery_status == "disabled"
+    assert result.self_delivery_target == ""
+    assert result.self_delivery_error == ""
+
+
 def test_runner_includes_image_failure_in_final_warnings(tmp_path: Path) -> None:
     class ImageWarningResolver(FakeResolver):
         def __init__(self) -> None:

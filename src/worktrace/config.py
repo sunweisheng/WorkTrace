@@ -33,6 +33,7 @@ DEFAULT_LLM_RETRY_FILE_NAME = "config/llm_retry.json"
 DEFAULT_EVENT_GROUPING_FILE_NAME = "config/event_grouping.json"
 DEFAULT_COLLECTED_MERGE_FILE_NAME = "config/collected_merge.json"
 DEFAULT_RETENTION_POLICY_FILE_NAME = "config/retention_policy.json"
+DEFAULT_SELF_DELIVERY_FILE_NAME = "config/self_delivery.json"
 
 
 @dataclass(frozen=True)
@@ -383,7 +384,33 @@ def _load_supporting_config_overrides(
     config = _load_conversation_window_overrides(config, base_dir=base_dir)
     config = _load_llm_retry_overrides(config, base_dir=base_dir)
     config = _load_event_grouping_overrides(config, base_dir=base_dir)
-    return _load_collected_merge_overrides(config, base_dir=base_dir)
+    config = _load_collected_merge_overrides(config, base_dir=base_dir)
+    return _load_self_delivery_overrides(config, base_dir=base_dir)
+
+
+def _load_self_delivery_overrides(
+    config: RuntimeConfig,
+    *,
+    base_dir: Path,
+) -> RuntimeConfig:
+    config_path = base_dir / config.self_delivery_file_name
+    try:
+        payload = json.loads(config_path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return config
+    except json.JSONDecodeError as exc:
+        raise ValueError(
+            f"Invalid self delivery config: {config_path} is not valid JSON."
+        ) from exc
+    if not isinstance(payload, dict) or set(payload) != {"enabled"}:
+        raise ValueError(
+            "Invalid self delivery config: fields must match the contract."
+        )
+    if not isinstance(payload["enabled"], bool):
+        raise ValueError(
+            "Invalid self delivery config: `enabled` must be a boolean."
+        )
+    return replace(config, self_delivery_enabled=payload["enabled"])
 
 
 def _load_retention_policy_overrides(
@@ -1347,6 +1374,7 @@ class RuntimeConfig:
     collected_merge_trace_root: Path = field(
         default_factory=lambda: Path("data") / "debug" / "collected_merge"
     )
+    self_delivery_enabled: bool = True
     high_risk_review_enabled: bool = True
     high_risk_source_event_count: int = 10
     high_risk_source_file_count: int = 4
@@ -1414,6 +1442,7 @@ class RuntimeConfig:
     event_grouping_file_name: str = DEFAULT_EVENT_GROUPING_FILE_NAME
     collected_merge_file_name: str = DEFAULT_COLLECTED_MERGE_FILE_NAME
     retention_policy_file_name: str = DEFAULT_RETENTION_POLICY_FILE_NAME
+    self_delivery_file_name: str = DEFAULT_SELF_DELIVERY_FILE_NAME
     llm_stream_enabled: bool = False
     llm_tls_verify: bool = False
     llm_reasoning_effort: str | None = "none"

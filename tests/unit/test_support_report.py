@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 
 from src.worktrace.analyzers.function_calls import FunctionCallSpec
@@ -189,6 +190,30 @@ def test_all_model_routes_failed_still_write_basic_markdown(tmp_path: Path) -> N
     report = Path(reference.path).read_text(encoding="utf-8")
     assert "大模型整理失败" in report
     assert "D001" in report
+
+
+def test_support_report_marks_disabled_self_delivery_as_disabled(
+    tmp_path: Path,
+) -> None:
+    result = replace(
+        _result(tmp_path),
+        self_delivery_status="disabled",
+        self_delivery_error="",
+        error_summary="",
+    )
+    settings = load_support_report_settings(REPO_ROOT)
+
+    facts = build_diagnostic_facts(
+        result=result,
+        run_mode="personal",
+        config=RuntimeConfig(data_root=tmp_path / "data"),
+        cwd=REPO_ROOT,
+        elapsed_ms=100,
+        settings=settings,
+    )
+
+    artifact_fact = next(fact for fact in facts if fact.kind == "artifact_status")
+    assert artifact_fact.metrics["delivery_status"] == "disabled"
 
 
 def test_privacy_scan_blocks_report_before_file_write(

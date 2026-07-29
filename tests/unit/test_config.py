@@ -410,6 +410,49 @@ def test_repo_collected_merge_config_matches_review_defaults() -> None:
     assert definitions["same_deliverable_batch"]["rejection_rules"]
 
 
+def test_load_runtime_config_overrides_reads_self_delivery_config(
+    tmp_path: Path,
+) -> None:
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    (config_dir / "self_delivery.json").write_text(
+        json.dumps({"enabled": False}),
+        encoding="utf-8",
+    )
+
+    config = load_runtime_config_overrides(RuntimeConfig(), cwd=tmp_path)
+
+    assert config.self_delivery_enabled is False
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [{}, {"enabled": "false"}, {"enabled": True, "other": False}],
+)
+def test_load_runtime_config_overrides_rejects_invalid_self_delivery_config(
+    tmp_path: Path,
+    payload: dict[str, object],
+) -> None:
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    (config_dir / "self_delivery.json").write_text(
+        json.dumps(payload),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="Invalid self delivery config"):
+        load_runtime_config_overrides(RuntimeConfig(), cwd=tmp_path)
+
+
+def test_repo_self_delivery_config_is_enabled() -> None:
+    config = load_runtime_config_overrides(RuntimeConfig(), cwd=Path.cwd())
+
+    assert config.self_delivery_enabled is True
+    assert json.loads(Path("config/self_delivery.json").read_text(encoding="utf-8")) == {
+        "enabled": True
+    }
+
+
 def test_load_runtime_config_rejects_invalid_attachment_version_pattern(
     tmp_path: Path,
 ) -> None:

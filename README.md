@@ -27,7 +27,7 @@ Codex 会自动选择正确命令、等待运行结束并检查 CLI 返回的 `s
 
 只把 `support_report.path` 指向的 Markdown 发给维护人员，绝不能发送完整 `data/debug` 目录。原始调试目录可能包含聊天、prompt 和模型返回；安全诊断报告不包含目标日期、姓名、本机路径、飞书 ID、聊天正文、事件文字、文件名、网址、模型名称、模型地址、密钥、prompt、原始返回、原始错误或日志原文。WorkTrace 不会自动上传或发送这份报告。
 
-调试模式会重新运行任务，个人日报可能再次发送给本人；正式日报和多人汇总线路不变，但运行结束后会增加一次独立的诊断报告模型调用。即使正式运行的 preflight 没有通过，CLI 也会继续尝试生成说明环境问题的报告；如果报告模型全部失败，仍会生成含 Python 统计并标明“大模型整理失败”的基础 Markdown。
+调试模式会重新运行任务；当自送达开启时，个人日报可能再次发送给本人。正式日报和多人汇总线路不变，但运行结束后会增加一次独立的诊断报告模型调用。即使正式运行的 preflight 没有通过，CLI 也会继续尝试生成说明环境问题的报告；如果报告模型全部失败，仍会生成含 Python 统计并标明“大模型整理失败”的基础 Markdown。
 
 开发者也可以直接执行：
 
@@ -49,6 +49,8 @@ python3 -m src.worktrace.cli sync-reaction-catalog --source feishu
 个人日报把未完成任务的模型中间结果临时保存在 `data/cache/llm/YYYY/MM/YYYY-MM-DD/`：先完成全部窗口切分，再逐批提炼事件。默认重新生成会在 preflight 通过后先删除旧个人日报、当天中间结果和当天个人调试目录，再从头执行；明确使用 `--resume` 时保留这三类旧产物，并只复用输入未变化的中间结果。Markdown 写入成功后，模型中间结果目录自动删除。
 
 `config/llm_retry.json` 可分别设置 Online 请求级额外重试次数、窗口切分、事件提炼和全日分组的结果质量重试次数、流式响应首次返回时间、Codex 调用间隔，以及切分、提炼、个人事实复核、完整内容复核和多人完整复核并发数。`WORKTRACE_LLM_STREAM` 是文字和图片请求共用的唯一流式开关，默认关闭；显式开启时，从请求开始到首个流事件的限制为 60 秒，首个流事件返回后不再使用该限制，后续读取使用 `.env` 的 `WORKTRACE_LLM_TIMEOUT_SECONDS`。
+
+`config/self_delivery.json` 控制个人日报和多人汇总是否发送给当前登录用户。默认是 `{"enabled": true}`；改为 `{"enabled": false}` 后仍会完整生成 Markdown，但不调用飞书 CLI。CLI JSON 会返回 `self_delivery_status: "disabled"`，这不是发送失败。
 
 ## 当前范围
 
@@ -86,7 +88,7 @@ flowchart TD
     C --> D["个人日报 preflight"]
     D --> E["飞书消息采集与个人事件提炼"]
     E --> F["data/YYYY/MM/个人 Markdown"]
-    F --> G["飞书 bot 发送给本人"]
+    F --> G["按自送达配置发送给本人"]
 
     B -->|"merge-collected"| H["读取 merge_inbox 当日目录"]
     H --> I["多人事件分组、修复与过滤"]
@@ -136,7 +138,7 @@ flowchart TD
     S --> S1["草稿过滤 + WorkEvent 构建 + 消息指纹"]
     S1 --> T["聚合文件证据和文件标识 + 最终过滤 + 排序"]
     T --> U["覆盖写 Markdown"]
-    U --> V["删除模型中间结果后由飞书 bot 发送给本人"]
+    U --> V["删除模型中间结果后按自送达配置发送给本人"]
 
     I -. "连续分段失败" .-> W["直接从本人参与的聊天窗口提炼"]
     W --> O
@@ -256,7 +258,7 @@ flowchart TD
     K --> L["物化团队 WorkEvent"]
     L --> M["最终关键词过滤 + 保留门槛"]
     M --> N["写入当前 scope 的 merged Markdown"]
-    N --> O["飞书 bot 发送给当前登录用户"]
+    N --> O["按自送达配置发送给当前登录用户"]
 ```
 
 输入示例：
