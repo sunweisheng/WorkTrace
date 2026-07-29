@@ -25,7 +25,7 @@ WorkTrace 解决的是员工对当天工作沟通的结构化回顾问题。个�
 | `python3 -m src.worktrace.cli --date YYYY-MM-DD` | 个人日报 | 加载规则/黑名单并自动 preflight | `data/YYYY/MM/YYYY-MM-DD-姓名.md` |
 | `python3 -m src.worktrace.cli --date YYYY-MM-DD --resume` | 续跑个人日报 | 保留输入未变化的分段/提炼中间结果 | 同上 |
 | `python3 -m src.worktrace.cli --preflight` | 仅自检 | 不生成日报 | JSON 检查结果 |
-| `python3 -m src.worktrace.cli merge-collected --date YYYY-MM-DD` | 多人汇总 | 独立执行，不走个人日报 preflight | 每个 scope 的 `*-merged.md` |
+| `python3 -m src.worktrace.cli merge-collected --date YYYY-MM-DD [--owner-name 姓名] [--offline]` | 多人汇总 | 独立执行，不走个人日报 preflight；离线时不依赖飞书 CLI | 每个 scope 的 `*-merged.md` |
 | `python3 -m src.worktrace.cli sync-reaction-catalog --source feishu` | reaction 同步 | 独立执行 | 本地目录 JSON 和 PNG |
 
 `cli.py` 统一负责日期校验、配置覆盖、JSON 输出和退出码。退出码约定：成功为 `0`，运行失败为 `1`，输入日期非法为 `2`。
@@ -306,7 +306,7 @@ data/YYYY/MM/YYYY-MM-DD-姓名.md
 
 无会话、无消息、候选被全部过滤或最终事件为空，都走成功空覆盖并生成合法 Markdown。
 
-写入后，`config/self_delivery.json` 的 `enabled` 默认是 `true`。开启时，`FeishuCliSelfDelivery` 规范化发送文件名，使用 bot 身份向当前 user `open_id` 发送文件；发送错误不会删除已写入文件，运行状态变为 `success_with_warnings`。关闭时不调用飞书 CLI，Markdown 保持已写入状态，结果的 `self_delivery_status` 为 `disabled`。
+写入后，`config/self_delivery.json` 的 `enabled` 默认是 `true`。开启时，`FeishuCliSelfDelivery` 规范化发送文件名，使用 bot 身份向当前 user `open_id` 发送文件；发送错误不会删除已写入文件，运行状态变为 `success_with_warnings`。关闭时不调用飞书 CLI，Markdown 保持已写入状态，结果的 `self_delivery_status` 为 `disabled`。多人汇总显式传入 `--offline --owner-name 姓名` 时，完全跳过飞书身份查询和自送达，直接把本地合并结果写为 `YYYY-MM-DD-姓名-merged.md`。
 
 ## 6. 三层过滤模型
 
@@ -385,7 +385,7 @@ flowchart TD
 
 候选、复核和正式正文使用各自任务专用 Function，并调用同一生产估算函数：`prepared_prompt` 包含最终提示词、当前合法参数示例、证据编号、重试错误反馈和 `/no_think`；`online_estimate` 再加入完整 Function 定义与 `tool_choice`，`codex_estimate` 再加入完整 output-schema，最终取两者较大值。估算器区分 ASCII 和非 ASCII 字符，并为混合中文 JSON、动态编号及协议固定开销留出余量。`model_input_batch_target_tokens=7000` 是模型输入估算目标，不是 HTTP 字节数或服务端上下文上限。每尝试加入一个候选都重新构建并估算；复核超过目标时按关系分批，单条正文仍过长时复用正文切片和分层摘要；不可继续拆分的最小输入允许发送。校验错误只重试当前请求，加入具体错误后重新估算，超限时标记 `oversized_retry` 后发送。正式内容必须返回完整 `covered_draft_ids` 和 `fact_items`；Python 检查整批 draft 分配、锁定组和事实来源，模型明确拒绝输入或结果仍不完整时当前 scope 失败且不写文件。若 scope 目录已有同名历史输出，失败不会删除或覆盖旧文件，是否成功必须以本次 CLI JSON 为准。调试 step 在 Python 校验失败时标记 `validation_failed`，`failed_step_indexes` 同时包含调用失败和校验失败；候选分组还保存解析前的 `raw_function_payload`，用于检查被解析器丢弃的非法结构。
 
-部门负责人和中心负责人复用同一个 `merge-collected` 命令，当前代码没有自动的层级编排。第一级由部门负责人收集本部门 v2 个人 MD 后运行；第二级由中心负责人收集各部门 `*-merged.md` 后再次运行。个人 MD 和部门 MD 可以同时作为输入，程序不比较两者的 `source_event_ids`，不拦截，也不提示重复来源。输出名始终取当前飞书登录人姓名。一级子目录是并列 scope，不会自动把子目录输出再送入根目录。上游汇总继续保留原始来源人员和事件 ID，并从 `*-merged.md` 文件名提取上一级负责人；中心公开输出显示 `来源负责人`，来源事件 ID 仅保存在隐藏信息中。
+部门负责人和中心负责人复用同一个 `merge-collected` 命令，当前代码没有自动的层级编排。第一级由部门负责人收集本部门 v2 个人 MD 后运行；第二级由中心负责人收集各部门 `*-merged.md` 后再次运行。个人 MD 和部门 MD 可以同时作为输入，程序不比较两者的 `source_event_ids`，不拦截，也不提示重复来源。输出名默认取当前飞书登录人姓名，显式传入 `--owner-name` 时才改为指定姓名；`--offline` 必须同时传入该姓名，并且不访问飞书 CLI。一级子目录是并列 scope，不会自动把子目录输出再送入根目录。上游汇总继续保留原始来源人员和事件 ID，并从 `*-merged.md` 文件名提取上一级负责人；中心公开输出显示 `来源负责人`，来源事件 ID 仅保存在隐藏信息中。
 
 合并边界：共同消息、共同文件、同日会话和语义理由只用于发现和说明候选关系，最终仍由模型确认是否属于同一事项。标题相似、部门相同、来源负责人相同或同一会话都不能单独证明是同一事件。
 

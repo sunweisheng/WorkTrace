@@ -5,7 +5,7 @@ WorkTrace 是一个个人工作事件整理工具。它从当前用户在指定�
 仓库同时提供两条正式业务链路：
 
 - 个人日报：读取当前用户可见的飞书消息，生成 `data/YYYY/MM/YYYY-MM-DD-姓名.md`
-- 多人汇总：读取已收集的个人或上游汇总 Markdown，生成 `merge_inbox/YYYY/MM/DD/.../YYYY-MM-DD-登录人姓名-merged.md`
+- 多人汇总：读取已收集的个人或上游汇总 Markdown，默认生成 `merge_inbox/YYYY/MM/DD/.../YYYY-MM-DD-登录人姓名-merged.md`
 
 它不是员工监控系统，也不会默认把结果发给领导。个人日报会把必要的裁剪文本、会话名、发送者信息、消息和会话标识、链接 URL/标题、附件文件名，以及启用的图片或按需读取的附件/文档正文发送给用户自己配置的在线模型服务，使用前必须确认模型服务和隐私边界。最终 Markdown 会隐藏群名和内部标识，但这不表示模型输入不包含这些上下文元数据。
 
@@ -36,6 +36,7 @@ python3 -m src.worktrace.cli --preflight
 python3 -m src.worktrace.cli --date 2026-07-06
 python3 -m src.worktrace.cli --date 2026-07-06 --resume
 python3 -m src.worktrace.cli merge-collected --date 2026-07-06
+python3 -m src.worktrace.cli merge-collected --date 2026-07-06 --owner-name 部门负责人 --offline
 ```
 
 日常运行只读取本地表情目录。如需显式更新飞书表情目录：
@@ -50,7 +51,7 @@ python3 -m src.worktrace.cli sync-reaction-catalog --source feishu
 
 `config/llm_retry.json` 可分别设置 Online 请求级额外重试次数、窗口切分、事件提炼和全日分组的结果质量重试次数、流式响应首次返回时间、Codex 调用间隔，以及切分、提炼、个人事实复核、完整内容复核和多人完整复核并发数。`WORKTRACE_LLM_STREAM` 是文字和图片请求共用的唯一流式开关，默认关闭；显式开启时，从请求开始到首个流事件的限制为 60 秒，首个流事件返回后不再使用该限制，后续读取使用 `.env` 的 `WORKTRACE_LLM_TIMEOUT_SECONDS`。
 
-`config/self_delivery.json` 控制个人日报和多人汇总是否发送给当前登录用户。默认是 `{"enabled": true}`；改为 `{"enabled": false}` 后仍会完整生成 Markdown，但不调用飞书 CLI。CLI JSON 会返回 `self_delivery_status: "disabled"`，这不是发送失败。
+`config/self_delivery.json` 控制个人日报和多人汇总是否发送给当前登录用户。默认是 `{"enabled": true}`；改为 `{"enabled": false}` 后仍会完整生成 Markdown，但不调用飞书 CLI。多人汇总额外传入 `--offline` 时，也会跳过飞书身份查询，并且必须传入 `--owner-name`。CLI JSON 会返回 `self_delivery_status: "disabled"`，这不是发送失败。
 
 ## 当前范围
 
@@ -271,16 +272,24 @@ merge_inbox/2026/07/06/
     └── 2026-07-06-王五.md
 ```
 
-根目录和 `项目A/` 会分别生成一个 `YYYY-MM-DD-登录人姓名-merged.md`。只扫描当前层，二级及更深目录不参与。
+根目录和 `项目A/` 会分别生成一个 `YYYY-MM-DD-登录人姓名-merged.md`。传入 `--owner-name` 时，文件名改用指定姓名。只扫描当前层，二级及更深目录不参与。
 
 ### 部门到中心的两级人工收集
 
-当前代码不区分“部门汇总命令”和“中心汇总命令”，两级都运行同一个 `merge-collected`。输出名来自执行命令时当前飞书登录人的姓名，因此正确流程是：
+当前代码不区分“部门汇总命令”和“中心汇总命令”，两级都运行同一个 `merge-collected`。默认输出名来自执行命令时当前飞书登录人的姓名；传入 `--owner-name` 时才使用指定姓名，因此正确流程是：
 
 1. 每位员工先生成带 v2 会话证据的个人 MD。
 2. 每位部门负责人把本部门个人 MD 放入当日目录，使用自己的飞书身份运行一次，得到 `YYYY-MM-DD-部门负责人-merged.md`。
 3. 中心负责人收集各部门的 `*-merged.md`；需要其他个人记录参与时，也可以同时放入个人 MD。
 4. 中心负责人使用自己的飞书身份再次运行，得到 `YYYY-MM-DD-中心负责人-merged.md`。
+
+未安装飞书 CLI 的服务器可显式使用离线模式：
+
+```bash
+python3 -m src.worktrace.cli merge-collected --date YYYY-MM-DD --owner-name 部门负责人 --offline
+```
+
+离线模式只读取本地 `merge_inbox` Markdown，按指定姓名写入文件，不查询飞书登录身份，也不自送达；它仍按现有配置请求在线模型完成多人事件合并。
 
 文件组合由负责人人工控制。个人 MD 与已经包含该人员的部门 MD 同时存在时，程序会把两份都作为正常输入，不比较 `source_event_ids`，不拦截，也不写重复来源 warning。一级子目录是并列的独立汇总范围，不表示系统会自动按“员工 -> 部门 -> 中心”顺序连续执行。
 
@@ -298,7 +307,7 @@ merge_inbox/2026/07/06/
 
 候选、标题发现、完整复核和正式正文请求统一按任务专用 Function 和上述同一输入估算函数使用 `model_input_batch_target_tokens=7000` 分批。每尝试加入一个候选都会重建拟提交批次的 prompt、合法参数示例、证据编号和 Function 定义后重新估算。候选与完整复核能够拆分时按消息、文件和会话关系优先分批；标题发现作为全部组编号与标题清单不拆批；只有完整复核或正式正文输入真正超长时，才复用正文切片和分层摘要。最小必要输入仍超过目标时标记后发送，由模型服务决定是否接受。正式正文必须返回完整 `covered_draft_ids` 和带来源的 `fact_items`；Python 只重试当前组的结果质量问题，模型明确拒绝输入或重试后仍不完整时当前 scope 失败，不写不完整文件。若当前 scope 已有同名历史输出，失败不会删除或覆盖它，判断本次结果必须以 CLI JSON 的 `status` 和 `outputs` 为准。单条事件组直接保留原文，不增加模型调用；正文不再把全部来源原文机械追加到模型结果。
 
-同一事件的不同员工描述会作为不同视角整合，最终不按人员逐条展示贡献。来源文件名中的姓名与当前登录用户名精确一致时，该来源会标记为“合并人来源”；只有来源间出现明确冲突时才采用合并人版本并写 warning，没有冲突时任何一方提供的有效补充都必须保留。没有当前登录人的个人 MD 时直接执行普通汇总，不写 warning。
+同一事件的不同员工描述会作为不同视角整合，最终不按人员逐条展示贡献。来源文件名中的姓名与合并负责人姓名精确一致时，该来源会标记为“合并人来源”；负责人默认是当前飞书登录人，传入 `--owner-name` 时才使用指定姓名。只有来源间出现明确冲突时才采用合并人版本并写 warning，没有冲突时任何一方提供的有效补充都必须保留。没有负责人个人 MD 时直接执行普通汇总，不写 warning。
 
 上游 `*-merged.md` 的文件名负责人会写入事件的 `source_report_owners`。中心汇总公开显示 `来源负责人`，并继续保留原始来源人员；来源事件 ID 只写入隐藏 `merge_meta`。个人 MD 和没有上游负责人的第一级部门结果不显示来源负责人。
 

@@ -302,8 +302,10 @@ def test_cli_merge_collected_returns_structured_json(capsys, tmp_path) -> None:
     personal_debug_file.parent.mkdir(parents=True)
     personal_debug_file.write_text("{}", encoding="utf-8")
 
-    def fake_run(*, target_date, config):
+    def fake_run(*, target_date, config, merge_owner_name, offline):
         assert config.collected_merge_trace_enabled is False
+        assert merge_owner_name is None
+        assert offline is False
         return CollectedMergeRunResult(
             status=DailyRunStatus.SUCCESS.value,
             target_date=target_date,
@@ -357,9 +359,11 @@ def test_cli_debug_output_enables_collected_merge_trace(capsys, tmp_path) -> Non
     captured_config = None
     trace_root = tmp_path / "custom-collected-trace"
 
-    def fake_run(*, target_date, config):
+    def fake_run(*, target_date, config, merge_owner_name, offline):
         nonlocal captured_config
         captured_config = config
+        assert merge_owner_name is None
+        assert offline is False
         return CollectedMergeRunResult(
             status=DailyRunStatus.SUCCESS.value,
             target_date=target_date,
@@ -399,6 +403,65 @@ def test_cli_debug_output_enables_collected_merge_trace(capsys, tmp_path) -> Non
     assert captured_config.conversation_debug_root is None
     assert payload["support_report"]["status"] == "generated_with_llm"
     assert payload["support_report"]["privacy_check"] == "passed"
+
+
+def test_cli_merge_collected_passes_offline_server_options(capsys, tmp_path) -> None:
+    captured_options = None
+
+    def fake_run(*, target_date, config, merge_owner_name, offline):
+        nonlocal captured_options
+        captured_options = (target_date, config, merge_owner_name, offline)
+        return CollectedMergeRunResult(
+            status=DailyRunStatus.SUCCESS.value,
+            target_date=target_date,
+            input_dir=str(tmp_path / "merge_inbox/2026/06/29"),
+            output_path=str(
+                tmp_path / "merge_inbox/2026/06/29/2026-06-29-服务器负责人-merged.md"
+            ),
+            source_file_count=1,
+            source_event_count=1,
+            merged_event_count=1,
+            skipped_file_count=0,
+            warning_messages=[],
+            self_delivery_status="disabled",
+            self_delivery_target="",
+            self_delivery_error="",
+        )
+
+    exit_code = main(
+        [
+            "merge-collected",
+            "--date",
+            "2026-06-29",
+            "--owner-name",
+            "服务器负责人",
+            "--offline",
+        ],
+        config=RuntimeConfig(data_root=tmp_path / "data"),
+        collected_run_func=fake_run,
+    )
+
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+
+    assert exit_code == 0
+    assert captured_options is not None
+    assert captured_options[0] == "2026-06-29"
+    assert captured_options[2:] == ("服务器负责人", True)
+    assert payload["self_delivery_status"] == "disabled"
+
+
+def test_cli_rejects_offline_merge_without_owner_name(capsys) -> None:
+    exit_code = main(
+        ["merge-collected", "--date", "2026-06-29", "--offline"],
+    )
+
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+
+    assert exit_code == 2
+    assert payload["status"] == DailyRunStatus.INVALID_INPUT.value
+    assert payload["error_summary"] == "Offline merge requires a non-empty --owner-name."
 
 
 def test_cli_debug_preflight_failure_still_generates_support_report(

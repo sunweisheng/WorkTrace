@@ -293,6 +293,7 @@ def _build_runner(
     analyzer=None,
     delivery_channel=None,
     command_runner=None,
+    self_identity_resolver=None,
 ) -> CollectedMergeRunner:
     return CollectedMergeRunner(
         config=config or RuntimeConfig(data_root=tmp_path / "data"),
@@ -300,7 +301,7 @@ def _build_runner(
         cwd=tmp_path,
         command_runner=command_runner or _unexpected_command,
         delivery_channel=delivery_channel or NullDelivery(),
-        self_identity_resolver=_fake_self_identity,
+        self_identity_resolver=self_identity_resolver or _fake_self_identity,
     )
 
 
@@ -1135,6 +1136,71 @@ def test_collected_merge_skips_self_delivery_when_disabled(tmp_path: Path) -> No
     assert result.self_delivery_error == ""
     assert [output.self_delivery_status for output in result.outputs] == ["disabled"]
     assert delivered == []
+
+
+def test_collected_merge_uses_specified_owner_name_for_output(tmp_path: Path) -> None:
+    inbox = tmp_path / "merge_inbox" / "2026" / "06" / "29"
+    _write_day_doc(
+        inbox / "2026-06-29-服务器负责人.md",
+        [
+            _event(
+                event_id="evt-owner-name",
+                title="指定负责人输出",
+                content="服务器负责人确认按指定姓名生成部门汇总。",
+                object_hint="部门汇总输出",
+                retention_detail="服务器负责人确认指定的部门汇总负责人。",
+            )
+        ],
+        tmp_path,
+    )
+
+    result = _build_runner(tmp_path).run(
+        "2026-06-29",
+        merge_owner_name="服务器负责人",
+    )
+
+    assert result.status == "success"
+    assert result.output_path == str(
+        (inbox / "2026-06-29-服务器负责人-merged.md").resolve()
+    )
+    assert result.self_delivery_target == "ou_manager"
+
+
+def test_collected_merge_offline_skips_feishu_identity_and_delivery(tmp_path: Path) -> None:
+    inbox = tmp_path / "merge_inbox" / "2026" / "06" / "29"
+    _write_day_doc(
+        inbox / "2026-06-29-张三.md",
+        [
+            _event(
+                event_id="evt-offline",
+                title="离线部门汇总",
+                content="张三确认服务器只生成本地部门汇总。",
+                object_hint="离线部门汇总",
+                retention_detail="张三确认离线模式只保存部门汇总文件。",
+            )
+        ],
+        tmp_path,
+    )
+
+    def unexpected_identity_lookup():
+        raise AssertionError("Offline merge must not resolve Feishu identity.")
+
+    result = _build_runner(
+        tmp_path,
+        self_identity_resolver=unexpected_identity_lookup,
+    ).run(
+        "2026-06-29",
+        merge_owner_name="服务器负责人",
+        offline=True,
+    )
+
+    assert result.status == "success"
+    assert result.output_path == str(
+        (inbox / "2026-06-29-服务器负责人-merged.md").resolve()
+    )
+    assert result.self_delivery_status == "disabled"
+    assert result.self_delivery_target == ""
+    assert result.self_delivery_error == ""
 
 
 def test_collected_merge_delivery_failure_only_warns(tmp_path: Path) -> None:

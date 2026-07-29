@@ -89,6 +89,7 @@ from .utils.text import (
     clean_text,
     combine_group_titles,
     merge_content_texts,
+    sanitize_filename_component,
 )
 from .utils.token_estimation import (
     estimate_structured_input_tokens,
@@ -252,15 +253,20 @@ class CollectedMergeRunner:
         self._attach_collected_merge_llm_calls(step)
         self._write_collected_merge_trace_step(step)
 
-    def run(self, target_date: str) -> CollectedMergeRunResult:
+    def run(
+        self,
+        target_date: str,
+        *,
+        merge_owner_name: str | None = None,
+        offline: bool = False,
+    ) -> CollectedMergeRunResult:
         run_started_at = perf_counter()
         input_dir = self.build_input_dir(target_date)
-        try:
-            self_identity = self.self_identity_resolver()
-        except (OSError, ValueError, StoreWriteError) as exc:
+
+        def early_result(status: str, warning: str) -> CollectedMergeRunResult:
             total_ms = round((perf_counter() - run_started_at) * 1000, 3)
             return CollectedMergeRunResult(
-                status=DailyRunStatus.FAILED.value,
+                status=status,
                 target_date=target_date,
                 input_dir=str(input_dir.resolve()),
                 output_path=None,
@@ -269,7 +275,7 @@ class CollectedMergeRunner:
                 merged_event_count=0,
                 skipped_file_count=0,
                 partial_file_count=0,
-                warning_messages=[str(exc)],
+                warning_messages=[warning],
                 self_delivery_status="",
                 self_delivery_target="",
                 self_delivery_error="",
@@ -280,6 +286,35 @@ class CollectedMergeRunner:
                         "request_accumulated_ms": 0.0,
                     }
                 },
+            )
+
+        merge_owner_name = clean_text(merge_owner_name or "")
+        if offline and not merge_owner_name:
+            return early_result(
+                DailyRunStatus.INVALID_INPUT.value,
+                "Offline merge requires a non-empty merge owner name.",
+            )
+        if merge_owner_name and not sanitize_filename_component(merge_owner_name):
+            return early_result(
+                DailyRunStatus.INVALID_INPUT.value,
+                "Invalid merge owner name for a Markdown filename.",
+            )
+
+        delivery_identity: SelfIdentity | None = None
+        if not offline:
+            try:
+                delivery_identity = self.self_identity_resolver()
+            except (OSError, ValueError, StoreWriteError) as exc:
+                return early_result(DailyRunStatus.FAILED.value, str(exc))
+            if not merge_owner_name:
+                merge_owner_name = (
+                    delivery_identity.display_name or delivery_identity.open_id
+                )
+
+        if not merge_owner_name:
+            return early_result(
+                DailyRunStatus.INVALID_INPUT.value,
+                "Missing merge owner name.",
             )
         child_dirs = (
             [
@@ -292,7 +327,7 @@ class CollectedMergeRunner:
         )
         preflight_failure = self._preflight_conversation_evidence(
             target_date,
-            self_identity=self_identity,
+            merge_owner_name=merge_owner_name,
             input_dir=input_dir,
             child_dirs=child_dirs,
         )
@@ -312,7 +347,8 @@ class CollectedMergeRunner:
             self._run_one_directory(
                 target_date,
                 input_dir,
-                self_identity=self_identity,
+                merge_owner_name=merge_owner_name,
+                delivery_identity=delivery_identity,
                 ignored_subdirectories={child.name for child in child_dirs},
             )
         ]
@@ -321,7 +357,8 @@ class CollectedMergeRunner:
                 self._run_one_directory(
                     target_date,
                     child,
-                    self_identity=self_identity,
+                    merge_owner_name=merge_owner_name,
+                    delivery_identity=delivery_identity,
                     ignored_subdirectories=set(),
                 )
             )
@@ -375,7 +412,7 @@ class CollectedMergeRunner:
         self,
         target_date: str,
         *,
-        self_identity: SelfIdentity,
+        merge_owner_name: str,
         input_dir: Path,
         child_dirs: list[Path],
     ) -> CollectedMergeRunResult | None:
@@ -392,7 +429,7 @@ class CollectedMergeRunner:
         for scope_dir, ignored_subdirectories in scope_specs:
             output_path = scope_dir / build_merged_markdown_filename(
                 target_date,
-                self_identity.display_name or self_identity.open_id,
+                merge_owner_name,
             )
             (
                 source_events,
@@ -491,12 +528,13 @@ class CollectedMergeRunner:
         target_date: str,
         input_dir: Path,
         *,
-        self_identity: SelfIdentity,
+        merge_owner_name: str,
+        delivery_identity: SelfIdentity | None,
         ignored_subdirectories: set[str],
     ) -> CollectedMergeOutput:
         output_path = input_dir / build_merged_markdown_filename(
             target_date,
-            self_identity.display_name or self_identity.open_id,
+            merge_owner_name,
         )
         self._collected_quality_counters = Counter()
         self._start_collected_merge_trace(target_date, input_dir)
@@ -554,7 +592,7 @@ class CollectedMergeRunner:
         )
         source_events, owner_source_warnings = self._mark_merge_owner_sources(
             source_events,
-            merge_owner_person=self_identity.display_name,
+            merge_owner_person=merge_owner_name,
             input_dir=input_dir,
         )
         warning_messages.extend(owner_source_warnings)
@@ -566,7 +604,7 @@ class CollectedMergeRunner:
                 merged_events, merge_warnings = self._merge_source_events(
                     target_date,
                     source_events,
-                    merge_owner_person=self_identity.display_name,
+                    merge_owner_person=merge_owner_name,
                 )
                 warning_messages.extend(merge_warnings)
             except (AnalyzerProtocolError, ValueError) as exc:
@@ -671,14 +709,21 @@ class CollectedMergeRunner:
             )
 
         self_delivery_started_at = perf_counter()
-        self_delivery_status, self_delivery_target, self_delivery_error = (
-            _deliver_markdown_to_self(
-                self.delivery_channel,
-                self_identity=self_identity,
-                markdown_path=output_path,
-                enabled=self.config.self_delivery_enabled,
+        if delivery_identity is None:
+            self_delivery_status, self_delivery_target, self_delivery_error = (
+                "disabled",
+                "",
+                "",
             )
-        )
+        else:
+            self_delivery_status, self_delivery_target, self_delivery_error = (
+                _deliver_markdown_to_self(
+                    self.delivery_channel,
+                    self_identity=delivery_identity,
+                    markdown_path=output_path,
+                    enabled=self.config.self_delivery_enabled,
+                )
+            )
         self._record_collected_stage_timing("self_delivery", self_delivery_started_at)
         if self_delivery_error:
             warning_messages.append(self_delivery_error)

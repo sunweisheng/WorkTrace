@@ -9,10 +9,10 @@
 正式命令：
 
 ```bash
-python3 -m src.worktrace.cli merge-collected --date YYYY-MM-DD
+python3 -m src.worktrace.cli merge-collected --date YYYY-MM-DD [--owner-name 姓名] [--offline]
 ```
 
-该子命令独立执行，不复用个人日报的整套 preflight；运行中仍需要当前飞书 user 身份、在线 analyzer 配置、输入目录写权限和 bot 自发送能力。
+该子命令独立执行，不复用个人日报的整套 preflight。默认模式需要当前飞书 user 身份、在线 analyzer 配置、输入目录写权限和 bot 自发送能力；显式传入 `--offline` 时必须同时传入 `--owner-name`，不需要安装飞书 CLI。
 
 ## 2. 输入目录与 scope
 
@@ -43,7 +43,7 @@ YYYY-MM-DD-登录人姓名-merged.md
 
 ### 2.1 两级人工收集方式
 
-部门汇总和中心汇总复用同一命令，代码不会根据文件内容自动判断当前属于哪一级。文件名中的负责人来自运行命令时当前飞书登录人。
+部门汇总和中心汇总复用同一命令，代码不会根据文件内容自动判断当前属于哪一级。默认文件名中的负责人来自运行命令时当前飞书登录人；显式传入 `--owner-name` 时使用指定姓名。
 
 部门负责人运行时：
 
@@ -256,7 +256,7 @@ Python 以 `model_input_batch_target_tokens=7000` 为分批目标。每尝试加
 
 输入文件是规范 `*-merged.md` 时，Python 从文件名提取上一级负责人，并与事件中已有的 `source_report_owners` 合并去重。中心结果公开显示 `来源负责人`；个人输入生成的第一级部门结果没有上游负责人时不显示该字段。来源事件 ID 只写入隐藏 `merge_meta`，不作为公开字段重复展示。
 
-最终事件再次执行关键词过滤和保留门槛，再通过 `MarkdownEventStore` 写入当前 scope，并由飞书 bot 发给当前登录用户自己。
+最终事件再次执行关键词过滤和保留门槛，再通过 `MarkdownEventStore` 写入当前 scope。默认模式按自送达配置由飞书 bot 发给当前登录用户自己；显式传入 `--offline` 时不查询飞书身份也不自送达。
 
 空目录、无有效文件或所有事件被过滤时，scope 可以生成空汇总并以 warning 说明原因。
 
@@ -299,7 +299,7 @@ WORKTRACE_COLLECTED_MERGE_TRACE_ROOT=data/debug/collected_merge
 
 `summary.json` 和 `summary.md` 还包含 Python 计算的 `quality_summary` 与 `stage_timing_summary`。前者记录输入/过滤后/输出事件数、来源覆盖、标题发现请求、逐组检查与候选、跨组合并、初步组拆分、关系成立、证据分开、复核失败、内容重写失败、正文重试和提示缩短；后者记录各阶段墙钟耗时和请求累计耗时。比例只用于人工检查，不作为强制减少门槛；一个人部门或当天没有重复事项时，输出事件数允许等于输入事件数。并发请求耗时不能相加后当作实际运行耗时。
 
-每个 scope 写入 Markdown 后，默认由飞书 CLI 发送给当前登录用户。把 `config/self_delivery.json` 的 `enabled` 改为 `false` 可同时关闭个人日报和多人汇总的这一步；此时不会调用飞书 CLI，`self_delivery_status` 返回 `disabled`，不影响 Markdown、统计或其他合并流程。
+每个 scope 写入 Markdown 后，默认由飞书 CLI 发送给当前登录用户。把 `config/self_delivery.json` 的 `enabled` 改为 `false` 可同时关闭个人日报和多人汇总的这一步；此时不会调用飞书 CLI，`self_delivery_status` 返回 `disabled`，不影响 Markdown、统计或其他合并流程。显式使用 `merge-collected --owner-name 姓名 --offline` 时，会同时跳过飞书身份查询和自送达，适用于未安装飞书 CLI 的服务器；离线模式仍请求在线模型完成事件合并。
 
 `python3 scripts/replay_collected_review_failures.py --trace-root <trace目录> --steps <编号列表> --output-dir <输出目录>` 可以直接离线回放候选分组和完整复核 step；原有 `--inventory`、`--ids`、`--result-dir` 和 `--output-dir` 继续可用。旧 trace 使用 `legacy_audit`，不补造初步组、关系处理或不可拆成员块；新 trace 使用 `current` 恢复 `initial_groups`、`strong_relations` 和 `atomic_groups`，并完整执行关系覆盖与成员块校验。脚本明确记录 `model_call_count: 0`，不调用模型，也不生成正式 Markdown。
 

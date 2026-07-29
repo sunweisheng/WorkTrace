@@ -29,6 +29,7 @@ from .preflight import run_preflight_checks
 from .runner import run_daily_trace
 from .pipeline.llm_checkpoints import clear_day_llm_checkpoints
 from .utils.filenames import parse_worktrace_markdown_filename
+from .utils.text import sanitize_filename_component
 from .utils.json_io import dump_json
 from .support_report import generate_support_report
 
@@ -38,6 +39,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     subparsers = parser.add_subparsers(dest="command")
     merge_parser = subparsers.add_parser("merge-collected")
     merge_parser.add_argument("--date", dest="target_date", required=True)
+    merge_parser.add_argument(
+        "--owner-name",
+        dest="merge_owner_name",
+        help="Name used for the merged Markdown filename and merge-owner source handling.",
+    )
+    merge_parser.add_argument(
+        "--offline",
+        action="store_true",
+        help="Create local merged Markdown without querying or sending through Feishu CLI.",
+    )
     sync_parser = subparsers.add_parser("sync-reaction-catalog")
     sync_parser.add_argument("--source", default="feishu")
     parser.add_argument("--date", dest="target_date", required=False)
@@ -70,6 +81,21 @@ def validate_target_date(raw_date: str | None) -> str:
     except ValueError as exc:
         raise InvalidInputError("Invalid date value. Expected YYYY-MM-DD.") from exc
     return raw_date
+
+
+def validate_merge_owner_name(
+    raw_name: str | None,
+    *,
+    required: bool,
+) -> str | None:
+    owner_name = (raw_name or "").strip()
+    if not owner_name:
+        if required:
+            raise InvalidInputError("Offline merge requires a non-empty --owner-name.")
+        return None
+    if not sanitize_filename_component(owner_name):
+        raise InvalidInputError("Invalid --owner-name for a Markdown filename.")
+    return owner_name
 
 
 def build_invalid_input_result(target_date: str | None, error_summary: str) -> DailyRunResult:
@@ -122,10 +148,16 @@ def run_collected_merge(
     *,
     target_date: str,
     config: RuntimeConfig,
+    merge_owner_name: str | None = None,
+    offline: bool = False,
 ):
     from .collected_merge import CollectedMergeRunner
 
-    return CollectedMergeRunner(config=config).run(target_date)
+    return CollectedMergeRunner(config=config).run(
+        target_date,
+        merge_owner_name=merge_owner_name,
+        offline=offline,
+    )
 
 
 def run_sync_reaction_catalog(
@@ -192,12 +224,21 @@ def execute(
         run_started_at = perf_counter()
         try:
             target_date = validate_target_date(args.target_date)
+            merge_owner_name = validate_merge_owner_name(
+                args.merge_owner_name,
+                required=args.offline,
+            )
         except InvalidInputError as exc:
             result = build_invalid_input_result(args.target_date, str(exc))
             if args.debug_output:
                 result = replace(result, support_report=_blocked_support_report())
             return result, 2
-        result = collected_run_func(target_date=target_date, config=replace(effective_config))
+        result = collected_run_func(
+            target_date=target_date,
+            config=replace(effective_config),
+            merge_owner_name=merge_owner_name,
+            offline=args.offline,
+        )
         result = _attach_support_report(
             result,
             enabled=args.debug_output,
