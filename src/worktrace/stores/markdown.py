@@ -14,6 +14,7 @@ from ..models import DayDocument, EventFileLink, StoreWriteResult, WorkEvent
 from ..utils.dates import now_iso
 from ..utils.hashing import (
     evidence_fingerprint,
+    event_content_fingerprint,
     file_key_from_attachment_id,
     file_key_from_url,
     is_sha256_fingerprint,
@@ -60,7 +61,6 @@ UNKNOWN_METADATA_VALUE = "未明确"
 class MarkdownEventStore(EventStore):
     config: RuntimeConfig
     last_warning_messages: list[str] = field(default_factory=list, init=False)
-    last_declared_event_count: int | None = field(default=None, init=False)
     last_partial_event_ids: list[str] = field(default_factory=list, init=False)
 
     def replace_day(
@@ -175,6 +175,7 @@ class MarkdownEventStore(EventStore):
         )
         self_relations = self._render_self_relations(event.self_relations)
         merge_meta = self._render_merge_meta(event)
+        manual_edit_line = self._render_manual_edit_line(event)
         event_id = event.event_id
         if INTERNAL_FEISHU_ID_RE.search(event_id):
             event_id = stable_event_id(event.date, [], event_id)
@@ -190,6 +191,7 @@ class MarkdownEventStore(EventStore):
             f"- **{relation_label}**: {self_relations}\n"
             f"- **保留理由**: {retention_reason_label}\n"
             f"- **保留依据**: {retention_detail}\n"
+            f"{manual_edit_line}"
             f"{source_lines}"
             f"- **涉及文件**:\n{link_lines}\n"
             "<!-- worktrace:event:end -->"
@@ -263,12 +265,33 @@ class MarkdownEventStore(EventStore):
                 if is_sha256_fingerprint(value)
             )
         )
+        allowed_manual_edit_types = {
+            item.key for item in self.config.manual_edit_types
+        }
+        manual_edit_type = event.manual_edit_type.strip()
+        if manual_edit_type not in allowed_manual_edit_types:
+            manual_edit_type = ""
+        source_manual_edit_types = list(
+            dict.fromkeys(
+                value.strip()
+                for value in event.source_manual_edit_types
+                if value.strip() in allowed_manual_edit_types
+            )
+        )
+        content_fingerprint = (
+            event.content_fingerprint
+            if is_sha256_fingerprint(event.content_fingerprint)
+            else self._event_content_fingerprint(event)
+        )
         payload = {
-            "version": 2,
+            "version": 3,
             "self_relations": self_relations,
             "evidence_fingerprints": evidence_fingerprints,
             "conversation_fingerprints": conversation_fingerprints,
             "file_keys": file_keys,
+            "manual_edit_type": manual_edit_type,
+            "source_manual_edit_types": source_manual_edit_types,
+            "content_fingerprint": content_fingerprint,
             "source_report_owners": list(
                 dict.fromkeys(
                     owner.strip()
@@ -288,6 +311,60 @@ class MarkdownEventStore(EventStore):
         if source_event_ids:
             payload["source_event_ids"] = source_event_ids
         return f"{MERGE_META_PREFIX}{json.dumps(payload, ensure_ascii=False, separators=(',', ':'))} -->"
+
+    def _render_manual_edit_line(self, event: WorkEvent) -> str:
+        labels_by_key = {
+            item.key: item.label for item in self.config.manual_edit_types
+        }
+        edit_types = list(
+            dict.fromkeys(
+                [
+                    event.manual_edit_type,
+                    *event.source_manual_edit_types,
+                ]
+            )
+        )
+        labels = [labels_by_key[key] for key in edit_types if key in labels_by_key]
+        if not labels:
+            return ""
+        return (
+            f"- **{self.config.manual_edit_field_label}**: "
+            f"{'、'.join(labels)}\n"
+        )
+
+    def _event_content_fingerprint(self, event: WorkEvent) -> str:
+        files: list[dict[str, str]] = []
+        for link in event.file_links:
+            safe_url = self._redact_sensitive_query_params(link.url)
+            label = self._normalize_public_text(link.title.strip() or safe_url)
+            files.append({"title": label, "url": safe_url})
+        return event_content_fingerprint(
+            {
+                "date": event.date.strip(),
+                "title": self._normalize_public_text(event.title),
+                "action_labels": self._render_action_labels(event.action_labels),
+                "content": self._normalize_public_text(event.content),
+                "object_hint": self._normalize_public_text(event.object_hint),
+                "self_relations": self._render_self_relations(event.self_relations),
+                "retention_reason": self._render_retention_reason(
+                    event.retention_reason
+                ),
+                "retention_detail": self._normalize_public_text(
+                    event.retention_detail
+                ),
+                "source_people": [
+                    self._normalize_public_text(value)
+                    for value in event.source_people
+                    if value.strip()
+                ],
+                "source_report_owners": [
+                    self._normalize_public_text(value)
+                    for value in event.source_report_owners
+                    if value.strip()
+                ],
+                "files": files,
+            }
+        )
 
     def _redact_internal_ids(self, value: str) -> str:
         return INTERNAL_FEISHU_ID_RE.sub("[内部消息ID已隐藏]", value)
@@ -361,7 +438,6 @@ class MarkdownEventStore(EventStore):
         allow_trailing_partial: bool = False,
     ) -> DayDocument:
         self.last_warning_messages = []
-        self.last_declared_event_count = None
         self.last_partial_event_ids = []
         if not markdown_text.startswith("---\n"):
             raise StoreWriteError("Markdown front matter is missing.")
@@ -369,12 +445,9 @@ class MarkdownEventStore(EventStore):
         meta = self._parse_front_matter(front_matter)
         date = str(meta["date"])
         generated_at = str(meta["generated_at"])
-        try:
-            self.last_declared_event_count = int(meta.get("event_count", ""))
-        except ValueError:
-            self.last_declared_event_count = None
         events = self._parse_events(
             body,
+            document_date=date,
             allow_trailing_partial=allow_trailing_partial,
         )
         return DayDocument(
@@ -387,9 +460,12 @@ class MarkdownEventStore(EventStore):
         self,
         body: str,
         *,
+        document_date: str,
         allow_trailing_partial: bool = False,
     ) -> list[WorkEvent]:
-        events: list[WorkEvent] = []
+        positioned_events: list[tuple[int, WorkEvent]] = []
+        occupied_ranges: list[tuple[int, int]] = []
+        seen_event_ids: set[str] = set()
         cursor = 0
         start_marker = '<!-- worktrace:event:start event_id="'
         end_marker = "<!-- worktrace:event:end -->"
@@ -403,7 +479,7 @@ class MarkdownEventStore(EventStore):
             if event_id_end == -1:
                 if (
                     allow_trailing_partial
-                    and events
+                    and positioned_events
                     and body.find(start_marker, event_id_start) == -1
                 ):
                     self.last_partial_event_ids.append("unknown")
@@ -422,7 +498,7 @@ class MarkdownEventStore(EventStore):
                     end_marker=end_marker,
                 )
             except StoreWriteError:
-                if not allow_trailing_partial or not events:
+                if not allow_trailing_partial or not positioned_events:
                     raise
                 self.last_partial_event_ids.append(event_id)
                 self.last_warning_messages.append(
@@ -430,88 +506,216 @@ class MarkdownEventStore(EventStore):
                 )
                 break
             block = body[event_id_end + 5:block_end].strip()
-            title = self._extract_value(
-                block,
-                "- **事件标题**: ",
-                "- 事件标题: ",
-            )
-            if not title:
-                title = self._extract_event_heading_title(block)
-            content = self._extract_value(
-                block,
-                "- **内容**: ",
-                "- 事件内容: ",
-            )
-            object_hint = self._extract_value(
-                block,
-                "- **具体对象**: ",
-                "- 具体对象: ",
-            )
-            retention_reason = self._extract_retention_reason(block)
-            retention_detail = self._extract_value(
-                block,
-                "- **保留依据**: ",
-                "- 保留依据: ",
-            )
-            event_date = self._extract_value(
-                block,
-                "- **日期**: ",
-                "- 日期: ",
-            )
-            source_people = self._parse_source_values(
-                self._extract_value(block, "- 来源人员: ")
-            )
-            source_event_ids = self._parse_source_values(
-                self._extract_value(block, "- 来源事件 ID: ")
-            )
-            source_report_owners = self._parse_source_values(
-                self._extract_value(block, "- 来源负责人: ")
-            )
-            action_labels = self._parse_metadata_values(
-                self._extract_value(block, "- **主要动作**: ")
-            )
-            visible_relations = self._parse_metadata_values(
-                self._extract_value(
+            forced_manual_edit_type = ""
+            if event_id in seen_event_ids:
+                event_id = self._manual_event_id(
+                    document_date,
                     block,
-                    "- **本人参与方式**: ",
-                    "- **协作方式**: ",
+                    occurrence=len(positioned_events) + 1,
                 )
+                forced_manual_edit_type = "manual_added"
+            event = self._parse_event_block(
+                block,
+                event_id=event_id,
+                forced_manual_edit_type=forced_manual_edit_type,
             )
-            merge_meta = self._extract_merge_meta(block, event_id=event_id)
-            if not source_event_ids:
-                source_event_ids = merge_meta.get("source_event_ids", [])
-            if not source_report_owners:
-                source_report_owners = merge_meta.get("source_report_owners", [])
-            self_relations = merge_meta.get("self_relations", [])
-            if not self_relations:
-                self_relations = self._relation_keys_from_labels(visible_relations)
-            file_links = self._extract_file_links(block)
-            events.append(
-                WorkEvent(
-                    date=event_date,
-                    event_id=event_id,
-                    title=title,
-                    content=content,
-                    file_links=file_links,
-                    source_people=source_people,
-                    source_event_ids=source_event_ids,
-                    source_report_owners=source_report_owners,
-                    object_hint=object_hint,
-                    retention_reason=retention_reason,
-                    retention_detail=retention_detail,
-                    action_labels=action_labels,
-                    self_relations=self_relations,
-                    evidence_fingerprints=merge_meta.get("evidence_fingerprints", []),
-                    conversation_fingerprints=merge_meta.get(
-                        "conversation_fingerprints",
-                        [],
-                    ),
-                    file_keys=merge_meta.get("file_keys", []),
-                )
-            )
+            positioned_events.append((start, event))
+            occupied_ranges.append((start, next_cursor))
+            seen_event_ids.add(event.event_id)
             cursor = next_cursor
 
-        return events
+        heading_matches = list(
+            re.finditer(r"(?m)^###[ \t]+\d+\.[ \t]*(.+)$", body)
+        )
+        footer_start = self._find_day_footer_start(body, 0)
+        for index, match in enumerate(heading_matches):
+            start = match.start()
+            if any(range_start <= start < range_end for range_start, range_end in occupied_ranges):
+                continue
+            end = (
+                heading_matches[index + 1].start()
+                if index + 1 < len(heading_matches)
+                else len(body)
+            )
+            if footer_start != -1 and start < footer_start < end:
+                end = footer_start
+            block = body[start:end].strip()
+            if not self._looks_like_markerless_event(block):
+                continue
+            event_id = self._manual_event_id(
+                document_date,
+                block,
+                occurrence=index + 1,
+            )
+            while event_id in seen_event_ids:
+                event_id = stable_event_id(
+                    document_date,
+                    [],
+                    f"manual-added:{event_id}:{len(seen_event_ids)}",
+                )
+            event = self._parse_event_block(
+                block,
+                event_id=event_id,
+                forced_manual_edit_type="manual_added",
+            )
+            positioned_events.append((start, event))
+            seen_event_ids.add(event.event_id)
+
+        return [event for _, event in sorted(positioned_events, key=lambda item: item[0])]
+
+    def _parse_event_block(
+        self,
+        block: str,
+        *,
+        event_id: str,
+        forced_manual_edit_type: str = "",
+    ) -> WorkEvent:
+        title = self._extract_value(
+            block,
+            "- **事件标题**: ",
+            "- 事件标题: ",
+        ) or self._extract_event_heading_title(block)
+        content = self._extract_value(
+            block,
+            "- **内容**: ",
+            "- 事件内容: ",
+        )
+        object_hint = self._extract_value(
+            block,
+            "- **具体对象**: ",
+            "- 具体对象: ",
+        )
+        retention_reason = self._extract_retention_reason(block)
+        retention_detail = self._extract_value(
+            block,
+            "- **保留依据**: ",
+            "- 保留依据: ",
+        )
+        event_date = self._extract_value(
+            block,
+            "- **日期**: ",
+            "- 日期: ",
+        )
+        source_people = self._parse_source_values(
+            self._extract_value(block, "- 来源人员: ")
+        )
+        source_event_ids = self._parse_source_values(
+            self._extract_value(block, "- 来源事件 ID: ")
+        )
+        source_report_owners = self._parse_source_values(
+            self._extract_value(block, "- 来源负责人: ")
+        )
+        action_labels = self._parse_metadata_values(
+            self._extract_value(block, "- **主要动作**: ")
+        )
+        visible_relations = self._parse_metadata_values(
+            self._extract_value(
+                block,
+                "- **本人参与方式**: ",
+                "- **协作方式**: ",
+            )
+        )
+        merge_meta = self._extract_merge_meta(block, event_id=event_id)
+        if forced_manual_edit_type == "manual_added":
+            merge_meta = {}
+            source_event_ids = []
+            source_report_owners = []
+        elif not source_event_ids:
+            source_event_ids = list(merge_meta.get("source_event_ids", []))
+        if not source_report_owners:
+            source_report_owners = list(
+                merge_meta.get("source_report_owners", [])
+            )
+        self_relations = list(merge_meta.get("self_relations", []))
+        if not self_relations:
+            self_relations = self._relation_keys_from_labels(visible_relations)
+        manual_edit_type = forced_manual_edit_type or str(
+            merge_meta.get("manual_edit_type", "")
+        )
+        source_manual_edit_types = list(
+            merge_meta.get("source_manual_edit_types", [])
+        )
+        event = WorkEvent(
+            date=event_date,
+            event_id=event_id,
+            title=title,
+            content=content,
+            file_links=self._extract_file_links(block),
+            source_people=source_people,
+            source_event_ids=source_event_ids,
+            source_report_owners=source_report_owners,
+            object_hint=object_hint,
+            retention_reason=retention_reason,
+            retention_detail=retention_detail,
+            action_labels=action_labels,
+            self_relations=self_relations,
+            evidence_fingerprints=list(
+                merge_meta.get("evidence_fingerprints", [])
+            ),
+            conversation_fingerprints=list(
+                merge_meta.get("conversation_fingerprints", [])
+            ),
+            file_keys=list(merge_meta.get("file_keys", [])),
+            manual_edit_type=manual_edit_type,
+            source_manual_edit_types=source_manual_edit_types,
+            content_fingerprint=str(merge_meta.get("content_fingerprint", "")),
+        )
+        actual_fingerprint = self._event_content_fingerprint(event)
+        merge_meta_version = int(merge_meta.get("version", 0))
+        if not event.manual_edit_type:
+            if (
+                merge_meta_version == 3
+                and event.content_fingerprint
+                and event.content_fingerprint != actual_fingerprint
+            ):
+                event = WorkEvent.from_dict(
+                    {**event.to_dict(), "manual_edit_type": "manual_modified"}
+                )
+            elif merge_meta_version == 0 or (
+                merge_meta_version in {2, 3}
+                and not event.conversation_fingerprints
+                and not event.source_manual_edit_types
+            ):
+                event = WorkEvent.from_dict(
+                    {**event.to_dict(), "manual_edit_type": "manual_unknown"}
+                )
+        return event
+
+    def _looks_like_markerless_event(self, block: str) -> bool:
+        return all(
+            [
+                self._extract_event_heading_title(block),
+                self._extract_value(block, "- **日期**: ", "- 日期: "),
+                self._extract_value(block, "- **内容**: ", "- 事件内容: "),
+                self._extract_value(block, "- **具体对象**: ", "- 具体对象: "),
+                self._extract_value(block, "- **保留理由**: ", "- 保留理由: "),
+                self._extract_value(block, "- **保留依据**: ", "- 保留依据: "),
+                (
+                    "- **涉及文件**:" in block
+                    or "- 涉及文件链接:" in block
+                ),
+            ]
+        )
+
+    def _manual_event_id(
+        self,
+        document_date: str,
+        block: str,
+        *,
+        occurrence: int,
+    ) -> str:
+        title = self._extract_event_heading_title(block)
+        content = self._extract_value(block, "- **内容**: ", "- 事件内容: ")
+        object_hint = self._extract_value(
+            block,
+            "- **具体对象**: ",
+            "- 具体对象: ",
+        )
+        return stable_event_id(
+            document_date,
+            [],
+            f"manual-added:{title}|{content}|{object_hint}|{occurrence}",
+        )
 
     def _locate_event_block_end(
         self,
@@ -579,7 +783,15 @@ class MarkdownEventStore(EventStore):
         for line in block.splitlines():
             if line.startswith(marker) and line.endswith(" -->"):
                 return line[len(marker) : -len(" -->")].strip()
-        return self._extract_value(block, "- 保留理由: ", "- **保留理由**: ")
+        visible_value = self._extract_value(
+            block,
+            "- 保留理由: ",
+            "- **保留理由**: ",
+        )
+        keys_by_label = {
+            label: key for key, label in RETENTION_REASON_LABELS.items()
+        }
+        return keys_by_label.get(visible_value, visible_value)
 
     def _render_source_values(self, values: list[str]) -> str:
         cleaned = [
@@ -628,7 +840,7 @@ class MarkdownEventStore(EventStore):
             dict.fromkeys(keys_by_label.get(label, label) for label in labels)
         )
 
-    def _extract_merge_meta(self, block: str, *, event_id: str) -> dict[str, list[str]]:
+    def _extract_merge_meta(self, block: str, *, event_id: str) -> dict[str, object]:
         for line in block.splitlines():
             if not line.startswith(MERGE_META_PREFIX):
                 continue
@@ -641,18 +853,21 @@ class MarkdownEventStore(EventStore):
             except json.JSONDecodeError:
                 self._record_merge_meta_warning(event_id)
                 return {}
-            if not isinstance(payload, dict) or payload.get("version") not in {1, 2}:
+            if not isinstance(payload, dict) or payload.get("version") not in {1, 2, 3}:
                 self._record_merge_meta_warning(event_id)
                 return {}
-            parsed: dict[str, list[str]] = {}
+            version = int(payload["version"])
+            parsed: dict[str, object] = {"version": version}
             keys = [
                 "self_relations",
                 "evidence_fingerprints",
                 "file_keys",
                 "source_report_owners",
             ]
-            if payload.get("version") == 2:
+            if version >= 2:
                 keys.extend(["conversation_fingerprints", "source_event_ids"])
+            if version >= 3:
+                keys.append("source_manual_edit_types")
             for key in keys:
                 value = payload.get(key, [])
                 if not isinstance(value, list) or not all(
@@ -664,6 +879,7 @@ class MarkdownEventStore(EventStore):
                     "self_relations",
                     "source_event_ids",
                     "source_report_owners",
+                    "source_manual_edit_types",
                 } and any(
                     INTERNAL_FEISHU_ID_RE.search(item) for item in value
                 ):
@@ -673,11 +889,35 @@ class MarkdownEventStore(EventStore):
                     "self_relations",
                     "source_event_ids",
                     "source_report_owners",
+                    "source_manual_edit_types",
                 }:
                     if not all(is_sha256_fingerprint(item) for item in value):
                         self._record_merge_meta_warning(event_id)
                         return {}
                 parsed[key] = list(dict.fromkeys(value))
+            if version >= 3:
+                allowed_manual_edit_types = {
+                    item.key for item in self.config.manual_edit_types
+                }
+                manual_edit_type = payload.get("manual_edit_type", "")
+                content_fingerprint = payload.get("content_fingerprint", "")
+                if (
+                    not isinstance(manual_edit_type, str)
+                    or (
+                        manual_edit_type
+                        and manual_edit_type not in allowed_manual_edit_types
+                    )
+                    or not isinstance(content_fingerprint, str)
+                    or not is_sha256_fingerprint(content_fingerprint)
+                    or any(
+                        value not in allowed_manual_edit_types
+                        for value in parsed.get("source_manual_edit_types", [])
+                    )
+                ):
+                    self._record_merge_meta_warning(event_id)
+                    return {}
+                parsed["manual_edit_type"] = manual_edit_type
+                parsed["content_fingerprint"] = content_fingerprint
             return parsed
         return {}
 

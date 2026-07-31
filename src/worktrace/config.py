@@ -55,6 +55,13 @@ class EventMetadataItem:
     order: int
 
 
+DEFAULT_MANUAL_EDIT_TYPES = (
+    EventMetadataItem("manual_added", "manual_added", 10),
+    EventMetadataItem("manual_modified", "manual_modified", 20),
+    EventMetadataItem("manual_unknown", "manual_unknown", 30),
+)
+
+
 @dataclass(frozen=True)
 class RetentionSignalDefinition:
     key: str
@@ -1154,9 +1161,13 @@ def _load_event_metadata_overrides(
         raise ValueError(
             f"Invalid event metadata config: {metadata_path} must contain a JSON object."
         )
-    unexpected_keys = sorted(
-        set(payload).difference({"action_labels", "self_relations"})
-    )
+    supported_keys = {
+        "action_labels",
+        "self_relations",
+        "manual_edit_field_label",
+        "manual_edit_types",
+    }
+    unexpected_keys = sorted(set(payload).difference(supported_keys))
     if unexpected_keys:
         raise ValueError(
             "Invalid event metadata config: unsupported keys "
@@ -1175,11 +1186,27 @@ def _load_event_metadata_overrides(
         fallback=config.self_relation_types,
         metadata_path=metadata_path,
     )
+    manual_edit_types = _read_event_metadata_items(
+        payload,
+        field_name="manual_edit_types",
+        fallback=config.manual_edit_types,
+        metadata_path=metadata_path,
+    )
+    manual_edit_field_label = payload.get(
+        "manual_edit_field_label",
+        config.manual_edit_field_label,
+    )
+    if not isinstance(manual_edit_field_label, str) or not manual_edit_field_label.strip():
+        raise ValueError(
+            "Invalid event metadata config: `manual_edit_field_label` must be non-empty."
+        )
 
     return replace(
         config,
         action_label_types=action_label_types,
         self_relation_types=self_relation_types,
+        manual_edit_types=manual_edit_types,
+        manual_edit_field_label=manual_edit_field_label.strip(),
     )
 
 
@@ -1415,6 +1442,8 @@ class RuntimeConfig:
     self_assignment_keywords: tuple[str, ...] = ()
     action_label_types: tuple[EventMetadataItem, ...] = ()
     self_relation_types: tuple[EventMetadataItem, ...] = ()
+    manual_edit_types: tuple[EventMetadataItem, ...] = DEFAULT_MANUAL_EDIT_TYPES
+    manual_edit_field_label: str = "manual_edit"
     retention_policy: RetentionPolicyConfig = field(default_factory=RetentionPolicyConfig)
     reaction_catalogs_root: Path = DEFAULT_REACTION_CATALOGS_ROOT
     excluded_conversation_ids: tuple[str, ...] = ()

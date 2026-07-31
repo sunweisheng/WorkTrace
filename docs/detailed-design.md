@@ -345,7 +345,7 @@ flowchart LR
 
 ### 7.2 来源解析与合并人来源
 
-文件名必须能解析目标日期和姓名。Markdown 必须符合 `MarkdownEventStore` 格式。无效文件跳过并写 warning，不阻断其他文件。来源声明事件数与实际解析数不同允许继续，只记录差值；只有损坏事件块才标记 `partial` 并告警。
+文件名必须能解析目标日期和姓名。Markdown 必须符合 `MarkdownEventStore` 格式。无效文件跳过并写 warning，不阻断其他文件。front matter 的事件数不用于推断删除行为，来源审计只记录当前解析事件数；只有损坏事件块才标记 `partial` 并告警。
 
 来源姓名与当前登录用户名精确匹配时标记 `is_merge_owner_source=true`。只有不同来源存在明确事实冲突，模型才标记 `merge_owner_conflict=true`，Python 才采用合并人版本并写 warning；没有冲突时必须整合所有来源的有效补充。未匹配到合并人来源时直接执行普通合并，不写 warning。
 
@@ -385,7 +385,7 @@ flowchart TD
 
 候选、复核和正式正文使用各自任务专用 Function，并调用同一生产估算函数：`prepared_prompt` 包含最终提示词、当前合法参数示例、证据编号、重试错误反馈和 `/no_think`；`online_estimate` 再加入完整 Function 定义与 `tool_choice`，`codex_estimate` 再加入完整 output-schema，最终取两者较大值。估算器区分 ASCII 和非 ASCII 字符，并为混合中文 JSON、动态编号及协议固定开销留出余量。`model_input_batch_target_tokens=7000` 是模型输入估算目标，不是 HTTP 字节数或服务端上下文上限。每尝试加入一个候选都重新构建并估算；复核超过目标时按关系分批，单条正文仍过长时复用正文切片和分层摘要；不可继续拆分的最小输入允许发送。校验错误只重试当前请求，加入具体错误后重新估算，超限时标记 `oversized_retry` 后发送。正式内容必须返回完整 `covered_draft_ids` 和 `fact_items`；Python 检查整批 draft 分配、锁定组和事实来源，模型明确拒绝输入或结果仍不完整时当前 scope 失败且不写文件。若 scope 目录已有同名历史输出，失败不会删除或覆盖旧文件，是否成功必须以本次 CLI JSON 为准。调试 step 在 Python 校验失败时标记 `validation_failed`，`failed_step_indexes` 同时包含调用失败和校验失败；候选分组还保存解析前的 `raw_function_payload`，用于检查被解析器丢弃的非法结构。
 
-部门负责人和中心负责人复用同一个 `merge-collected` 命令，当前代码没有自动的层级编排。第一级由部门负责人收集本部门 v2 个人 MD 后运行；第二级由中心负责人收集各部门 `*-merged.md` 后再次运行。个人 MD 和部门 MD 可以同时作为输入，程序不比较两者的 `source_event_ids`，不拦截，也不提示重复来源。输出名默认取当前飞书登录人姓名，显式传入 `--owner-name` 时才改为指定姓名；`--offline` 必须同时传入该姓名，并且不访问飞书 CLI。一级子目录是并列 scope，不会自动把子目录输出再送入根目录。上游汇总继续保留原始来源人员和事件 ID，并从 `*-merged.md` 文件名提取上一级负责人；中心公开输出显示 `来源负责人`，来源事件 ID 仅保存在隐藏信息中。
+部门负责人和中心负责人复用同一个 `merge-collected` 命令，当前代码没有自动的层级编排。第一级由部门负责人收集本部门个人 MD 后运行；第二级由中心负责人收集各部门 `*-merged.md` 后再次运行。带会话证据的自动事件和带合法人工修订标记的事件都可参与，修订类型会逐级传递。个人 MD 和部门 MD 可以同时作为输入，程序不比较两者的 `source_event_ids`，不拦截，也不提示重复来源。输出名默认取当前飞书登录人姓名，显式传入 `--owner-name` 时才改为指定姓名；`--offline` 必须同时传入该姓名，并且不访问飞书 CLI。一级子目录是并列 scope，不会自动把子目录输出再送入根目录。上游汇总继续保留原始来源人员和事件 ID，并从 `*-merged.md` 文件名提取上一级负责人；中心公开输出显示 `来源负责人`，来源事件 ID 仅保存在隐藏信息中。
 
 合并边界：共同消息、共同文件、同日会话和语义理由只用于发现和说明候选关系，最终仍由模型确认是否属于同一事项。标题相似、部门相同、来源负责人相同或同一会话都不能单独证明是同一事件。
 
@@ -475,7 +475,7 @@ CLI 会开启 `collected_merge_trace_enabled`，并保留环境配置的 trace �
 ### 9.3 JSON 配置
 
 - `config/event_rules.json`：三类业务关键词
-- `config/event_metadata.json`：主要动作和参与方式的英文键、中文显示名和排序
+- `config/event_metadata.json`：主要动作、参与方式和人工修订类型的英文键、中文显示名和排序
 - `config/conversation_blacklist.example.json`：不含个人会话 ID 的黑名单示例
 - `config/conversation_blacklist.json`：仅保存在使用者本机的整会话排除配置，不纳入 Git 管理
 - `config/conversation_window.json`：初始窗口聚合和按需扩窗阈值
@@ -496,9 +496,9 @@ CLI 会开启 `collected_merge_trace_enabled`，并保留环境配置的 trace �
 - front matter：`date`、`event_count`、`generated_at`、`generator`、`skill_version`
 - event HTML 注释：稳定 `event_id`
 - retention HTML 注释：内部枚举
-- `merge_meta` HTML 注释：v2 版本、参与方式英文键、消息证据 SHA-256、按“目标日期 + 来源会话 ID”生成的同日会话 SHA-256、文件标识 SHA-256，以及非空的来源事件 ID 和来源负责人
+- `merge_meta` HTML 注释：v3 版本、参与方式英文键、消息证据 SHA-256、按“目标日期 + 来源会话 ID”生成的同日会话 SHA-256、文件标识 SHA-256、可见业务字段内容指纹、当前人工修订类型，以及非空的来源事件 ID、来源负责人和下级修订类型
 
-团队汇总把“本人参与方式”显示为“协作方式”，公开保留来源人员，并把来源事件 ID 写入隐藏 `merge_meta`。存在上游负责人时额外显示“来源负责人”，并在 `merge_meta` 保存 `source_report_owners`。读取器兼容旧 Markdown 中重复的“事件标题”、可见的“来源事件 ID”，以及缺少新增隐藏字段的旧 V2 文件；旧 Markdown 中的工作流字段允许读取但会丢弃。缺少会话证据的 V1 文件仍不能参与多人合并，必须重新生成；新输出仍用“未明确”表示缺少可见业务字段。损坏的 `merge_meta` 被忽略并写 warning，不影响正文解析。多人汇总遇到尾部残缺事件时保留此前完整事件并增加 `partial_file_count`，但不修改来源文件；没有完整事件或其他结构无效时整份跳过。Markdown store 同时负责回读，因此字段名或注释结构变化必须同步解析器和多人汇总测试。
+团队汇总把“本人参与方式”显示为“协作方式”，公开保留来源人员，并把来源事件 ID 写入隐藏 `merge_meta`。存在上游负责人时额外显示“来源负责人”，并在 `merge_meta` 保存 `source_report_owners`。人工新增、人工修改和类型无法确认的修订会显示配置定义的“修订标记”，并通过 `source_manual_edit_types` 从部门继续传到中心；缺少可见业务字段时仍显示“未明确”。读取器兼容旧 Markdown 中重复的“事件标题”、可见的“来源事件 ID”和 v1/v2 隐藏信息；旧 Markdown 中的工作流字段允许读取但会丢弃。v2 空会话证据事件标记为类型无法确认，有效 v1 缺少会话证据且没有修订类型时仍不能参与多人合并。损坏的 `merge_meta` 写 warning；正文结构完整时标记为类型无法确认并继续读取。删除事件不保留事件 ID、内容、指纹、删除数量或数量差值。多人汇总遇到尾部残缺事件时保留此前完整事件并增加 `partial_file_count`，但不修改来源文件；没有完整事件或其他结构无效时整份跳过。
 
 LLM 中间缓存指纹使用 schema v3；旧缓存不复用、不迁移，避免旧字段进入新链路。新 Markdown、缓存和 trace 不生成工作流字段；旧 trace 只由调试工具兼容读取并标记为旧版。
 

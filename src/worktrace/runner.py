@@ -5805,6 +5805,9 @@ def _attach_event_file_links(
                 evidence_fingerprints=list(event.evidence_fingerprints),
                 conversation_fingerprints=list(event.conversation_fingerprints),
                 file_keys=file_keys,
+                manual_edit_type=event.manual_edit_type,
+                source_manual_edit_types=list(event.source_manual_edit_types),
+                content_fingerprint=event.content_fingerprint,
             )
         )
 

@@ -1912,7 +1912,7 @@ def test_collected_merge_partially_reads_truncated_source_file(
     ]
 
 
-def test_collected_merge_records_declared_count_difference_without_warning(
+def test_collected_merge_does_not_record_declared_count_difference(
     tmp_path: Path,
 ) -> None:
     inbox = tmp_path / "merge_inbox" / "2026" / "06" / "29"
@@ -1958,9 +1958,14 @@ def test_collected_merge_records_declared_count_difference_without_warning(
     )
     source_file = source_audit["source_files"][0]
     assert source_file["status"] == "success"
-    assert source_file["declared_event_count"] == 2
     assert source_file["parsed_event_count"] == 1
-    assert source_file["event_count_delta"] == -1
+    assert "declared_event_count" not in source_file
+    assert "event_count_delta" not in source_file
+    trace_summary = (trace_root / "2026-06-29" / "summary.md").read_text(
+        encoding="utf-8"
+    )
+    assert "| Declared |" not in trace_summary
+    assert "| Delta |" not in trace_summary
 
 
 def test_collected_merge_does_not_retry_non_retryable_error(tmp_path: Path) -> None:
@@ -2589,12 +2594,13 @@ def test_same_conversation_is_not_automatically_merged(tmp_path: Path) -> None:
     assert analyzer.merge_calls == []
 
 
-def test_merge_collected_stops_before_analyzer_for_missing_conversation_evidence(
+def test_merge_collected_stops_for_v1_without_conversation_or_manual_marker(
     tmp_path: Path,
 ) -> None:
     inbox = tmp_path / "merge_inbox" / "2026" / "06" / "29"
+    source_path = inbox / "2026-06-29-旧文件.md"
     _write_day_doc(
-        inbox / "2026-06-29-旧文件.md",
+        source_path,
         [
             _event(
                 event_id="legacy",
@@ -2604,6 +2610,19 @@ def test_merge_collected_stops_before_analyzer_for_missing_conversation_evidence
             )
         ],
         tmp_path,
+    )
+    source_text = source_path.read_text(encoding="utf-8")
+    merge_meta_line = next(
+        line
+        for line in source_text.splitlines()
+        if line.startswith("<!-- worktrace:merge_meta ")
+    )
+    source_path.write_text(
+        source_text.replace(
+            merge_meta_line,
+            '<!-- worktrace:merge_meta {"version":1,"self_relations":[],"evidence_fingerprints":[],"file_keys":[],"source_report_owners":[]} -->',
+        ),
+        encoding="utf-8",
     )
     analyzer = TwoStageAnalyzer("all")
 
@@ -2617,6 +2636,91 @@ def test_merge_collected_stops_before_analyzer_for_missing_conversation_evidence
         "2026-06-29-旧文件.md (1 events)" in warning
         for warning in result.warning_messages
     )
+
+
+def test_merge_collected_accepts_v2_without_conversation_as_manual_unknown(
+    tmp_path: Path,
+) -> None:
+    inbox = tmp_path / "merge_inbox" / "2026" / "06" / "29"
+    source_path = inbox / "2026-06-29-人工修订.md"
+    _write_day_doc(
+        source_path,
+        [
+            _event(
+                event_id="manual-v2",
+                title="人工补充配置",
+                content="人工补充一项配置结果。",
+                conversation_fingerprints=[],
+            )
+        ],
+        tmp_path,
+    )
+    source_text = source_path.read_text(encoding="utf-8")
+    merge_meta_line = next(
+        line
+        for line in source_text.splitlines()
+        if line.startswith("<!-- worktrace:merge_meta ")
+    )
+    source_path.write_text(
+        source_text.replace(
+            merge_meta_line,
+            '<!-- worktrace:merge_meta {"version":2,"self_relations":[],"evidence_fingerprints":[],"conversation_fingerprints":[],"file_keys":[],"source_report_owners":[]} -->',
+        ),
+        encoding="utf-8",
+    )
+    analyzer = TwoStageAnalyzer("all")
+
+    result = _build_runner(tmp_path, analyzer=analyzer).run("2026-06-29")
+
+    assert result.status == "success"
+    assert len(analyzer.grouping_calls) == 1
+    output = MarkdownEventStore(config=RuntimeConfig()).parse_day_document(
+        Path(result.output_path or "").read_text(encoding="utf-8")
+    )
+    assert output.events[0].manual_edit_type == ""
+    assert output.events[0].source_manual_edit_types == ["manual_unknown"]
+
+
+def test_manual_edit_marker_survives_department_and_center_merge(
+    tmp_path: Path,
+) -> None:
+    department_inbox = tmp_path / "merge_inbox" / "2026" / "06" / "29"
+    _write_day_doc(
+        department_inbox / "2026-06-29-张三.md",
+        [
+            replace(
+                _event(
+                    event_id="manual-added",
+                    title="人工新增事项",
+                    content="人工补充一项已完成工作。",
+                    conversation_fingerprints=[],
+                ),
+                manual_edit_type="manual_added",
+            )
+        ],
+        tmp_path,
+    )
+
+    department_result = _build_runner(tmp_path).run("2026-06-29")
+    department_doc = MarkdownEventStore(config=RuntimeConfig()).parse_day_document(
+        Path(department_result.output_path or "").read_text(encoding="utf-8")
+    )
+    assert department_doc.events[0].source_manual_edit_types == ["manual_added"]
+
+    center_root = tmp_path / "center"
+    center_inbox = center_root / "merge_inbox" / "2026" / "06" / "29"
+    _write_day_doc(
+        center_inbox / "2026-06-29-部门甲-merged.md",
+        department_doc.events,
+        center_root,
+    )
+    center_result = _build_runner(center_root).run("2026-06-29")
+    center_doc = MarkdownEventStore(config=RuntimeConfig()).parse_day_document(
+        Path(center_result.output_path or "").read_text(encoding="utf-8")
+    )
+
+    assert center_result.status == "success"
+    assert center_doc.events[0].source_manual_edit_types == ["manual_added"]
 
 
 def test_cross_department_upstream_events_keep_conversation_evidence(

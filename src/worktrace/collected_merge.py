@@ -447,11 +447,15 @@ class CollectedMergeRunner:
             missing_by_file = Counter(
                 item.source_file
                 for item in source_events
-                if not item.event.conversation_fingerprints
+                if not (
+                    item.event.conversation_fingerprints
+                    or item.event.manual_edit_type
+                    or item.event.source_manual_edit_types
+                )
             )
             scope_warnings = [
                 (
-                    "Missing version 2 conversation evidence: "
+                    "Missing conversation evidence or manual edit marker: "
                     f"{source_file} ({count} events). Regenerate this markdown "
                     "before running merge-collected."
                 )
@@ -489,7 +493,8 @@ class CollectedMergeRunner:
                     scope_warnings
                     or [
                         "Collected merge stopped before this scope because another "
-                        "scope has missing version 2 conversation evidence."
+                        "scope has events without conversation evidence or a manual "
+                        "edit marker."
                     ]
                 ),
             )
@@ -3685,9 +3690,7 @@ class CollectedMergeRunner:
                         "person_name": "",
                         "format": "unknown",
                         "status": "skipped",
-                        "declared_event_count": None,
                         "parsed_event_count": 0,
-                        "event_count_delta": None,
                         "partial_event_ids": [],
                         "partial_reason": "",
                         "warning_messages": ["Invalid source filename."],
@@ -3709,9 +3712,7 @@ class CollectedMergeRunner:
                         "person_name": person_name,
                         "format": _classify_source_markdown(path.name, []),
                         "status": "skipped",
-                        "declared_event_count": self.store.last_declared_event_count,
                         "parsed_event_count": 0,
-                        "event_count_delta": None,
                         "partial_event_ids": [],
                         "partial_reason": "",
                         "warning_messages": [str(exc)],
@@ -3728,8 +3729,7 @@ class CollectedMergeRunner:
                 partial_file_count += 1
                 partial_warning = (
                     f"Partially read source markdown: {path.name} "
-                    f"(declared={self.store.last_declared_event_count} "
-                    f"parsed={len(day_doc.events)} "
+                    f"(parsed={len(day_doc.events)} "
                     f"skipped_event_ids={','.join(partial_event_ids)} "
                     "reason=malformed trailing event block)."
                 )
@@ -3748,12 +3748,7 @@ class CollectedMergeRunner:
                     "person_name": person_name,
                     "format": _classify_source_markdown(path.name, day_doc.events),
                     "status": "partial" if partial_event_ids else "success",
-                    "declared_event_count": self.store.last_declared_event_count,
                     "parsed_event_count": len(day_doc.events),
-                    "event_count_delta": _event_count_delta(
-                        self.store.last_declared_event_count,
-                        len(day_doc.events),
-                    ),
                     "partial_event_ids": partial_event_ids,
                     "partial_reason": (
                         "malformed trailing event block" if partial_event_ids else ""
@@ -3901,10 +3896,6 @@ class CollectedMergeRunner:
                 {
                     **item,
                     "parsed_event_count": parsed_event_count,
-                    "event_count_delta": _event_count_delta(
-                        item.get("declared_event_count"),
-                        parsed_event_count,
-                    ),
                     "sensitive_filtered_count": filter_counts.get(
                         (source_file, "sensitive"),
                         0,
@@ -4030,6 +4021,17 @@ class CollectedMergeRunner:
                     ),
                 ]
             )
+            source_manual_edit_types = _dedupe(
+                [
+                    edit_type
+                    for item in items
+                    for edit_type in [
+                        item.event.manual_edit_type,
+                        *item.event.source_manual_edit_types,
+                    ]
+                    if edit_type
+                ]
+            )
             event_id = stable_event_id(
                 target_date,
                 group.draft_ids,
@@ -4056,6 +4058,7 @@ class CollectedMergeRunner:
                     evidence_fingerprints=evidence_fingerprints,
                     conversation_fingerprints=conversation_fingerprints,
                     file_keys=file_keys,
+                    source_manual_edit_types=source_manual_edit_types,
                 )
             )
         return events
@@ -5216,12 +5219,6 @@ def _quality_ratio(numerator: int | float, denominator: int) -> float:
     return round(float(numerator) / denominator, 4)
 
 
-def _event_count_delta(declared: object, parsed: int) -> int | None:
-    if isinstance(declared, bool) or not isinstance(declared, int):
-        return None
-    return parsed - declared
-
-
 def collected_merge_text_metrics(rows: list[dict[str, str]]) -> dict[str, Any]:
     result: dict[str, Any] = {}
     for field in ("title", "content", "object_hint", "retention_detail"):
@@ -5359,20 +5356,18 @@ def render_collected_merge_trace_summary(summary: dict[str, Any]) -> str:
     lines.extend(["", "## Source Files", ""])
     lines.extend(
         [
-            "| File | Format | Status | Declared | Parsed | Delta | Model input | Sensitive | Excluded | Retention |",
-            "|---|---|---|---:|---:|---:|---:|---:|---:|---:|",
+            "| File | Format | Status | Parsed | Model input | Sensitive | Excluded | Retention |",
+            "|---|---|---|---:|---:|---:|---:|---:|",
         ]
     )
     for item in summary.get("source_files", []):
         lines.append(
-            "| {file} | {format} | {status} | {declared} | {parsed} | {delta} | {model_input} | "
+            "| {file} | {format} | {status} | {parsed} | {model_input} | "
             "{sensitive} | {excluded} | {retention} |".format(
                 file=item.get("source_file", ""),
                 format=item.get("format", ""),
                 status=item.get("status", ""),
-                declared=item.get("declared_event_count", ""),
                 parsed=item.get("parsed_event_count", ""),
-                delta=item.get("event_count_delta", ""),
                 model_input=item.get("model_input_event_count", ""),
                 sensitive=item.get("sensitive_filtered_count", 0),
                 excluded=item.get("excluded_filtered_count", 0),
@@ -6173,6 +6168,17 @@ def build_grouping_summary_events(
                             value
                             for item in items
                             for value in item.event.file_keys
+                        ]
+                    ),
+                    source_manual_edit_types=_dedupe(
+                        [
+                            edit_type
+                            for item in items
+                            for edit_type in [
+                                item.event.manual_edit_type,
+                                *item.event.source_manual_edit_types,
+                            ]
+                            if edit_type
                         ]
                     ),
                 ),

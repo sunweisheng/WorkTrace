@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 
 import pytest
 
 import scripts.diagnose_collected_merge_rolling as diagnostic
 from src.worktrace.config import RuntimeConfig
-from src.worktrace.models import CollectedMergeResult
+from src.worktrace.models import CollectedMergeResult, CollectedMergeRunResult
 
 
 def _build_runner(
@@ -108,3 +109,83 @@ def test_diagnostic_step_records_failed_llm_call(
         "summary": "simulated failure",
     }
     assert 'status="failed"' in captured.err
+
+
+def test_diagnostic_main_stops_before_read_and_model_after_preflight_failure(
+    tmp_path: Path,
+    capsys,
+    monkeypatch,
+) -> None:
+    input_dir = tmp_path / "merge_inbox" / "2026" / "07" / "15"
+    preflight_failure = CollectedMergeRunResult(
+        status="failed",
+        target_date="2026-07-15",
+        input_dir=str(input_dir),
+        output_path=None,
+        source_file_count=1,
+        source_event_count=1,
+        merged_event_count=0,
+        skipped_file_count=0,
+        partial_file_count=0,
+        warning_messages=[
+            "Missing conversation evidence or manual edit marker: source.md (1 events)."
+        ],
+    )
+
+    class FakeRunner:
+        def build_input_dir(self, target_date):
+            assert target_date == "2026-07-15"
+            return input_dir
+
+        def _preflight_conversation_evidence(self, *args, **kwargs):
+            return preflight_failure
+
+        def _read_source_events(self, *args, **kwargs):
+            raise AssertionError("source reading must not continue after preflight failure")
+
+    monkeypatch.setattr(
+        diagnostic,
+        "TracingCollectedMergeRunner",
+        lambda **kwargs: FakeRunner(),
+    )
+    monkeypatch.setattr(
+        diagnostic,
+        "load_runtime_config_overrides",
+        lambda config, cwd: RuntimeConfig(),
+    )
+    monkeypatch.setattr(
+        diagnostic,
+        "load_conversation_blacklist_overrides",
+        lambda config, cwd: config,
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "diagnose_collected_merge_rolling.py",
+            "--date",
+            "2026-07-15",
+            "--owner",
+            "管理者",
+            "--output-dir",
+            str(tmp_path / "trace"),
+        ],
+    )
+
+    diagnostic.main()
+
+    capsys.readouterr()
+    summary = json.loads(
+        (tmp_path / "trace" / "2026-07-15" / "summary.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    summary_markdown = (
+        tmp_path / "trace" / "2026-07-15" / "summary.md"
+    ).read_text(encoding="utf-8")
+    assert summary["status"] == "failed"
+    assert summary["source_event_count_before_preflight"] == 1
+    assert summary["source_event_count_after_source_filter"] == 0
+    assert summary["steps"] == []
+    assert "## Preflight Warnings" in summary_markdown
+    assert "Missing conversation evidence or manual edit marker" in summary_markdown

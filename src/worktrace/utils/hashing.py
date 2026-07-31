@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 from hashlib import sha1, sha256
+from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
 
@@ -40,6 +42,16 @@ def file_key_from_attachment_id(attachment_id: str) -> str:
     if not cleaned:
         return ""
     return _namespaced_sha256("worktrace:attachment:v1", cleaned)
+
+
+def event_content_fingerprint(payload: dict[str, Any]) -> str:
+    serialized = json.dumps(
+        payload,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    return _namespaced_sha256("worktrace:event-content:v1", serialized)
 
 
 def normalize_file_url(url: str) -> str:

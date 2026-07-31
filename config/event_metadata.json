@@ -51,5 +51,11 @@
       "label": "参与回应",
       "order": 70
     }
+  ],
+  "manual_edit_field_label": "修订标记",
+  "manual_edit_types": [
+    {"key": "manual_added", "label": "人工新增", "order": 10},
+    {"key": "manual_modified", "label": "人工修改", "order": 20},
+    {"key": "manual_unknown", "label": "人工修订，类型无法确认", "order": 30}
   ]
 }

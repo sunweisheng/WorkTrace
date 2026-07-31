@@ -322,6 +322,12 @@ def test_repo_event_metadata_defines_self_relation_labels_and_order() -> None:
         "decision_made",
         "follow_up_assigned",
     }
+    assert payload["manual_edit_field_label"] == "修订标记"
+    assert [item["key"] for item in payload["manual_edit_types"]] == [
+        "manual_added",
+        "manual_modified",
+        "manual_unknown",
+    ]
 
 
 def test_load_runtime_config_overrides_reads_collected_merge_env_overrides(

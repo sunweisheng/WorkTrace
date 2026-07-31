@@ -75,6 +75,16 @@ def _emit_step_status(
     sys.stderr.flush()
 
 
+def _write_diagnostic_summary(trace_dir: Path, summary: dict[str, Any]) -> Path:
+    summary_path = trace_dir / "summary.md"
+    (trace_dir / "summary.json").write_text(
+        dump_json(summary, pretty=True),
+        encoding="utf-8",
+    )
+    summary_path.write_text(_render_summary_markdown(summary), encoding="utf-8")
+    return summary_path
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Trace WorkTrace collected rolling merge specificity changes."
@@ -102,6 +112,36 @@ def main() -> None:
     )
     input_dir = runner.build_input_dir(args.date)
     output_path = input_dir / f"{args.date}-{args.owner}-merged.md"
+    preflight_failure = runner._preflight_conversation_evidence(
+        args.date,
+        merge_owner_name=args.owner,
+        input_dir=input_dir,
+        child_dirs=[],
+    )
+    if preflight_failure is not None:
+        summary = {
+            "status": preflight_failure.status,
+            "target_date": args.date,
+            "input_dir": str(input_dir.resolve()),
+            "source_file_count": preflight_failure.source_file_count,
+            "skipped_file_count": preflight_failure.skipped_file_count,
+            "partial_file_count": preflight_failure.partial_file_count,
+            "source_event_count_before_preflight": (
+                preflight_failure.source_event_count
+            ),
+            "source_event_count_after_source_filter": 0,
+            "final_event_count": 0,
+            "final_source_id_count": 0,
+            "preflight_warnings": list(preflight_failure.warning_messages),
+            "read_warnings": [],
+            "source_retention_warnings": [],
+            "owner_warnings": [],
+            "merge_warnings": [],
+            "steps": [],
+            "batch_decisions": [],
+        }
+        print(_write_diagnostic_summary(trace_dir, summary).resolve())
+        return
     (
         source_events,
         source_file_count,
@@ -117,6 +157,7 @@ def main() -> None:
             ignored_subdirectories=set(),
         )
     )
+    source_event_count_before_preflight = len(source_events)
     source_events, source_retention_warnings = runner._filter_retained_source_events(
         source_events,
     )
@@ -132,11 +173,13 @@ def main() -> None:
     )
 
     summary = {
+        "status": "success",
         "target_date": args.date,
         "input_dir": str(input_dir.resolve()),
         "source_file_count": source_file_count,
         "skipped_file_count": skipped_file_count,
         "partial_file_count": partial_file_count,
+        "source_event_count_before_preflight": source_event_count_before_preflight,
         "source_event_count_after_source_filter": len(source_events),
         "final_event_count": len(merged_events),
         "final_source_id_count": len(_source_ids_from_events(merged_events)),
@@ -144,12 +187,11 @@ def main() -> None:
         "source_retention_warnings": source_retention_warnings,
         "owner_warnings": owner_warnings,
         "merge_warnings": merge_warnings,
+        "preflight_warnings": [],
         "steps": runner.step_summaries,
         "batch_decisions": runner._collected_merge_batch_decisions,
     }
-    (trace_dir / "summary.json").write_text(dump_json(summary, pretty=True), encoding="utf-8")
-    (trace_dir / "summary.md").write_text(_render_summary_markdown(summary), encoding="utf-8")
-    print((trace_dir / "summary.md").resolve())
+    print(_write_diagnostic_summary(trace_dir, summary).resolve())
 
 
 class TracingCollectedMergeRunner(CollectedMergeRunner):
@@ -437,15 +479,25 @@ def _render_summary_markdown(summary: dict[str, Any]) -> str:
         "",
         "## Summary",
         "",
+        f"- Status: {summary.get('status', '')}",
+        f"- Source events before preflight: {summary.get('source_event_count_before_preflight', 0)}",
         f"- Source events after source filter: {summary['source_event_count_after_source_filter']}",
         f"- Final events: {summary['final_event_count']}",
         f"- Final source IDs: {summary['final_source_id_count']}",
-        "",
-        "## Step Metrics",
-        "",
-        "| Step | Input estimate | Online estimate | Codex estimate | Target | Prompt chars | Input events | Synthetic inputs | Input source IDs | Raw groups | Retained events | Retained source IDs | Dropped by retention | missing_or_generic_retention_detail | Detail median in | Detail median raw | Detail median kept | Specific tokens/event raw | Specific tokens/event kept |",
-        "|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
+    preflight_warnings = summary.get("preflight_warnings", [])
+    if preflight_warnings:
+        lines.extend(["", "## Preflight Warnings", ""])
+        lines.extend(f"- {warning}" for warning in preflight_warnings)
+    lines.extend(
+        [
+            "",
+            "## Step Metrics",
+            "",
+            "| Step | Input estimate | Online estimate | Codex estimate | Target | Prompt chars | Input events | Synthetic inputs | Input source IDs | Raw groups | Retained events | Retained source IDs | Dropped by retention | missing_or_generic_retention_detail | Detail median in | Detail median raw | Detail median kept | Specific tokens/event raw | Specific tokens/event kept |",
+            "|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+        ]
+    )
     for step in summary["steps"]:
         retention_counts = Counter(
             item["rejection_reason"]

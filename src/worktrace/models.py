@@ -1475,6 +1475,9 @@ class WorkEvent:
     evidence_fingerprints: list[str] = field(default_factory=list)
     conversation_fingerprints: list[str] = field(default_factory=list)
     file_keys: list[str] = field(default_factory=list)
+    manual_edit_type: str = ""
+    source_manual_edit_types: list[str] = field(default_factory=list)
+    content_fingerprint: str = ""
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> WorkEvent:
@@ -1503,6 +1506,11 @@ class WorkEvent:
                 data.get("conversation_fingerprints")
             ),
             file_keys=_string_list(data.get("file_keys")),
+            manual_edit_type=str(data.get("manual_edit_type", "")),
+            source_manual_edit_types=_string_list(
+                data.get("source_manual_edit_types")
+            ),
+            content_fingerprint=str(data.get("content_fingerprint", "")),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -1527,6 +1535,9 @@ class WorkEvent:
             "evidence_fingerprints": list(self.evidence_fingerprints),
             "conversation_fingerprints": list(self.conversation_fingerprints),
             "file_keys": list(self.file_keys),
+            "manual_edit_type": self.manual_edit_type,
+            "source_manual_edit_types": list(self.source_manual_edit_types),
+            "content_fingerprint": self.content_fingerprint,
         }
 
     @property

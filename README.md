@@ -242,8 +242,8 @@ data/YYYY/MM/YYYY-MM-DD-姓名.md
 flowchart TD
     A["merge_inbox/YYYY/MM/DD"] --> B["根目录 + 每个一级子目录分别成为 scope"]
     B --> C["读取当前层有效 Markdown"]
-    C --> D["解析正文、动作和隐藏 v2 证据"]
-    D --> E{"每条事件都有会话指纹?"}
+    C --> D["解析正文、动作和隐藏 v3 来源信息"]
+    D --> E{"有会话证据或合法人工修订标记?"}
     E -->|"否"| X["整次停止并列出须重新生成的文件"]
     E -->|"是"| F["来源过滤 + 确定性预分组"]
     F --> G["共同消息/文件/同日会话建立关系集合"]
@@ -278,7 +278,7 @@ merge_inbox/2026/07/06/
 
 当前代码不区分“部门汇总命令”和“中心汇总命令”，两级都运行同一个 `merge-collected`。默认输出名来自执行命令时当前飞书登录人的姓名；传入 `--owner-name` 时才使用指定姓名，因此正确流程是：
 
-1. 每位员工先生成带 v2 会话证据的个人 MD。
+1. 每位员工先生成带 v3 来源信息的个人 MD；通过其他编辑器进行的合法人工修订也可参与。
 2. 每位部门负责人把本部门个人 MD 放入当日目录，使用自己的飞书身份运行一次，得到 `YYYY-MM-DD-部门负责人-merged.md`。
 3. 中心负责人收集各部门的 `*-merged.md`；需要其他个人记录参与时，也可以同时放入个人 MD。
 4. 中心负责人使用自己的飞书身份再次运行，得到 `YYYY-MM-DD-中心负责人-merged.md`。
@@ -293,9 +293,11 @@ python3 -m src.worktrace.cli merge-collected --date YYYY-MM-DD --owner-name 部�
 
 文件组合由负责人人工控制。个人 MD 与已经包含该人员的部门 MD 同时存在时，程序会把两份都作为正常输入，不比较 `source_event_ids`，不拦截，也不写重复来源 warning。一级子目录是并列的独立汇总范围，不表示系统会自动按“员工 -> 部门 -> 中心”顺序连续执行。
 
-多人汇总只接受带 v2 会话证据的新个人日报和新版上游 `*-merged.md`。任一事件缺少会话指纹时，所有 scope 都会在模型调用、文件写入和发送前停止，并列出必须重新生成的文件。来源 front matter 的声明事件数与实际解析数不同是允许情况，可能来自人工删除，只记录 `declared_event_count`、`parsed_event_count` 和 `event_count_delta`，不告警也不阻断。只有检测到损坏事件块时才把文件标记为 `partial` 并写 warning；若新版文件仅在尾部留下一个未闭合事件，系统仍按既有部分恢复规则处理，并记录 `partial_file_count`。
+多人汇总接受带合法会话证据的自动生成事件，也接受带 `manual_edit_type` 或 `source_manual_edit_types` 的人工修订事件。通过 Codex 或其他编辑器修改可见业务字段时标记为“人工修改”；新增完整标准事件时标记为“人工新增”；隐藏信息损坏但正文完整时标记为“人工修订，类型无法确认”。这些标记会从部门汇总继续传到中心汇总。只有既没有会话证据、也没有合法人工修订标记的来源事件才会在模型调用、文件写入和发送前阻止整次合并。
 
-历史 v1 文件仍可用于检查解析数量、输入规模和旧输出质量，但缺少同日会话证据，不能直接运行当前多人汇总，也不能用来证明当前 V2 候选分组的语义效果。最终验收必须使用重新生成的 v2 个人 MD 和由它们生成的 v2 上游汇总 MD。
+删除事件按“删除即遗忘”处理：系统不保留被删事件的编号、内容、指纹、删除数量或数量差值。front matter 的 `event_count` 只表示当前仍存在的事件数量；来源审计只记录当前解析数量。只有检测到损坏事件块时才把文件标记为 `partial` 并写 warning；若文件尾部留下一个未闭合事件，系统仍按既有部分恢复规则处理，并记录 `partial_file_count`。
+
+历史 v1 文件仍可用于检查解析数量、输入规模和旧输出质量；缺少会话证据且没有人工修订标记时，不能直接运行当前多人汇总。旧 v2 文件继续兼容：会话证据完整时正常合并，单个事件缺少会话证据时标记为“人工修订，类型无法确认”。
 
 个人事件会对“日期 + 原始会话 ID”计算不可逆会话指纹；同一天同一会话的不同消息因此可以建立候选关系。生产代码先用 Python 计算 `evidence_relations`，再在每个滚动批次或复核请求的内存中，把数量大于零的共同消息、共同文件关系编号为 `MSG-xxx`、`FILE-xxx`。编号清单进入模型上下文供模型判断；同会话候选放在 `candidate_discovery_context` 中，不使用输出分组字段或组编号，并明确禁止直接复制为合并组。新模型输出中不再包含 `evidence_relation_ids`，也不能自行声明 `shared_message`、`shared_file` 或内部 `group_reason`。Python 在模型返回分组后只保留全部端点都位于当前组内的关系，并按稳定目录顺序选择能够连接全部成员的最小关系集合，再恢复内部原因；内部 `evidence_relation_ids` 只保存 Python 计算结果并兼容旧 trace。消息或文件集合完全相同也不能自动合并，第一阶段 LLM 仍须结合具体对象和前后动作判断是否属于同一真实事项，第二阶段才生成正式汇总；同一会话不会自动强制合并。
 
@@ -327,6 +329,7 @@ python3 -m src.worktrace.cli merge-collected --date YYYY-MM-DD --owner-name 部�
 - 本人参与方式
 - 保留理由
 - 保留依据
+- 人工修订事件额外显示配置定义的“修订标记”
 - 涉及文件
 
 事件标题应脱离正文也能识别具体事项，优先采用“具体对象 + 关键动作、进展、结果或风险”的结构，不只写无法区分实际事项的通用类别。
@@ -337,7 +340,7 @@ python3 -m src.worktrace.cli merge-collected --date YYYY-MM-DD --owner-name 部�
 - 来源人员
 - 存在上游汇总时的来源负责人
 
-`event_id`、内部 `retention_reason` 枚举和 `merge_meta` 保存在 HTML 注释中。v2 `merge_meta` 保存参与方式英文键、消息证据/同日会话证据/稳定文件标识的 SHA-256 结果，以及可选的来源事件 ID 和上游来源负责人；不保存原始 `om_`、`oc_`、`ou_` 标识。主要动作中的已知内部英文键按 `config/event_metadata.json` 转为中文显示，模型直接返回的中文动作保持不变；主要动作或本人参与方式缺少可见值时显示“未明确”。原始指纹继续保留在 Markdown 和调试 trace 的 `input_events` 中用于追溯，但不会直接发送给模型。读取器兼容旧 Markdown 中重复的“事件标题”和可见的“来源事件 ID”；历史文件不会批量改写。缺少 v2 会话证据的旧文件不能参与多人汇总，必须重新生成。
+`event_id`、内部 `retention_reason` 枚举和 `merge_meta` 保存在 HTML 注释中。v3 `merge_meta` 保存参与方式英文键、消息证据/同日会话证据/稳定文件标识的 SHA-256 结果、内容指纹、人工修订类型，以及可选的来源事件 ID、上游来源负责人和下级修订类型；不保存原始 `om_`、`oc_`、`ou_` 标识。主要动作和修订标记的显示名称都从 `config/event_metadata.json` 读取，主要动作或参与方式缺少可见值时显示“未明确”。原始消息、会话和文件指纹继续保留在 Markdown 和调试 trace 的 `input_events` 中用于追溯，但不会直接发送给模型；人工新增事件不补造这些证据。读取器继续兼容 v1、v2 和旧版可见字段，历史文件不会批量改写。
 
 允许的保留理由枚举：
 
@@ -509,7 +512,7 @@ python3 -m src.worktrace.cli --debug-output merge-collected --date YYYY-MM-DD
 
 诊断报告生成器不会把上述原始调试内容交给报告模型。Python 只提取固定运行状态、数量、墙钟耗时、token、重试、备用线路、写入和送达结果，并先计算阶段排序与占比；报告模型通过专用 Function Calling 选择 `config/support_report.json` 中的整体判断、问题分类、严重程度、原因和建议。模型返回的事实编号、字段和允许值会再次校验，最终 Markdown 写入前还会执行一次隐私扫描。
 
-`scripts/diagnose_collected_merge_rolling.py` 的每个模型步骤也会在调用前写入 `status=running`，并实时输出步骤状态；完成或异常后，同一个 `step-NNN.json` 会更新为 `success` 或 `failed`。调试文件保持 `running` 只表示调用尚未返回，不能据此判断模型无响应。
+`scripts/diagnose_collected_merge_rolling.py` 在模型调用前复用正式多人合并的来源资格预检：有会话证据或合法人工修订类型时继续，有效 v1 事件三者都没有时停止并写入失败状态的 `summary.json`、`summary.md`，不会发起模型请求。每个模型步骤也会在调用前写入 `status=running`，并实时输出步骤状态；完成或异常后，同一个 `step-NNN.json` 会更新为 `success` 或 `failed`。调试文件保持 `running` 只表示调用尚未返回，不能据此判断模型无响应。
 
 `python3 scripts/replay_collected_review_failures.py` 可离线回放候选分组和完整复核 step。旧 trace 使用 `legacy_audit`，不补造初步组、关系或不可拆成员块；新 trace 使用 `current` 恢复 `initial_groups`、`strong_relations` 和 `atomic_groups` 并执行完整校验。`--output-dir` 只写 prompt、Function 定义和汇总，不调用模型，也不生成正式 Markdown。
 
@@ -553,6 +556,7 @@ python3 -m pip install -r requirements.txt
 - [部门到中心两级汇总改造说明](docs/two-level-collected-merge-improvement-plan.md)：当前实现、历史样本结论和真实 V2 验收边界
 - [Online Analyzer](docs/online-analyzer-usage.md)：Responses API 调用和错误边界
 - [Markdown 输出](docs/markdown-output-simplification-design.md)：去掉管理者总结后的当前事件文件格式
+- [日报手工编辑支持](docs/manual-report-editing-design.md)：外部编辑识别、修订标记传播和删除即遗忘边界
 - [锚点实验使用说明](docs/anchor-experiment-usage.md)：独立实验入口，不等同于正式日报
 - [锚点能力当前状态](docs/anchor-first-implementation-breakdown.md)：正式主链与独立实验的边界
 - [锚点协议](docs/anchor-analysis-protocol.md)：分段失败后直接提炼和独立实验使用的协议

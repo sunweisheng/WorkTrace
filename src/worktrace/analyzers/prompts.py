@@ -889,6 +889,17 @@ def build_collected_grouping_prompt(
                 "content": clean_text(item.event.content),
                 "object_hint": item.event.object_hint,
                 "action_labels": list(item.event.action_labels),
+                **(
+                    {
+                        "manual_edit_type": item.event.manual_edit_type,
+                        "source_manual_edit_types": list(
+                            item.event.source_manual_edit_types
+                        ),
+                    }
+                    if item.event.manual_edit_type
+                    or item.event.source_manual_edit_types
+                    else {}
+                ),
             }
             for item in events
         ],
@@ -1068,6 +1079,17 @@ def build_collected_review_prompt(
                 "content": clean_text(item.event.content),
                 "object_hint": item.event.object_hint,
                 "action_labels": list(item.event.action_labels),
+                **(
+                    {
+                        "manual_edit_type": item.event.manual_edit_type,
+                        "source_manual_edit_types": list(
+                            item.event.source_manual_edit_types
+                        ),
+                    }
+                    if item.event.manual_edit_type
+                    or item.event.source_manual_edit_types
+                    else {}
+                ),
             }
             for item in events
         ],
@@ -1527,6 +1549,17 @@ def _serialize_collected_source_event_for_prompt(
         "retention_reason": source_event.event.retention_reason,
         "retention_detail": source_event.event.retention_detail,
         "action_labels": list(source_event.event.action_labels),
+        **(
+            {
+                "manual_edit_type": source_event.event.manual_edit_type,
+                "source_manual_edit_types": list(
+                    source_event.event.source_manual_edit_types
+                ),
+            }
+            if source_event.event.manual_edit_type
+            or source_event.event.source_manual_edit_types
+            else {}
+        ),
         "self_relations": [
             {
                 "key": relation,

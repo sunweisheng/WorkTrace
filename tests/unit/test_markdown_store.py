@@ -180,10 +180,140 @@ def test_markdown_store_roundtrip_keeps_event_metadata_and_hidden_merge_keys(
     assert content.index("- **主要动作**:") < content.index("- **内容**:")
     assert content.index("- **具体对象**:") < content.index("- **本人参与方式**:")
     assert "sha256:" in content
-    assert '"version":2' in content
+    assert '"version":3' in content
     assert '"conversation_fingerprints"' in content
+    assert event.manual_edit_type == ""
+    assert event.source_manual_edit_types == []
+    assert event.content_fingerprint.startswith("sha256:")
     assert "om_secret_1" not in content
     assert "attachment-secret-1" not in content
+
+
+def test_markdown_store_marks_visible_content_changes_as_manual_modified() -> None:
+    config = RuntimeConfig(
+        manual_edit_types=(
+            EventMetadataItem("manual_added", "人工新增", 10),
+            EventMetadataItem("manual_modified", "人工修改", 20),
+            EventMetadataItem("manual_unknown", "人工修订，类型无法确认", 30),
+        ),
+        manual_edit_field_label="修订标记",
+    )
+    store = MarkdownEventStore(config=config)
+    markdown = store.render_day_document(
+        DayDocument(
+            date="2026-07-30",
+            events=[
+                WorkEvent(
+                    date="2026-07-30",
+                    event_id="evt-modified",
+                    title="配置工作",
+                    content="完成原配置。",
+                    object_hint="配置项",
+                    retention_reason="deliverable_updated",
+                    retention_detail="配置已经完成。",
+                    conversation_fingerprints=["sha256:" + "a" * 64],
+                )
+            ],
+            generated_at="2026-07-30T10:00:00+08:00",
+        )
+    )
+    modified = markdown.replace("- **内容**: 完成原配置。", "- **内容**: 完成调整后的配置。")
+
+    loaded = store.parse_day_document(modified)
+    rerendered = store.render_day_document(loaded)
+    loaded_again = store.parse_day_document(rerendered)
+
+    assert loaded.events[0].manual_edit_type == "manual_modified"
+    assert loaded.events[0].content == "完成调整后的配置。"
+    assert "- **修订标记**: 人工修改" in rerendered
+    assert loaded_again.events[0].manual_edit_type == "manual_modified"
+    assert loaded_again.events[0].content_fingerprint == loaded.events[0].content_fingerprint
+
+
+def test_markdown_store_reads_markerless_standard_event_as_manual_added() -> None:
+    config = RuntimeConfig(
+        manual_edit_types=(
+            EventMetadataItem("manual_added", "人工新增", 10),
+            EventMetadataItem("manual_modified", "人工修改", 20),
+            EventMetadataItem("manual_unknown", "人工修订，类型无法确认", 30),
+        ),
+        manual_edit_field_label="修订标记",
+    )
+    store = MarkdownEventStore(config=config)
+    markdown = store.render_day_document(
+        DayDocument(
+            date="2026-07-30",
+            events=[
+                WorkEvent(
+                    date="2026-07-30",
+                    event_id="evt-added",
+                    title="人工补充事项",
+                    content="补充完整的工作结果。",
+                    object_hint="补充事项",
+                    retention_reason="deliverable_updated",
+                    retention_detail="已经形成可汇报结果。",
+                )
+            ],
+            generated_at="2026-07-30T10:00:00+08:00",
+        )
+    )
+    markerless = "\n".join(
+        line
+        for line in markdown.splitlines()
+        if not line.startswith("<!-- worktrace:")
+    )
+
+    loaded = store.parse_day_document(markerless)
+    rerendered = store.render_day_document(loaded)
+
+    assert len(loaded.events) == 1
+    assert loaded.events[0].manual_edit_type == "manual_added"
+    assert loaded.events[0].conversation_fingerprints == []
+    assert loaded.events[0].evidence_fingerprints == []
+    assert "- **修订标记**: 人工新增" in rerendered
+
+
+def test_markdown_store_forgets_removed_event_without_deletion_trace() -> None:
+    store = MarkdownEventStore(config=RuntimeConfig())
+    removed_fingerprint = "sha256:" + "d" * 64
+    markdown = store.render_day_document(
+        DayDocument(
+            date="2026-07-30",
+            events=[
+                WorkEvent(
+                    date="2026-07-30",
+                    event_id="evt-private",
+                    title="私密事项",
+                    content="不应继续存在的内容。",
+                    object_hint="私密对象",
+                    conversation_fingerprints=[removed_fingerprint],
+                ),
+                WorkEvent(
+                    date="2026-07-30",
+                    event_id="evt-kept",
+                    title="保留事项",
+                    content="继续保留的内容。",
+                    object_hint="公开对象",
+                    conversation_fingerprints=["sha256:" + "e" * 64],
+                ),
+            ],
+            generated_at="2026-07-30T10:00:00+08:00",
+        )
+    )
+    removed_start = markdown.index('<!-- worktrace:event:start event_id="evt-private" -->')
+    removed_end = markdown.index("<!-- worktrace:event:end -->", removed_start)
+    removed_end += len("<!-- worktrace:event:end -->")
+    edited = markdown[:removed_start] + markdown[removed_end:]
+
+    loaded = store.parse_day_document(edited)
+    rerendered = store.render_day_document(loaded)
+
+    assert [event.event_id for event in loaded.events] == ["evt-kept"]
+    assert "event_count: 1" in rerendered
+    assert "evt-private" not in rerendered
+    assert "私密事项" not in rerendered
+    assert "不应继续存在的内容" not in rerendered
+    assert removed_fingerprint not in rerendered
 
 
 def test_markdown_store_omits_removed_workstream_field_but_renders_other_metadata(
@@ -266,6 +396,7 @@ generator: worktrace
     loaded = store.parse_day_document(markdown)
 
     assert loaded.events[0].evidence_fingerprints == []
+    assert loaded.events[0].manual_edit_type == "manual_unknown"
     assert store.last_warning_messages == [
         "Ignored damaged merge metadata for event evt-a."
     ]
@@ -303,9 +434,42 @@ generator: worktrace
 
     assert loaded.events[0].evidence_fingerprints == [fingerprint]
     assert loaded.events[0].conversation_fingerprints == []
+    assert loaded.events[0].manual_edit_type == ""
     assert loaded.events[0].source_people == ["张三"]
     assert loaded.events[0].source_event_ids == ["evt-old-source"]
     assert store.last_warning_messages == []
+
+
+def test_markdown_store_marks_v2_event_without_conversation_as_manual_unknown() -> None:
+    store = MarkdownEventStore(config=RuntimeConfig())
+    markdown = """---
+date: 2026-07-30
+event_count: 1
+generated_at: 2026-07-30T10:00:00+08:00
+generator: worktrace
+---
+
+<!-- worktrace:event:start event_id="evt-v2-empty" -->
+<!-- worktrace:retention_reason: deliverable_updated -->
+<!-- worktrace:merge_meta {"version":2,"self_relations":["primary_execution"],"evidence_fingerprints":[],"conversation_fingerprints":[],"file_keys":[],"source_report_owners":[]} -->
+### 1. 人工补充的旧版事件
+
+- **日期**: 2026-07-30
+- **主要动作**: 配置
+- **内容**: 完成一项人工补充的配置工作。
+- **具体对象**: 配置项
+- **本人参与方式**: 主责执行
+- **保留理由**: 交付物有更新
+- **保留依据**: 已经形成可汇报结果。
+- **涉及文件**:
+  - 无
+<!-- worktrace:event:end -->
+"""
+
+    loaded = store.parse_day_document(markdown)
+
+    assert loaded.events[0].manual_edit_type == "manual_unknown"
+    assert loaded.events[0].conversation_fingerprints == []
 
 
 def test_markdown_store_redacts_sensitive_link_query_params(tmp_path: Path) -> None:
@@ -784,7 +948,6 @@ def test_markdown_store_partially_reads_truncated_trailing_event_when_enabled() 
     loaded = store.parse_day_document(markdown, allow_trailing_partial=True)
 
     assert [event.event_id for event in loaded.events] == ["evt-complete"]
-    assert store.last_declared_event_count == 2
     assert store.last_partial_event_ids == ["evt-truncated"]
     assert store.last_warning_messages == [
         "Skipped malformed trailing event block: evt-truncated."

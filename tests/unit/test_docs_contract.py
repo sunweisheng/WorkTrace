@@ -294,6 +294,29 @@ def test_docs_describe_python_collected_evidence_relations() -> None:
         assert "input_events" in content
 
 
+def test_docs_describe_manual_edits_and_deletion_privacy() -> None:
+    current_docs = [
+        Path("README.md").read_text(encoding="utf-8"),
+        Path("docs/detailed-design.md").read_text(encoding="utf-8"),
+        Path("docs/collected-people-merge-plan.md").read_text(encoding="utf-8"),
+        Path("docs/markdown-output-simplification-design.md").read_text(
+            encoding="utf-8"
+        ),
+        Path("SKILL.md").read_text(encoding="utf-8"),
+    ]
+
+    for content in current_docs:
+        assert "人工新增" in content
+        assert "人工修改" in content
+        assert "类型无法确认" in content
+        assert "删除数量" in content
+        assert "数量差值" in content
+
+    for content in current_docs:
+        assert "declared_event_count" not in content
+        assert "event_count_delta" not in content
+
+
 def test_docs_describe_enhanced_debug_artifacts() -> None:
     readme = Path("README.md").read_text(encoding="utf-8")
     detailed = Path("docs/detailed-design.md").read_text(encoding="utf-8")

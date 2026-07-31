@@ -113,7 +113,7 @@
 
 - HTML 注释包裹的 `event_id`
 - 隐藏注释保存内部 `retention_reason` 枚举
-- 隐藏 `merge_meta` 保存参与方式英文键、消息证据指纹、同日会话指纹、文件标识，以及可选来源事件 ID 和来源负责人
+- 隐藏 `merge_meta` 保存参与方式英文键、消息证据指纹、同日会话指纹、文件标识、内容指纹、人工修订类型，以及可选来源事件 ID、来源负责人和下级修订类型
 - `### 序号. 事件标题`
 - `日期`
 - `主要动作`
@@ -122,6 +122,7 @@
 - `本人参与方式`
 - 中文 `保留理由`
 - `保留依据`
+- 存在人工修订时显示配置定义的 `修订标记`
 - `涉及文件`
 
 团队汇总事件把“本人参与方式”替换为“协作方式”，并额外公开显示：
@@ -134,12 +135,12 @@
 隐藏信息格式：
 
 ```html
-<!-- worktrace:merge_meta {"version":2,"self_relations":["initiated"],"evidence_fingerprints":["sha256:..."],"conversation_fingerprints":["sha256:..."],"file_keys":["sha256:..."],"source_report_owners":["部门负责人"],"source_event_ids":["事件ID"]} -->
+<!-- worktrace:merge_meta {"version":3,"self_relations":["initiated"],"evidence_fingerprints":["sha256:..."],"conversation_fingerprints":["sha256:..."],"file_keys":["sha256:..."],"manual_edit_type":"manual_modified","source_manual_edit_types":[],"content_fingerprint":"sha256:...","source_report_owners":["部门负责人"],"source_event_ids":["事件ID"]} -->
 ```
 
 `evidence_fingerprints` 由 Python 对每个来源消息 ID 分别计算 SHA-256，`conversation_fingerprints` 由目标日期和来源会话 ID 计算，`file_keys` 由去参数后的链接或附件 ID 计算 SHA-256。注释不得包含原始消息、会话、用户 ID。只有文件名而没有稳定链接或附件 ID 时不生成文件标识。
 
-读取器仍能读取旧 Markdown 中重复的“事件标题”和可见的“来源事件 ID”，能把 v1 Markdown 按空会话证据读回，也能把缺少 `source_report_owners`、`source_event_ids` 的旧 V2 文件按空列表读回；但 `merge-collected` 不允许 v1 与 v2 混合：任一事件缺少会话指纹时整次停止，并要求重新生成来源文件。不批量改写历史文件。损坏的 `merge_meta` 仍记录 warning 并忽略，不影响普通正文回读。
+读取器仍能读取旧 Markdown 中重复的“事件标题”和可见的“来源事件 ID”，也兼容 v1、v2 隐藏信息。v2 空会话证据事件和隐藏信息损坏但正文完整的事件标记为“人工修订，类型无法确认”；有效 v1 缺少会话证据且没有修订标记时仍停止多人合并。外部编辑器新增的完整标准事件标记为“人工新增”，v3 可见业务字段改变时标记为“人工修改”。删除事件直接消失，不保存其编号、内容、指纹、删除数量或数量差值。不批量改写历史文件。
 
 底部生成说明包含：
 
