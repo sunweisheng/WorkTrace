@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, Sequence
 
 from . import __version__
-from .analyzers.function_calls import FunctionCallSpec
+from .analyzers.function_calls import FunctionCallSpec, function_call_spec
 from .config import RuntimeConfig, load_online_llm_settings
 from .errors import AnalyzerProtocolError, RetryableAnalyzerProtocolError
 from .models import (
@@ -231,13 +231,6 @@ def build_support_report_analyzers(
 
     recorder = LLMUsageRecorder()
     codex = CodexAnalyzer(config=config, cwd=cwd, usage_recorder=recorder)
-    if config.analyzer_backend != "online":
-        return AnalyzerBundle(
-            primary=codex,
-            fallback=None,
-            primary_kind="codex",
-            online_request_retry_limit=0,
-        )
     try:
         load_online_llm_settings(config, cwd=cwd)
     except ValueError:
@@ -245,17 +238,17 @@ def build_support_report_analyzers(
             primary=codex,
             fallback=None,
             primary_kind="codex",
-            online_request_retry_limit=0,
+            online_request_retry_limit=config.primary_request_retry_limit,
         )
 
     from .analyzers.online import OnlineLLMAnalyzer
 
     online = OnlineLLMAnalyzer(config=config, cwd=cwd, usage_recorder=recorder)
     return AnalyzerBundle(
-        primary=online,
-        fallback=codex,
-        primary_kind="online",
-        online_request_retry_limit=config.online_request_retry_limit,
+        primary=codex,
+        fallback=online,
+        primary_kind="codex",
+        online_request_retry_limit=config.primary_request_retry_limit,
     )
 
 
@@ -498,18 +491,6 @@ def _request_support_analysis(
     prompt = _support_prompt(facts=facts, settings=settings)
     if scan_support_report_privacy(prompt, settings=settings):
         return None
-    if bundle.primary_kind != "online":
-        try:
-            return _request_and_validate(
-                bundle.primary,
-                prompt=prompt,
-                spec=spec,
-                facts=facts,
-                settings=settings,
-            )[0]
-        except Exception:
-            return None
-
     technical_failures = 0
     validation_failures = 0
     while True:
@@ -623,11 +604,9 @@ def _support_function_spec(
         "additionalProperties": False,
     }
     typical_fact_id = fact_ids[0]
-    return FunctionCallSpec(
-        request_kind="support_report",
-        name=settings.function_name,
-        description=settings.function_description,
-        parameters=parameters,
+    spec = function_call_spec(
+        "support_report",
+        parameters,
         typical_arguments={
             "overall_assessment": settings.definition_keys("overall_assessments")[0],
             "findings": [
@@ -645,6 +624,14 @@ def _support_function_spec(
         },
         final_parameter_checks=settings.analysis_rules,
     )
+    if (
+        spec.name != settings.function_name
+        or spec.description != settings.function_description
+    ):
+        raise ValueError(
+            "Support report Function metadata does not match the shared LLM contract."
+        )
+    return spec
 
 
 def validate_support_analysis(

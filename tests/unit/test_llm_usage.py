@@ -1,3 +1,6 @@
+import json
+
+from src.worktrace.analyzers.function_calls import FunctionCallSpec
 from src.worktrace.llm_usage import LLMUsageRecorder, extract_usage
 
 
@@ -64,3 +67,53 @@ def test_usage_recorder_marks_codex_tokens_unavailable() -> None:
     assert record["token_usage_status"] == "unavailable"
     assert recorder.summary()["by_backend"]["codex"]["success_count"] == 1
     assert recorder.summary()["codex_wait_ms"]["total"] == 100
+
+
+def test_usage_call_ledger_records_contract_without_runtime_environment(
+    tmp_path,
+) -> None:
+    spec = FunctionCallSpec(
+        request_kind="preflight",
+        name="submit_worktrace_probe",
+        description="提交探测结果。",
+        strict=True,
+        parameters={
+            "type": "object",
+            "properties": {"probe": {"type": "string", "enum": ["ok"]}},
+            "required": ["probe"],
+            "additionalProperties": False,
+        },
+        typical_arguments={"probe": "ok"},
+        final_parameter_checks=("probe 必须为 ok。",),
+        codex_submission_instructions=("只提交一次最终 Function 参数 JSON 对象。",),
+    )
+    recorder = LLMUsageRecorder()
+
+    with recorder.request_context("probe-001"):
+        recorder.record(
+            "preflight",
+            {},
+            backend="codex",
+            duration_ms=12,
+            function_spec=spec,
+            final_prompt='{"probe": "ok"}',
+            model="test-model",
+            reasoning_effort="high",
+            raw_result={"probe": "ok"},
+            python_validation={"status": "passed", "errors": []},
+        )
+    ledger_path = tmp_path / "llm_calls.json"
+    recorder.write_call_ledger(ledger_path, status="completed")
+    ledger = json.loads(ledger_path.read_text(encoding="utf-8"))
+
+    assert ledger["schema_version"] == 1
+    assert ledger["status"] == "completed"
+    call = ledger["calls"][0]
+    assert call["call_id"] == "LLM-000001"
+    assert call["function_contract"] == spec.contract_payload()
+    assert call["final_prompt"] == '{"probe": "ok"}'
+    assert call["raw_result"] == {"probe": "ok"}
+    assert call["python_validation"] == {"status": "passed", "errors": []}
+    serialized = json.dumps(ledger, ensure_ascii=False)
+    for forbidden_field in ("environment", "codex_jsonl", "authentication", "image_bytes"):
+        assert forbidden_field not in serialized

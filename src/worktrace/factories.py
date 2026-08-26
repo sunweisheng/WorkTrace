@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .config import RuntimeConfig
+from .config import RuntimeConfig, load_online_llm_settings
 from .analyzers.base import Analyzer
 from .resolvers.base import ContentResolver
 from .sources.base import ChatSource
@@ -49,13 +49,32 @@ class ContentResolverFactory:
     ) -> ContentResolver:
         from .attachments import TextAttachmentExtractor
         from .resolvers.feishu_message import FeishuMessageContentResolver
-        from .vision import OnlineImageSummarizer
+        from .analyzers.codex import CodexAnalyzer
+        from .vision import CodexFirstImageSummarizer, ImageSummarySettings, OnlineImageSummarizer
+
+        settings = ImageSummarySettings.load(config)
+        online_fallback = None
+        try:
+            load_online_llm_settings(config)
+        except ValueError:
+            pass
+        else:
+            online_fallback = OnlineImageSummarizer(
+                config=config,
+                settings=settings,
+                usage_recorder=usage_recorder,
+            )
 
         return FeishuMessageContentResolver(
             config=config,
-            image_summarizer=OnlineImageSummarizer(
+            image_summarizer=CodexFirstImageSummarizer(
                 config=config,
-                usage_recorder=usage_recorder,
+                settings=settings,
+                codex=CodexAnalyzer(
+                    config=config,
+                    usage_recorder=usage_recorder,
+                ),
+                online_fallback=online_fallback,
             ),
             text_attachment_extractor=TextAttachmentExtractor(config=config),
         )
@@ -67,29 +86,38 @@ class AnalyzerFactory:
         config: RuntimeConfig,
         *,
         usage_recorder: LLMUsageRecorder | None = None,
+        cwd: Path | None = None,
     ) -> Analyzer:
         recorder = usage_recorder or LLMUsageRecorder()
-        if config.analyzer_backend == "online":
-            from .analyzers.codex import CodexAnalyzer
-            from .analyzers.failover import FailoverAnalyzer
+        base_dir = cwd or Path.cwd()
+        from .analyzers.codex import CodexAnalyzer
+        from .analyzers.failover import FailoverAnalyzer
+
+        fallback = None
+        try:
+            load_online_llm_settings(config, cwd=base_dir)
+        except ValueError:
+            pass
+        else:
             from .analyzers.online import OnlineLLMAnalyzer
 
-            return FailoverAnalyzer(
-                primary=OnlineLLMAnalyzer(
-                    config=config,
-                    usage_recorder=recorder,
-                ),
-                fallback=CodexAnalyzer(
-                    config=config,
-                    usage_recorder=recorder,
-                ),
+            fallback = OnlineLLMAnalyzer(
+                config=config,
+                cwd=base_dir,
                 usage_recorder=recorder,
-                online_request_retry_limit=config.online_request_retry_limit,
             )
-
-        from .analyzers.codex import CodexAnalyzer
-
-        return CodexAnalyzer(config=config, usage_recorder=recorder)
+        return FailoverAnalyzer(
+            primary=CodexAnalyzer(
+                config=config,
+                cwd=base_dir,
+                usage_recorder=recorder,
+            ),
+            fallback=fallback,
+            usage_recorder=recorder,
+            primary_backend="codex",
+            fallback_backend="online",
+            primary_request_retry_limit=config.primary_request_retry_limit,
+        )
 
 
 class StorageFactory:

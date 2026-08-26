@@ -132,6 +132,27 @@ def _apply_soft_no_think(prompt: str) -> str:
     return prepare_model_prompt(prompt, append_no_think=True)
 
 
+def _online_error_category(error: AnalyzerProtocolError) -> str:
+    message = str(error).lower()
+    if isinstance(error, ModelInputRejectedError):
+        return "request_rejected"
+    if "429" in message or "rate limit" in message:
+        return "rate_limited"
+    if "401" in message or "authentication" in message:
+        return "authentication"
+    if "403" in message or "permission" in message:
+        return "permission"
+    if "tls" in message or "certificate" in message:
+        return "tls"
+    if "timeout" in message or "timed out" in message:
+        return "timeout"
+    if "network" in message or "connection" in message:
+        return "network"
+    if "json" in message:
+        return "invalid_json"
+    return "invalid_protocol"
+
+
 def _extract_text_from_chat_payload(payload: object) -> str:
     if not isinstance(payload, dict):
         return ""
@@ -620,6 +641,7 @@ def _read_non_stream_response(
 
 @dataclass
 class OnlineLLMAnalyzer(Analyzer):
+    manages_usage_records = True
     config: RuntimeConfig
     cwd: Path | None = None
     settings_loader: Callable[..., OnlineLLMSettings] = load_online_llm_settings
@@ -1042,15 +1064,46 @@ class OnlineLLMAnalyzer(Analyzer):
                 estimated_tokens,
                 target_tokens,
             )
+        started_at = perf_counter()
+        settings: OnlineLLMSettings | None = None
         try:
+            settings = self.settings_loader(self.config, cwd=self.cwd, environ=None)
             return self._invoke_online_prepared(
                 prompt,
+                settings=settings,
                 function_spec=function_spec,
                 estimated_input_tokens=estimated_tokens,
                 input_target_tokens=target_tokens,
                 oversized_singleton=oversized_singleton,
             )
         except AnalyzerProtocolError as exc:
+            final_prompt = _apply_soft_no_think(function_spec.prompt_with_example(prompt))
+            if settings is not None:
+                final_prompt = str(
+                    _build_responses_request_body(
+                        prompt,
+                        settings=settings,
+                        function_spec=function_spec,
+                    )["input"]
+                )
+            self.usage_recorder.record(
+                request_kind,
+                {},
+                duration_ms=(perf_counter() - started_at) * 1000,
+                prompt_chars=len(prompt),
+                backend="online",
+                function_spec=function_spec,
+                final_prompt=final_prompt,
+                model=settings.model if settings is not None else None,
+                reasoning_effort=(
+                    settings.reasoning_effort if settings is not None else None
+                ),
+                status="failed",
+                error_category=_online_error_category(exc),
+                estimated_input_tokens=estimated_tokens,
+                input_target_tokens=target_tokens,
+                oversized_singleton=oversized_singleton,
+            )
             exc.estimated_input_tokens = estimated_tokens
             exc.input_target_tokens = target_tokens
             exc.oversized_singleton = oversized_singleton
@@ -1060,13 +1113,13 @@ class OnlineLLMAnalyzer(Analyzer):
         self,
         prompt: str,
         *,
+        settings: OnlineLLMSettings,
         function_spec: FunctionCallSpec,
         estimated_input_tokens: int,
         input_target_tokens: int,
         oversized_singleton: bool,
     ) -> object:
         started_at = perf_counter()
-        settings = self.settings_loader(self.config, cwd=self.cwd, environ=None)
         body = _build_responses_request_body(
             prompt,
             settings=settings,
@@ -1147,6 +1200,11 @@ class OnlineLLMAnalyzer(Analyzer):
             duration_ms=duration_ms,
             prompt_chars=len(prompt),
             backend="online",
+            function_spec=function_spec,
+            final_prompt=str(body["input"]),
+            model=settings.model,
+            reasoning_effort=settings.reasoning_effort,
+            raw_result=payload,
             estimated_input_tokens=estimated_input_tokens,
             input_target_tokens=input_target_tokens,
             oversized_singleton=oversized_singleton,

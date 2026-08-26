@@ -19,7 +19,7 @@ from ..constants import LinkType
 from ..models import AttachmentTextBlock, LinkMeta, LinkedFileTextBlock, NormalizedMessage
 from ..utils.link_refs import build_message_link_candidates, classify_link_type, collect_message_links
 from ..utils.text import clean_text, extract_urls
-from ..vision import OnlineImageSummarizer
+from ..vision import CodexFirstImageSummarizer, OnlineImageSummarizer
 from .base import ContentResolver
 
 logger = logging.getLogger("worktrace")
@@ -38,7 +38,7 @@ def _warning_detail(exc: Exception) -> str:
 class FeishuMessageContentResolver(ContentResolver):
     config: RuntimeConfig
     command_runner: Any | None = None
-    image_summarizer: OnlineImageSummarizer | None = None
+    image_summarizer: CodexFirstImageSummarizer | OnlineImageSummarizer | None = None
     image_downloader: Any | None = None
     text_attachment_extractor: TextAttachmentExtractor | None = None
     attachment_downloader: Any | None = None

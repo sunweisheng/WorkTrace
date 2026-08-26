@@ -3,6 +3,8 @@ from __future__ import annotations
 import copy
 import json
 from dataclasses import dataclass
+from functools import lru_cache
+from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from .collected_evidence import EvidenceRelation
@@ -19,76 +21,50 @@ COLLECTED_GROUPING_FINAL_PARAMETER_CHECKS = (
 )
 
 
-_FUNCTION_METADATA = {
-    "batch_analysis": (
-        "submit_batch_analysis",
-        "提交当前聊天批次提炼出的候选工作事件和补充上下文请求。",
-    ),
-    "conversation_segmentation": (
-        "submit_conversation_segmentation",
-        "提交当前会话中各独立会话轮次的起点。",
-    ),
-    "segment_batch_analysis": (
-        "submit_segment_batch_analysis",
-        "提交当前多个独立会话轮次的事件提炼结果。",
-    ),
-    "retention_review": (
-        "submit_retention_review",
-        "提交临时协作候选的信号复核结果。",
-    ),
-    "personal_fact_review": (
-        "submit_personal_fact_review",
-        "提交单个个人事件候选的事实证据复核结果。",
-    ),
-    "anchor_batch_analysis": (
-        "submit_anchor_batch_analysis",
-        "提交分段失败后的锚点批量事件提炼结果。",
-    ),
-    "anchor_analysis": (
-        "submit_anchor_analysis",
-        "提交一个锚点聊天窗口的事件提炼或上下文补读结果。",
-    ),
-    "day_candidate_merge": (
-        "submit_day_candidate_groups",
-        "提交同一天候选事件的跨会话分组结果。",
-    ),
-    "day_group_discovery": (
-        "submit_day_group_discovery",
-        "逐组提交仅根据标题完成的个人事件漏合并检查。",
-    ),
-    "day_group_review": (
-        "submit_day_group_review",
-        "提交存在强关联的个人事件组局部复核结果。",
-    ),
-    "personal_group_render": (
-        "submit_personal_group_render",
-        "提交成员已经锁定的个人多事件组标题、正文和具体对象。",
-    ),
-    "collected_candidate_grouping": (
-        "submit_collected_grouping_result",
-        "提交多人事件候选分组，完整覆盖每个来源事件且不得重复。",
-    ),
-    "collected_group_discovery": (
-        "submit_collected_group_discovery",
-        "逐组提交仅根据标题完成的部门事件漏合并检查。",
-    ),
-    "collected_group_review": (
-        "submit_collected_group_review_result",
-        "提交一个高风险多人候选组的复核或拆分结果。",
-    ),
-    "collected_event_merge": (
-        "submit_collected_render_result",
-        "提交多人分组的正式汇总内容和事实来源。",
-    ),
-    "reaction_metadata": (
-        "submit_reaction_metadata",
-        "提交飞书表情类型的结构化元数据。",
-    ),
-    "preflight": (
-        "submit_worktrace_probe",
-        "提交 WorkTrace Function Calling 能力探测结果。",
-    ),
-}
+DEFAULT_FUNCTION_CONTRACTS_PATH = (
+    Path(__file__).resolve().parents[3] / "config" / "llm_function_contracts.json"
+)
+
+
+@lru_cache(maxsize=1)
+def _load_function_contracts() -> tuple[dict[str, dict[str, object]], tuple[str, ...]]:
+    try:
+        payload = json.loads(DEFAULT_FUNCTION_CONTRACTS_PATH.read_text(encoding="utf-8"))
+    except FileNotFoundError as exc:
+        raise ValueError("LLM Function contract configuration is missing.") from exc
+    except json.JSONDecodeError as exc:
+        raise ValueError("LLM Function contract configuration is not valid JSON.") from exc
+    if not isinstance(payload, dict) or payload.get("schema_version") != 1:
+        raise ValueError("LLM Function contract configuration has an unsupported version.")
+    raw_functions = payload.get("functions")
+    raw_instructions = payload.get("codex_submission_instructions")
+    if not isinstance(raw_functions, dict) or not isinstance(raw_instructions, list):
+        raise ValueError("LLM Function contract configuration has invalid fields.")
+    functions: dict[str, dict[str, object]] = {}
+    for request_kind, raw_contract in raw_functions.items():
+        if not isinstance(request_kind, str) or not isinstance(raw_contract, dict):
+            raise ValueError("LLM Function contract entries must be objects.")
+        if set(raw_contract) != {"name", "description", "strict"}:
+            raise ValueError(f"Invalid Function contract fields for {request_kind}.")
+        name = raw_contract.get("name")
+        description = raw_contract.get("description")
+        strict = raw_contract.get("strict")
+        if (
+            not isinstance(name, str)
+            or not name.strip()
+            or not isinstance(description, str)
+            or not description.strip()
+            or not isinstance(strict, bool)
+        ):
+            raise ValueError(f"Invalid Function contract values for {request_kind}.")
+        functions[request_kind] = {
+            "name": name.strip(),
+            "description": description.strip(),
+            "strict": strict,
+        }
+    if not all(isinstance(item, str) and item.strip() for item in raw_instructions):
+        raise ValueError("Codex submission instructions must be non-empty strings.")
+    return functions, tuple(item.strip() for item in raw_instructions)
 
 
 @dataclass(frozen=True)
@@ -98,8 +74,10 @@ class FunctionCallSpec:
     description: str
     parameters: dict[str, object]
     typical_arguments: dict[str, object]
+    strict: bool = True
     argument_structure_example: dict[str, object] | None = None
     final_parameter_checks: tuple[str, ...] = ()
+    codex_submission_instructions: tuple[str, ...] = ()
 
     def tool(self) -> dict[str, object]:
         return {
@@ -107,13 +85,36 @@ class FunctionCallSpec:
             "name": self.name,
             "description": self.description,
             "parameters": self.parameters,
-            "strict": True,
+            "strict": self.strict,
         }
 
     def tool_choice(self) -> dict[str, str]:
         return {"type": "function", "name": self.name}
 
     def prompt_with_example(self, prompt: str) -> str:
+        return self._prepare_prompt(prompt, include_codex_contract=False)
+
+    def codex_prompt(self, prompt: str) -> str:
+        return self._prepare_prompt(prompt, include_codex_contract=True)
+
+    def contract_payload(self) -> dict[str, object]:
+        return {
+            "request_kind": self.request_kind,
+            "name": self.name,
+            "description": self.description,
+            "strict": self.strict,
+            "parameters": copy.deepcopy(self.parameters),
+            "typical_arguments": copy.deepcopy(self.typical_arguments),
+            "argument_structure_example": copy.deepcopy(
+                self.argument_structure_example
+            ),
+            "final_parameter_checks": list(self.final_parameter_checks),
+            "codex_submission_instructions": list(
+                self.codex_submission_instructions
+            ),
+        }
+
+    def _prepare_prompt(self, prompt: str, *, include_codex_contract: bool) -> str:
         try:
             payload = json.loads(prompt)
         except json.JSONDecodeError:
@@ -128,6 +129,15 @@ class FunctionCallSpec:
             if self.argument_structure_example is not None:
                 payload["function_argument_structure_example"] = (
                     self.argument_structure_example
+                )
+            if include_codex_contract:
+                payload["function_contract"] = {
+                    "name": self.name,
+                    "description": self.description,
+                    "strict": self.strict,
+                }
+                payload["codex_submission_instructions"] = list(
+                    self.codex_submission_instructions
                 )
             prepared = json.dumps(
                 payload,
@@ -146,6 +156,22 @@ class FunctionCallSpec:
                     "\n\nFunction 参数结构示例：\n"
                     + json.dumps(
                         self.argument_structure_example,
+                        ensure_ascii=False,
+                        indent=2,
+                    )
+                )
+            if include_codex_contract:
+                prepared += (
+                    "\n\nFunction contract:\n"
+                    + json.dumps(
+                        {
+                            "name": self.name,
+                            "description": self.description,
+                            "strict": self.strict,
+                            "codex_submission_instructions": list(
+                                self.codex_submission_instructions
+                            ),
+                        },
                         ensure_ascii=False,
                         indent=2,
                     )
@@ -386,8 +412,9 @@ def function_call_spec(
     enum_values: Mapping[str, Sequence[str]] | None = None,
     exact_array_lengths: Mapping[str, int] | None = None,
 ) -> FunctionCallSpec:
+    contracts, codex_submission_instructions = _load_function_contracts()
     try:
-        name, description = _FUNCTION_METADATA[request_kind]
+        metadata = contracts[request_kind]
     except KeyError as exc:
         raise ValueError(f"No Function Calling definition for request kind: {request_kind}") from exc
     normalized_parameters = copy.deepcopy(parameters)
@@ -398,8 +425,9 @@ def function_call_spec(
     )
     return FunctionCallSpec(
         request_kind=request_kind,
-        name=name,
-        description=description,
+        name=str(metadata["name"]),
+        description=str(metadata["description"]),
+        strict=bool(metadata["strict"]),
         parameters=normalized_parameters,
         typical_arguments=(
             copy.deepcopy(typical_arguments)
@@ -412,6 +440,7 @@ def function_call_spec(
             else None
         ),
         final_parameter_checks=tuple(final_parameter_checks),
+        codex_submission_instructions=codex_submission_instructions,
     )
 
 

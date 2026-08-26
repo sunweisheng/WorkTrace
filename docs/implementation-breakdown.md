@@ -9,7 +9,7 @@
 | 文件 | 当前职责 |
 | --- | --- |
 | `src/worktrace/cli.py` | 解析个人日报、`merge-collected`、`sync-reaction-catalog`，加载配置，输出 JSON 和退出码 |
-| `src/worktrace/preflight.py` | 检查 Python、lark-cli user 身份、在线模型、Codex 备用命令、数据目录和时区 |
+| `src/worktrace/preflight.py` | 检查 Python、lark-cli user 身份、Codex 主线路及其严格 Schema 小探针、Online 备用配置、数据目录和时区 |
 | `src/worktrace/config.py` | 合并 `RuntimeConfig`、`.env`、进程环境变量及各类 JSON 配置 |
 | `src/worktrace/factories.py` | 装配聊天源、内容解析器、analyzer、store 和投递通道 |
 
@@ -50,7 +50,7 @@ flowchart LR
 - `_review_retention_candidates(...)`：复核配置命中的临时协作边界候选，并由 Python 应用固定保留规则
 - `_review_personal_event_facts(...)`：把高风险个人事件拆成单候选请求，最多 3 路并发复核事实证据；每个候选内部重试保持顺序
 - `_review_personal_fact_batch_with_retry(...)`：执行单候选事实复核、协议校验和有限重试
-- `_merge_day_candidates_with_batching(...)`：全日分组、覆盖校验、Online 质量重试、Codex 备用和拆单修补
+- `_merge_day_candidates_with_batching(...)`：全日分组、覆盖校验、Codex 质量重试、Online 当前请求备用和拆单修补
 - `_discover_day_group_review_candidates(...)`：一次提交全部初步组编号和组合标题，校验逐组检查并建立标题候选范围
 - `_review_strongly_related_day_groups(...)`：按标题、结构关系和附件基础名称形成的完整检查范围，最多三路并行拆分或重组初步组；失败时保留复核前分组
 - `_render_personal_multi_groups(...)`：成员锁定后重写多成员组标题、正文和具体对象；失败时确定性拼接并告警
@@ -77,7 +77,7 @@ flowchart LR
 | `pipeline/cross_conversation_merge.py` | 最终分组物化，以及动作、参与方式的 `MergedEventDraft` 合并 |
 | `pipeline/event_merge.py` | 最终 `WorkEvent` 构建、稳定 ID 和消息证据指纹 |
 
-`pipeline/conversation_first_pass.py` 仍用于不支持分段批处理的 analyzer 兼容路径；它不是当前默认 Online analyzer 的主入口。
+`pipeline/conversation_first_pass.py` 仍用于不支持分段批处理的 analyzer 兼容路径；它不是当前默认 Codex 主线路的主入口。
 
 ## 6. Analyzer
 
@@ -86,13 +86,13 @@ flowchart LR
 | `analyzers/base.py` | 分段、片段批处理、临时协作复核、个人事实复核、日级分组、标题发现、完整复核、内容重写和多人合并接口 |
 | `analyzers/online.py` | OpenAI Python SDK + Responses API 在线文字实现；固定结构使用任务专用 Function Calling，每次请求独立创建和关闭客户端 |
 | `analyzers/codex.py` | Codex CLI 文字实现，使用线程安全的 0-1 秒调用间隔 |
-| `analyzers/failover.py` | 在线文字请求首次发生可切换错误时，只对当前请求再试 Online 1 次，仍失败才改由 Codex 执行 |
+| `analyzers/failover.py` | 后端无关的当前请求路由器：Codex 可切换技术错误先重试一次，仍失败才改由 Online 执行一次 |
 | `analyzers/prompts.py` | 所有语义任务 prompt |
 | `analyzers/function_calls.py` | `FunctionCallSpec`、任务专用 Function、动态 ID 枚举、典型参数示例和多人证据编号合同 |
 | `analyzers/output_schemas.py` | Function 参数与 Codex output-schema 共用结构；动态限制候选、关系和合法证据 ID |
 | `analyzers/protocol.py` | 模型 JSON 到领域对象的解析与引用恢复；校验关系处理、成员覆盖和内容证据 |
 
-当前默认 `OnlineLLMAnalyzer` 实现分段、片段提炼、临时协作复核、个人事实复核、全日初步分组、标题发现、完整内容复核、多成员内容重写和多人汇总接口，因此 `runner` 走完整的现行主链。是否支持具体能力由接口检查决定，不通过配置字符串猜测。
+当前默认 `FailoverAnalyzer` 以 `CodexAnalyzer` 为主、`OnlineLLMAnalyzer` 为当前请求备用，实现分段、片段提炼、临时协作复核、个人事实复核、全日初步分组、标题发现、完整内容复核、多成员内容重写和多人汇总接口，因此 `runner` 走完整的现行主链。是否支持具体能力由接口检查决定，不通过配置字符串猜测。
 
 ## 7. 输出与投递
 
@@ -114,7 +114,7 @@ flowchart LR
 6. `collected_group_discovery` 单次提交全部初步组编号和标题，模型逐组完整检查，Python 校验并形成重叠候选；标题候选与结构关系和高风险条件共同建立检查范围
 7. 完整复核在范围内拆开初步组并跨组重新组合；标题发现的多组候选保持为完整范围，但实际组间连接分别编号；相同 `event_id` 的相似来源块不可拆，全部关系用 `relation_resolutions` 逐条处理，分开时允许返回两侧代表成员并校验其确实位于不同最终组
 8. Python 校验完整覆盖、不可拆成员块、关系处理和合并依据，再按锁定候选组生成正式内容及带来源的 `fact_items`
-9. 可切换在线错误只让当前请求额外再试 Online 1 次，仍失败才由 Codex 重做；结果质量错误按 Online 首次请求、Online 局部重试 1 次、Codex 当前请求备用 1 次执行。标题发现全部失败时按没有标题候选继续，完整复核持续失败时保留复核前分组并告警；初步分组或正式正文到达各自关键失败边界时，当前 scope 终止且不写新文件
+9. 可切换 Codex 技术错误只让当前请求额外再试 Codex 1 次，仍失败才由 Online 执行一次；结果质量错误按各任务的 Codex 局部重试、带具体 Python 错误的 Online 当前请求备用执行。标题发现全部失败时按没有标题候选继续，完整复核持续失败时保留复核前分组并告警；初步分组或正式正文到达各自关键失败边界时，当前 scope 终止且不写新文件
 10. 聚合动作、协作方式、消息指纹、会话指纹、文件标识、来源人员、事件 ID 和上一级负责人
 11. Python 计算 scope 和整次运行的 `quality_summary`，团队 `WorkEvent` 最终过滤、写入和自发送
 
@@ -131,7 +131,8 @@ flowchart LR
 | `config/conversation_blacklist.example.json` | 不含个人会话 ID 的黑名单示例 |
 | `config/conversation_blacklist.json` | 仅保存在使用者本机的整会话排除配置，不纳入 Git 管理 |
 | `config/conversation_window.json` | 群聊锚点聚合、初始上下文和按需扩窗阈值 |
-| `config/llm_retry.json` | Online 请求级重试、分段/提炼/全日分组结果质量重试、流式首次返回超时、Codex 间隔，以及切分、提炼、个人事实复核、个人完整内容复核和多人完整复核并发数 |
+| `config/llm_retry.json` | Codex 主线路请求级重试、分段/提炼/全日分组结果质量重试、Online 流式首次返回超时、Codex 间隔，以及切分、提炼、个人事实复核、个人完整内容复核和多人完整复核并发数 |
+| `config/llm_function_contracts.json` | Function 名称、描述、`strict` 与 Codex 单次参数 JSON 提交规则 |
 | `config/retention_policy.json` | 个人事件保留提示、结构化业务词、临时协作复核、事实复核条件和模型信号定义 |
 | `config/event_grouping.json` | 个人与多人共同分组说明，以及合并原因的描述、`acceptance_rules` 和 `rejection_rules` |
 | `config/collected_merge.json` | 多人汇总高风险复核开关、事件数/文件数阈值、对象冲突与宽泛对象复核条件 |

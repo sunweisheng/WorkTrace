@@ -471,6 +471,7 @@ def test_online_analyzer_allows_marked_indivisible_input(
             model_input_batch_target_tokens=1,
         ),
         cwd=tmp_path,
+        settings_loader=lambda *args, **kwargs: build_settings(),
     )
     captured: dict[str, object] = {}
 

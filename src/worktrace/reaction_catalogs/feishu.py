@@ -11,9 +11,9 @@ from urllib.parse import urljoin
 
 import httpx
 
-from ..analyzers.online import OnlineLLMAnalyzer
 from ..analyzers.function_calls import function_call_spec
 from ..config import RuntimeConfig
+from ..factories import AnalyzerFactory
 from ..reaction_catalog import (
     ReactionCatalog,
     ReactionCatalogError,
@@ -55,7 +55,7 @@ class OnlineReactionMetadataEnricher:
     def enrich(self, emoji_types: list[str]) -> list[ReactionMetadata]:
         if not emoji_types:
             return []
-        analyzer = OnlineLLMAnalyzer(
+        analyzer = AnalyzerFactory.create_default(
             config=self.config,
             cwd=self.cwd,
         )
@@ -205,7 +205,7 @@ def _build_metadata_prompt(emoji_types: list[str]) -> str:
         "为飞书消息表情生成中文元数据。只调用指定 Function 一次。"
         "每个 emoji_type 恰好输出一次；name 为简短中文名称，description 为不超过 30 字的中文含义，"
         "semantic 为英文小写短语，描述工作沟通中的主要反应语义。\n"
-        f"emoji_types: {emoji_types}\n/no_think"
+        f"emoji_types: {emoji_types}"
     )
 
 

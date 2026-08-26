@@ -25,13 +25,13 @@ WorkTrace 另有一个管理人员汇总模式：管理人员先收集多人已�
 - 如果用户同时提到“收集的文件/多人 Markdown/合并”，即使没有写出 `merge-collected`，也按管理人员汇总流程处理。
 - 用户说“运行报错”“帮我排查”“速度太慢”“结果不对”“生成诊断报告”“用调试模式重新跑”时，按调试诊断流程执行。能从当前对话确定日期和个人/多人方式时直接运行；确实无法判断运行方式时只询问一次。
 
-普通生成每次使用前都必须先检查用户是否已经提供本地在线模型配置；如果没有配置，必须中止普通生成并明确要求用户先提供：
+普通生成每次使用前都必须先检查仓库本地 `.env` 是否已经显式配置 Codex 主线路；缺少时中止普通生成并明确要求用户先提供：
 
-- 必须在仓库本地单独配置在线模型参数
-- 推荐使用仓库根目录 `.env`
-- `WORKTRACE_LLM_BASE_URL`、`WORKTRACE_LLM_MODEL`、`WORKTRACE_LLM_API_KEY` 缺一不可
-- `WORKTRACE_LLM_REASONING_EFFORT` 默认应为 `none`
-- 这些内容不能提交到 git 仓库
+- `WORKTRACE_CODEX_MODEL`、`WORKTRACE_CODEX_REASONING_EFFORT` 与五项 `WORKTRACE_CODEX_PROVIDER_*` 缺一不可
+- 它们只从仓库本地 `.env` 读取，不继承个人 Codex 的模型或中转提供方配置；中转站 Key 仍由 Codex CLI 自己的认证存储提供
+- 不硬编码模型名或推理强度枚举，由 `--preflight` 的正式严格 Schema 小探针验证组合
+- Online 当前请求备用使用 `WORKTRACE_LLM_BASE_URL`、`WORKTRACE_LLM_MODEL` 和 `WORKTRACE_LLM_API_KEY`；缺少或不合法时禁用备用但不阻止 Codex 主线路
+- 真实密钥和本地 `.env` 都不能提交到 git 仓库
 
 诊断请求例外：不要因为配置缺失或 preflight 失败而由 Codex 提前中止。仍要执行带 `--debug-output` 的 CLI，让 WorkTrace 生成能够说明环境问题的安全诊断报告；正式日报流程是否继续仍由 CLI 自己决定。
 
@@ -41,11 +41,11 @@ WorkTrace 另有一个管理人员汇总模式：管理人员先收集多人已�
 2. 在仓库根目录执行 WorkTrace 的 Python 入口，而不是直接在 `SKILL.md` 中实现业务逻辑。
 3. 让 Python 负责聊天抓取、窗口裁剪、批量组装、模型信号和证据校验、固定保留规则、统计、全日分组完整性、文件链接聚合、Markdown 写入和自送达。
 4. 每日 Markdown 文件创建成功后，按 `config/self_delivery.json` 的 `enabled` 决定是否通过飞书 CLI 机器人身份发给当前登录用户自己；默认开启。
-5. 仅在需要语义提取时调用在线模型做批量分析。
-6. 主流程默认且强制使用 `/no_think` 与请求体关闭推理配置。
-7. 在线文字请求不等待；Online 非流式请求和 Codex 备用请求都以 `WORKTRACE_LLM_TIMEOUT_SECONDS`（未配置时 180 秒）作为整次请求总时限，Online 到点后关闭当前连接。发生网络、超时、429、5xx、流式 JSON 异常、空结果或无效 JSON 时，按 `config/llm_retry.json` 的 `online_request_retry_limit=1` 只对当前请求再试 Online 1 次，仍失败才切到 Codex，下一请求仍优先在线。Codex 按同一配置的 `0-1` 秒范围调用；图片摘要只走在线图片能力。
+5. 仅在需要语义提取时调用 Codex 做批量分析；Online 只在当前请求的 Codex 技术失败后作为备用。
+6. Online 备用保持 `/no_think` 与 `reasoning.effort=none`；Codex 不追加 `/no_think`，而是在完整契约提示词中明确 `strict=true` 与单次参数 JSON 提交要求。
+7. 每个新请求先走 Codex。网络、超时、429、5xx、空结果和无效 JSON 时，按 `config/llm_retry.json` 的 `primary_request_retry_limit=1` 只对当前请求再试 Codex 1 次，仍失败才交给 Online 一次；下一个新请求重新优先 Codex。登录、权限、模型、推理强度、TLS 和配置错误不切换。两条线路都以 `WORKTRACE_LLM_TIMEOUT_SECONDS`（未配置时 180 秒）作为整次请求总时限；Codex 的全局同时调用上限为 3，文字、图片、表情补全和诊断报告共用。图片摘要也先走 Codex 普通文本任务，使用临时图片副本的 `--image`，不强制 Function Calling。
 8. 调试模式只为正式日报或多人汇总增加 trace 和日志，不改变正式模型线路。任务结束后另有一次独立的诊断报告模型调用；报告模型只读取 Python 已脱敏并计算好的编号事实。除非用户明确要求做单独的 Codex 后端诊断，否则不得通过临时配置、包装命令或代码参数把整次个人日报或多人汇总强制切到 Codex。
-9. 在线请求成功返回、但结果未通过 Python 证据或结构校验时，先按程序现有配置用 Online 局部重试当前请求；结果质量错误在局部重试用尽后，只把带有最后校验错误的当前请求交给 Codex 再执行一次。技术请求经过 Online 重试和 Codex 备用仍失败时直接执行该节点的失败策略，不消耗结果质量重试，也不重新从 Online 开始一轮。Codex 结果合法时继续流程，下一请求仍优先 Online；普通结构化任务中 Codex 失败或结果仍不合法时停止整次生成。全日分组的专用边界是：Codex 技术调用失败时终止；Codex 返回但仍非法时保留完全合法组，其余候选拆成单例并记录 warning。标题发现全部尝试失败时按没有候选继续并记录 warning；局部复核失败或持续非法时保留复核前分组并记录 warning。不得擅自增加重试次数、重新运行整次流程或把整次流程切换到 Codex。
+9. Codex 成功返回、但结果未通过 Python 证据或结构校验时，先按程序现有配置用 Codex 局部重试当前请求，并把具体错误放入提示词；结果质量重试用尽后，只把当前请求交给 Online 一次。技术请求经过 Codex 重试和 Online 备用仍失败时直接执行该节点的失败策略，不消耗结果质量重试，也不重新从 Codex 开始一轮。Online 结果合法时继续流程，下一请求仍优先 Codex；普通结构化任务中 Online 失败或结果仍不合法时停止整次生成。全日分组的专用边界是：Online 技术调用失败时终止；Online 返回但仍非法时保留完全合法组，其余候选拆成单例并记录 warning。标题发现全部尝试失败时按没有候选继续并记录 warning；局部复核失败或持续非法时保留复核前分组并记录 warning。不得擅自增加重试次数或重新运行整次流程。
 
 个人日报临时协作复核约定：
 
@@ -114,7 +114,7 @@ python3 -m src.worktrace.cli --debug-output merge-collected --date YYYY-MM-DD
 
 外发材料必须由 WorkTrace 报告生成器产生并通过隐私检查。不得自行读取原始聊天、prompt、模型返回或完整 trace 后整理外发内容；不得发送完整 `data/debug` 目录。报告只允许是 `data/debug/support_reports/worktrace-support-<随机编号>.md` 指向的单个 Markdown，不生成或索要 ZIP。
 
-报告模型先按当前请求规则尝试 Online，再使用 Codex 备用；如果 Online 配置本身不可用，可以直接尝试 Codex。这个例外只属于独立报告调用，不改变个人日报或多人汇总的正式模型线路。
+报告模型同样先走 Codex，再在可重试技术失败后使用 Online 一次；Online 配置缺失时不阻止报告使用 Codex。这个规则不改变个人日报或多人汇总的请求级主备边界。
 
 管理人员汇总命令：
 
@@ -139,7 +139,7 @@ python3 -m src.worktrace.cli --debug-output merge-collected --date YYYY-MM-DD
 - 部门负责人和中心负责人使用同一个命令。部门负责人先汇总个人 MD，中心负责人再人工收集各部门 `*-merged.md` 汇总；代码不自动编排层级。
 - 个人 MD 与已经包含该人员的部门 MD 可以同时输入；程序不比较 `source_event_ids`，不拦截，也不提示重复来源，文件组合由负责人人工控制。
 - 同一天同一会话只用于发现可能属于同一事项的候选，最终仍由模型结合内容确认，不自动强制合并。
-- 多人候选阶段默认使用完整事件正文，并按 `model_input_batch_target_tokens=7000` 的完整输入估算优先分批。固定结构的 Online 请求使用任务专用 Function Calling；估算取“最终提示词、当前合法参数示例、证据编号、重试错误和 `/no_think` 加完整 tools 与 `tool_choice`”同“相同提示词加 Codex 完整 output-schema”两者的较大值。超过目标时关系优先分批，各批初步组由 Python 直接合并。个人和多人候选阶段都不构造候选摘要、不做摘要再次分组；跨批关系交给全部组标题发现和完整内容复核。已经拆到最小必要输入仍超过目标时标记为 `oversized_singleton` 并发送，不设置额外的本地绝对上限。重试反馈使当前请求超限时标记 `oversized_retry` 后发送。
+- 多人候选阶段默认使用完整事件正文，并按 `model_input_batch_target_tokens=7000` 的完整输入估算优先分批。固定结构任务使用同一份 `FunctionCallSpec`：Online 备用接收原生 Function Calling 的 `tools`、`tool_choice` 与 `strict:true`，Codex 主线路接收完整契约提示词和同一份 `--output-schema`。估算取“Online 示例、自检和 `/no_think` 加完整 tools 与 `tool_choice`”同“Codex 完整契约提示词加完整 output-schema”两者的较大值。超过目标时关系优先分批，各批初步组由 Python 直接合并。个人和多人候选阶段都不构造候选摘要、不做摘要再次分组；跨批关系交给全部组标题发现和完整内容复核。已经拆到最小必要输入仍超过目标时标记为 `oversized_singleton` 并发送，不设置额外的本地绝对上限。重试反馈使当前请求超限时标记 `oversized_retry` 后发送。
 - `config/event_grouping.json` 是个人与多人分组语义说明的共同来源：每个 `group_reason_definitions` 项配置 `acceptance_rules` 和 `rejection_rules`，具体中文判断规则不得复制到 Python；`config/collected_merge.json` 只保留多人高风险复核开关和阈值。`same_deliverable_batch` 可用于同一批配套产物、同一交付物多个版本，以及不同时间、状态、地区或阶段形成但需要统一汇报或交付的连续产物。文件、版本、时期、状态、地区、项目归属、名称和格式只是上下文信息，任何单项都不能直接决定合并或拆分。模型能看到 Python 编号的 `MSG-xxx`、`FILE-xxx` 证据目录，但新结果只返回 `semantic_reasons`、`reason_detail`、逐条覆盖全部成员的 `member_connections` 和 `risk_flags`，不再返回 `evidence_relation_ids`，也不能直接声明 `shared_message`、`shared_file` 或内部 `group_reason`。Python 只使用端点都在当前组内的关系，按稳定目录顺序计算连接全部成员的最小证据集合，并恢复内部原因；局部证据只写审计，不作为全组合并依据。内部 `evidence_relation_ids` 仅保存 Python 计算结果并兼容旧 trace；同会话候选放入 `candidate_discovery_context`，不用输出分组字段或组编号。逐事件说明遗漏、重复、组外引用或空说明，以及重复事件编号和单成员合并组，都必须进入当前请求局部重试，不得静默修复。
 - 初步分组后，`collected_group_discovery` 单次只提交全部组编号和组合标题，组合标题覆盖组内全部来源事件标题；模型逐组完整返回 `group_checks`，Python 校验后形成重叠候选。超过 7000 token 仍整体提交，全部失败时按没有标题候选继续并记录 warning。标题候选与共同消息、共同文件、同一附件基础名称、同日会话候选和现有高风险条件共同建立完整检查范围。
 - 完整复核可以拆开初步组并跨组重新组合；同一 `event_id` 的相似重复来源是不可拆成员块，但整个成员块可以继续加入更大事件。标题发现的多组候选继续作为完整检查范围，但每条实际组间连接单独编号。模型先逐条判断待处理关系，再统一处理重叠关系并形成最终组；确认成立时最少关联成员必须真实同组，分开时可以返回两侧代表成员，并必须提供关系各侧证据和可独立汇报的目标或结果。复核结果持续非法时保留复核前分组并记录 warning，不让整次部门汇总失败。
@@ -148,7 +148,7 @@ python3 -m src.worktrace.cli --debug-output merge-collected --date YYYY-MM-DD
 - 每个合并范围输出本目录 `YYYY-MM-DD-登录人姓名-merged.md`。
 - 团队汇总文件会公开保留来源人员，并在隐藏信息中逐级保留来源事件 ID；中心结果还公开显示从上游 `*-merged.md` 文件名提取并逐级保留的来源负责人。
 - 缺少当前登录人的个人 MD 时静默执行普通汇总，不产生 warning。
-- 输入/输出数量、字符数、覆盖率、校验错误、重试原因、复核触发和阶段耗时全部由 Python 计算，并进入 CLI JSON 与 trace summary；阶段实际耗时看 `wall_clock_ms`，并发请求负载看 `request_accumulated_ms`，不能把请求累计耗时当作实际等待时间。调试记录不改变 Online 局部重试 1 次和当前请求 Codex 备用 1 次的正式线路；结束后独立执行报告模型调用，不要求每一级事件数必须减少。
+- 输入/输出数量、字符数、覆盖率、校验错误、重试原因、复核触发和阶段耗时全部由 Python 计算，并进入 CLI JSON 与 trace summary；阶段实际耗时看 `wall_clock_ms`，并发请求负载看 `request_accumulated_ms`，不能把请求累计耗时当作实际等待时间。调试记录不改变 Codex 局部重试和当前请求 Online 备用的正式线路；结束后独立执行报告模型调用，不要求每一级事件数必须减少。
 - 多人汇总的 `--debug-output` 会直接开启 trace，默认写入 `data/debug/collected_merge/<target_date>/`；除原 step 和汇总外，还写入 `collected_group_discovery.json` 与 `collected_group_review.json`。如果 `.env` 配置了 `WORKTRACE_COLLECTED_MERGE_TRACE_ROOT`，继续使用该目录。也可通过 `WORKTRACE_COLLECTED_MERGE_TRACE=true` 长期开启。
 - `python3 scripts/replay_collected_review_failures.py --trace-root <trace目录> --steps <编号列表> --output-dir <输出目录>` 可离线复盘候选分组和高风险复核。旧 trace 使用 `legacy_audit`，不补造 `member_connections`；新实验结果使用 `current` 完整执行新协议校验。该脚本不调用模型，也不生成正式 Markdown。
 - 每个生成的团队汇总文件默认都会通过飞书 CLI 机器人身份发送给当前登录用户自己。将 `config/self_delivery.json` 的 `enabled` 设为 `false` 后不发送，结果 `self_delivery_status` 为 `disabled`。
@@ -160,8 +160,8 @@ python3 -m src.worktrace.cli --debug-output merge-collected --date YYYY-MM-DD
 - 核心实现应放在 `src/`，测试放在 `tests/`，设计文档放在 `docs/`。
 - 不要让 LLM 参与数据计算；统计或计算必须由 Python 完成。
 - 个人保留提示、既有业务词、临时协作与事实复核条件和语义信号说明维护在 `config/retention_policy.json`；个人和多人分组理由的描述、成立条件和排除条件维护在 `config/event_grouping.json`；多人高风险复核开关和阈值维护在 `config/collected_merge.json`。不得在 Python 中新增聊天关键词或具体中文业务判断规则。
-- 个人日报和多人汇总统一使用默认值为 `7000` 的 `model_input_batch_target_tokens` 作为模型输入估算目标，不另设多人合并字符阈值。分批和调用前检查必须调用同一个 Python 估算函数，并取 Online Function 定义与 `tool_choice`、Codex 完整 output-schema 两种估算的较大值；模型名、URL、API Key、timeout 和 stream 不计入。会话分段窗口、锚点降级批次、全日候选分组及多人汇总等仍可拆的组合输入必须继续拆分；最小必要输入仍超过目标时允许发送，并在调试记录中保存两条线路估算、目标值、超限原因、实际 token 和估算差。该值不是 HTTP 字节数或服务端上下文上限。
-- `WORKTRACE_LLM_STREAM` 是 Online 文字和图片请求的唯一流式开关，默认 `false`。每次请求重新读取配置，创建并关闭独立 OpenAI 和 HTTP 客户端；固定结构请求强制且只允许调用一次预期 Function，显式开启流式时按调用 ID 拼接 Function 参数。普通文字或图片理解不强制 Function Calling。请求级可重试错误按配置再试 Online 1 次，仍失败才将当前请求交给 Codex；Python 校验失败则先用 Online 局部重试当前请求并反馈具体错误，结果质量局部重试用尽后再将当前请求交给 Codex 一次。下一请求重新优先 Online。Codex 失败或结果仍不合法时停止整次生成。调试、诊断或一次运行失败都不构成整次切换后端的授权；需要改变全局后端或重试次数时，先停止并取得用户明确同意。
+- 个人日报和多人汇总统一使用默认值为 `7000` 的 `model_input_batch_target_tokens` 作为模型输入估算目标，不另设多人合并字符阈值。分批和调用前检查必须调用同一个 Python 估算函数，并取 Online 原生 Function 与 `tool_choice`、Codex 完整契约和同一 output-schema 两种估算的较大值；模型名、URL、API Key、timeout 和 stream 不计入。会话分段窗口、锚点降级批次、全日候选分组及多人汇总等仍可拆的组合输入必须继续拆分；最小必要输入仍超过目标时允许发送，并在调试记录中保存两条线路估算、目标值、超限原因、实际 token 和估算差。该值不是 HTTP 字节数或服务端上下文上限。
+- `WORKTRACE_LLM_STREAM` 是 Online 文字和图片备用请求的唯一流式开关，默认 `false`。每次 Online 请求重新读取配置，创建并关闭独立 OpenAI 和 HTTP 客户端；固定结构 Online 请求强制且只允许调用一次预期 Function，显式开启流式时按调用 ID 拼接 Function 参数。Codex 每次都在空临时目录以 stdin 和 `--output-schema` 运行，读取 `--json` 事件并拒绝工具调用；`read-only` 是写保护，不是操作系统级读取隔离。请求级可重试错误按配置再试 Codex 1 次，仍失败才将当前请求交给 Online 一次。Python 校验失败先走 Codex 局部重试并反馈具体错误，结果质量重试用尽后再交给 Online 一次。下一请求重新优先 Codex。Online 失败或结果仍不合法时停止整次生成。调试、诊断或一次运行失败都不构成整次切换后端的授权；需要改变重试次数时，先停止并取得用户明确同意。
 - 原始聊天内容不应长期落盘，长期保留的只有结构化事件清单。
 - 安全诊断报告的数量、耗时、排序、比例、token、重试和送达统计必须由 Python 计算；大模型只解释编号事实并从 `config/support_report.json` 的允许项中选择判断和建议。
 - 报告模型不得读取目标日期、姓名、本机路径、飞书 ID、聊天正文、事件文字、文件名、URL、模型名称、模型地址、密钥、prompt、原始模型返回、原始错误或日志原文。

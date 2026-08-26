@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from src.worktrace.analyzers.function_calls import (
@@ -233,6 +234,49 @@ def test_task_function_spec_applies_dynamic_enums_and_empty_array_limits() -> No
     assert properties["source_message_ids"]["items"]["enum"] == ["m001", "m002"]
     assert properties["target_attachment_ids"]["maxItems"] == 0
     assert properties["target_link_ids"]["maxItems"] == 0
+
+
+def test_online_and_codex_share_one_complete_function_contract() -> None:
+    schema = {
+        "type": "object",
+        "properties": {
+            "draft_id": {"type": "string"},
+            "evidence_message_ids": {
+                "type": "array",
+                "items": {"type": "string"},
+            },
+        },
+        "required": ["draft_id", "evidence_message_ids"],
+        "additionalProperties": False,
+    }
+    spec = task_function_call_spec(
+        "preflight",
+        schema,
+        draft_ids=["draft-001"],
+        message_ids=["message-001"],
+        typical_arguments={
+            "draft_id": "draft-001",
+            "evidence_message_ids": ["message-001"],
+        },
+    )
+
+    online_tool = spec.tool()
+    codex_prompt = json.loads(spec.codex_prompt('{"input": "probe"}'))
+    ledger_contract = spec.contract_payload()
+
+    assert online_tool["name"] == codex_prompt["function_contract"]["name"]
+    assert online_tool["description"] == codex_prompt["function_contract"]["description"]
+    assert online_tool["strict"] is True
+    assert codex_prompt["function_contract"]["strict"] is True
+    assert ledger_contract["parameters"] == online_tool["parameters"]
+    assert ledger_contract["typical_arguments"] == codex_prompt[
+        "typical_function_arguments"
+    ]
+    assert ledger_contract["codex_submission_instructions"] == codex_prompt[
+        "codex_submission_instructions"
+    ]
+    assert spec.tool_choice() == {"type": "function", "name": online_tool["name"]}
+    assert "/no_think" not in json.dumps(codex_prompt, ensure_ascii=False)
 
 
 def test_day_grouping_function_has_only_grouping_fields() -> None:

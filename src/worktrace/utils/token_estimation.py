@@ -73,8 +73,8 @@ def estimate_codex_schema_input_tokens(
     append_no_think: bool = False,
 ) -> int:
     prepared_prompt = prepare_model_prompt(
-        function_spec.prompt_with_example(prompt),
-        append_no_think=append_no_think,
+        function_spec.codex_prompt(prompt),
+        append_no_think=False,
     )
     schema_input = json.dumps(
         {"output_schema": function_spec.parameters},

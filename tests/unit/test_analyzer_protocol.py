@@ -38,6 +38,9 @@ from src.worktrace.models import (
     PersonalFactReviewCandidate,
     SourceBackedEventDraft,
 )
+from src.worktrace.pipeline.personal_fact_review import (
+    validate_personal_fact_review_result,
+)
 
 
 def _personal_fact_review_batch() -> PersonalFactReviewBatch:
@@ -61,6 +64,42 @@ def _personal_fact_review_batch() -> PersonalFactReviewBatch:
             )
         ],
     )
+
+
+def _valid_personal_fact_review_payload() -> dict[str, object]:
+    return {
+        "results": [
+            {
+                "draft_id": "d1",
+                "supported": True,
+                "fact_items": {
+                    "topic": {
+                        "text": "设备编号修正",
+                        "evidence_message_ids": ["m1"],
+                    },
+                    "content": [
+                        {
+                            "text": "重新修改未生效的设备编号。",
+                            "evidence_message_ids": ["m1"],
+                        }
+                    ],
+                    "action_label": {
+                        "text": "修改",
+                        "evidence_message_ids": ["m1"],
+                    },
+                    "object_hint": {
+                        "text": "设备编号",
+                        "evidence_message_ids": ["m1"],
+                    },
+                    "retention_detail": {
+                        "text": "执行人确认重新修改设备编号。",
+                        "evidence_message_ids": ["m1"],
+                    },
+                },
+                "removed_claims": [],
+            }
+        ]
+    }
 
 
 def test_protocol_parsers_accept_valid_payloads() -> None:
@@ -412,39 +451,7 @@ def test_retention_review_protocol_and_schema_use_configured_signal_types() -> N
 
 def test_personal_fact_review_protocol_and_schema_require_source_backed_fields() -> None:
     batch = _personal_fact_review_batch()
-    payload = {
-        "results": [
-            {
-                "draft_id": "d1",
-                "supported": True,
-                "fact_items": {
-                    "topic": {
-                        "text": "设备编号修正",
-                        "evidence_message_ids": ["m1"],
-                    },
-                    "content": [
-                        {
-                            "text": "重新修改未生效的设备编号。",
-                            "evidence_message_ids": ["m1"],
-                        }
-                    ],
-                    "action_label": {
-                        "text": "修改",
-                        "evidence_message_ids": ["m1"],
-                    },
-                    "object_hint": {
-                        "text": "设备编号",
-                        "evidence_message_ids": ["m1"],
-                    },
-                    "retention_detail": {
-                        "text": "执行人确认重新修改设备编号。",
-                        "evidence_message_ids": ["m1"],
-                    },
-                },
-                "removed_claims": [],
-            }
-        ]
-    }
+    payload = _valid_personal_fact_review_payload()
 
     parsed = parse_personal_fact_review_payload(payload)
     schema = personal_fact_review_output_schema(batch)
@@ -464,6 +471,37 @@ def test_personal_fact_review_protocol_and_schema_require_source_backed_fields()
     assert item_schema["properties"]["draft_id"]["enum"] == ["d1"]
     assert evidence_schema["enum"] == ["m1"]
     assert item_schema["additionalProperties"] is False
+
+
+def test_personal_fact_review_rejects_missing_extra_enum_and_evidence_values() -> None:
+    batch = _personal_fact_review_batch()
+    payloads = []
+
+    missing_field = _valid_personal_fact_review_payload()
+    del missing_field["results"][0]["supported"]
+    payloads.append(missing_field)
+
+    extra_field = _valid_personal_fact_review_payload()
+    extra_field["results"][0]["unexpected"] = True
+    payloads.append(extra_field)
+
+    invalid_enum = _valid_personal_fact_review_payload()
+    invalid_enum["results"][0]["draft_id"] = "d2"
+    payloads.append(invalid_enum)
+
+    invalid_evidence = _valid_personal_fact_review_payload()
+    invalid_evidence["results"][0]["fact_items"]["topic"][
+        "evidence_message_ids"
+    ] = ["m2"]
+    payloads.append(invalid_evidence)
+
+    for payload in payloads[:2]:
+        with pytest.raises(AnalyzerProtocolError):
+            parse_personal_fact_review_payload(payload)
+    for payload in payloads[2:]:
+        parsed = parse_personal_fact_review_payload(payload)
+        with pytest.raises(AnalyzerProtocolError):
+            validate_personal_fact_review_result(batch, parsed)
 
 
 def test_personal_fact_review_schema_requires_single_candidate() -> None:

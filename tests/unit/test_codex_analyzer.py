@@ -7,10 +7,19 @@ from pathlib import Path
 
 import pytest
 
-from src.worktrace.analyzers.codex import CodexAnalyzer, CodexRequestPacer
+from src.worktrace.analyzers.codex import (
+    CODEX_GLOBAL_CONCURRENCY_LIMIT,
+    CodexAnalyzer,
+    CodexRequestPacer,
+    build_codex_subprocess_env,
+)
 from src.worktrace.analyzers.function_calls import FunctionCallSpec
 from src.worktrace.config import RuntimeConfig, load_runtime_config_overrides
-from src.worktrace.errors import AnalyzerProtocolError, ModelInputLimitError
+from src.worktrace.errors import (
+    AnalyzerProtocolError,
+    ModelInputLimitError,
+    RetryableAnalyzerProtocolError,
+)
 from src.worktrace.models import (
     AnalysisBatch,
     ConversationSlice,
@@ -24,6 +33,29 @@ from src.worktrace.models import (
     WorkEvent,
 )
 from src.worktrace.utils.token_estimation import estimate_model_input_tokens
+
+
+_CODEX_EVENTS = '{"type":"thread.started","thread_id":"test"}\n'
+_CODEX_PROVIDER_ENV = (
+    "WORKTRACE_CODEX_PROVIDER_ID=test-relay\n"
+    "WORKTRACE_CODEX_PROVIDER_NAME=Test Relay\n"
+    "WORKTRACE_CODEX_PROVIDER_BASE_URL=https://relay.example/v1\n"
+    "WORKTRACE_CODEX_PROVIDER_WIRE_API=responses\n"
+    "WORKTRACE_CODEX_PROVIDER_REQUIRES_OPENAI_AUTH=true\n"
+)
+
+
+@pytest.fixture(autouse=True)
+def _write_codex_env(tmp_path: Path) -> None:
+    (tmp_path / ".env").write_text(
+        "WORKTRACE_CODEX_MODEL=test-codex-model\n"
+        "WORKTRACE_CODEX_REASONING_EFFORT=high\n" + _CODEX_PROVIDER_ENV,
+        encoding="utf-8",
+    )
+
+
+def _output_path(args) -> Path:
+    return Path(args[args.index("--output-last-message") + 1])
 
 
 def sample_batch() -> AnalysisBatch:
@@ -368,6 +400,36 @@ def test_codex_analyzer_surfaces_stderr_tail_on_failure(tmp_path: Path) -> None:
     assert "line2 | line3 | line4" in message
 
 
+def test_codex_analyzer_reports_authentication_without_leaking_jsonl_error(
+    tmp_path: Path,
+) -> None:
+    def fake_runner(args, *, cwd=None, timeout=None, input_text=None):
+        class Result:
+            returncode = 1
+            stdout = (
+                '{"type":"turn.failed","error":{"message":"unexpected status 401 '
+                'Unauthorized: Incorrect API key provided: sk-test-secret"}}\n'
+            )
+            stderr = ""
+
+        return Result()
+
+    analyzer = CodexAnalyzer(
+        config=RuntimeConfig(data_root=tmp_path / "data", analyzer_backend="codex"),
+        command_runner=fake_runner,
+        cwd=tmp_path,
+    )
+
+    with pytest.raises(AnalyzerProtocolError) as exc_info:
+        analyzer.analyze_batch("2026-06-23", sample_batch())
+
+    assert type(exc_info.value) is not RetryableAnalyzerProtocolError
+    message = str(exc_info.value)
+    assert "error_category=authentication" in message
+    assert "sk-test-secret" not in message
+    assert analyzer.usage_recorder.records()[-1]["error_category"] == "authentication"
+
+
 def test_codex_analyzer_rejects_oversized_prompt_before_command(tmp_path: Path) -> None:
     calls = []
 
@@ -393,9 +455,11 @@ def test_codex_analyzer_rejects_oversized_prompt_before_command(tmp_path: Path) 
 
 def test_codex_analyzer_allows_marked_indivisible_input(tmp_path: Path) -> None:
     def fake_runner(args, *, cwd=None, timeout=None, input_text=None):
-        output_path = Path(args[args.index("-o") + 1])
+        output_path = _output_path(args)
         output_path.write_text("{}", encoding="utf-8")
-        return subprocess.CompletedProcess(args=args, returncode=0, stdout="", stderr="")
+        return subprocess.CompletedProcess(
+            args=args, returncode=0, stdout=_CODEX_EVENTS, stderr=""
+        )
 
     analyzer = CodexAnalyzer(
         config=RuntimeConfig(
@@ -435,7 +499,6 @@ def test_codex_analyzer_counts_output_schema_before_command(tmp_path: Path) -> N
         config=RuntimeConfig(
             data_root=tmp_path / "data",
             analyzer_backend="codex",
-            codex_stdin_mode=True,
             model_input_batch_target_tokens=prompt_only_tokens,
         ),
         command_runner=fake_runner,
@@ -464,14 +527,20 @@ def test_codex_analyzer_passes_output_schema_in_default_mode(tmp_path: Path) -> 
     )
     captured: dict[str, object] = {}
 
-    def fake_runner(args, *, cwd=None, timeout=None, input_text=None):
-        output_path = Path(args[args.index("-o") + 1])
+    def fake_runner(args, *, cwd=None, timeout=None, input_text=None, env=None):
+        output_path = _output_path(args)
         schema_path = Path(args[args.index("--output-schema") + 1])
         captured["args"] = args
         captured["schema"] = json.loads(schema_path.read_text(encoding="utf-8"))
+        captured["schema_path"] = schema_path
+        captured["output_path"] = output_path
         captured["input_text"] = input_text
+        captured["cwd"] = cwd
+        captured["env"] = env
         output_path.write_text('{"result":"ok"}', encoding="utf-8")
-        return subprocess.CompletedProcess(args=args, returncode=0, stdout="", stderr="")
+        return subprocess.CompletedProcess(
+            args=args, returncode=0, stdout=_CODEX_EVENTS, stderr=""
+        )
 
     analyzer = CodexAnalyzer(
         config=RuntimeConfig(data_root=tmp_path / "data", analyzer_backend="codex"),
@@ -484,21 +553,60 @@ def test_codex_analyzer_passes_output_schema_in_default_mode(tmp_path: Path) -> 
     }
     assert "--output-schema" in captured["args"]
     assert captured["schema"] == schema
-    assert captured["input_text"] is None
+    assert captured["input_text"]
+    assert '"strict": true' in str(captured["input_text"])
+    assert "/no_think" not in str(captured["input_text"])
+    assert captured["cwd"] != tmp_path
+    assert not Path(captured["cwd"]).exists()
+    assert not Path(captured["schema_path"]).exists()
+    assert not Path(captured["output_path"]).exists()
+    assert all(not key.startswith("WORKTRACE_") for key in captured["env"])
+    assert "--ignore-user-config" in captured["args"]
+    assert "--ignore-rules" in captured["args"]
+    assert "--strict-config" in captured["args"]
+    assert "--disable" in captured["args"]
+    assert captured["args"][captured["args"].index("--disable") + 1] == "multi_agent"
+    assert "agents.enabled=false" not in captured["args"]
+    assert 'model_provider="test-relay"' in captured["args"]
+    assert (
+        'model_providers.test-relay.base_url="https://relay.example/v1"'
+        in captured["args"]
+    )
+    assert "--json" in captured["args"]
+    assert captured["args"][-1] == "-"
+
+
+def test_codex_subprocess_environment_is_allowlisted() -> None:
+    environment = build_codex_subprocess_env(
+        {
+            "PATH": "/usr/bin",
+            "LANG": "zh_CN.UTF-8",
+            "WORKTRACE_LLM_API_KEY": "must-not-pass",
+            "WORKTRACE_CODEX_MODEL": "must-not-pass",
+            "OTHER_SERVICE_TOKEN": "must-not-pass",
+        }
+    )
+
+    assert environment == {"PATH": "/usr/bin", "LANG": "zh_CN.UTF-8"}
+    assert CODEX_GLOBAL_CONCURRENCY_LIMIT == 3
 
 
 def test_codex_analyzer_uses_configured_llm_timeout(tmp_path: Path) -> None:
     (tmp_path / ".env").write_text(
-        "WORKTRACE_LLM_TIMEOUT_SECONDS=1200\n",
+        "WORKTRACE_LLM_TIMEOUT_SECONDS=1200\n"
+        "WORKTRACE_CODEX_MODEL=test-codex-model\n"
+        "WORKTRACE_CODEX_REASONING_EFFORT=high\n" + _CODEX_PROVIDER_ENV,
         encoding="utf-8",
     )
     captured: dict[str, object] = {}
 
     def fake_runner(args, *, cwd=None, timeout=None, input_text=None):
-        output_path = Path(args[args.index("-o") + 1])
+        output_path = _output_path(args)
         output_path.write_text("{}", encoding="utf-8")
         captured["timeout"] = timeout
-        return subprocess.CompletedProcess(args=args, returncode=0, stdout="", stderr="")
+        return subprocess.CompletedProcess(
+            args=args, returncode=0, stdout=_CODEX_EVENTS, stderr=""
+        )
 
     analyzer = CodexAnalyzer(
         config=RuntimeConfig(data_root=tmp_path / "data", analyzer_backend="codex"),
@@ -508,6 +616,29 @@ def test_codex_analyzer_uses_configured_llm_timeout(tmp_path: Path) -> None:
 
     assert analyzer._invoke_codex("处理输入") == {}
     assert captured["timeout"] == 1200
+
+
+def test_codex_analyzer_rejects_tool_events(tmp_path: Path) -> None:
+    def fake_runner(args, *, cwd=None, timeout=None, input_text=None):
+        _output_path(args).write_text("{}", encoding="utf-8")
+        return subprocess.CompletedProcess(
+            args=args,
+            returncode=0,
+            stdout=(
+                '{"type":"item.completed","item":'
+                '{"type":"command_execution","command":"pwd"}}\n'
+            ),
+            stderr="",
+        )
+
+    analyzer = CodexAnalyzer(
+        config=RuntimeConfig(data_root=tmp_path / "data"),
+        command_runner=fake_runner,
+        cwd=tmp_path,
+    )
+
+    with pytest.raises(AnalyzerProtocolError, match="protocol violation"):
+        analyzer._invoke_codex("处理输入")
 
 
 def test_codex_request_pacer_reserves_shared_interval(

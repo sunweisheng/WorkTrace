@@ -106,10 +106,10 @@ WORKTRACE_LLM_API_KEY=
 请先明确知道当前系统会发生什么：
 
 - WorkTrace 会通过你本机上的 `lark-cli` 读取飞书聊天
-- WorkTrace 会把经过裁剪和压缩后的必要文本、会话名、发送者信息、消息和会话标识、链接 URL/标题、附件文件名发送到你配置的在线模型服务
+- WorkTrace 会把经过裁剪和压缩后的必要文本、会话名、发送者信息、消息和会话标识、链接 URL/标题、附件文件名发送到仓库本地 `.env` 配置的 Codex 主线路；当前请求的可重试技术失败时才会发送到 Online 备用服务
 - 为补齐 reply/quote 直接关系或模型请求的相邻上下文，系统可能临时读取并发送目标日期之外的直接关联消息，但生成的事件日期仍是目标日期
 - 如果图片摘要已启用，本人发送或本人 reply/quote 直接关联的图片会按大小限制处理；其他图片受数量和大小限制，并只在模型明确请求时处理
-- 模型明确请求时，指定文本附件或飞书文档正文也会进入在线模型输入
+- 模型明确请求时，指定文本附件或飞书文档正文也会进入上述模型线路输入
 - WorkTrace 会在你本地生成 Markdown 文件
 - WorkTrace 默认通过飞书机器人把生成的 Markdown 文件发给你自己
 
@@ -124,7 +124,7 @@ WORKTRACE_LLM_API_KEY=
 - 只处理与你直接相关的工作事项
 - 默认过滤缺少具体对象、保留理由和保留依据的低价值事件
 - 默认过滤部分敏感内容
-- 默认强制 `/no_think`
+- Online 备用强制 `/no_think`；Codex 主线路不追加该文本，而是使用完整严格契约
 - 消息正文中的裸链接会压缩成占位文本，但可引用链接的 URL、标题和临时引用 ID 仍会作为结构化元数据进入 prompt
 - 正式主流程默认不长期保存原始聊天
 
@@ -255,9 +255,9 @@ cp .env.example .env
 - `lark-cli` 是否已安装
 - `lark-cli` 是否登录为 `user`
 - `codex` 命令是否可用
-- 模型三项连接配置是否完整；配置可来自 `.env` 或进程环境变量
-- `WORKTRACE_LLM_REASONING_EFFORT` 显式配置时是否为 `none`；未配置时使用代码默认值
-- 在线模型是否可连通
+- 仓库本地 `.env` 是否显式配置 `WORKTRACE_CODEX_MODEL`、`WORKTRACE_CODEX_REASONING_EFFORT` 和全部 `WORKTRACE_CODEX_PROVIDER_*` 项
+- 使用正式 Schema、临时目录和隔离参数的 Codex 小探针是否成功
+- Online 三项备用连接配置是否完整；缺少时禁用备用但不阻止 Codex 主线路
 - `data/` 目录是否可写
 - `Asia/Shanghai` 时区是否可用
 
@@ -369,9 +369,10 @@ data/debug/conversations/2026-06-23/_merge_day_candidates/
 - `retention_review.json` 中临时协作复核每次尝试的候选摘要、模型信号、证据校验结果和 Python 统计
 - `personal_fact_review.json` 中事实复核的触发原因、修订前后字段、事实证据覆盖、Python 统计和失败重试结果
 - `final_events.json` 中完成文件聚合和排序后的最终事件、证据指纹、文件标识和过滤 warning
-- `llm_usage.json` 中按调用类型记录的成功或失败、线路切换、错误类别、耗时、输入字符数和 provider 返回的 token；确定性修复单个 Function 参数逗号时还会保存修复诊断
+- `llm_calls.json` 中按调用编号记录的严格契约、最终提示词、线路、模型、推理强度、成功或失败、切换原因、原始结果和 Python 校验；不保存密钥、认证文件、个人 Codex 配置、完整环境变量、图片内容或 Codex JSONL
+- `llm_usage.json` 中按调用类型汇总耗时、输入字符数和 provider 返回的 token；确定性修复单个 Function 参数逗号时还会保存修复诊断
 
-从仓库根目录执行 `python3 -m scripts.replay_day_with_trace --date YYYY-MM-DD` 回放时，`summary.json` 的 `review_artifact_summary` 会汇总两类事实复核文件，`day_grouping_artifact_summary` 和 `day_grouping_summary` 会汇总全日初始分组、标题发现、完整内容复核、多成员内容重写和失败范围重放，`llm_usage_summary` 会按调用类型汇总次数、token 和耗时。完整内容复核会分别显示 Python 处理过的结果尝试数和实际模型请求数，后者包含技术失败后的 Online 重试与 Codex 备用。调用输入报告会逐次列出标题发现、完整内容复核、多成员内容重写、失败范围重放及其重试，并显示标题发现的输入字符、Online/Codex 估算、实际 token、超限状态和逐组检查覆盖。分析实际运行耗时时，标题发现看 `day_group_discovery_all`，事实复核看 `personal_fact_review_all`，完整内容复核看 `day_group_review_all`，多成员内容重写看 `personal_group_render_all`，整个分组阶段看 `merge_day_candidates`；各候选或请求耗时之和只代表模型调用总负载。旧 trace 缺少标题发现文件时明确显示节点不可用；有旧标题发现文件但没有 `group_checks` 时显示逐组检查不可用，不补造数据。
+从仓库根目录执行 `python3 -m scripts.replay_day_with_trace --date YYYY-MM-DD` 回放时，`summary.json` 的 `review_artifact_summary` 会汇总两类事实复核文件，`day_grouping_artifact_summary` 和 `day_grouping_summary` 会汇总全日初始分组、标题发现、完整内容复核、多成员内容重写和失败范围重放，`llm_usage_summary` 会按调用类型汇总次数、token 和耗时。完整内容复核会分别显示 Python 处理过的结果尝试数和实际模型请求数，后者包含技术失败后的 Codex 重试与 Online 备用。调用输入报告会逐次列出标题发现、完整内容复核、多成员内容重写、失败范围重放及其重试，并显示标题发现的输入字符、Online/Codex 估算、实际 token、超限状态和逐组检查覆盖。分析实际运行耗时时，标题发现看 `day_group_discovery_all`，事实复核看 `personal_fact_review_all`，完整内容复核看 `day_group_review_all`，多成员内容重写看 `personal_group_render_all`，整个分组阶段看 `merge_day_candidates`；各候选或请求耗时之和只代表模型调用总负载。旧 trace 缺少标题发现文件时明确显示节点不可用；有旧标题发现文件但没有 `group_checks` 时显示逐组检查不可用，不补造数据。
 
 如果整日回放已经完成，但 `day_group_review.json` 显示某个完整内容复核范围最终失败，可运行 `python3 -m scripts.replay_failed_day_group_reviews --date YYYY-MM-DD` 只重新请求失败范围。该脚本使用已有调试输入和最后一次具体错误，不重新拉取聊天，也不直接修改个人 MD；全部线路仍失败时写明放弃原因并结束，不阻碍已经完成的日报。随后重新运行调用输入报告时，失败范围重放会单独列出。
 

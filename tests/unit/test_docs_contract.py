@@ -369,13 +369,14 @@ def test_docs_match_failover_and_collected_merge_optimizations() -> None:
     content = "\n".join(path.read_text(encoding="utf-8") for path in documents)
 
     assert "codex_request_interval_min_seconds" in content
+    assert "primary_request_retry_limit" in content
     assert "online_request_retry_limit" in content
     assert "当前请求" in content
     assert "单条事件组直接保留" in content
     assert "标题候选、共同消息、共同文件" in content
     assert "split_reason" in content
     assert "最多三路" in content
-    assert "在线文字请求之间不增加随机等待" in content
+    assert "Online 没有独立的请求级重试" in content
     assert "第二次正式在线请求起" not in content
     assert "WORKTRACE_LLM_" + "SLEEP_" not in content
     assert "WORKTRACE_COLLECTED_MERGE_" + "RETRYABLE_ERROR_LIMIT" not in content
@@ -502,7 +503,8 @@ def test_docs_describe_three_required_llm_values_and_default_reasoning() -> None
 
     for content in documents:
         assert "三项" in content or "3 项" in content
-        assert "未配置" in content and "默认" in content
+        assert "未配置" in content or "缺少" in content
+        assert "默认" in content or "备用" in content
         assert "WORKTRACE_LLM_REASONING_EFFORT" in content
         assert "4 项" not in content
 
@@ -758,7 +760,7 @@ def test_skill_mentions_first_run_configuration_requirement() -> None:
     content = Path("SKILL.md").read_text(encoding="utf-8")
 
     assert "每次使用前" in content
-    assert "必须先检查用户是否已经提供本地在线模型配置" in content
+    assert "必须先检查仓库本地 `.env` 是否已经显式配置 Codex 主线路" in content
     assert "WORKTRACE_LLM_API_KEY" in content
     assert "不能提交到 git 仓库" in content
     assert "/no_think" in content

@@ -16,8 +16,17 @@ from src.worktrace.preflight import (
 )
 
 
+_CODEX_PROVIDER_ENV = (
+    "WORKTRACE_CODEX_PROVIDER_ID=test-relay\n"
+    "WORKTRACE_CODEX_PROVIDER_NAME=Test Relay\n"
+    "WORKTRACE_CODEX_PROVIDER_BASE_URL=https://relay.example/v1\n"
+    "WORKTRACE_CODEX_PROVIDER_WIRE_API=responses\n"
+    "WORKTRACE_CODEX_PROVIDER_REQUIRES_OPENAI_AUTH=true\n"
+)
+
+
 def _success_runner_factory():
-    def runner(args, *, cwd=None, timeout=None, input_text=None):
+    def runner(args, *, cwd=None, timeout=None, input_text=None, env=None):
         command = tuple(args)
         if command[:3] == ("lark-cli", "auth", "status"):
             return CommandResult(
@@ -26,6 +35,16 @@ def _success_runner_factory():
                     '{"identity":"user","identities":{"user":{"available":true,'
                     '"openId":"ou_123"}}}'
                 ),
+                stderr="",
+            )
+        if command[:2] == ("codex", "exec"):
+            output_path = Path(
+                command[command.index("--output-last-message") + 1]
+            )
+            output_path.write_text('{"probe":"ok"}', encoding="utf-8")
+            return CommandResult(
+                returncode=0,
+                stdout='{"type":"thread.started","thread_id":"test"}\n',
                 stderr="",
             )
         raise AssertionError(f"Unexpected command: {command}")
@@ -41,7 +60,9 @@ def test_preflight_success(
         "WORKTRACE_LLM_BASE_URL=https://llm.example/v1\n"
         "WORKTRACE_LLM_MODEL=provider-model\n"
         "WORKTRACE_LLM_API_KEY=file-key\n"
-        "WORKTRACE_LLM_REASONING_EFFORT=none\n",
+        "WORKTRACE_LLM_REASONING_EFFORT=none\n"
+        "WORKTRACE_CODEX_MODEL=test-codex-model\n"
+        "WORKTRACE_CODEX_REASONING_EFFORT=high\n" + _CODEX_PROVIDER_ENV,
         encoding="utf-8",
     )
 
@@ -83,10 +104,11 @@ def test_preflight_success(
     )
 
     assert report.ok is True
-    assert report.details["analyzer_backend"] == "online"
+    assert report.details["analyzer_backend"] == "codex"
+    assert report.details["codex_probe"] == "ok"
     assert report.details["online_llm_config"] == "ok"
-    assert report.details["online_probe"] == "ok"
-    assert report.details["certificate_verification"] == "disabled"
+    assert report.details["online_fallback"] == "available"
+    assert "online_probe" not in report.details
 
 
 def test_preflight_fails_when_lark_identity_is_not_user(tmp_path: Path) -> None:
@@ -108,7 +130,7 @@ def test_preflight_fails_when_lark_identity_is_not_user(tmp_path: Path) -> None:
     assert report.error_summary == "lark-cli is not using a user identity."
 
 
-def test_preflight_fails_on_online_timeout(
+def test_preflight_does_not_send_online_probe(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -116,7 +138,9 @@ def test_preflight_fails_on_online_timeout(
         "WORKTRACE_LLM_BASE_URL=https://llm.example/v1\n"
         "WORKTRACE_LLM_MODEL=provider-model\n"
         "WORKTRACE_LLM_API_KEY=file-key\n"
-        "WORKTRACE_LLM_REASONING_EFFORT=none\n",
+        "WORKTRACE_LLM_REASONING_EFFORT=none\n"
+        "WORKTRACE_CODEX_MODEL=test-codex-model\n"
+        "WORKTRACE_CODEX_REASONING_EFFORT=high\n" + _CODEX_PROVIDER_ENV,
         encoding="utf-8",
     )
 
@@ -147,11 +171,16 @@ def test_preflight_fails_on_online_timeout(
         python_version=(3, 13, 0),
     )
 
-    assert report.ok is False
-    assert report.error_summary == "Online LLM probe timed out."
+    assert report.ok is True
+    assert report.details["online_fallback"] == "available"
 
 
-def test_preflight_fails_when_online_llm_config_is_missing(tmp_path: Path) -> None:
+def test_preflight_disables_online_fallback_when_config_is_missing(tmp_path: Path) -> None:
+    (tmp_path / ".env").write_text(
+        "WORKTRACE_CODEX_MODEL=test-codex-model\n"
+        "WORKTRACE_CODEX_REASONING_EFFORT=high\n" + _CODEX_PROVIDER_ENV,
+        encoding="utf-8",
+    )
     report = run_preflight_checks(
         RuntimeConfig(data_root=tmp_path / "data"),
         cwd=tmp_path,
@@ -159,11 +188,12 @@ def test_preflight_fails_when_online_llm_config_is_missing(tmp_path: Path) -> No
         python_version=(3, 13, 0),
     )
 
-    assert report.ok is False
-    assert "Missing online LLM configuration" in report.error_summary
+    assert report.ok is True
+    assert report.details["online_fallback"] == "disabled"
+    assert "Missing online LLM configuration" in report.details["online_fallback_warning"]
 
 
-def test_preflight_fails_when_reasoning_effort_is_not_none(
+def test_preflight_disables_online_fallback_when_reasoning_effort_is_not_none(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -171,7 +201,9 @@ def test_preflight_fails_when_reasoning_effort_is_not_none(
         "WORKTRACE_LLM_BASE_URL=https://llm.example/v1\n"
         "WORKTRACE_LLM_MODEL=provider-model\n"
         "WORKTRACE_LLM_API_KEY=file-key\n"
-        "WORKTRACE_LLM_REASONING_EFFORT=medium\n",
+        "WORKTRACE_LLM_REASONING_EFFORT=medium\n"
+        "WORKTRACE_CODEX_MODEL=test-codex-model\n"
+        "WORKTRACE_CODEX_REASONING_EFFORT=high\n" + _CODEX_PROVIDER_ENV,
         encoding="utf-8",
     )
 
@@ -182,10 +214,23 @@ def test_preflight_fails_when_reasoning_effort_is_not_none(
         python_version=(3, 13, 0),
     )
 
-    assert report.ok is False
-    assert report.error_summary == (
+    assert report.ok is True
+    assert report.details["online_fallback"] == "disabled"
+    assert report.details["online_fallback_warning"] == (
         "WorkTrace requires WORKTRACE_LLM_REASONING_EFFORT=none in the main flow."
     )
+
+
+def test_preflight_fails_when_codex_config_is_missing(tmp_path: Path) -> None:
+    report = run_preflight_checks(
+        RuntimeConfig(data_root=tmp_path / "data"),
+        cwd=tmp_path,
+        command_runner=_success_runner_factory(),
+        python_version=(3, 13, 0),
+    )
+
+    assert report.ok is False
+    assert "Missing Codex configuration" in report.error_summary
 
 
 @pytest.mark.parametrize(
@@ -198,6 +243,47 @@ def test_preflight_fails_when_reasoning_effort_is_not_none(
 )
 def test_classify_codex_failure(stdout: str, stderr: str, expected: str) -> None:
     assert classify_codex_failure(CommandResult(returncode=1, stdout=stdout, stderr=stderr)) == expected
+
+
+def test_preflight_reports_safe_codex_authentication_failure(tmp_path: Path) -> None:
+    (tmp_path / ".env").write_text(
+        "WORKTRACE_CODEX_MODEL=test-codex-model\n"
+        "WORKTRACE_CODEX_REASONING_EFFORT=high\n" + _CODEX_PROVIDER_ENV,
+        encoding="utf-8",
+    )
+
+    def runner(args, *, cwd=None, timeout=None, input_text=None, env=None):
+        command = tuple(args)
+        if command[:3] == ("lark-cli", "auth", "status"):
+            return CommandResult(
+                returncode=0,
+                stdout=(
+                    '{"identity":"user","identities":{"user":{"available":true,'
+                    '"openId":"ou_123"}}}'
+                ),
+                stderr="",
+            )
+        if command[:2] == ("codex", "exec"):
+            return CommandResult(
+                returncode=1,
+                stdout=(
+                    '{"type":"turn.failed","error":{"message":"HTTP 401 '
+                    'Unauthorized: invalid API key sk-test-secret"}}\n'
+                ),
+                stderr="",
+            )
+        raise AssertionError(f"Unexpected command: {command}")
+
+    report = run_preflight_checks(
+        RuntimeConfig(data_root=tmp_path / "data"),
+        cwd=tmp_path,
+        command_runner=runner,
+        python_version=(3, 13, 0),
+    )
+
+    assert report.ok is False
+    assert report.error_summary == "Codex is not logged in or lacks permission."
+    assert "sk-test-secret" not in report.error_summary
 
 
 def test_classify_online_failure_http_429() -> None:

@@ -11,7 +11,7 @@ from time import perf_counter
 from openai import OpenAI
 
 from .config import RuntimeConfig, load_online_llm_settings
-from .errors import AnalyzerProtocolError
+from .errors import AnalyzerProtocolError, RetryableAnalyzerProtocolError
 from .logging_utils import log_timing
 from .llm_usage import LLMUsageRecorder, extract_usage
 from .analyzers.online import (
@@ -168,4 +168,56 @@ class OnlineImageSummarizer:
             self._count += 1
         if not text:
             raise AnalyzerProtocolError("Image summary response did not contain text output.")
+        return text
+
+
+@dataclass
+class CodexFirstImageSummarizer:
+    config: RuntimeConfig
+    settings: ImageSummarySettings
+    codex: object
+    online_fallback: OnlineImageSummarizer | None = None
+
+    def __post_init__(self) -> None:
+        self._count = 0
+
+    def summarize(self, image_path: Path, *, required: bool = False) -> str:
+        if not self.settings.enabled or (
+            not required and self._count >= self.settings.max_images_per_run
+        ):
+            return ""
+        if (
+            not image_path.is_file()
+            or image_path.stat().st_size > self.settings.max_image_bytes
+        ):
+            return ""
+
+        request_text = getattr(self.codex, "request_text")
+        last_error: Exception | None = None
+        for attempt_index in range(self.config.primary_request_retry_limit + 1):
+            try:
+                text = str(
+                    request_text(self.settings.prompt, image_path=image_path)
+                ).strip()
+                if not text:
+                    raise RetryableAnalyzerProtocolError(
+                        "Codex image summary response is empty."
+                    )
+                if not required:
+                    self._count += 1
+                return text
+            except RetryableAnalyzerProtocolError as exc:
+                last_error = exc
+                if attempt_index < self.config.primary_request_retry_limit:
+                    continue
+                break
+
+        if self.online_fallback is None:
+            assert last_error is not None
+            raise last_error
+        text = self.online_fallback.summarize(image_path, required=True)
+        if not text:
+            raise AnalyzerProtocolError("Online image fallback returned empty output.")
+        if not required:
+            self._count += 1
         return text

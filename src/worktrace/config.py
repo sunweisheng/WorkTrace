@@ -15,6 +15,15 @@ DEFAULT_LLM_TIMEOUT_ENV_VAR = "WORKTRACE_LLM_TIMEOUT_SECONDS"
 DEFAULT_LLM_STREAM_ENV_VAR = "WORKTRACE_LLM_STREAM"
 DEFAULT_LLM_TLS_VERIFY_ENV_VAR = "WORKTRACE_LLM_TLS_VERIFY"
 DEFAULT_LLM_REASONING_EFFORT_ENV_VAR = "WORKTRACE_LLM_REASONING_EFFORT"
+DEFAULT_CODEX_MODEL_ENV_VAR = "WORKTRACE_CODEX_MODEL"
+DEFAULT_CODEX_REASONING_EFFORT_ENV_VAR = "WORKTRACE_CODEX_REASONING_EFFORT"
+DEFAULT_CODEX_PROVIDER_ID_ENV_VAR = "WORKTRACE_CODEX_PROVIDER_ID"
+DEFAULT_CODEX_PROVIDER_NAME_ENV_VAR = "WORKTRACE_CODEX_PROVIDER_NAME"
+DEFAULT_CODEX_PROVIDER_BASE_URL_ENV_VAR = "WORKTRACE_CODEX_PROVIDER_BASE_URL"
+DEFAULT_CODEX_PROVIDER_WIRE_API_ENV_VAR = "WORKTRACE_CODEX_PROVIDER_WIRE_API"
+DEFAULT_CODEX_PROVIDER_REQUIRES_OPENAI_AUTH_ENV_VAR = (
+    "WORKTRACE_CODEX_PROVIDER_REQUIRES_OPENAI_AUTH"
+)
 DEFAULT_COLLECTED_MERGE_TRACE_ENV_VAR = "WORKTRACE_COLLECTED_MERGE_TRACE"
 DEFAULT_COLLECTED_MERGE_TRACE_ROOT_ENV_VAR = "WORKTRACE_COLLECTED_MERGE_TRACE_ROOT"
 DEFAULT_COLLECTED_MERGE_RETRY_RATIO_ENV_VAR = (
@@ -46,6 +55,18 @@ class OnlineLLMSettings:
     stream_enabled: bool
     tls_verify: bool
     reasoning_effort: str | None
+
+
+@dataclass(frozen=True)
+class CodexLLMSettings:
+    model: str
+    reasoning_effort: str
+    provider_id: str
+    provider_name: str
+    provider_base_url: str
+    provider_wire_api: str
+    provider_requires_openai_auth: bool
+    timeout_seconds: int
 
 
 @dataclass(frozen=True)
@@ -294,6 +315,57 @@ def load_online_llm_settings(
         stream_enabled=stream_enabled,
         tls_verify=tls_verify,
         reasoning_effort=reasoning_effort,
+    )
+
+
+def load_codex_llm_settings(
+    config: RuntimeConfig,
+    *,
+    cwd: Path | None = None,
+    environ: Mapping[str, str] | None = None,
+) -> CodexLLMSettings:
+    """Load Codex model and relay provider only from the local dotenv file."""
+    base_dir = cwd or Path.cwd()
+    file_values = load_local_env_file(base_dir / config.llm_env_file_name)
+    required_keys = [
+        config.codex_model_env_var,
+        config.codex_reasoning_effort_env_var,
+        config.codex_provider_id_env_var,
+        config.codex_provider_name_env_var,
+        config.codex_provider_base_url_env_var,
+        config.codex_provider_wire_api_env_var,
+        config.codex_provider_requires_openai_auth_env_var,
+    ]
+    missing = [key for key in required_keys if not file_values.get(key, "").strip()]
+    if missing:
+        raise ValueError(
+            "Missing Codex configuration in repository-local "
+            f"`{config.llm_env_file_name}`: {', '.join(missing)}. "
+            "Codex model, reasoning effort, and relay provider must be explicit and "
+            "cannot be inherited from personal Codex settings."
+        )
+    provider_id = file_values[config.codex_provider_id_env_var].strip()
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", provider_id):
+        raise ValueError(
+            f"{config.codex_provider_id_env_var} must contain only letters, digits, "
+            "underscores, or hyphens."
+        )
+    return CodexLLMSettings(
+        model=file_values[config.codex_model_env_var].strip(),
+        reasoning_effort=file_values[config.codex_reasoning_effort_env_var].strip(),
+        provider_id=provider_id,
+        provider_name=file_values[config.codex_provider_name_env_var].strip(),
+        provider_base_url=file_values[config.codex_provider_base_url_env_var].strip(),
+        provider_wire_api=file_values[config.codex_provider_wire_api_env_var].strip(),
+        provider_requires_openai_auth=_parse_bool_value(
+            file_values[config.codex_provider_requires_openai_auth_env_var],
+            env_var=config.codex_provider_requires_openai_auth_env_var,
+        ),
+        timeout_seconds=load_llm_timeout_seconds(
+            config,
+            cwd=base_dir,
+            environ=environ,
+        ),
     )
 
 
@@ -1049,8 +1121,7 @@ def _load_llm_retry_overrides(
         raise ValueError(f"Invalid LLM retry config: {retry_path} is not valid JSON.") from exc
     if not isinstance(payload, dict):
         raise ValueError(f"Invalid LLM retry config: {retry_path} must contain a JSON object.")
-    keys = {
-        "online_request_retry_limit",
+    common_keys = {
         "day_group_validation_retry_limit",
         "segmentation_retry_limit",
         "event_extraction_retry_limit",
@@ -1063,6 +1134,15 @@ def _load_llm_retry_overrides(
         "codex_request_interval_max_seconds",
         "max_concurrent_collected_merge_review_requests",
     }
+    retry_keys = {"primary_request_retry_limit", "online_request_retry_limit"}
+    present_retry_keys = retry_keys.intersection(payload)
+    if len(present_retry_keys) != 1:
+        raise ValueError(
+            "Invalid LLM retry config: provide exactly one of "
+            "primary_request_retry_limit or the compatibility alias "
+            "online_request_retry_limit."
+        )
+    keys = common_keys | present_retry_keys
     unexpected = sorted(set(payload).difference(keys))
     missing = sorted(keys.difference(payload))
     if unexpected or missing:
@@ -1113,9 +1193,11 @@ def _load_llm_retry_overrides(
             "Invalid LLM retry config: codex_request_interval_min_seconds must be "
             "less than or equal to codex_request_interval_max_seconds."
         )
+    primary_retry_limit = values[next(iter(present_retry_keys))]
     return replace(
         config,
-        online_request_retry_limit=values["online_request_retry_limit"],
+        primary_request_retry_limit=primary_retry_limit,
+        online_request_retry_limit=primary_retry_limit,
         anchor_retry_limit=values["segmentation_retry_limit"],
         analysis_batch_retry_limit=values["event_extraction_retry_limit"],
         stream_first_response_timeout_seconds=values["stream_first_response_timeout_seconds"],
@@ -1377,7 +1459,8 @@ def _read_string_list(
 @dataclass(frozen=True)
 class RuntimeConfig:
     timezone: str = "Asia/Shanghai"
-    analyzer_backend: str = "online"
+    analyzer_backend: str = "codex"
+    primary_request_retry_limit: int = 1
     online_request_retry_limit: int = 1
     day_group_validation_retry_limit: int = 1
     anchor_retry_limit: int = 3
@@ -1435,7 +1518,7 @@ class RuntimeConfig:
     context_expansion_round_limit: int = 2
     use_initial_conversation_windows: bool = True
     analyzer_timeout_seconds: int = 180
-    codex_stdin_mode: bool = False
+    codex_stdin_mode: bool = True
     anchor_batch_size: int = 3
     sensitive_event_keywords: tuple[str, ...] = ()
     excluded_event_keywords: tuple[str, ...] = ()
@@ -1458,6 +1541,15 @@ class RuntimeConfig:
     llm_stream_env_var: str = DEFAULT_LLM_STREAM_ENV_VAR
     llm_tls_verify_env_var: str = DEFAULT_LLM_TLS_VERIFY_ENV_VAR
     llm_reasoning_effort_env_var: str = DEFAULT_LLM_REASONING_EFFORT_ENV_VAR
+    codex_model_env_var: str = DEFAULT_CODEX_MODEL_ENV_VAR
+    codex_reasoning_effort_env_var: str = DEFAULT_CODEX_REASONING_EFFORT_ENV_VAR
+    codex_provider_id_env_var: str = DEFAULT_CODEX_PROVIDER_ID_ENV_VAR
+    codex_provider_name_env_var: str = DEFAULT_CODEX_PROVIDER_NAME_ENV_VAR
+    codex_provider_base_url_env_var: str = DEFAULT_CODEX_PROVIDER_BASE_URL_ENV_VAR
+    codex_provider_wire_api_env_var: str = DEFAULT_CODEX_PROVIDER_WIRE_API_ENV_VAR
+    codex_provider_requires_openai_auth_env_var: str = (
+        DEFAULT_CODEX_PROVIDER_REQUIRES_OPENAI_AUTH_ENV_VAR
+    )
     collected_merge_trace_env_var: str = DEFAULT_COLLECTED_MERGE_TRACE_ENV_VAR
     collected_merge_trace_root_env_var: str = DEFAULT_COLLECTED_MERGE_TRACE_ROOT_ENV_VAR
     collected_merge_retry_ratio_env_var: str = DEFAULT_COLLECTED_MERGE_RETRY_RATIO_ENV_VAR
@@ -1475,6 +1567,21 @@ class RuntimeConfig:
     llm_stream_enabled: bool = False
     llm_tls_verify: bool = False
     llm_reasoning_effort: str | None = "none"
+
+    def __post_init__(self) -> None:
+        primary = self.primary_request_retry_limit
+        legacy = self.online_request_retry_limit
+        if primary == legacy:
+            return
+        if primary == 1:
+            object.__setattr__(self, "primary_request_retry_limit", legacy)
+            return
+        if legacy == 1:
+            object.__setattr__(self, "online_request_retry_limit", primary)
+            return
+        raise ValueError(
+            "primary_request_retry_limit conflicts with online_request_retry_limit."
+        )
 
 
 DEFAULT_CONFIG = RuntimeConfig()

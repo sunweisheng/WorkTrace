@@ -98,13 +98,15 @@ def _runner(tmp_path: Path, analyzer: object, **config_values: object) -> DailyT
 class QualityRetryAnalyzer:
     def __init__(
         self,
-        online_results: list[CrossConversationGroupResult],
-        codex_result: CrossConversationGroupResult | Exception,
+        primary_results: list[CrossConversationGroupResult],
+        fallback_result: CrossConversationGroupResult | Exception,
     ) -> None:
-        self.online_results = list(online_results)
-        self.codex_result = codex_result
+        self.primary_results = list(primary_results)
+        self.fallback_result = fallback_result
         self.validation_feedback: list[str] = []
         self.fallback_calls = 0
+        self._backend = "codex"
+        self._used_fallback = False
 
     def merge_day_candidates(
         self,
@@ -114,16 +116,23 @@ class QualityRetryAnalyzer:
         validation_feedback: str = "",
     ) -> CrossConversationGroupResult:
         self.validation_feedback.append(validation_feedback)
-        return self.online_results.pop(0)
+        self._backend = "codex"
+        self._used_fallback = False
+        return self.primary_results.pop(0)
 
     def last_request_used_fallback(self) -> bool:
-        return False
+        return self._used_fallback
+
+    def last_request_backend(self) -> str:
+        return self._backend
 
     def fallback_current_request(self, method_name: str, *args, **kwargs):
         self.fallback_calls += 1
-        if isinstance(self.codex_result, Exception):
-            raise self.codex_result
-        return self.codex_result
+        self._backend = "online"
+        self._used_fallback = True
+        if isinstance(self.fallback_result, Exception):
+            raise self.fallback_result
+        return self.fallback_result
 
 
 class ParsingRetryAnalyzer(QualityRetryAnalyzer):
@@ -142,7 +151,7 @@ class ParsingRetryAnalyzer(QualityRetryAnalyzer):
         self.calls += 1
         if self.calls == 1:
             raise PersonalGroupingValidationError("missing_member_connection")
-        return self.codex_result  # type: ignore[return-value]
+        return self.fallback_result  # type: ignore[return-value]
 
 
 def test_day_grouping_retries_personal_contract_parse_error(tmp_path: Path) -> None:
@@ -165,7 +174,7 @@ def test_day_grouping_retries_personal_contract_parse_error(tmp_path: Path) -> N
     assert (retry_count, codex_count, repair_count) == (1, 0, 0)
 
 
-def test_day_grouping_retries_online_quality_once_then_uses_codex(
+def test_day_grouping_retries_codex_quality_once_then_uses_online(
     tmp_path: Path,
 ) -> None:
     candidates = [_draft("d1", "m1"), _draft("d2", "m2")]
@@ -187,7 +196,7 @@ def test_day_grouping_retries_online_quality_once_then_uses_codex(
     assert analyzer.validation_feedback[0] == ""
     assert "missing=['d1', 'd2']" in analyzer.validation_feedback[1]
     assert analyzer.fallback_calls == 1
-    assert [item["backend"] for item in attempts] == ["online", "online", "codex"]
+    assert [item["backend"] for item in attempts] == ["codex", "codex", "online"]
     assert warnings == []
     assert (retry_count, codex_count, repair_count) == (1, 1, 0)
 

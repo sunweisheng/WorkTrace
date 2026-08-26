@@ -12,7 +12,7 @@
 python3 -m src.worktrace.cli merge-collected --date YYYY-MM-DD [--owner-name 姓名] [--offline]
 ```
 
-该子命令独立执行，不复用个人日报的整套 preflight。默认模式需要当前飞书 user 身份、在线 analyzer 配置、输入目录写权限和 bot 自发送能力；显式传入 `--offline` 时必须同时传入 `--owner-name`，不需要安装飞书 CLI。
+该子命令独立执行，不复用个人日报的整套 preflight。默认模式需要当前飞书 user 身份、Codex 主线路配置、输入目录写权限和 bot 自发送能力；Online 仅作为当前请求备用。显式传入 `--offline` 时必须同时传入 `--owner-name`，不需要安装飞书 CLI。
 
 ## 2. 输入目录与 scope
 
@@ -168,9 +168,10 @@ Python 按稳定 `event_id` 聚合来源。相同 ID 的事件只有在标题/�
 候选、复核和正式内容请求统一使用任务专用 Function。输入估算口径如下：
 
 ```text
-prepared_prompt = 最终提示词 + 当前合法参数示例 + 当前证据编号清单 + 当前重试错误反馈 + /no_think
-online_estimate = estimate(prepared_prompt + tools 完整 Function 定义 + tool_choice)
-codex_estimate = estimate(prepared_prompt + 完整 output-schema)
+online_prepared_prompt = 最终提示词 + 当前合法参数示例 + 当前证据编号清单 + 当前重试错误反馈 + /no_think
+online_estimate = estimate(online_prepared_prompt + tools 完整 Function 定义 + tool_choice)
+codex_prepared_prompt = 完整 Function 契约、典型参数、结构示例和最终自检
+codex_estimate = estimate(codex_prepared_prompt + 同一 parameters output-schema)
 input_estimated_tokens = max(online_estimate, codex_estimate)
 ```
 
@@ -182,7 +183,7 @@ Python 以 `model_input_batch_target_tokens=7000` 为分批目标。每尝试加
 
 `config/event_grouping.json` 是个人与多人分组语义说明的共同来源。每个 `group_reason_definitions` 项除描述和关系类型外，还配置 `acceptance_rules` 与 `rejection_rules`：`same_object` 要求唯一共同对象和逐事件直接关系；`continuous_action` 要求前一结果明确成为后一动作的输入、条件或后续动作；`same_deliverable_batch` 覆盖同一批配套产物、同一交付物的多个版本，以及不同时间、状态、地区或阶段形成但需要统一汇报或交付的连续产物，并说明每项在整体中的角色。共同消息或共同文件必须由 Python 计算并连接全组；同一会话不能单独支持合并。具体中文判断规则不复制到 Python。`config/collected_merge.json` 只保留多人高风险复核开关和阈值。
 
-初步分组后，`collected_group_discovery` 把当前 scope 全部组的 `group_id` 和组合标题作为一个请求提交。组合标题由 Python 按稳定顺序覆盖初步组全部来源事件标题，避免候选摘要的主标题掩盖其他成员；请求不发送日期、正文、对象、附件、人员、来源信息或其他分组阶段的业务正反例，字段仍严格只有 `group_id` 和 `title`。模型必须逐组比较全部标题，并按输入顺序为每个组恰好返回一次 `group_checks`，列出可能相关的其他编号和非空理由；Python 校验全量覆盖、编号、自关联和重复后，将重叠关系形成可包含两个或更多组的候选。协议不包含特定日期、人员、业务关键词或固定长度片段。超过 7000 token 仍整体提交。Online 重试和当前请求 Codex 备用后仍失败时，按没有标题候选继续并记录 warning。
+初步分组后，`collected_group_discovery` 把当前 scope 全部组的 `group_id` 和组合标题作为一个请求提交。组合标题由 Python 按稳定顺序覆盖初步组全部来源事件标题，避免候选摘要的主标题掩盖其他成员；请求不发送日期、正文、对象、附件、人员、来源信息或其他分组阶段的业务正反例，字段仍严格只有 `group_id` 和 `title`。模型必须逐组比较全部标题，并按输入顺序为每个组恰好返回一次 `group_checks`，列出可能相关的其他编号和非空理由；Python 校验全量覆盖、编号、自关联和重复后，将重叠关系形成可包含两个或更多组的候选。协议不包含特定日期、人员、业务关键词或固定长度片段。超过 7000 token 仍整体提交。Codex 重试和当前请求 Online 备用后仍失败时，按没有标题候选继续并记录 warning。
 
 标题候选、共同消息、共同文件、同一附件基础名称、同日会话候选和下列高风险条件共同建立检查范围。配置文件 `config/collected_merge.json` 的默认高风险条件是：
 
@@ -194,7 +195,7 @@ Python 以 `model_input_batch_target_tokens=7000` 为分批目标。每尝试加
 - 没有完整共同证据，且标准化后的非空 `object_hint` 存在两个以上不同值
 - 模型返回 `broad_object` 风险
 
-完整复核不预设方向，可以拆开初步组并跨组重新组合。标题发现的候选范围可以包含任意多个组，但其中每条实际组间连接单独编号，使同一范围能够分别确认或否定不同关系。每个保留的多事件子组必须有合法语义理由或 Python 自动确定的完整共同证据，并分别提供自己的 `reason_detail` 和 `member_connections`；单条组不要求这些字段。模型先逐条判断 `relation_resolutions`，再统一处理重叠关系并形成最终分组，不得用初步组或预设最终组反向解释关系：成立时 `connected_draft_ids` 只填写证明关系成立所需的最少成员，直接两端关系必须包含左右两端，且所有关联成员必须真实进入同一最终组；决定分开时 `connected_draft_ids` 可以为空，也可以填写关系两侧代表成员，填写后代表成员必须位于不同最终组，并必须给出具体业务差异和关系各侧的 `evidence_draft_ids`。相同 `event_id` 的不可拆成员块若被拆开、关系遗漏或重复、来源覆盖错误、缺少合并依据或拆分证据时，只重试当前检查范围，并把具体错误反馈给模型。Online 局部重试和当前请求 Codex 备用后仍非法时，保留复核前分组并记录 warning，不影响其他检查范围或整次部门汇总。
+完整复核不预设方向，可以拆开初步组并跨组重新组合。标题发现的候选范围可以包含任意多个组，但其中每条实际组间连接单独编号，使同一范围能够分别确认或否定不同关系。每个保留的多事件子组必须有合法语义理由或 Python 自动确定的完整共同证据，并分别提供自己的 `reason_detail` 和 `member_connections`；单条组不要求这些字段。模型先逐条判断 `relation_resolutions`，再统一处理重叠关系并形成最终分组，不得用初步组或预设最终组反向解释关系：成立时 `connected_draft_ids` 只填写证明关系成立所需的最少成员，直接两端关系必须包含左右两端，且所有关联成员必须真实进入同一最终组；决定分开时 `connected_draft_ids` 可以为空，也可以填写关系两侧代表成员，填写后代表成员必须位于不同最终组，并必须给出具体业务差异和关系各侧的 `evidence_draft_ids`。相同 `event_id` 的不可拆成员块若被拆开、关系遗漏或重复、来源覆盖错误、缺少合并依据或拆分证据时，只重试当前检查范围，并把具体错误反馈给模型。Codex 局部重试和当前请求 Online 备用后仍非法时，保留复核前分组并记录 warning，不影响其他检查范围或整次部门汇总。
 
 第二阶段展开回原始事件，按已确认组发送完整内容并生成正式汇总。模型必须返回与锁定组完全一致的 `covered_draft_ids`，并用 `fact_items.source_draft_ids` 标明关键事实来源。Python 检查整批 draft 分配、锁定组、正文覆盖和事实来源；失败时只重试当前内容组，重试后仍不完整则不写文件。单条组直接保留，不增加模型调用。
 
@@ -220,7 +221,7 @@ Python 以 `model_input_batch_target_tokens=7000` 为分批目标。每尝试加
 
 中间结果只在内存中存在，最终只写一次规范化汇总文件。
 
-429、HTTP 5xx、连接、超时、流式 Function 参数异常、空返回和无效 Function 参数时，当前文字请求立即再试 Online 1 次，仍失败才切到 Codex，下一请求仍优先在线。Codex 技术调用失败则当前阶段失败，不循环调用；鉴权、权限、TLS 和参数错误不会重试，也不会切换。字段缺失、来源覆盖、事实覆盖和分组协议错误属于结果质量校验，固定执行 Online 首次请求、Online 当前请求局部重试 1 次、Codex 当前请求备用 1 次。正式正文结果仍不合法时当前 scope 失败且不写文件；完整复核全部尝试失败或结果仍不合法时保留复核前分组并告警，流程继续。调试模式只增加记录，不改变线路和次数。
+429、HTTP 5xx、连接、超时、空返回和无效 JSON 时，当前文字请求立即再试 Codex 1 次，仍失败才切到 Online 一次，下一请求仍优先 Codex。Codex 登录、权限、模型、推理强度、TLS 和配置错误不会重试或切换。字段缺失、来源覆盖、事实覆盖和分组协议错误属于结果质量校验，先按当前任务次数用带具体 Python 错误的 Codex 请求重试，用尽后才走 Online 一次。正式正文结果仍不合法时当前 scope 失败且不写文件；完整复核全部尝试失败或结果仍不合法时保留复核前分组并告警，流程继续。调试模式只增加记录，不改变线路和次数。
 
 ## 10. 字段检查、重试与修复
 

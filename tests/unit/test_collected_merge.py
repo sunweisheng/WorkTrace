@@ -2810,7 +2810,7 @@ def test_relation_priority_batches_preserve_same_conversation_candidates(
         analyzer=analyzer,
         config=RuntimeConfig(
             data_root=tmp_path / "data",
-                model_input_batch_target_tokens=5200,
+                model_input_batch_target_tokens=7000,
             collected_merge_trace_enabled=True,
             collected_merge_trace_root=trace_root,
         ),
@@ -2827,8 +2827,8 @@ def test_relation_priority_batches_preserve_same_conversation_candidates(
     summary = json.loads(
         (trace_root / "2026-06-29" / "summary.json").read_text(encoding="utf-8")
     )
-    assert max(step["input_estimated_tokens"] for step in summary["steps"]) <= 5200
-    assert {step["input_target_tokens"] for step in summary["steps"]} == {5200}
+    assert max(step["input_estimated_tokens"] for step in summary["steps"]) <= 7000
+    assert {step["input_target_tokens"] for step in summary["steps"]} == {7000}
     assert not any(
         step["stage"].startswith("candidate_reconciliation")
         for step in summary["steps"]
@@ -4204,13 +4204,13 @@ def test_high_risk_review_invalid_partition_retries_then_keeps_original(
     assert any("Kept the pre-review collected group" in warning for warning in warnings)
 
 
-def test_candidate_grouping_uses_codex_after_online_local_retry_only(
+def test_candidate_grouping_uses_online_after_codex_local_retry_only(
     tmp_path: Path,
 ) -> None:
     route: list[str] = []
     correction_contexts: list[tuple[str, str, object]] = []
 
-    class Online:
+    class Codex:
         def __init__(self) -> None:
             self.calls = 0
 
@@ -4224,10 +4224,10 @@ def test_candidate_grouping_uses_codex_after_online_local_retry_only(
             previous_invalid_assignment=None,
         ):
             self.calls += 1
-            route.append("online")
+            route.append("codex")
             correction_contexts.append(
                 (
-                    "online",
+                    "codex",
                     validation_feedback,
                     previous_invalid_assignment,
                 )
@@ -4236,10 +4236,10 @@ def test_candidate_grouping_uses_codex_after_online_local_retry_only(
             if self.calls <= 2:
                 draft_ids = draft_ids[:1]
             return CollectedGroupingResult(
-                groups=[CollectedGroupingGroup("online", draft_ids)]
+                groups=[CollectedGroupingGroup("codex", draft_ids)]
             )
 
-    class Codex:
+    class Online:
         def group_collected_events(
             self,
             target_date,
@@ -4249,10 +4249,10 @@ def test_candidate_grouping_uses_codex_after_online_local_retry_only(
             validation_feedback="",
             previous_invalid_assignment=None,
         ):
-            route.append("codex")
+            route.append("online")
             correction_contexts.append(
                 (
-                    "codex",
+                    "online",
                     validation_feedback,
                     previous_invalid_assignment,
                 )
@@ -4260,7 +4260,7 @@ def test_candidate_grouping_uses_codex_after_online_local_retry_only(
             return CollectedGroupingResult(
                 groups=[
                     CollectedGroupingGroup(
-                        "codex",
+                        "online",
                         [item.draft_id for item in events],
                     )
                 ]
@@ -4275,7 +4275,7 @@ def test_candidate_grouping_uses_codex_after_online_local_retry_only(
         )
         for index in range(2)
     ]
-    analyzer = FailoverAnalyzer(Online(), Codex(), LLMUsageRecorder())
+    analyzer = FailoverAnalyzer(Codex(), Online(), LLMUsageRecorder())
     runner = _build_runner(
         tmp_path,
         analyzer=analyzer,
@@ -4300,36 +4300,18 @@ def test_candidate_grouping_uses_codex_after_online_local_retry_only(
 
     assert grouped.groups[0].draft_ids == ["d0", "d1"]
     assert next_grouped.groups[0].draft_ids == ["d0", "d1"]
-    assert route == ["online", "online", "codex", "online"]
-    assert correction_contexts[0] == ("online", "", None)
+    assert route == ["codex", "codex", "online", "codex"]
+    assert correction_contexts[0] == ("codex", "", None)
     assert correction_contexts[1][1:]
     assert correction_contexts[1][1:] == correction_contexts[2][1:]
-    assert correction_contexts[3] == ("online", "", None)
-    assert any("with Codex" in warning for warning in warnings)
+    assert correction_contexts[3] == ("codex", "", None)
+    assert any("fallback" in warning for warning in warnings)
 
 
-def test_high_risk_review_uses_codex_after_online_local_retry(
+def test_high_risk_review_uses_online_after_codex_local_retry(
     tmp_path: Path,
 ) -> None:
     route: list[str] = []
-
-    class Online:
-        def review_collected_group(
-            self,
-            target_date,
-            events,
-            candidate_group,
-            *,
-            review_reasons=None,
-            validation_feedback="",
-            existing_groups=None,
-            relation_reasons=None,
-            atomic_groups=None,
-        ):
-            route.append("online")
-            return CollectedGroupingResult(
-                groups=[CollectedGroupingGroup("invalid", [events[0].draft_id])]
-            )
 
     class Codex:
         def review_collected_group(
@@ -4345,6 +4327,24 @@ def test_high_risk_review_uses_codex_after_online_local_retry(
             atomic_groups=None,
         ):
             route.append("codex")
+            return CollectedGroupingResult(
+                groups=[CollectedGroupingGroup("invalid", [events[0].draft_id])]
+            )
+
+    class Online:
+        def review_collected_group(
+            self,
+            target_date,
+            events,
+            candidate_group,
+            *,
+            review_reasons=None,
+            validation_feedback="",
+            existing_groups=None,
+            relation_reasons=None,
+            atomic_groups=None,
+        ):
+            route.append("online")
             return CollectedGroupingResult(
                 groups=[
                     CollectedGroupingGroup(
@@ -4369,7 +4369,7 @@ def test_high_risk_review_uses_codex_after_online_local_retry(
     ]
     runner = _build_runner(
         tmp_path,
-        analyzer=FailoverAnalyzer(Online(), Codex(), LLMUsageRecorder()),
+        analyzer=FailoverAnalyzer(Codex(), Online(), LLMUsageRecorder()),
         config=RuntimeConfig(
             data_root=tmp_path / "data",
             collected_merge_missing_field_retry_limit=1,
@@ -4384,8 +4384,8 @@ def test_high_risk_review_uses_codex_after_online_local_retry(
     )
 
     assert reviewed.groups[0].draft_ids == ["d0", "d1"]
-    assert route == ["online", "online", "codex"]
-    assert any("with Codex" in warning for warning in warnings)
+    assert route == ["codex", "codex", "online"]
+    assert any("fallback" in warning for warning in warnings)
 
 
 def test_high_risk_review_batches_large_group_within_token_limit(

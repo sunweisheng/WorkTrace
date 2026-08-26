@@ -14,7 +14,12 @@ from openai import APIConnectionError, APIStatusError, APITimeoutError, OpenAI
 from openai import AuthenticationError, PermissionDeniedError, RateLimitError
 import httpx
 
-from .config import OnlineLLMSettings, RuntimeConfig, load_online_llm_settings
+from .config import (
+    OnlineLLMSettings,
+    RuntimeConfig,
+    load_codex_llm_settings,
+    load_online_llm_settings,
+)
 from .errors import PreflightError
 from .analyzers.function_calls import function_call_spec
 from .analyzers.online import _extract_function_arguments_from_responses_payload
@@ -44,6 +49,7 @@ def run_subprocess(
     cwd: Path | None = None,
     timeout: int | float | None = None,
     input_text: str | None = None,
+    env: dict[str, str] | None = None,
 ) -> CommandResult:
     completed = subprocess.run(
         list(args),
@@ -53,6 +59,7 @@ def run_subprocess(
         input=input_text,
         timeout=timeout,
         check=False,
+        env=env,
     )
     return CommandResult(
         returncode=completed.returncode,
@@ -79,28 +86,32 @@ def run_preflight_checks(
         check_lark_identity(command_runner)
         details["lark_identity"] = "ok"
 
-        if config.analyzer_backend == "online":
-            settings = ensure_online_runtime_config(config, cwd=cwd)
-            details["online_llm_config"] = "ok"
-            ensure_reasoning_disabled(settings.reasoning_effort)
-            details["reasoning_effort"] = settings.reasoning_effort or ""
-            details.update(probe_online_llm(config, cwd=cwd))
-            details["codex_path"] = require_command("codex")
-            details["codex_fallback"] = "available"
-            details["analyzer_backend"] = "online"
+        details["codex_path"] = require_command("codex")
+        codex_settings = load_codex_llm_settings(config, cwd=cwd)
+        details["codex_config"] = "ok"
+        details["codex_model"] = codex_settings.model
+        details["codex_reasoning_effort"] = codex_settings.reasoning_effort
+        probe_codex(command_runner, config=config, cwd=cwd)
+        details["codex_probe"] = "ok"
+        details["analyzer_backend"] = "codex"
+
+        try:
+            online_settings = ensure_online_runtime_config(config, cwd=cwd)
+            ensure_reasoning_disabled(online_settings.reasoning_effort)
+        except PreflightError as exc:
+            details["online_fallback"] = "disabled"
+            details["online_fallback_warning"] = str(exc)
         else:
-            codex_path = require_command("codex")
-            details["codex_path"] = codex_path
-            probe_codex(command_runner, cwd=cwd)
-            details["analyzer_backend"] = "codex"
-            details["codex_probe"] = "ok"
+            details["online_llm_config"] = "ok"
+            details["online_fallback"] = "available"
+            details["online_reasoning_effort"] = online_settings.reasoning_effort or ""
 
         ensure_data_root_writable(config.data_root)
         details["data_root"] = str(config.data_root.resolve())
 
         ensure_timezone_available(config.timezone)
         details["timezone"] = config.timezone
-    except PreflightError as exc:
+    except (PreflightError, ValueError) as exc:
         return PreflightReport(ok=False, error_summary=str(exc), details=details)
 
     return PreflightReport(ok=True, details=details)
@@ -146,53 +157,36 @@ def check_lark_identity(command_runner) -> None:
         raise PreflightError("lark-cli user identity is unavailable or not logged in.")
 
 
-def probe_codex(command_runner, *, cwd: Path) -> None:
-    probe_prompt = 'Return only this compact JSON object: {"probe":"ok"}'
-    with tempfile.NamedTemporaryFile(
-        prefix="worktrace-codex-probe-",
-        suffix=".json",
-        dir=str(cwd),
-        delete=False,
-    ) as handle:
-        output_path = Path(handle.name)
+def probe_codex(command_runner, *, config: RuntimeConfig, cwd: Path) -> None:
+    from .analyzers.codex import CodexAnalyzer
 
+    probe_schema = {
+        "type": "object",
+        "properties": {"probe": {"type": "string", "enum": ["ok"]}},
+        "required": ["probe"],
+        "additionalProperties": False,
+    }
+    spec = function_call_spec(
+        "preflight",
+        probe_schema,
+        typical_arguments={"probe": "ok"},
+    )
     try:
-        result = command_runner(
-            (
-                "codex",
-                "exec",
-                "--skip-git-repo-check",
-                "--ephemeral",
-                "--color",
-                "never",
-                "-s",
-                "read-only",
-                "-o",
-                str(output_path),
-                probe_prompt,
-            ),
+        payload = CodexAnalyzer(
+            config=config,
+            command_runner=command_runner,
             cwd=cwd,
-            timeout=CODEX_PROBE_TIMEOUT_SECONDS,
+        ).request_function(
+            '请把 probe 设为 "ok" 并提交。',
+            function_spec=spec,
         )
     except subprocess.TimeoutExpired as exc:
-        output_path.unlink(missing_ok=True)
         raise PreflightError("Codex probe timed out.") from exc
-
-    if result.returncode != 0:
-        output_path.unlink(missing_ok=True)
-        raise PreflightError(classify_codex_failure(result))
-
-    try:
-        content = output_path.read_text(encoding="utf-8").strip()
-    except OSError as exc:
-        raise PreflightError("Codex probe did not produce an output file.") from exc
-    finally:
-        output_path.unlink(missing_ok=True)
-
-    try:
-        payload = json.loads(content)
-    except json.JSONDecodeError as exc:
-        raise PreflightError("Codex probe returned invalid JSON.") from exc
+    except ValueError as exc:
+        raise PreflightError(str(exc)) from exc
+    except Exception as exc:
+        result = CommandResult(returncode=1, stdout="", stderr=str(exc))
+        raise PreflightError(classify_codex_failure(result)) from exc
 
     if not isinstance(payload, dict) or payload.get("probe") != "ok":
         raise PreflightError("Codex probe returned unexpected JSON content.")

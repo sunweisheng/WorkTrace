@@ -8,6 +8,7 @@ import pytest
 from src.worktrace.config import (
     RuntimeConfig,
     load_conversation_blacklist_overrides,
+    load_codex_llm_settings,
     load_llm_timeout_seconds,
     load_runtime_config_overrides,
     load_online_llm_settings,
@@ -66,6 +67,50 @@ def test_load_llm_timeout_seconds_does_not_require_online_credentials(
         cwd=tmp_path,
         environ={},
     ) == 1200
+
+
+def test_load_codex_llm_settings_requires_local_values_and_ignores_process_model_values(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / ".env").write_text(
+        "WORKTRACE_CODEX_MODEL=local-codex-model\n"
+        "WORKTRACE_CODEX_REASONING_EFFORT=high\n"
+        "WORKTRACE_CODEX_PROVIDER_ID=local-relay\n"
+        "WORKTRACE_CODEX_PROVIDER_NAME=Local Relay\n"
+        "WORKTRACE_CODEX_PROVIDER_BASE_URL=https://relay.example/v1\n"
+        "WORKTRACE_CODEX_PROVIDER_WIRE_API=responses\n"
+        "WORKTRACE_CODEX_PROVIDER_REQUIRES_OPENAI_AUTH=true\n",
+        encoding="utf-8",
+    )
+
+    settings = load_codex_llm_settings(
+        RuntimeConfig(),
+        cwd=tmp_path,
+        environ={
+            "WORKTRACE_CODEX_MODEL": "personal-default-model",
+            "WORKTRACE_CODEX_REASONING_EFFORT": "low",
+        },
+    )
+
+    assert settings.model == "local-codex-model"
+    assert settings.reasoning_effort == "high"
+    assert settings.provider_id == "local-relay"
+    assert settings.provider_name == "Local Relay"
+    assert settings.provider_base_url == "https://relay.example/v1"
+    assert settings.provider_wire_api == "responses"
+    assert settings.provider_requires_openai_auth is True
+
+
+def test_load_codex_llm_settings_rejects_process_only_model_values(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="repository-local"):
+        load_codex_llm_settings(
+            RuntimeConfig(),
+            cwd=tmp_path,
+            environ={
+                "WORKTRACE_CODEX_MODEL": "personal-default-model",
+                "WORKTRACE_CODEX_REASONING_EFFORT": "low",
+            },
+        )
 
 
 def test_load_online_llm_settings_prefers_process_environment(tmp_path: Path) -> None:

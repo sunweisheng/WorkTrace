@@ -90,63 +90,122 @@ def _input_metrics(error: Exception) -> dict[str, int | bool | None]:
 
 @dataclass
 class FailoverAnalyzer(Analyzer):
-    """Retry safe Online failures before using Codex for the current request."""
+    """Retry safe primary failures before using fallback for the current request."""
 
     primary: Analyzer
-    fallback: Analyzer
+    fallback: Analyzer | None
     usage_recorder: LLMUsageRecorder
-    online_request_retry_limit: int = 1
+    primary_backend: str = "codex"
+    fallback_backend: str = "online"
+    primary_request_retry_limit: int | None = None
+    online_request_retry_limit: int | None = None
 
     def __post_init__(self) -> None:
-        if self.online_request_retry_limit < 0:
-            raise ValueError("online_request_retry_limit must be non-negative.")
+        retry_limit = self.primary_request_retry_limit
+        if retry_limit is None:
+            retry_limit = self.online_request_retry_limit
+        if retry_limit is None:
+            retry_limit = 1
+        if retry_limit < 0:
+            raise ValueError("primary_request_retry_limit must be non-negative.")
+        self.primary_request_retry_limit = retry_limit
+        self.online_request_retry_limit = retry_limit
         self._request_state = local()
 
     def last_request_used_fallback(self) -> bool:
         return bool(getattr(self._request_state, "used_fallback", False))
 
+    def last_request_backend(self) -> str:
+        return str(
+            getattr(self._request_state, "backend", self.primary_backend)
+        )
+
+    def _primary_manages_usage_records(self) -> bool:
+        return bool(getattr(self.primary, "manages_usage_records", False))
+
+    def _request_context_id(self) -> str | None:
+        return self.usage_recorder.current_request_context_id()
+
     def _call(self, method_name: str, *args: Any, **kwargs: Any) -> Any:
         self._request_state.used_fallback = False
+        self._request_state.backend = self.primary_backend
         function_spec = kwargs.get("function_spec")
         request_kind = (
             function_spec.request_kind
             if isinstance(function_spec, FunctionCallSpec)
             else _REQUEST_KINDS[method_name]
         )
-        for attempt_index in range(self.online_request_retry_limit + 1):
+        assert self.primary_request_retry_limit is not None
+        for attempt_index in range(self.primary_request_retry_limit + 1):
             started_at = perf_counter()
             try:
-                return getattr(self.primary, method_name)(*args, **kwargs)
+                value = getattr(self.primary, method_name)(*args, **kwargs)
+                if self._primary_manages_usage_records():
+                    self.usage_recorder.mark_request_validation(
+                        self._request_context_id(),
+                        valid=True,
+                    )
+                return value
             except RetryableAnalyzerProtocolError as exc:
-                use_fallback = attempt_index == self.online_request_retry_limit
-                self.usage_recorder.record(
-                    request_kind,
-                    {},
-                    duration_ms=(perf_counter() - started_at) * 1000,
-                    backend="online",
-                    status="failed",
-                    fallback_from="online" if use_fallback else None,
-                    fallback_to="codex" if use_fallback else None,
-                    error_category=_safe_error_category(exc),
-                    **_input_metrics(exc),
+                use_fallback = (
+                    attempt_index == self.primary_request_retry_limit
+                    and self.fallback is not None
                 )
+                if self._primary_manages_usage_records():
+                    self.usage_recorder.mark_request_validation(
+                        self._request_context_id(), valid=False, errors=(str(exc),)
+                    )
+                    if use_fallback:
+                        self.usage_recorder.mark_request_fallback(
+                            self._request_context_id(),
+                            fallback_from=self.primary_backend,
+                            fallback_to=self.fallback_backend,
+                            error_category=_safe_error_category(exc),
+                        )
+                else:
+                    self.usage_recorder.record(
+                        request_kind,
+                        {},
+                        duration_ms=(perf_counter() - started_at) * 1000,
+                        backend=self.primary_backend,
+                        status="failed",
+                        fallback_from=self.primary_backend if use_fallback else None,
+                        fallback_to=self.fallback_backend if use_fallback else None,
+                        error_category=_safe_error_category(exc),
+                        python_validation={
+                            "status": "failed", "errors": [str(exc)]
+                        },
+                        **_input_metrics(exc),
+                    )
                 if not use_fallback:
+                    if attempt_index == self.primary_request_retry_limit:
+                        raise
                     continue
                 self._request_state.used_fallback = True
+                self._request_state.backend = self.fallback_backend
+                assert self.fallback is not None
                 return getattr(self.fallback, method_name)(*args, **kwargs)
             except AnalyzerProtocolError as exc:
-                self.usage_recorder.record(
-                    request_kind,
-                    {},
-                    duration_ms=(perf_counter() - started_at) * 1000,
-                    backend="online",
-                    status="failed",
-                    error_category=_safe_error_category(exc),
-                    **_input_metrics(exc),
-                )
+                if self._primary_manages_usage_records():
+                    self.usage_recorder.mark_request_validation(
+                        self._request_context_id(), valid=False, errors=(str(exc),)
+                    )
+                else:
+                    self.usage_recorder.record(
+                        request_kind,
+                        {},
+                        duration_ms=(perf_counter() - started_at) * 1000,
+                        backend=self.primary_backend,
+                        status="failed",
+                        error_category=_safe_error_category(exc),
+                        python_validation={
+                            "status": "failed", "errors": [str(exc)]
+                        },
+                        **_input_metrics(exc),
+                    )
                 raise
 
-        raise AssertionError("Online retry loop ended unexpectedly.")
+        raise AssertionError("Primary retry loop ended unexpectedly.")
 
     def fallback_current_request(
         self,
@@ -156,17 +215,30 @@ class FailoverAnalyzer(Analyzer):
         error_category: str,
         **kwargs: Any,
     ) -> Any:
-        """Send one already-retried request to Codex without changing later routing."""
+        """Send one already-retried request to fallback without changing later routing."""
         if method_name not in _REQUEST_KINDS and method_name != "request_function":
             raise ValueError(f"Unsupported fallback analyzer method: {method_name}.")
+        if self.fallback is None:
+            raise AnalyzerProtocolError("Online fallback is disabled by configuration.")
         self._request_state.used_fallback = True
+        self._request_state.backend = self.fallback_backend
         self.usage_recorder.mark_request_fallback(
             failed_request_context_id,
-            fallback_from="online",
-            fallback_to="codex",
+            fallback_from=self.primary_backend,
+            fallback_to=self.fallback_backend,
             error_category=error_category,
         )
-        return getattr(self.fallback, method_name)(*args, **kwargs)
+        try:
+            value = getattr(self.fallback, method_name)(*args, **kwargs)
+        except AnalyzerProtocolError as exc:
+            self.usage_recorder.mark_request_validation(
+                self._request_context_id(), valid=False, errors=(str(exc),)
+            )
+            raise
+        self.usage_recorder.mark_request_validation(
+            self._request_context_id(), valid=True
+        )
+        return value
 
     def request_function(
         self,

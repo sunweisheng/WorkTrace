@@ -205,9 +205,13 @@ class _DayGroupDiscoveryOutcome:
     artifact: dict[str, object]
     request_count: int
     retry_count: int
-    codex_fallback_count: int
+    fallback_count: int
     failure_count: int
     oversized_submission_count: int
+
+    @property
+    def codex_fallback_count(self) -> int:
+        return self.fallback_count
 
 
 @dataclass(frozen=True)
@@ -217,8 +221,12 @@ class _PersonalGroupRenderOutcome:
     artifact: dict[str, object]
     request_count: int
     retry_count: int
-    codex_fallback_count: int
+    fallback_count: int
     failure_count: int
+
+    @property
+    def codex_fallback_count(self) -> int:
+        return self.fallback_count
 
 
 @dataclass
@@ -492,7 +500,7 @@ class DailyTraceRunner:
                         merge_batch_warnings,
                         grouping_attempts,
                         validation_retry_count,
-                        codex_fallback_count,
+                        fallback_count,
                         singleton_repair_count,
                     ) = (
                         self._merge_day_candidates_with_batching(
@@ -516,7 +524,7 @@ class DailyTraceRunner:
                         review_component_count,
                         review_request_count,
                         review_retry_count,
-                        review_codex_fallback_count,
+                        review_fallback_count,
                         review_metrics,
                     ) = self._review_strongly_related_day_groups(
                         target_date=target_date,
@@ -590,11 +598,11 @@ class DailyTraceRunner:
                             + review_retry_count
                             + render_outcome.retry_count
                         ),
-                        codex_fallback_count=(
-                            codex_fallback_count
-                            + discovery_outcome.codex_fallback_count
-                            + review_codex_fallback_count
-                            + render_outcome.codex_fallback_count
+                        fallback_count=(
+                            fallback_count
+                            + discovery_outcome.fallback_count
+                            + review_fallback_count
+                            + render_outcome.fallback_count
                         ),
                         singleton_repair_candidate_count=singleton_repair_count,
                         warning_count=len(day_grouping_warnings),
@@ -1302,6 +1310,10 @@ class DailyTraceRunner:
             )
             + "\n",
             encoding="utf-8",
+        )
+        self.dependencies.llm_usage_recorder.write_call_ledger(
+            date_dir / "llm_calls.json",
+            status=status,
         )
 
     def _analyze_segmented_conversations(
@@ -3033,7 +3045,7 @@ class DailyTraceRunner:
         warnings: list[str] = []
         attempts: list[dict[str, object]] = []
         validation_retry_count = 0
-        codex_fallback_count = 0
+        fallback_count = 0
         singleton_repair_count = 0
         for batch_index, batch in enumerate(batches, start=1):
             if len(batch) == 1:
@@ -3053,7 +3065,7 @@ class DailyTraceRunner:
                 batch_warnings,
                 batch_attempts,
                 batch_retry_count,
-                batch_codex_count,
+                batch_fallback_count,
                 batch_repair_count,
             ) = self._request_valid_day_groups(
                 target_date,
@@ -3063,7 +3075,7 @@ class DailyTraceRunner:
             warnings.extend(batch_warnings)
             attempts.extend(batch_attempts)
             validation_retry_count += batch_retry_count
-            codex_fallback_count += batch_codex_count
+            fallback_count += batch_fallback_count
             singleton_repair_count += batch_repair_count
             local_groups.extend(result.groups)
 
@@ -3076,7 +3088,7 @@ class DailyTraceRunner:
             warnings,
             attempts,
             validation_retry_count,
-            codex_fallback_count,
+            fallback_count,
             singleton_repair_count,
         )
 
@@ -3098,7 +3110,7 @@ class DailyTraceRunner:
         attempts: list[dict[str, object]] = []
         validation_feedback = ""
         validation_retry_count = 0
-        codex_fallback_count = 0
+        fallback_count = 0
         last_context_id = ""
         last_result = CrossConversationGroupResult()
 
@@ -3120,7 +3132,7 @@ class DailyTraceRunner:
                     )
             except PersonalGroupingValidationError as exc:
                 used_fallback = self._last_analyzer_request_used_fallback()
-                codex_fallback_count += int(used_fallback)
+                fallback_count += int(used_fallback)
                 if isinstance(exc.partial_result, CrossConversationGroupResult):
                     last_result = exc.partial_result
                 validation_feedback = str(exc)
@@ -3128,7 +3140,7 @@ class DailyTraceRunner:
                     {
                         "request_label": request_label,
                         "attempt": attempt_index + 1,
-                        "backend": "codex" if used_fallback else "online",
+                        "backend": self._last_analyzer_request_backend(),
                         "status": "invalid",
                         "validation_feedback_input": attempt_feedback,
                         "validation_error": validation_feedback,
@@ -3142,7 +3154,7 @@ class DailyTraceRunner:
                     continue
                 break
             used_fallback = self._last_analyzer_request_used_fallback()
-            codex_fallback_count += int(used_fallback)
+            fallback_count += int(used_fallback)
             try:
                 validated = validate_cross_conversation_groups(result, candidates)
             except AnalyzerProtocolError as exc:
@@ -3152,7 +3164,7 @@ class DailyTraceRunner:
                     {
                         "request_label": request_label,
                         "attempt": attempt_index + 1,
-                        "backend": "codex" if used_fallback else "online",
+                        "backend": self._last_analyzer_request_backend(),
                         "status": "invalid",
                         "validation_feedback_input": attempt_feedback,
                         "validation_error": validation_feedback,
@@ -3169,7 +3181,7 @@ class DailyTraceRunner:
                 {
                     "request_label": request_label,
                     "attempt": attempt_index + 1,
-                    "backend": "codex" if used_fallback else "online",
+                    "backend": self._last_analyzer_request_backend(),
                     "status": "success",
                     "validation_feedback_input": validation_feedback,
                     "validation_error": "",
@@ -3181,14 +3193,14 @@ class DailyTraceRunner:
                 [],
                 attempts,
                 validation_retry_count,
-                codex_fallback_count,
+                fallback_count,
                 0,
             )
 
         fallback = getattr(analyzer, "fallback_current_request", None)
         if callable(fallback) and not self._last_analyzer_request_used_fallback():
             recorder = getattr(analyzer, "usage_recorder", None)
-            context_id = f"day-group:{request_label}:codex"
+            context_id = f"day-group:{request_label}:fallback"
             context = (
                 recorder.request_context(context_id)
                 if callable(getattr(recorder, "request_context", None))
@@ -3196,7 +3208,7 @@ class DailyTraceRunner:
             )
             try:
                 with context:
-                    codex_result = fallback(
+                    fallback_result = fallback(
                         "merge_day_candidates",
                         target_date,
                         candidates,
@@ -3206,39 +3218,39 @@ class DailyTraceRunner:
                     )
             except PersonalGroupingValidationError as exc:
                 validation_feedback = str(exc)
-                codex_fallback_count += 1
+                fallback_count += 1
                 if isinstance(exc.partial_result, CrossConversationGroupResult):
                     last_result = exc.partial_result
                 attempts.append(
                     {
                         "request_label": request_label,
                         "attempt": len(attempts) + 1,
-                        "backend": "codex",
+                        "backend": self._last_analyzer_request_backend(),
                         "status": "invalid",
                         "validation_error": validation_feedback,
                         "result": {},
                     }
                 )
-                codex_result = None
+                fallback_result = None
             else:
-                codex_fallback_count += 1
-            if codex_result is not None:
+                fallback_count += 1
+            if fallback_result is not None:
                 try:
                     validated = validate_cross_conversation_groups(
-                        codex_result,
+                        fallback_result,
                         candidates,
                     )
                 except AnalyzerProtocolError as exc:
-                    last_result = codex_result
+                    last_result = fallback_result
                     validation_feedback = str(exc)
                     attempts.append(
                         {
                             "request_label": request_label,
                             "attempt": len(attempts) + 1,
-                            "backend": "codex",
+                            "backend": self._last_analyzer_request_backend(),
                             "status": "invalid",
                             "validation_error": validation_feedback,
-                            "result": codex_result.to_dict(),
+                            "result": fallback_result.to_dict(),
                         }
                     )
                 else:
@@ -3246,7 +3258,7 @@ class DailyTraceRunner:
                         {
                             "request_label": request_label,
                             "attempt": len(attempts) + 1,
-                            "backend": "codex",
+                            "backend": self._last_analyzer_request_backend(),
                             "status": "success",
                             "validation_error": "",
                             "result": validated.to_dict(),
@@ -3257,7 +3269,7 @@ class DailyTraceRunner:
                         [],
                         attempts,
                         validation_retry_count,
-                        codex_fallback_count,
+                        fallback_count,
                         0,
                     )
 
@@ -3295,7 +3307,7 @@ class DailyTraceRunner:
             warnings,
             attempts,
             validation_retry_count,
-            codex_fallback_count,
+            fallback_count,
             repair_count,
         )
 
@@ -3306,6 +3318,16 @@ class DailyTraceRunner:
             None,
         )
         return bool(checker()) if callable(checker) else False
+
+    def _last_analyzer_request_backend(self) -> str:
+        checker = getattr(
+            self.dependencies.analyzer,
+            "last_request_backend",
+            None,
+        )
+        if callable(checker):
+            return str(checker())
+        return "codex"
 
     def _discover_day_group_review_candidates(
         self,
@@ -3337,7 +3359,7 @@ class DailyTraceRunner:
                 artifact=artifact,
                 request_count=0,
                 retry_count=0,
-                codex_fallback_count=0,
+                fallback_count=0,
                 failure_count=0,
                 oversized_submission_count=0,
             )
@@ -3353,7 +3375,7 @@ class DailyTraceRunner:
                 artifact=artifact,
                 request_count=0,
                 retry_count=0,
-                codex_fallback_count=0,
+                fallback_count=0,
                 failure_count=0,
                 oversized_submission_count=0,
             )
@@ -3362,7 +3384,7 @@ class DailyTraceRunner:
         attempts: list[dict[str, object]] = []
         validation_feedback = ""
         retry_count = 0
-        codex_fallback_count = 0
+        fallback_count = 0
         last_context_id = ""
         last_prompt = ""
         last_function_spec = None
@@ -3465,7 +3487,7 @@ class DailyTraceRunner:
                 artifact=artifact,
                 request_count=request_count,
                 retry_count=retry_count,
-                codex_fallback_count=codex_fallback_count,
+                fallback_count=fallback_count,
                 failure_count=int(bool(abandon_reason)),
                 oversized_submission_count=oversized_submission_count,
             )
@@ -3482,7 +3504,7 @@ class DailyTraceRunner:
                 > self.config.model_input_batch_target_tokens
             )
             last_context_id = (
-                f"day-group-discovery:{target_date}:online-{attempt_index + 1}"
+                f"day-group-discovery:{target_date}:primary-{attempt_index + 1}"
             )
             recorder = getattr(analyzer, "usage_recorder", None)
             context = (
@@ -3501,7 +3523,7 @@ class DailyTraceRunner:
                         allow_oversized_input=oversized,
                     )
                 used_fallback = self._last_analyzer_request_used_fallback()
-                codex_fallback_count += int(used_fallback)
+                fallback_count += int(used_fallback)
                 fallback_counted = used_fallback
                 result = parse_day_group_discovery_payload(
                     raw_payload,
@@ -3510,13 +3532,13 @@ class DailyTraceRunner:
             except DayGroupDiscoveryValidationError as exc:
                 used_fallback = self._last_analyzer_request_used_fallback()
                 if used_fallback and not fallback_counted:
-                    codex_fallback_count += 1
+                    fallback_count += 1
                 validation_feedback = str(exc)
                 attempts.append(
                     {
                         "attempt": len(attempts) + 1,
                         "request_context_id": last_context_id,
-                        "backend": "codex" if used_fallback else "online",
+                        "backend": self._last_analyzer_request_backend(),
                         "status": "invalid",
                         "duration_ms": round(
                             (perf_counter() - attempt_started_at) * 1000,
@@ -3539,12 +3561,12 @@ class DailyTraceRunner:
             except (AnalyzerProtocolError, TypeError, ValueError) as exc:
                 used_fallback = self._last_analyzer_request_used_fallback()
                 if used_fallback and not fallback_counted:
-                    codex_fallback_count += 1
+                    fallback_count += 1
                 attempts.append(
                     {
                         "attempt": len(attempts) + 1,
                         "request_context_id": last_context_id,
-                        "backend": "codex" if used_fallback else "online",
+                        "backend": self._last_analyzer_request_backend(),
                         "status": "failed",
                         "duration_ms": round(
                             (perf_counter() - attempt_started_at) * 1000,
@@ -3571,7 +3593,7 @@ class DailyTraceRunner:
                 {
                     "attempt": len(attempts) + 1,
                     "request_context_id": last_context_id,
-                    "backend": "codex" if used_fallback else "online",
+                    "backend": self._last_analyzer_request_backend(),
                     "status": "success",
                     "duration_ms": round(
                         (perf_counter() - attempt_started_at) * 1000,
@@ -3596,7 +3618,7 @@ class DailyTraceRunner:
                 last_estimates["input_estimated_tokens"]
                 > self.config.model_input_batch_target_tokens
             )
-            context_id = f"day-group-discovery:{target_date}:codex"
+            context_id = f"day-group-discovery:{target_date}:fallback"
             recorder = getattr(analyzer, "usage_recorder", None)
             context = (
                 recorder.request_context(context_id)
@@ -3605,7 +3627,7 @@ class DailyTraceRunner:
             )
             attempt_started_at = perf_counter()
             raw_payload = None
-            codex_fallback_count += 1
+            fallback_count += 1
             try:
                 with context:
                     raw_payload = fallback(
@@ -3625,7 +3647,7 @@ class DailyTraceRunner:
                     {
                         "attempt": len(attempts) + 1,
                         "request_context_id": context_id,
-                        "backend": "codex",
+                        "backend": self._last_analyzer_request_backend(),
                         "status": (
                             "invalid"
                             if isinstance(exc, DayGroupDiscoveryValidationError)
@@ -3656,7 +3678,7 @@ class DailyTraceRunner:
                 {
                     "attempt": len(attempts) + 1,
                     "request_context_id": context_id,
-                    "backend": "codex",
+                    "backend": self._last_analyzer_request_backend(),
                     "status": "success",
                     "duration_ms": round(
                         (perf_counter() - attempt_started_at) * 1000,
@@ -3705,7 +3727,7 @@ class DailyTraceRunner:
         attempts: list[dict[str, object]] = []
         validation_feedback = initial_validation_feedback
         retry_count = 0
-        codex_fallback_count = 0
+        fallback_count = 0
         last_context_id = ""
         review_input = {
             "candidate_draft_ids": [item.draft_id for item in component.candidates],
@@ -3769,7 +3791,7 @@ class DailyTraceRunner:
                     f"{component.component_id}: {exc}"
                 ],
                 retry_count,
-                codex_fallback_count,
+                fallback_count,
             )
 
         for attempt_index in range(
@@ -3783,7 +3805,7 @@ class DailyTraceRunner:
             )
             last_context_id = (
                 f"day-group-review:{target_date}:{component.component_id}:"
-                f"online-{attempt_index + 1}"
+                f"primary-{attempt_index + 1}"
             )
             recorder = getattr(analyzer, "usage_recorder", None)
             context = (
@@ -3802,12 +3824,12 @@ class DailyTraceRunner:
                     )
             except (AnalyzerProtocolError, TypeError, ValueError) as exc:
                 used_fallback = self._last_analyzer_request_used_fallback()
-                codex_fallback_count += int(used_fallback)
+                fallback_count += int(used_fallback)
                 attempts.append(
                     {
                         "component_id": component.component_id,
                         "attempt": len(attempts) + 1,
-                        "backend": "codex" if used_fallback else "online",
+                        "backend": self._last_analyzer_request_backend(),
                         "status": "failed",
                         "failure_kind": "request",
                         "validation_error": str(exc),
@@ -3832,7 +3854,7 @@ class DailyTraceRunner:
                 return failure_result(exc)
 
             used_fallback = self._last_analyzer_request_used_fallback()
-            codex_fallback_count += int(used_fallback)
+            fallback_count += int(used_fallback)
             raw_result: DayGroupReviewResult | None = None
             try:
                 raw_result = parse_day_group_review_payload(
@@ -3851,7 +3873,7 @@ class DailyTraceRunner:
                     {
                         "component_id": component.component_id,
                         "attempt": len(attempts) + 1,
-                        "backend": "codex" if used_fallback else "online",
+                        "backend": self._last_analyzer_request_backend(),
                         "status": "failed",
                         "failure_kind": "validation",
                         "validation_error": validation_feedback,
@@ -3890,7 +3912,7 @@ class DailyTraceRunner:
                 {
                     "component_id": component.component_id,
                     "attempt": len(attempts) + 1,
-                    "backend": "codex" if used_fallback else "online",
+                    "backend": self._last_analyzer_request_backend(),
                     "status": "success",
                     "failure_kind": "",
                     "validation_error": "",
@@ -3918,7 +3940,7 @@ class DailyTraceRunner:
                 attempts,
                 [],
                 retry_count,
-                codex_fallback_count,
+                fallback_count,
             )
 
         fallback = getattr(analyzer, "fallback_current_request", None)
@@ -3929,7 +3951,7 @@ class DailyTraceRunner:
                 > self.config.model_input_batch_target_tokens
             )
             context_id = (
-                f"day-group-review:{target_date}:{component.component_id}:codex"
+                f"day-group-review:{target_date}:{component.component_id}:fallback"
             )
             recorder = getattr(analyzer, "usage_recorder", None)
             context = (
@@ -3940,7 +3962,7 @@ class DailyTraceRunner:
             started_at = perf_counter()
             raw_result = None
             payload = None
-            codex_fallback_count += 1
+            fallback_count += 1
             try:
                 with context:
                     payload = fallback(
@@ -3971,7 +3993,7 @@ class DailyTraceRunner:
                     {
                         "component_id": component.component_id,
                         "attempt": len(attempts) + 1,
-                        "backend": "codex",
+                        "backend": self._last_analyzer_request_backend(),
                         "status": "failed",
                         "failure_kind": fallback_failure_kind,
                         "validation_error": fallback_error,
@@ -4009,7 +4031,7 @@ class DailyTraceRunner:
                 {
                     "component_id": component.component_id,
                     "attempt": len(attempts) + 1,
-                    "backend": "codex",
+                    "backend": self._last_analyzer_request_backend(),
                     "status": "success",
                     "failure_kind": "",
                     "validation_error": "",
@@ -4037,7 +4059,7 @@ class DailyTraceRunner:
                 attempts,
                 [],
                 retry_count,
-                codex_fallback_count,
+                fallback_count,
             )
 
         return failure_result(AnalyzerProtocolError(validation_feedback))
@@ -4145,7 +4167,7 @@ class DailyTraceRunner:
             for warning in component_warnings
         ]
         retry_count = sum(item[4] for item in results)
-        codex_fallback_count = sum(item[5] for item in results)
+        fallback_count = sum(item[5] for item in results)
         recorder = getattr(self.dependencies.analyzer, "usage_recorder", None)
         records = (
             recorder.records()
@@ -4192,7 +4214,7 @@ class DailyTraceRunner:
             len(components),
             request_count,
             retry_count,
-            codex_fallback_count,
+            fallback_count,
             review_metrics,
         )
 
@@ -4265,7 +4287,7 @@ class DailyTraceRunner:
             for warning in group_warnings
         ]
         retry_count = sum(item[4] for item in results)
-        codex_fallback_count = sum(item[5] for item in results)
+        fallback_count = sum(item[5] for item in results)
         failure_count = len(multi_groups) - len(rendered_groups)
         recorder = getattr(self.dependencies.analyzer, "usage_recorder", None)
         records = (
@@ -4307,7 +4329,7 @@ class DailyTraceRunner:
                     "group_count": len(multi_groups),
                     "request_count": request_count,
                     "retry_count": retry_count,
-                    "codex_fallback_count": codex_fallback_count,
+                    "fallback_count": fallback_count,
                     "failure_count": failure_count,
                 },
             }
@@ -4329,7 +4351,7 @@ class DailyTraceRunner:
             artifact,
             request_count,
             retry_count,
-            codex_fallback_count,
+            fallback_count,
             failure_count,
         )
 
@@ -4361,7 +4383,7 @@ class DailyTraceRunner:
         attempts: list[dict[str, object]] = []
         validation_feedback = ""
         retry_count = 0
-        codex_fallback_count = 0
+        fallback_count = 0
         last_context_id = ""
 
         def request_parts(feedback: str):
@@ -4429,7 +4451,7 @@ class DailyTraceRunner:
                     f"failed: group={group.group_id}: {exc}"
                 ],
                 retry_count,
-                codex_fallback_count,
+                fallback_count,
             )
 
         for attempt_index in range(self.config.day_group_validation_retry_limit + 1):
@@ -4441,7 +4463,7 @@ class DailyTraceRunner:
             )
             last_context_id = (
                 f"personal-group-render:{target_date}:{group.group_id}:"
-                f"online-{attempt_index + 1}"
+                f"primary-{attempt_index + 1}"
             )
             recorder = getattr(analyzer, "usage_recorder", None)
             context = (
@@ -4459,7 +4481,7 @@ class DailyTraceRunner:
                         allow_oversized_input=oversized,
                     )
                 used_fallback = self._last_analyzer_request_used_fallback()
-                codex_fallback_count += int(used_fallback)
+                fallback_count += int(used_fallback)
                 result = parse_personal_group_render_payload(
                     payload,
                     group=group,
@@ -4468,7 +4490,7 @@ class DailyTraceRunner:
             except (AnalyzerProtocolError, TypeError, ValueError) as exc:
                 used_fallback = self._last_analyzer_request_used_fallback()
                 if used_fallback and payload is None:
-                    codex_fallback_count += 1
+                    fallback_count += 1
                 failure_kind = "validation" if payload is not None else "request"
                 validation_feedback = str(exc)
                 attempts.append(
@@ -4476,7 +4498,7 @@ class DailyTraceRunner:
                         "group_id": group.group_id,
                         "attempt": len(attempts) + 1,
                         "request_context_id": last_context_id,
-                        "backend": "codex" if used_fallback else "online",
+                        "backend": self._last_analyzer_request_backend(),
                         "status": "failed",
                         "failure_kind": failure_kind,
                         "validation_error": validation_feedback,
@@ -4501,7 +4523,7 @@ class DailyTraceRunner:
                     "group_id": group.group_id,
                     "attempt": len(attempts) + 1,
                     "request_context_id": last_context_id,
-                    "backend": "codex" if used_fallback else "online",
+                    "backend": self._last_analyzer_request_backend(),
                     "status": "success",
                     "failure_kind": "",
                     "validation_error": "",
@@ -4520,7 +4542,7 @@ class DailyTraceRunner:
                 attempts,
                 [],
                 retry_count,
-                codex_fallback_count,
+                fallback_count,
             )
 
         fallback = getattr(analyzer, "fallback_current_request", None)
@@ -4530,7 +4552,7 @@ class DailyTraceRunner:
                 estimates["input_estimated_tokens"]
                 > self.config.model_input_batch_target_tokens
             )
-            context_id = f"personal-group-render:{target_date}:{group.group_id}:codex"
+            context_id = f"personal-group-render:{target_date}:{group.group_id}:fallback"
             recorder = getattr(analyzer, "usage_recorder", None)
             context = (
                 recorder.request_context(context_id)
@@ -4539,7 +4561,7 @@ class DailyTraceRunner:
             )
             started_at = perf_counter()
             payload = None
-            codex_fallback_count += 1
+            fallback_count += 1
             try:
                 with context:
                     payload = fallback(
@@ -4561,7 +4583,7 @@ class DailyTraceRunner:
                         "group_id": group.group_id,
                         "attempt": len(attempts) + 1,
                         "request_context_id": context_id,
-                        "backend": "codex",
+                        "backend": self._last_analyzer_request_backend(),
                         "status": "failed",
                         "failure_kind": (
                             "validation" if payload is not None else "request"
@@ -4583,7 +4605,7 @@ class DailyTraceRunner:
                     "group_id": group.group_id,
                     "attempt": len(attempts) + 1,
                     "request_context_id": context_id,
-                    "backend": "codex",
+                    "backend": self._last_analyzer_request_backend(),
                     "status": "success",
                     "failure_kind": "",
                     "validation_error": "",
@@ -4602,7 +4624,7 @@ class DailyTraceRunner:
                 attempts,
                 [],
                 retry_count,
-                codex_fallback_count,
+                fallback_count,
             )
         return failure(AnalyzerProtocolError(validation_feedback))
 

@@ -3,6 +3,8 @@ from __future__ import annotations
 from collections import defaultdict
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+import json
+from pathlib import Path
 from threading import Lock, local
 
 
@@ -42,9 +44,10 @@ def _read_token_count(usage: dict[str, object], *keys: str) -> int | None:
 
 @dataclass
 class LLMUsageRecorder:
-    _records: list[dict[str, bool | int | str | None]] = field(default_factory=list)
+    _records: list[dict[str, object]] = field(default_factory=list)
     _lock: Lock = field(default_factory=Lock)
     _context: local = field(default_factory=local)
+    _next_call_number: int = 1
 
     @contextmanager
     def request_context(self, context_id: str):
@@ -77,9 +80,20 @@ class LLMUsageRecorder:
         function_arguments_json_error_column: int | None = None,
         function_arguments_json_error_position: int | None = None,
         function_arguments_sha256: str | None = None,
+        function_spec: object | None = None,
+        final_prompt: str | None = None,
+        model: str | None = None,
+        reasoning_effort: str | None = None,
+        raw_result: object | None = None,
+        python_validation: dict[str, object] | None = None,
     ) -> dict[str, int | None]:
         usage = extract_usage(payload)
-        record: dict[str, bool | int | str | None] = {
+        contract_payload = None
+        if function_spec is not None:
+            serializer = getattr(function_spec, "contract_payload", None)
+            if callable(serializer):
+                contract_payload = serializer()
+        record: dict[str, object] = {
             "request_kind": request_kind,
             "request_context_id": getattr(
                 self._context,
@@ -120,6 +134,19 @@ class LLMUsageRecorder:
             ),
             **usage,
         }
+        if contract_payload is not None:
+            record["function_contract"] = contract_payload
+        if final_prompt is not None:
+            record["final_prompt"] = final_prompt
+        if model is not None:
+            record["model"] = model
+        if reasoning_effort is not None:
+            record["reasoning_effort"] = reasoning_effort
+        if raw_result is not None:
+            record["raw_result"] = raw_result
+        record["python_validation"] = python_validation or {
+            "status": "pending_task_validation"
+        }
         if function_arguments_repair_kind is not None:
             record.update(
                 {
@@ -142,6 +169,14 @@ class LLMUsageRecorder:
                 }
             )
         with self._lock:
+            record["call_id"] = f"LLM-{self._next_call_number:06d}"
+            self._next_call_number += 1
+            matching_attempts = sum(
+                item.get("request_context_id") == record.get("request_context_id")
+                and item.get("request_kind") == request_kind
+                for item in self._records
+            )
+            record["attempt"] = matching_attempts + 1
             self._records.append(record)
         return usage
 
@@ -178,13 +213,17 @@ class LLMUsageRecorder:
             ),
         }
 
-    def records(self) -> list[dict[str, bool | int | str | None]]:
+    def records(self) -> list[dict[str, object]]:
         with self._lock:
             return [dict(record) for record in self._records]
 
+    def current_request_context_id(self) -> str | None:
+        value = getattr(self._context, "request_context_id", None)
+        return value if isinstance(value, str) else None
+
     def mark_request_fallback(
         self,
-        request_context_id: str,
+        request_context_id: str | None,
         *,
         fallback_from: str,
         fallback_to: str,
@@ -207,6 +246,36 @@ class LLMUsageRecorder:
                 )
                 return True
         return False
+
+    def mark_request_validation(
+        self,
+        request_context_id: str | None,
+        *,
+        valid: bool,
+        errors: list[str] | tuple[str, ...] = (),
+    ) -> bool:
+        with self._lock:
+            for record in reversed(self._records):
+                if record.get("request_context_id") != request_context_id:
+                    continue
+                record["python_validation"] = {
+                    "status": "passed" if valid else "failed",
+                    "errors": list(errors),
+                }
+                return True
+        return False
+
+    def write_call_ledger(self, path: Path, *, status: str) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "schema_version": 1,
+            "status": status,
+            "calls": self.records(),
+        }
+        path.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
 
 
 def _summarize_records(
@@ -250,11 +319,11 @@ def _basic_duration_summary(values: list[object]) -> dict[str, float | int]:
 
 
 def _summarize_attempts(
-    records: list[dict[str, bool | int | str | None]],
+    records: list[dict[str, object]],
     *,
     key: str,
 ) -> dict[str, dict[str, object]]:
-    grouped: dict[str, list[dict[str, bool | int | str | None]]] = defaultdict(list)
+    grouped: dict[str, list[dict[str, object]]] = defaultdict(list)
     for record in records:
         grouped[str(record.get(key, "unknown"))].append(record)
     return {

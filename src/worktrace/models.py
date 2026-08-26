@@ -1744,7 +1744,7 @@ class DayGroupingSummary:
     content_render_retry_count: int = 0
     content_render_failure_count: int = 0
     validation_retry_count: int = 0
-    codex_fallback_count: int = 0
+    fallback_count: int = 0
     singleton_repair_candidate_count: int = 0
     warning_count: int = 0
 
@@ -1786,7 +1786,9 @@ class DayGroupingSummary:
                 data.get("content_render_failure_count", 0)
             ),
             validation_retry_count=int(data.get("validation_retry_count", 0)),
-            codex_fallback_count=int(data.get("codex_fallback_count", 0)),
+            fallback_count=int(
+                data.get("fallback_count", data.get("codex_fallback_count", 0))
+            ),
             singleton_repair_candidate_count=int(
                 data.get("singleton_repair_candidate_count", 0)
             ),
@@ -1818,10 +1820,15 @@ class DayGroupingSummary:
             "content_render_retry_count": self.content_render_retry_count,
             "content_render_failure_count": self.content_render_failure_count,
             "validation_retry_count": self.validation_retry_count,
-            "codex_fallback_count": self.codex_fallback_count,
+            "fallback_count": self.fallback_count,
             "singleton_repair_candidate_count": self.singleton_repair_candidate_count,
             "warning_count": self.warning_count,
         }
+
+    @property
+    def codex_fallback_count(self) -> int:
+        """Compatibility reader for traces created before the route reversal."""
+        return self.fallback_count
 
 
 @dataclass(frozen=True)

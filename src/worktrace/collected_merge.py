@@ -124,7 +124,7 @@ class _CollectedDiscoveryOutcome:
     artifact: dict[str, object]
     request_count: int
     retry_count: int
-    codex_fallback_count: int
+    fallback_count: int
     failure_count: int
     oversized_submission_count: int
 
@@ -227,6 +227,12 @@ class CollectedMergeRunner:
         checker = getattr(self.analyzer, "last_request_used_fallback", None)
         return bool(checker()) if callable(checker) else False
 
+    def _last_analyzer_request_backend(self) -> str:
+        checker = getattr(self.analyzer, "last_request_backend", None)
+        if callable(checker):
+            return str(checker())
+        return "codex"
+
     def _fallback_current_analyzer_request(
         self,
         method_name: str,
@@ -237,7 +243,7 @@ class CollectedMergeRunner:
     ) -> Any:
         fallback = getattr(self.analyzer, "fallback_current_request", None)
         if not callable(fallback):
-            raise AnalyzerProtocolError("Current-request Codex fallback is unavailable.")
+            raise AnalyzerProtocolError("Current-request fallback is unavailable.")
         return fallback(
             method_name,
             *args,
@@ -251,6 +257,13 @@ class CollectedMergeRunner:
         if step is None:
             return
         self._attach_collected_merge_llm_calls(step)
+        recorder = self._llm_usage_recorder()
+        if recorder is not None:
+            recorder.mark_request_validation(
+                str(step_index),
+                valid=not source_coverage_error,
+                errors=(source_coverage_error,) if source_coverage_error else (),
+            )
         self._write_collected_merge_trace_step(step)
 
     def run(
@@ -961,7 +974,7 @@ class CollectedMergeRunner:
                 artifact=artifact,
                 attempts=[],
                 retry_count=0,
-                codex_fallback_count=0,
+                fallback_count=0,
                 usage_record_start_index=usage_record_start_index,
             )
 
@@ -982,7 +995,7 @@ class CollectedMergeRunner:
         attempts: list[dict[str, object]] = []
         validation_feedback = ""
         retry_count = 0
-        codex_fallback_count = 0
+        fallback_count = 0
         last_context_id = ""
 
         def request_parts(feedback: str):
@@ -1018,7 +1031,7 @@ class CollectedMergeRunner:
                 > self.config.model_input_batch_target_tokens
             )
             last_context_id = (
-                f"collected-group-discovery:{target_date}:online-{attempt_index + 1}"
+                f"collected-group-discovery:{target_date}:primary-{attempt_index + 1}"
             )
             recorder = self._llm_usage_recorder()
             context = (
@@ -1036,7 +1049,7 @@ class CollectedMergeRunner:
                         allow_oversized_input=oversized,
                     )
                 used_fallback = self._last_analyzer_request_used_fallback()
-                codex_fallback_count += int(used_fallback)
+                fallback_count += int(used_fallback)
                 result = parse_day_group_discovery_payload(
                     raw_payload,
                     allowed_group_ids=group_ids,
@@ -1048,7 +1061,7 @@ class CollectedMergeRunner:
                     _collected_discovery_attempt(
                         attempt=len(attempts) + 1,
                         context_id=last_context_id,
-                        backend="codex" if used_fallback else "online",
+                        backend=self._last_analyzer_request_backend(),
                         status="invalid",
                         started_at=started_at,
                         validation_feedback_input=feedback_input,
@@ -1065,7 +1078,7 @@ class CollectedMergeRunner:
                         artifact=artifact,
                         attempts=attempts,
                         retry_count=retry_count,
-                        codex_fallback_count=codex_fallback_count,
+                        fallback_count=fallback_count,
                         usage_record_start_index=usage_record_start_index,
                         abandon_reason=str(exc),
                     )
@@ -1075,12 +1088,12 @@ class CollectedMergeRunner:
                 break
             except (AnalyzerProtocolError, TypeError, ValueError) as exc:
                 used_fallback = self._last_analyzer_request_used_fallback()
-                codex_fallback_count += int(used_fallback)
+                fallback_count += int(used_fallback)
                 attempts.append(
                     _collected_discovery_attempt(
                         attempt=len(attempts) + 1,
                         context_id=last_context_id,
-                        backend="codex" if used_fallback else "online",
+                        backend=self._last_analyzer_request_backend(),
                         status="failed",
                         started_at=started_at,
                         validation_feedback_input=feedback_input,
@@ -1096,7 +1109,7 @@ class CollectedMergeRunner:
                     artifact=artifact,
                     attempts=attempts,
                     retry_count=retry_count,
-                    codex_fallback_count=codex_fallback_count,
+                    fallback_count=fallback_count,
                     usage_record_start_index=usage_record_start_index,
                     abandon_reason=str(exc),
                 )
@@ -1104,7 +1117,7 @@ class CollectedMergeRunner:
                 _collected_discovery_attempt(
                     attempt=len(attempts) + 1,
                     context_id=last_context_id,
-                    backend="codex" if used_fallback else "online",
+                    backend=self._last_analyzer_request_backend(),
                     status="success",
                     started_at=started_at,
                     validation_feedback_input=feedback_input,
@@ -1120,7 +1133,7 @@ class CollectedMergeRunner:
                 artifact=artifact,
                 attempts=attempts,
                 retry_count=retry_count,
-                codex_fallback_count=codex_fallback_count,
+                fallback_count=fallback_count,
                 usage_record_start_index=usage_record_start_index,
             )
 
@@ -1131,7 +1144,7 @@ class CollectedMergeRunner:
                 estimates["input_estimated_tokens"]
                 > self.config.model_input_batch_target_tokens
             )
-            context_id = f"collected-group-discovery:{target_date}:codex"
+            context_id = f"collected-group-discovery:{target_date}:fallback"
             recorder = self._llm_usage_recorder()
             context = (
                 recorder.request_context(context_id)
@@ -1140,7 +1153,7 @@ class CollectedMergeRunner:
             )
             started_at = perf_counter()
             raw_payload = None
-            codex_fallback_count += 1
+            fallback_count += 1
             try:
                 with context:
                     raw_payload = fallback(
@@ -1160,7 +1173,7 @@ class CollectedMergeRunner:
                     _collected_discovery_attempt(
                         attempt=len(attempts) + 1,
                         context_id=context_id,
-                        backend="codex",
+                        backend=self._last_analyzer_request_backend(),
                         status=(
                             "invalid"
                             if isinstance(exc, DayGroupDiscoveryValidationError)
@@ -1180,7 +1193,7 @@ class CollectedMergeRunner:
                     artifact=artifact,
                     attempts=attempts,
                     retry_count=retry_count,
-                    codex_fallback_count=codex_fallback_count,
+                    fallback_count=fallback_count,
                     usage_record_start_index=usage_record_start_index,
                     abandon_reason=str(exc),
                 )
@@ -1188,7 +1201,7 @@ class CollectedMergeRunner:
                 _collected_discovery_attempt(
                     attempt=len(attempts) + 1,
                     context_id=context_id,
-                    backend="codex",
+                    backend=self._last_analyzer_request_backend(),
                     status="success",
                     started_at=started_at,
                     validation_feedback_input=validation_feedback,
@@ -1204,7 +1217,7 @@ class CollectedMergeRunner:
                 artifact=artifact,
                 attempts=attempts,
                 retry_count=retry_count,
-                codex_fallback_count=codex_fallback_count,
+                fallback_count=fallback_count,
                 usage_record_start_index=usage_record_start_index,
             )
 
@@ -1213,7 +1226,7 @@ class CollectedMergeRunner:
             artifact=artifact,
             attempts=attempts,
             retry_count=retry_count,
-            codex_fallback_count=codex_fallback_count,
+            fallback_count=fallback_count,
             usage_record_start_index=usage_record_start_index,
             abandon_reason=validation_feedback or "No valid result was returned.",
         )
@@ -1225,7 +1238,7 @@ class CollectedMergeRunner:
         artifact: dict[str, object],
         attempts: list[dict[str, object]],
         retry_count: int,
-        codex_fallback_count: int,
+        fallback_count: int,
         usage_record_start_index: int,
         abandon_reason: str = "",
     ) -> _CollectedDiscoveryOutcome:
@@ -1302,7 +1315,7 @@ class CollectedMergeRunner:
             artifact=artifact,
             request_count=request_count,
             retry_count=retry_count,
-            codex_fallback_count=codex_fallback_count,
+            fallback_count=fallback_count,
             failure_count=int(bool(abandon_reason)),
             oversized_submission_count=oversized_count,
         )
@@ -1793,7 +1806,7 @@ class CollectedMergeRunner:
         if cancel_event is not None and cancel_event.is_set():
             raise AnalyzerProtocolError(
                 "High-risk collected group review was cancelled after another group "
-                "failed Codex fallback validation."
+                "failed fallback validation."
             )
 
     def _pack_collected_review_batches(
@@ -2083,8 +2096,8 @@ class CollectedMergeRunner:
             ):
                 if self._supports_current_request_fallback():
                     warning = (
-                        "Retrying current high-risk collected group review with Codex "
-                        "after Online Python validation retries were exhausted: "
+                        "Retrying current high-risk collected group review with the fallback "
+                        "after primary Python validation retries were exhausted: "
                         f"group={candidate_group.group_id} {validation_error}"
                     )
                     warnings.append(warning)
@@ -3215,8 +3228,8 @@ class CollectedMergeRunner:
             if invalid_result_count >= self.config.collected_merge_missing_field_retry_limit:
                 if self._supports_current_request_fallback():
                     warning = (
-                        "Retrying current collected candidate grouping with Codex after "
-                        "Online Python validation retries were exhausted: "
+                        "Retrying current collected candidate grouping with the fallback after "
+                        "primary Python validation retries were exhausted: "
                         + partition_error
                     )
                     warnings.append(warning)
@@ -3355,7 +3368,7 @@ class CollectedMergeRunner:
                 ):
                     if self._supports_current_request_fallback():
                         warning = (
-                            "Retrying current collected content with Codex after Online "
+                            "Retrying current collected content with the fallback after primary "
                             "source coverage retries were exhausted: "
                             f"{coverage_error}"
                         )
@@ -3396,7 +3409,7 @@ class CollectedMergeRunner:
             ):
                 if self._supports_current_request_fallback():
                     warning = (
-                        "Retrying current collected content with Codex after Online "
+                        "Retrying current collected content with the fallback after primary "
                         "required-field retries were exhausted: "
                         f"{format_collected_merge_missing_field_summary(missing_summary)}"
                     )
@@ -4393,6 +4406,18 @@ class CollectedMergeRunner:
             }
         )
         self._attach_collected_merge_llm_calls(step)
+        recorder = self._llm_usage_recorder()
+        if recorder is not None:
+            validation_errors = [
+                item.strip()
+                for item in source_coverage_error.split(";")
+                if item.strip()
+            ]
+            recorder.mark_request_validation(
+                str(step_index),
+                valid=not validation_errors,
+                errors=validation_errors,
+            )
         self._write_collected_merge_trace_step(step)
 
     def _record_collected_merge_trace_success(
@@ -4435,6 +4460,13 @@ class CollectedMergeRunner:
             }
         )
         self._attach_collected_merge_llm_calls(step)
+        recorder = self._llm_usage_recorder()
+        if recorder is not None:
+            recorder.mark_request_validation(
+                str(step_index),
+                valid=not validation_errors,
+                errors=validation_errors,
+            )
         self._write_collected_merge_trace_step(step)
 
     def _record_collected_merge_trace_failure(
@@ -4667,6 +4699,12 @@ class CollectedMergeRunner:
             render_collected_merge_trace_summary(summary),
             encoding="utf-8",
         )
+        recorder = self._llm_usage_recorder()
+        if recorder is not None:
+            recorder.write_call_ledger(
+                self._collected_merge_trace_dir / "llm_calls.json",
+                status=status,
+            )
 
     def _collected_merge_llm_usage_summary(self) -> dict[str, Any]:
         recorder = self._llm_usage_recorder()
