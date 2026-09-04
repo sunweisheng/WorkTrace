@@ -43,6 +43,7 @@ from src.worktrace.errors import (
 )
 from src.worktrace.models import (
     AnalysisBatch,
+    ConversationSegmentUnit,
     ConversationSlice,
     CollectedSourceEvent,
     NormalizedMessage,
@@ -50,6 +51,7 @@ from src.worktrace.models import (
     PersonalFactReviewCandidate,
     RetentionReviewBatch,
     RetentionReviewCandidate,
+    SegmentAnalysisBatch,
     SourceBackedEventDraft,
     WorkEvent,
 )
@@ -113,6 +115,30 @@ def sample_batch() -> AnalysisBatch:
                 ],
             )
         ],
+    )
+
+
+def sample_segment_batch(*, oversized_singleton: bool = False) -> SegmentAnalysisBatch:
+    message = sample_batch().slices[0].messages[0]
+    segment = ConversationSegmentUnit(
+        segment_id="segment-1",
+        conversation_id=message.conversation_id,
+        conversation_name=message.conversation_name,
+        primary_message_ids=[message.message_id],
+        context_message_ids=[],
+        self_evidence_message_ids=[message.message_id],
+        response_signals=[],
+        response_assessments=[],
+        messages=[message],
+    )
+    return SegmentAnalysisBatch(
+        target_date="2026-06-23",
+        conversation_id=message.conversation_id,
+        conversation_name=message.conversation_name,
+        self_open_id="ou_self",
+        self_display_name="张宝华",
+        segments=[segment],
+        oversized_singleton=oversized_singleton,
     )
 
 
@@ -488,6 +514,43 @@ def test_online_analyzer_allows_marked_indivisible_input(
     ) == {}
     assert captured["oversized_singleton"] is True
     assert captured["estimated_input_tokens"] > captured["input_target_tokens"]
+
+
+def test_online_analyzer_allows_single_segment_without_upstream_marker(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    analyzer = OnlineLLMAnalyzer(
+        config=RuntimeConfig(
+            data_root=tmp_path / "data",
+            model_input_batch_target_tokens=1,
+        ),
+        cwd=tmp_path,
+    )
+    captured: dict[str, object] = {}
+
+    def fake_invoke(prompt, *, function_spec, allow_oversized_input=False):
+        captured.update(
+            prompt=prompt,
+            function_spec=function_spec,
+            allow_oversized_input=allow_oversized_input,
+        )
+        return {
+            "results": [
+                {
+                    "segment_id": "segment-1",
+                    "analysis": {"candidate_events": [], "context_requests": []},
+                }
+            ]
+        }
+
+    monkeypatch.setattr(analyzer, "_invoke_online", fake_invoke)
+
+    result = analyzer.analyze_segment_batch(sample_segment_batch())
+
+    assert result.results[0].segment_id == "segment-1"
+    assert captured["function_spec"].request_kind == "segment_batch_analysis"
+    assert captured["allow_oversized_input"] is True
 
 
 def test_online_analyzer_counts_function_contract_before_request(tmp_path: Path) -> None:

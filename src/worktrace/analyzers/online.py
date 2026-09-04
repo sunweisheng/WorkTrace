@@ -771,7 +771,9 @@ class OnlineLLMAnalyzer(Analyzer):
                 result_count=len(batch.segments),
                 **references,
             ),
-            **oversized_input_kwargs(batch.oversized_singleton),
+            **oversized_input_kwargs(
+                batch.oversized_singleton or len(batch.segments) == 1
+            ),
         )
         return parse_segment_batch_analysis_payload(payload)
 
