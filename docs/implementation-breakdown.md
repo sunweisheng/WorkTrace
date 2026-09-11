@@ -124,7 +124,7 @@ flowchart LR
 
 | 来源 | 内容 |
 | --- | --- |
-| `RuntimeConfig` | 流程阈值、目录、analyzer backend 和默认运行参数；`model_input_batch_target_tokens` 统一控制个人日报和多人合并的分批目标 |
+| `RuntimeConfig` | 流程阈值、目录、analyzer backend 和默认运行参数；`model_input_batch_target_tokens` 统一控制个人日报和多人合并的分批目标，并由当前模型预算 profile 覆盖 |
 | `.env` / 环境变量 | 在线模型和多人汇总 trace/retry 覆盖项 |
 | `config/event_rules.json` | 敏感、排除和本人指派关键词 |
 | `config/event_metadata.json` | 本人参与方式英文键、中文显示名和排序 |
@@ -134,11 +134,16 @@ flowchart LR
 | `config/llm_retry.json` | Codex 主线路请求级重试、分段/提炼/全日分组结果质量重试、Online 流式首次返回超时、Codex 间隔，以及切分、提炼、个人事实复核、个人完整内容复核和多人完整复核并发数 |
 | `config/llm_function_contracts.json` | Function 名称、描述、`strict` 与 Codex 单次参数 JSON 提交规则 |
 | `config/retention_policy.json` | 个人事件保留提示、结构化业务词、临时协作复核、事实复核条件和模型信号定义 |
+| `config/event_generation.json` | 个人与团队共同写作规则、完整事项边界、字段模板和脱敏正反例 |
 | `config/event_grouping.json` | 个人与多人共同分组说明，以及合并原因的描述、`acceptance_rules` 和 `rejection_rules` |
+| `config/model_input_budget.json` | 按主模型和备用模型组合选择统一输入分批目标；未匹配时回退 7000 |
 | `config/collected_merge.json` | 多人汇总高风险复核开关、事件数/文件数阈值、对象冲突与宽泛对象复核条件 |
 | `config/attachment_text.json` | 文本附件提取限制 |
 | `config/image_summary.json` | 图片摘要限制和提示词 |
 | `config/reaction_catalogs/*.json` | reaction 本地语义目录 |
+| `tests/fixtures/event_generation_quality_cases.json` | 不读取真实聊天的个人与团队内容质量固定评测场景 |
+| `scripts/evaluate_event_generation_quality.py` | 确定性统计两版结果的边界错误、来源覆盖和运行指标 |
+| `scripts/benchmark_model_input_budget.py` | 隔离运行主线路五档评测和备用线路两档抽查、生成盲审材料、选择并写回通过验证的 profile |
 
 可调整的敏感、普通排除、本人指派、个人保留业务词、复核信号说明和多人合并中文判断规则必须进入配置文件，不应继续写在代码中。`retention_filter.py` 负责结构化保留门槛；两类个人复核模块负责模型信号、事实证据的校验和固定处理规则；多人合并 Python 只比较编号、证据连接和标准化结构字段，不根据新增聊天关键词判断语义。
 

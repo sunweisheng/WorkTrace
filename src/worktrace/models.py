@@ -1883,6 +1883,11 @@ class DailyRunResult:
     )
     day_grouping_summary: DayGroupingSummary = field(default_factory=DayGroupingSummary)
     support_report: SupportReportReference | None = None
+    stage_timing_summary: dict[str, dict[str, float]] = field(
+        default_factory=dict,
+        repr=False,
+        compare=False,
+    )
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> DailyRunResult:

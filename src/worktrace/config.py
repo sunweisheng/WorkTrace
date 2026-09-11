@@ -40,6 +40,8 @@ DEFAULT_CONVERSATION_BLACKLIST_FILE_NAME = "config/conversation_blacklist.json"
 DEFAULT_CONVERSATION_WINDOW_FILE_NAME = "config/conversation_window.json"
 DEFAULT_LLM_RETRY_FILE_NAME = "config/llm_retry.json"
 DEFAULT_EVENT_GROUPING_FILE_NAME = "config/event_grouping.json"
+DEFAULT_EVENT_GENERATION_FILE_NAME = "config/event_generation.json"
+DEFAULT_MODEL_INPUT_BUDGET_FILE_NAME = "config/model_input_budget.json"
 DEFAULT_COLLECTED_MERGE_FILE_NAME = "config/collected_merge.json"
 DEFAULT_RETENTION_POLICY_FILE_NAME = "config/retention_policy.json"
 DEFAULT_SELF_DELIVERY_FILE_NAME = "config/self_delivery.json"
@@ -159,6 +161,149 @@ class RetentionPolicyConfig:
     administrative_approval_keywords: tuple[str, ...] = ()
     substantive_work_keywords: tuple[str, ...] = ()
     repeated_low_information_suffixes: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class EventGenerationExample:
+    name: str
+    source_facts: tuple[str, ...]
+    expected_output: tuple[tuple[str, str], ...]
+
+    def to_prompt_dict(self, *, fields: tuple[str, ...] | None = None) -> dict[str, object]:
+        allowed_fields = set(fields or ())
+        expected_output = {
+            key: value
+            for key, value in self.expected_output
+            if not allowed_fields or key in allowed_fields
+        }
+        return {
+            "name": self.name,
+            "source_facts": list(self.source_facts),
+            "expected_output": expected_output,
+        }
+
+
+@dataclass(frozen=True)
+class EventGenerationNegativeExample:
+    name: str
+    source_facts: tuple[str, ...]
+    incorrect_behavior: str
+    expected_behavior: str
+
+    def to_prompt_dict(self) -> dict[str, object]:
+        return {
+            "name": self.name,
+            "source_facts": list(self.source_facts),
+            "incorrect_behavior": self.incorrect_behavior,
+            "expected_behavior": self.expected_behavior,
+        }
+
+
+@dataclass(frozen=True)
+class EventGenerationConfig:
+    schema_version: int = 1
+    shared_writing_rules: tuple[str, ...] = ()
+    personal_event_boundary_rules: tuple[str, ...] = ()
+    personal_template: tuple[tuple[str, str], ...] = ()
+    personal_positive_examples: tuple[EventGenerationExample, ...] = ()
+    personal_negative_examples: tuple[EventGenerationNegativeExample, ...] = ()
+    collected_writing_rules: tuple[str, ...] = ()
+    collected_template: tuple[tuple[str, str], ...] = ()
+    collected_positive_examples: tuple[EventGenerationExample, ...] = ()
+    collected_negative_examples: tuple[EventGenerationNegativeExample, ...] = ()
+
+
+@dataclass(frozen=True)
+class ModelInputBudgetProfile:
+    profile_id: str
+    primary_model: str
+    fallback_model: str
+    target_tokens: int
+    benchmark_dataset_version: str
+
+
+@dataclass(frozen=True)
+class ModelInputBudgetConfig:
+    schema_version: int = 1
+    default_target_tokens: int = 7000
+    profiles: tuple[ModelInputBudgetProfile, ...] = ()
+
+
+@dataclass(frozen=True)
+class ModelInputBudgetSelection:
+    profile_matched: bool = False
+    profile_id: str = ""
+    target_tokens: int = 7000
+    benchmark_dataset_version: str = ""
+
+
+def model_input_budget_debug_summary(
+    selection: ModelInputBudgetSelection,
+) -> dict[str, bool | int | str]:
+    return {
+        "profile_matched": selection.profile_matched,
+        "profile_id": selection.profile_id or "default",
+        "target_tokens": selection.target_tokens,
+        "benchmark_dataset_version": (
+            selection.benchmark_dataset_version or "not_available"
+        ),
+    }
+
+
+def event_generation_debug_summary(
+    config: EventGenerationConfig,
+) -> dict[str, int | bool]:
+    config_loaded = all(
+        (
+            config.shared_writing_rules,
+            config.personal_event_boundary_rules,
+            config.personal_template,
+            config.personal_positive_examples,
+            config.personal_negative_examples,
+            config.collected_writing_rules,
+            config.collected_template,
+            config.collected_positive_examples,
+            config.collected_negative_examples,
+        )
+    )
+    return {
+        "schema_version": config.schema_version,
+        "config_loaded": config_loaded,
+        "shared_writing_rule_count": len(config.shared_writing_rules),
+        "personal_boundary_rule_count": len(
+            config.personal_event_boundary_rules
+        ),
+        "personal_template_field_count": len(config.personal_template),
+        "personal_positive_example_count": len(
+            config.personal_positive_examples
+        ),
+        "personal_negative_example_count": len(
+            config.personal_negative_examples
+        ),
+        "collected_writing_rule_count": len(config.collected_writing_rules),
+        "collected_template_field_count": len(config.collected_template),
+        "collected_positive_example_count": len(
+            config.collected_positive_examples
+        ),
+        "collected_negative_example_count": len(
+            config.collected_negative_examples
+        ),
+    }
+
+
+def event_generation_debug_metadata(
+    config: EventGenerationConfig,
+    *,
+    guidance_mode: str,
+    template_mode: str,
+    examples_included: bool,
+) -> dict[str, object]:
+    return {
+        "guidance_mode": guidance_mode,
+        "template_mode": template_mode,
+        "examples_included": examples_included,
+        "config": event_generation_debug_summary(config),
+    }
 
 
 def parse_dotenv_lines(text: str) -> dict[str, str]:
@@ -376,6 +521,7 @@ def load_runtime_config_overrides(
 ) -> RuntimeConfig:
     base_dir = cwd or Path.cwd()
     config = _apply_runtime_env_overrides(config, cwd=base_dir)
+    config = _load_model_input_budget_overrides(config, base_dir=base_dir)
     rules_path = base_dir / config.event_rules_file_name
     try:
         payload = json.loads(rules_path.read_text(encoding="utf-8"))
@@ -463,8 +609,160 @@ def _load_supporting_config_overrides(
     config = _load_conversation_window_overrides(config, base_dir=base_dir)
     config = _load_llm_retry_overrides(config, base_dir=base_dir)
     config = _load_event_grouping_overrides(config, base_dir=base_dir)
+    config = _load_event_generation_overrides(config, base_dir=base_dir)
     config = _load_collected_merge_overrides(config, base_dir=base_dir)
     return _load_self_delivery_overrides(config, base_dir=base_dir)
+
+
+def load_model_input_budget_config(config_path: Path) -> ModelInputBudgetConfig:
+    try:
+        payload = json.loads(config_path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return ModelInputBudgetConfig()
+    except json.JSONDecodeError as exc:
+        raise ValueError(
+            f"Invalid model input budget config: {config_path} is not valid JSON."
+        ) from exc
+    if not isinstance(payload, dict) or set(payload) != {
+        "schema_version",
+        "default_target_tokens",
+        "profiles",
+    }:
+        raise ValueError(
+            "Invalid model input budget config: fields do not match the contract."
+        )
+    if type(payload["schema_version"]) is not int or payload["schema_version"] != 1:
+        raise ValueError(
+            "Invalid model input budget config: schema_version must be 1."
+        )
+    default_target_tokens = payload["default_target_tokens"]
+    if (
+        not isinstance(default_target_tokens, int)
+        or isinstance(default_target_tokens, bool)
+        or default_target_tokens <= 0
+    ):
+        raise ValueError(
+            "Invalid model input budget config: default_target_tokens must be a positive integer."
+        )
+    raw_profiles = payload["profiles"]
+    if not isinstance(raw_profiles, list) or not raw_profiles:
+        raise ValueError(
+            "Invalid model input budget config: profiles must be a non-empty list."
+        )
+
+    profiles: list[ModelInputBudgetProfile] = []
+    profile_ids: set[str] = set()
+    model_pairs: set[tuple[str, str]] = set()
+    expected_profile_fields = {
+        "profile_id",
+        "primary_model",
+        "fallback_model",
+        "target_tokens",
+        "benchmark_dataset_version",
+    }
+    for raw_profile in raw_profiles:
+        if not isinstance(raw_profile, dict) or set(raw_profile) != expected_profile_fields:
+            raise ValueError(
+                "Invalid model input budget config: profile fields do not match the contract."
+            )
+        text_values: dict[str, str] = {}
+        for key in (
+            "profile_id",
+            "primary_model",
+            "fallback_model",
+            "benchmark_dataset_version",
+        ):
+            value = raw_profile[key]
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(
+                    f"Invalid model input budget config: {key} must be non-empty."
+                )
+            text_values[key] = value.strip()
+        for key in ("profile_id", "benchmark_dataset_version"):
+            if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", text_values[key]):
+                raise ValueError(
+                    "Invalid model input budget config: "
+                    f"{key} must contain only safe identifier characters."
+                )
+        target_tokens = raw_profile["target_tokens"]
+        if (
+            not isinstance(target_tokens, int)
+            or isinstance(target_tokens, bool)
+            or target_tokens <= 0
+        ):
+            raise ValueError(
+                "Invalid model input budget config: target_tokens must be a positive integer."
+            )
+        model_pair = (
+            text_values["primary_model"],
+            text_values["fallback_model"],
+        )
+        if text_values["profile_id"] in profile_ids:
+            raise ValueError(
+                "Invalid model input budget config: profile_id values must be unique."
+            )
+        if model_pair in model_pairs:
+            raise ValueError(
+                "Invalid model input budget config: model combinations must be unique."
+            )
+        profile_ids.add(text_values["profile_id"])
+        model_pairs.add(model_pair)
+        profiles.append(
+            ModelInputBudgetProfile(
+                profile_id=text_values["profile_id"],
+                primary_model=text_values["primary_model"],
+                fallback_model=text_values["fallback_model"],
+                target_tokens=target_tokens,
+                benchmark_dataset_version=text_values[
+                    "benchmark_dataset_version"
+                ],
+            )
+        )
+    return ModelInputBudgetConfig(
+        schema_version=1,
+        default_target_tokens=default_target_tokens,
+        profiles=tuple(profiles),
+    )
+
+
+def _load_model_input_budget_overrides(
+    config: RuntimeConfig,
+    *,
+    base_dir: Path,
+) -> RuntimeConfig:
+    budget = load_model_input_budget_config(
+        base_dir / config.model_input_budget_file_name
+    )
+    values = _read_local_env_values(config, cwd=base_dir)
+    primary_model = values.get(config.codex_model_env_var, "").strip()
+    fallback_model = values.get(config.llm_model_env_var, "").strip()
+    profile = next(
+        (
+            item
+            for item in budget.profiles
+            if item.primary_model == primary_model
+            and item.fallback_model == fallback_model
+        ),
+        None,
+    )
+    if profile is None:
+        selection = ModelInputBudgetSelection(
+            profile_matched=False,
+            target_tokens=budget.default_target_tokens,
+        )
+    else:
+        selection = ModelInputBudgetSelection(
+            profile_matched=True,
+            profile_id=profile.profile_id,
+            target_tokens=profile.target_tokens,
+            benchmark_dataset_version=profile.benchmark_dataset_version,
+        )
+    return replace(
+        config,
+        model_input_budget=budget,
+        model_input_budget_selection=selection,
+        model_input_batch_target_tokens=selection.target_tokens,
+    )
 
 
 def _load_self_delivery_overrides(
@@ -758,6 +1056,305 @@ def _read_retention_signal_definitions(
         seen.add(key)
         definitions.append(RetentionSignalDefinition(key=key, description=description))
     return tuple(definitions)
+
+
+def _load_event_generation_overrides(
+    config: RuntimeConfig,
+    *,
+    base_dir: Path,
+) -> RuntimeConfig:
+    config_path = base_dir / config.event_generation_file_name
+    try:
+        payload = json.loads(config_path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return config
+    except json.JSONDecodeError as exc:
+        raise ValueError(
+            f"Invalid event generation config: {config_path} is not valid JSON."
+        ) from exc
+    if not isinstance(payload, dict) or set(payload) != {
+        "schema_version",
+        "shared_writing_rules",
+        "personal",
+        "collected",
+    }:
+        raise ValueError(
+            "Invalid event generation config: fields do not match the contract."
+        )
+    if type(payload["schema_version"]) is not int or payload["schema_version"] != 1:
+        raise ValueError(
+            "Invalid event generation config: schema_version must be 1."
+        )
+
+    personal = payload["personal"]
+    collected = payload["collected"]
+    if not isinstance(personal, dict) or set(personal) != {
+        "event_boundary_rules",
+        "template",
+        "positive_examples",
+        "negative_examples",
+    }:
+        raise ValueError(
+            "Invalid event generation config: personal fields do not match the contract."
+        )
+    if not isinstance(collected, dict) or set(collected) != {
+        "writing_rules",
+        "template",
+        "positive_examples",
+        "negative_examples",
+    }:
+        raise ValueError(
+            "Invalid event generation config: collected fields do not match the contract."
+        )
+
+    shared_writing_rules = _read_string_list(
+        payload,
+        key="shared_writing_rules",
+        fallback=(),
+        file_path=config_path,
+        error_prefix="Invalid event generation config",
+    )
+    personal_event_boundary_rules = _read_string_list(
+        personal,
+        key="event_boundary_rules",
+        fallback=(),
+        file_path=config_path,
+        error_prefix="Invalid event generation config",
+    )
+    collected_writing_rules = _read_string_list(
+        collected,
+        key="writing_rules",
+        fallback=(),
+        file_path=config_path,
+        error_prefix="Invalid event generation config",
+    )
+    personal_template = _read_event_generation_template(
+        personal["template"],
+        expected_fields=(
+            "topic",
+            "content",
+            "action_label",
+            "object_hint",
+            "retention_detail",
+        ),
+        config_path=config_path,
+        section="personal",
+    )
+    collected_template = _read_event_generation_template(
+        collected["template"],
+        expected_fields=(
+            "summary_title",
+            "summary_content",
+            "summary_object_hint",
+            "title",
+            "content",
+            "object_hint",
+            "retention_detail",
+        ),
+        config_path=config_path,
+        section="collected",
+    )
+    personal_positive_examples = _read_event_generation_examples(
+        personal["positive_examples"],
+        expected_fields=tuple(key for key, _ in personal_template),
+        config_path=config_path,
+        section="personal.positive_examples",
+    )
+    personal_negative_examples = _read_event_generation_negative_examples(
+        personal["negative_examples"],
+        config_path=config_path,
+        section="personal.negative_examples",
+    )
+    collected_positive_examples = _read_event_generation_examples(
+        collected["positive_examples"],
+        expected_fields=tuple(key for key, _ in collected_template),
+        config_path=config_path,
+        section="collected.positive_examples",
+    )
+    collected_negative_examples = _read_event_generation_negative_examples(
+        collected["negative_examples"],
+        config_path=config_path,
+        section="collected.negative_examples",
+    )
+    for section, positive_examples, negative_examples in (
+        ("personal", personal_positive_examples, personal_negative_examples),
+        ("collected", collected_positive_examples, collected_negative_examples),
+    ):
+        names = [item.name for item in (*positive_examples, *negative_examples)]
+        if len(names) != len(set(names)):
+            raise ValueError(
+                "Invalid event generation config: "
+                f"{section} example names must be unique."
+            )
+    if not all(
+        (
+            shared_writing_rules,
+            personal_event_boundary_rules,
+            collected_writing_rules,
+            personal_positive_examples,
+            personal_negative_examples,
+            collected_positive_examples,
+            collected_negative_examples,
+        )
+    ):
+        raise ValueError(
+            "Invalid event generation config: rules and examples must not be empty."
+        )
+    return replace(
+        config,
+        event_generation=EventGenerationConfig(
+            schema_version=1,
+            shared_writing_rules=shared_writing_rules,
+            personal_event_boundary_rules=personal_event_boundary_rules,
+            personal_template=personal_template,
+            personal_positive_examples=personal_positive_examples,
+            personal_negative_examples=personal_negative_examples,
+            collected_writing_rules=collected_writing_rules,
+            collected_template=collected_template,
+            collected_positive_examples=collected_positive_examples,
+            collected_negative_examples=collected_negative_examples,
+        ),
+    )
+
+
+def _read_event_generation_template(
+    raw_value: object,
+    *,
+    expected_fields: tuple[str, ...],
+    config_path: Path,
+    section: str,
+) -> tuple[tuple[str, str], ...]:
+    if not isinstance(raw_value, dict) or set(raw_value) != set(expected_fields):
+        raise ValueError(
+            "Invalid event generation config: "
+            f"{section}.template fields do not match the contract."
+        )
+    result: list[tuple[str, str]] = []
+    for field_name in expected_fields:
+        value = raw_value[field_name]
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(
+                "Invalid event generation config: "
+                f"{config_path} {section}.template.{field_name} must be non-empty."
+            )
+        result.append((field_name, value.strip()))
+    return tuple(result)
+
+
+def _read_event_generation_examples(
+    raw_value: object,
+    *,
+    expected_fields: tuple[str, ...],
+    config_path: Path,
+    section: str,
+) -> tuple[EventGenerationExample, ...]:
+    if not isinstance(raw_value, list) or not raw_value:
+        raise ValueError(
+            f"Invalid event generation config: {section} must be a non-empty list."
+        )
+    examples: list[EventGenerationExample] = []
+    for item in raw_value:
+        if not isinstance(item, dict) or set(item) != {
+            "name",
+            "source_facts",
+            "expected_output",
+        }:
+            raise ValueError(
+                f"Invalid event generation config: {section} fields do not match the contract."
+            )
+        name = item["name"]
+        if not isinstance(name, str) or not name.strip():
+            raise ValueError(
+                f"Invalid event generation config: {section} name must be non-empty."
+            )
+        source_facts = _read_string_list(
+            item,
+            key="source_facts",
+            fallback=(),
+            file_path=config_path,
+            error_prefix="Invalid event generation config",
+        )
+        if not source_facts:
+            raise ValueError(
+                f"Invalid event generation config: {section} source_facts must not be empty."
+            )
+        expected = _read_event_generation_template(
+            item["expected_output"],
+            expected_fields=expected_fields,
+            config_path=config_path,
+            section=f"{section}.{name.strip()}.expected_output",
+        )
+        examples.append(
+            EventGenerationExample(
+                name=name.strip(),
+                source_facts=source_facts,
+                expected_output=expected,
+            )
+        )
+    names = [item.name for item in examples]
+    if len(names) != len(set(names)):
+        raise ValueError(
+            f"Invalid event generation config: {section} names must be unique."
+        )
+    return tuple(examples)
+
+
+def _read_event_generation_negative_examples(
+    raw_value: object,
+    *,
+    config_path: Path,
+    section: str,
+) -> tuple[EventGenerationNegativeExample, ...]:
+    if not isinstance(raw_value, list) or not raw_value:
+        raise ValueError(
+            f"Invalid event generation config: {section} must be a non-empty list."
+        )
+    examples: list[EventGenerationNegativeExample] = []
+    for item in raw_value:
+        if not isinstance(item, dict) or set(item) != {
+            "name",
+            "source_facts",
+            "incorrect_behavior",
+            "expected_behavior",
+        }:
+            raise ValueError(
+                f"Invalid event generation config: {section} fields do not match the contract."
+            )
+        name = item["name"]
+        incorrect_behavior = item["incorrect_behavior"]
+        expected_behavior = item["expected_behavior"]
+        if not all(
+            isinstance(value, str) and value.strip()
+            for value in (name, incorrect_behavior, expected_behavior)
+        ):
+            raise ValueError(
+                f"Invalid event generation config: {section} text must be non-empty."
+            )
+        source_facts = _read_string_list(
+            item,
+            key="source_facts",
+            fallback=(),
+            file_path=config_path,
+            error_prefix="Invalid event generation config",
+        )
+        if not source_facts:
+            raise ValueError(
+                f"Invalid event generation config: {section} source_facts must not be empty."
+            )
+        examples.append(
+            EventGenerationNegativeExample(
+                name=name.strip(),
+                source_facts=source_facts,
+                incorrect_behavior=incorrect_behavior.strip(),
+                expected_behavior=expected_behavior.strip(),
+            )
+        )
+    names = [item.name for item in examples]
+    if len(names) != len(set(names)):
+        raise ValueError(
+            f"Invalid event generation config: {section} names must be unique."
+        )
+    return tuple(examples)
 
 
 def _load_collected_merge_overrides(
@@ -1478,6 +2075,12 @@ class RuntimeConfig:
     reaction_discovery_page_limit: int = 3
     slice_base_limit: int = 150
     model_input_batch_target_tokens: int = 7000
+    model_input_budget: ModelInputBudgetConfig = field(
+        default_factory=ModelInputBudgetConfig
+    )
+    model_input_budget_selection: ModelInputBudgetSelection = field(
+        default_factory=ModelInputBudgetSelection
+    )
     collected_merge_missing_field_retry_ratio: float = 0.2
     collected_merge_missing_field_retry_limit: int = 1
     collected_merge_trace_enabled: bool = False
@@ -1503,6 +2106,9 @@ class RuntimeConfig:
     collected_group_discovery_rules: tuple[str, ...] = ()
     personal_group_review_rules: tuple[str, ...] = ()
     collected_group_review_rules: tuple[str, ...] = ()
+    event_generation: EventGenerationConfig = field(
+        default_factory=EventGenerationConfig
+    )
     attachment_ignored_mime_type_prefixes: tuple[str, ...] = ()
     attachment_ignored_extensions: tuple[str, ...] = ()
     attachment_version_suffix_patterns: tuple[str, ...] = ()
@@ -1561,6 +2167,8 @@ class RuntimeConfig:
     conversation_window_file_name: str = DEFAULT_CONVERSATION_WINDOW_FILE_NAME
     llm_retry_file_name: str = DEFAULT_LLM_RETRY_FILE_NAME
     event_grouping_file_name: str = DEFAULT_EVENT_GROUPING_FILE_NAME
+    event_generation_file_name: str = DEFAULT_EVENT_GENERATION_FILE_NAME
+    model_input_budget_file_name: str = DEFAULT_MODEL_INPUT_BUDGET_FILE_NAME
     collected_merge_file_name: str = DEFAULT_COLLECTED_MERGE_FILE_NAME
     retention_policy_file_name: str = DEFAULT_RETENTION_POLICY_FILE_NAME
     self_delivery_file_name: str = DEFAULT_SELF_DELIVERY_FILE_NAME

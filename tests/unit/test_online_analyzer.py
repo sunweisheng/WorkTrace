@@ -456,11 +456,68 @@ def test_build_responses_request_body_includes_function_and_reasoning() -> None:
     assert body["stream"] is True
     assert body["stream_options"] == {"include_usage": True}
     assert body["reasoning"] == {"effort": "none"}
-    assert body["tools"] == [function_spec.tool()]
+    assert body["tools"] == [function_spec.online_tool()]
     assert body["tool_choice"] == function_spec.tool_choice()
     assert body["parallel_tool_calls"] is False
     assert body["tools"][0]["strict"] is True
     assert "text" not in body
+
+
+def test_online_tool_removes_unique_items_without_changing_function_schema() -> None:
+    function_spec = function_call_spec(
+        "preflight",
+        {
+            "type": "object",
+            "properties": {
+                "values": {
+                    "type": "array",
+                    "uniqueItems": True,
+                    "items": {"type": "string"},
+                }
+            },
+            "required": ["values"],
+            "additionalProperties": False,
+        },
+        typical_arguments={"values": []},
+    )
+
+    original_values = function_spec.parameters["properties"]["values"]
+    online_values = function_spec.online_tool()["parameters"]["properties"][
+        "values"
+    ]
+    assert original_values["uniqueItems"] is True
+    assert "uniqueItems" not in online_values
+
+
+def test_online_tool_removes_only_impossible_array_minimum() -> None:
+    function_spec = function_call_spec(
+        "preflight",
+        {
+            "type": "object",
+            "properties": {
+                "impossible": {
+                    "type": "array",
+                    "minItems": 2,
+                    "maxItems": 1,
+                    "items": {"type": "object"},
+                },
+                "possible": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": 1,
+                    "items": {"type": "string", "enum": ["one"]},
+                },
+            },
+            "required": ["impossible", "possible"],
+            "additionalProperties": False,
+        },
+        typical_arguments={"impossible": [], "possible": ["one"]},
+    )
+
+    online_properties = function_spec.online_tool()["parameters"]["properties"]
+    assert function_spec.parameters["properties"]["impossible"]["minItems"] == 2
+    assert "minItems" not in online_properties["impossible"]
+    assert online_properties["possible"]["minItems"] == 1
 
 
 def test_apply_soft_no_think_deduplicates_marker() -> None:

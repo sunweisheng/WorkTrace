@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "default_target_tokens": 7000,
+  "profiles": [
+    {
+      "profile_id": "event-quality-v1-primary-fallback",
+      "primary_model": "gpt-5.6-terra",
+      "fallback_model": "qwen3.7-max",
+      "target_tokens": 20000,
+      "benchmark_dataset_version": "event-generation-quality-v1"
+    }
+  ]
+}

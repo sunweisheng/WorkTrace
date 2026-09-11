@@ -18,6 +18,7 @@ from scripts.replay_failed_day_group_reviews import (
 )
 from scripts.replay_day_with_trace import (
     _collect_day_grouping_artifact_summary,
+    _collect_event_generation_summary,
     _collect_llm_usage_summary,
     _collect_review_artifact_summary,
     _parse_args,
@@ -188,6 +189,37 @@ def test_replay_main_updates_run_status_from_subprocess_result(
     assert final_status["returncode"] == returncode
     assert final_status["completed_at_utc"]
     assert summary["model_input_batch_target_tokens"] == 7000
+    assert summary["event_generation_summary"] == {
+        "available": False,
+        "config_loaded": False,
+    }
+
+
+def test_replay_summary_collects_event_generation_config_status(
+    tmp_path: Path,
+) -> None:
+    debug_root = tmp_path / "conversation_debug"
+    _write_json(
+        debug_root / "2026-07-15" / "llm_usage.json",
+        {
+            "event_generation_summary": {
+                "schema_version": 1,
+                "config_loaded": True,
+                "personal_positive_example_count": 4,
+                "collected_positive_example_count": 2,
+            }
+        },
+    )
+
+    summary = _collect_event_generation_summary(debug_root, "2026-07-15")
+
+    assert summary == {
+        "available": True,
+        "schema_version": 1,
+        "config_loaded": True,
+        "personal_positive_example_count": 4,
+        "collected_positive_example_count": 2,
+    }
 
 
 def test_replay_summary_collects_review_artifact_status(tmp_path: Path) -> None:
@@ -266,6 +298,8 @@ def test_replay_summary_collects_llm_usage_by_request_kind(tmp_path: Path) -> No
                     "request_kind": "image_summary",
                     "duration_ms": 1000.0,
                     "total_tokens": 20,
+                    "fallback_from": "codex",
+                    "fallback_to": "online",
                 },
                 {
                     "request_kind": "personal_fact_review",
@@ -284,6 +318,8 @@ def test_replay_summary_collects_llm_usage_by_request_kind(tmp_path: Path) -> No
     assert fact_review["request_count"] == 2
     assert fact_review["duration_ms"]["max"] == 5000.0
     assert fact_review["token_usage"]["total_tokens"] == 70
+    assert summary["fallback_count"] == 1
+    assert summary["by_request_kind"]["image_summary"]["fallback_count"] == 1
 
 
 def test_timing_report_uses_usage_types_and_separates_parallel_wall_clock() -> None:

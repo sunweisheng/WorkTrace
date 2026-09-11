@@ -222,6 +222,7 @@ def _collect_llm_usage_summary(
             "exists": False,
             "status": "",
             "request_count": 0,
+            "fallback_count": 0,
             "duration_ms": _duration_summary([]),
             "token_usage": {},
             "by_request_kind": {},
@@ -258,6 +259,9 @@ def _collect_llm_usage_summary(
         )
         by_request_kind[request_kind] = {
             "request_count": len(items),
+            "fallback_count": sum(
+                item.get("fallback_to") is not None for item in items
+            ),
             "duration_ms": _duration_summary(kind_durations),
             "token_usage": kind_usage if isinstance(kind_usage, dict) else {},
         }
@@ -267,10 +271,40 @@ def _collect_llm_usage_summary(
         "exists": True,
         "status": str(payload.get("status", "")) if isinstance(payload, dict) else "",
         "request_count": len(requests),
+        "fallback_count": sum(
+            item.get("fallback_to") is not None for item in requests
+        ),
         "duration_ms": _duration_summary(durations),
         "token_usage": usage if isinstance(usage, dict) else {},
         "by_request_kind": by_request_kind,
         "requests": requests,
+    }
+
+
+def _collect_event_generation_summary(
+    conversation_debug_root: Path,
+    target_date: str,
+) -> dict[str, object]:
+    path = conversation_debug_root / target_date / "llm_usage.json"
+    if not path.exists():
+        return {
+            "available": False,
+            "config_loaded": False,
+        }
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    raw_summary = (
+        payload.get("event_generation_summary")
+        if isinstance(payload, dict)
+        else None
+    )
+    if not isinstance(raw_summary, dict):
+        return {
+            "available": False,
+            "config_loaded": False,
+        }
+    return {
+        "available": True,
+        **raw_summary,
     }
 
 
@@ -720,6 +754,10 @@ def main(argv: list[str] | None = None) -> int:
         conversation_debug_root,
         args.date,
     )
+    event_generation_summary = _collect_event_generation_summary(
+        conversation_debug_root,
+        args.date,
+    )
     day_grouping_artifact_summary = _collect_day_grouping_artifact_summary(
         conversation_debug_root,
         args.date,
@@ -762,6 +800,7 @@ def main(argv: list[str] | None = None) -> int:
         "review_artifact_summary": review_artifact_summary,
         "day_grouping_summary": day_grouping_summary,
         "day_grouping_artifact_summary": day_grouping_artifact_summary,
+        "event_generation_summary": event_generation_summary,
         "llm_usage_summary": llm_usage_summary,
         "llm_summary": llm_summary,
         "timing_summary": timing_summary,

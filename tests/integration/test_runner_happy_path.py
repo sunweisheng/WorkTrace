@@ -144,6 +144,22 @@ def test_runner_happy_path(tmp_path: Path) -> None:
     assert Path(result.output_path).name == "2026-06-22-Me.md"
     assert result.self_delivery_status == "success"
     assert result.self_delivery_target == "ou_self"
+    assert set(result.stage_timing_summary) == {
+        "source_fetch",
+        "message_preparation",
+        "candidate_generation",
+        "candidate_review",
+        "day_grouping",
+        "event_build",
+        "markdown_write",
+        "self_delivery",
+        "total",
+    }
+    assert all(
+        set(metrics) == {"wall_clock_ms", "request_accumulated_ms"}
+        for metrics in result.stage_timing_summary.values()
+    )
+    assert "stage_timing_summary" not in result.to_dict()
     assert not (tmp_path / "data" / "debug" / "conversations").exists()
 
 

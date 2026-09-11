@@ -11,7 +11,12 @@ from time import perf_counter
 from typing import Callable
 from urllib.parse import urlsplit
 
-from .config import RuntimeConfig
+from .config import (
+    RuntimeConfig,
+    event_generation_debug_metadata,
+    event_generation_debug_summary,
+    model_input_budget_debug_summary,
+)
 from .analyzers.base import Analyzer
 from .analyzers.function_calls import (
     message_reference_ids,
@@ -262,6 +267,11 @@ class DailyTraceRunner:
     dependencies: RuntimeDependencies
     reaction_catalog: ReactionCatalog | None = None
     checkpoint_store: LLMCheckpointStore | None = None
+    _personal_stage_timings: dict[str, dict[str, float]] = field(
+        default_factory=dict,
+        init=False,
+        repr=False,
+    )
 
     def __post_init__(self) -> None:
         if self.reaction_catalog is None:
@@ -270,6 +280,7 @@ class DailyTraceRunner:
 
     def run(self, target_date: str) -> DailyRunResult:
         run_started_at = perf_counter()
+        self._personal_stage_timings = {}
         self.checkpoint_store = LLMCheckpointStore(self.config, target_date)
         warning_messages: list[str] = []
         skipped_slice_count = 0
@@ -277,6 +288,7 @@ class DailyTraceRunner:
         personal_fact_review_summary = PersonalFactReviewSummary()
         day_grouping_summary = DayGroupingSummary()
 
+        source_fetch_marker = self._start_personal_stage()
         try:
             stage_started_at = perf_counter()
             self_identity = self.dependencies.chat_source.get_self_identity()
@@ -304,7 +316,6 @@ class DailyTraceRunner:
                 target_date,
                 [item.conversation_id for item in conversations],
             )
-            messages = enrich_message_reactions(messages, self.reaction_catalog)
             log_timing(
                 logger,
                 "runner.stage.completed",
@@ -314,10 +325,12 @@ class DailyTraceRunner:
                 message_count=len(messages),
             )
         except ChatSourceError as exc:
+            self._record_personal_stage("source_fetch", source_fetch_marker)
             return self._finish_run(
                 run_started_at,
                 self._failed_result(target_date, str(exc)),
             )
+        self._record_personal_stage("source_fetch", source_fetch_marker)
 
         if not conversations and not messages:
             return self._finish_run(
@@ -333,7 +346,13 @@ class DailyTraceRunner:
             )
 
         stage_started_at = perf_counter()
+        message_preparation_marker = self._start_personal_stage()
+        messages = enrich_message_reactions(messages, self.reaction_catalog)
         filtered_messages = filter_messages(messages)
+        self._record_personal_stage(
+            "message_preparation",
+            message_preparation_marker,
+        )
         log_timing(
             logger,
             "runner.stage.completed",
@@ -347,6 +366,7 @@ class DailyTraceRunner:
         all_message_order = [message.message_id for message in filtered_messages]
         conversation_slices: list[ConversationSlice] = []
 
+        candidate_generation_marker = self._start_personal_stage()
         try:
             if _supports_segment_batches(self.dependencies.analyzer):
                 (
@@ -392,10 +412,18 @@ class DailyTraceRunner:
                         skipped_slice_count += 1
                     warning_messages.extend(slice_warnings)
         except AnalyzerProtocolError as exc:
+            self._record_personal_stage(
+                "candidate_generation",
+                candidate_generation_marker,
+            )
             return self._finish_run(
                 run_started_at,
                 self._failed_result(target_date, str(exc)),
             )
+        self._record_personal_stage(
+            "candidate_generation",
+            candidate_generation_marker,
+        )
 
         warning_messages.extend(
             _drain_content_resolver_warnings(self.dependencies.content_resolver)
@@ -403,6 +431,8 @@ class DailyTraceRunner:
 
         merged_drafts: list[MergedEventDraft] = []
         if all_candidates:
+            candidate_review_marker = self._start_personal_stage()
+            day_grouping_marker: tuple[float, float] | None = None
             try:
                 all_candidates, candidate_filter_warnings = (
                     filter_candidate_drafts(all_candidates, self.config)
@@ -451,6 +481,11 @@ class DailyTraceRunner:
                     messages=filtered_messages,
                 )
                 analyzed_batch_count += personal_fact_review_call_count
+                self._record_personal_stage(
+                    "candidate_review",
+                    candidate_review_marker,
+                )
+                candidate_review_marker = None
 
                 if not all_candidates:
                     return self._finish_run(
@@ -470,6 +505,7 @@ class DailyTraceRunner:
                         ),
                     )
 
+                day_grouping_marker = self._start_personal_stage()
                 if len(all_candidates) == 1:
                     day_grouping_summary = DayGroupingSummary(
                         candidate_count=1,
@@ -641,7 +677,23 @@ class DailyTraceRunner:
                         candidate_event_count=len(all_candidates),
                         merged_event_count=len(merged_drafts),
                     )
+                if day_grouping_marker is not None:
+                    self._record_personal_stage(
+                        "day_grouping",
+                        day_grouping_marker,
+                    )
+                    day_grouping_marker = None
             except (AnalyzerProtocolError, ValueError) as exc:
+                if day_grouping_marker is not None:
+                    self._record_personal_stage(
+                        "day_grouping",
+                        day_grouping_marker,
+                    )
+                elif candidate_review_marker is not None:
+                    self._record_personal_stage(
+                        "candidate_review",
+                        candidate_review_marker,
+                    )
                 return self._finish_run(
                     run_started_at,
                     self._failed_result(target_date, str(exc)),
@@ -665,6 +717,8 @@ class DailyTraceRunner:
                 ),
             )
 
+        active_stage = "event_build"
+        active_stage_marker = self._start_personal_stage()
         try:
             merged_drafts, merged_filter_warnings = filter_merged_drafts(
                 merged_drafts,
@@ -709,6 +763,9 @@ class DailyTraceRunner:
                 warning_count=len(merge_warnings),
             )
             warning_messages.extend(merge_warnings)
+            self._record_personal_stage(active_stage, active_stage_marker)
+            active_stage = "markdown_write"
+            active_stage_marker = self._start_personal_stage()
             write_started_at = perf_counter()
             write_result = self.dependencies.event_store.replace_day(
                 target_date,
@@ -725,6 +782,9 @@ class DailyTraceRunner:
                 event_count=len(events),
                 output_path=write_result.output_path,
             )
+            self._record_personal_stage(active_stage, active_stage_marker)
+            active_stage = "self_delivery"
+            active_stage_marker = self._start_personal_stage()
             delivery_status, delivery_target, delivery_error = _deliver_markdown_to_self(
                 self.dependencies.delivery_channel,
                 self_identity=self_identity,
@@ -733,7 +793,11 @@ class DailyTraceRunner:
             )
             if delivery_error:
                 warning_messages.append(delivery_error)
+            self._record_personal_stage(active_stage, active_stage_marker)
+            active_stage = ""
         except (AnalyzerProtocolError, StoreWriteError, ValueError) as exc:
+            if active_stage:
+                self._record_personal_stage(active_stage, active_stage_marker)
             return self._finish_run(
                 run_started_at,
                 self._failed_result(target_date, str(exc)),
@@ -1142,6 +1206,12 @@ class DailyTraceRunner:
                     "summary": summary.to_dict(),
                     "batches": batches,
                     "error_summary": error_summary,
+                    "event_generation_debug": event_generation_debug_metadata(
+                        self.config.event_generation,
+                        guidance_mode="personal_review_without_examples",
+                        template_mode="full",
+                        examples_included=False,
+                    ),
                 },
                 pretty=True,
             )
@@ -1192,6 +1262,7 @@ class DailyTraceRunner:
         day_grouping_summary: DayGroupingSummary | None = None,
     ) -> DailyRunResult:
         warning_messages = warning_messages or []
+        markdown_write_marker = self._start_personal_stage()
         write_result = self.dependencies.event_store.replace_day(
             target_date,
             [],
@@ -1199,12 +1270,15 @@ class DailyTraceRunner:
         )
         if self.checkpoint_store is not None:
             self.checkpoint_store.clear()
+        self._record_personal_stage("markdown_write", markdown_write_marker)
+        self_delivery_marker = self._start_personal_stage()
         delivery_status, delivery_target, delivery_error = _deliver_markdown_to_self(
             self.dependencies.delivery_channel,
             self_identity=self_identity,
             markdown_path=Path(write_result.output_path),
             enabled=self.config.self_delivery_enabled,
         )
+        self._record_personal_stage("self_delivery", self_delivery_marker)
         if delivery_error:
             warning_messages.append(delivery_error)
         status = (
@@ -1262,6 +1336,20 @@ class DailyTraceRunner:
         run_started_at: float,
         result: DailyRunResult,
     ) -> DailyRunResult:
+        self._personal_stage_timings["total"] = {
+            "wall_clock_ms": round((perf_counter() - run_started_at) * 1000, 3),
+            "request_accumulated_ms": round(
+                self._personal_request_accumulated_ms(),
+                3,
+            ),
+        }
+        result = replace(
+            result,
+            stage_timing_summary={
+                stage: dict(metrics)
+                for stage, metrics in self._personal_stage_timings.items()
+            },
+        )
         self._dump_llm_usage_debug_artifact(target_date=result.target_date, status=result.status)
         log_timing(
             logger,
@@ -1292,6 +1380,40 @@ class DailyTraceRunner:
         )
         return result
 
+    def _start_personal_stage(self) -> tuple[float, float]:
+        return perf_counter(), self._personal_request_accumulated_ms()
+
+    def _record_personal_stage(
+        self,
+        stage: str,
+        marker: tuple[float, float],
+    ) -> None:
+        started_at, request_started_ms = marker
+        current = self._personal_stage_timings.setdefault(
+            stage,
+            {"wall_clock_ms": 0.0, "request_accumulated_ms": 0.0},
+        )
+        current["wall_clock_ms"] = round(
+            current["wall_clock_ms"] + (perf_counter() - started_at) * 1000,
+            3,
+        )
+        current["request_accumulated_ms"] = round(
+            current["request_accumulated_ms"]
+            + max(
+                self._personal_request_accumulated_ms() - request_started_ms,
+                0.0,
+            ),
+            3,
+        )
+
+    def _personal_request_accumulated_ms(self) -> float:
+        return sum(
+            float(record["duration_ms"])
+            for record in self.dependencies.llm_usage_recorder.records()
+            if isinstance(record.get("duration_ms"), (int, float))
+            and not isinstance(record.get("duration_ms"), bool)
+        )
+
     def _dump_llm_usage_debug_artifact(self, *, target_date: str, status: str) -> None:
         debug_root = self.config.conversation_debug_root
         if debug_root is None:
@@ -1303,6 +1425,16 @@ class DailyTraceRunner:
                 {
                     "target_date": target_date,
                     "status": status,
+                    "event_generation_summary": event_generation_debug_summary(
+                        self.config.event_generation
+                    ),
+                    "model_input_budget": model_input_budget_debug_summary(
+                        self.config.model_input_budget_selection
+                    ),
+                    "stage_timing_summary": {
+                        stage: dict(metrics)
+                        for stage, metrics in self._personal_stage_timings.items()
+                    },
                     "usage": self.dependencies.llm_usage_recorder.summary(),
                     "requests": self.dependencies.llm_usage_recorder.records(),
                 },
@@ -2660,6 +2792,12 @@ class DailyTraceRunner:
             ),
             "status": "failed" if error_summary else "completed",
             "error_summary": error_summary or "",
+            "event_generation_debug": event_generation_debug_metadata(
+                self.config.event_generation,
+                guidance_mode="personal_full",
+                template_mode="full",
+                examples_included=True,
+            ),
         }
         (conversation_dir / "meta.json").write_text(
             dump_json(meta, pretty=True) + "\n",
@@ -2795,6 +2933,12 @@ class DailyTraceRunner:
                     "retained_candidates": [item.to_dict() for item in candidates],
                     "skipped_count": skipped_count,
                     "warnings": list(warnings),
+                    "event_generation_debug": event_generation_debug_metadata(
+                        self.config.event_generation,
+                        guidance_mode="personal_full",
+                        template_mode="full",
+                        examples_included=True,
+                    ),
                 },
                 pretty=True,
             )
@@ -2839,6 +2983,12 @@ class DailyTraceRunner:
                     "attempt": attempt + 1,
                     "segment_ids": [item.segment_id for item in batch.segments],
                     "error_summary": error_summary,
+                    "event_generation_debug": event_generation_debug_metadata(
+                        self.config.event_generation,
+                        guidance_mode="personal_full",
+                        template_mode="full",
+                        examples_included=True,
+                    ),
                 },
                 pretty=True,
             )
@@ -2970,6 +3120,12 @@ class DailyTraceRunner:
                 {
                     "target_date": target_date,
                     "anchor_units": [item.to_dict() for item in anchor_units],
+                    "event_generation_debug": event_generation_debug_metadata(
+                        self.config.event_generation,
+                        guidance_mode="personal_full",
+                        template_mode="full",
+                        examples_included=True,
+                    ),
                 },
                 pretty=True,
             )
@@ -4651,6 +4807,9 @@ class DailyTraceRunner:
         input_payload = {
             "target_date": target_date,
             "candidates": [candidate.to_dict() for candidate in candidates],
+            "event_generation_summary": event_generation_debug_summary(
+                self.config.event_generation
+            ),
         }
         (merge_dir / "input.json").write_text(
             dump_json(input_payload, pretty=True) + "\n",
@@ -4679,7 +4838,19 @@ class DailyTraceRunner:
             encoding="utf-8",
         )
         (merge_dir / "personal_group_render.json").write_text(
-            dump_json(render_artifact, pretty=True) + "\n",
+            dump_json(
+                {
+                    **render_artifact,
+                    "event_generation_debug": event_generation_debug_metadata(
+                        self.config.event_generation,
+                        guidance_mode="personal_full",
+                        template_mode="full",
+                        examples_included=True,
+                    ),
+                },
+                pretty=True,
+            )
+            + "\n",
             encoding="utf-8",
         )
         (merge_dir / "resolved_groups.json").write_text(

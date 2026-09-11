@@ -52,6 +52,7 @@ class ContentResolverFactory:
         from .analyzers.codex import CodexAnalyzer
         from .vision import CodexFirstImageSummarizer, ImageSummarySettings, OnlineImageSummarizer
 
+        recorder = usage_recorder or LLMUsageRecorder()
         settings = ImageSummarySettings.load(config)
         online_fallback = None
         try:
@@ -62,7 +63,7 @@ class ContentResolverFactory:
             online_fallback = OnlineImageSummarizer(
                 config=config,
                 settings=settings,
-                usage_recorder=usage_recorder,
+                usage_recorder=recorder,
             )
 
         return FeishuMessageContentResolver(
@@ -72,9 +73,10 @@ class ContentResolverFactory:
                 settings=settings,
                 codex=CodexAnalyzer(
                     config=config,
-                    usage_recorder=usage_recorder,
+                    usage_recorder=recorder,
                 ),
                 online_fallback=online_fallback,
+                usage_recorder=recorder,
             ),
             text_attachment_extractor=TextAttachmentExtractor(config=config),
         )

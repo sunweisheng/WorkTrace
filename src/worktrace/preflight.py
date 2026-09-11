@@ -284,7 +284,7 @@ def probe_online_llm(config: RuntimeConfig, *, cwd: Path) -> dict[str, str]:
                 "model": settings.model,
                 "input": '请只调用指定 Function，并把 probe 设为 "ok"。\n/no_think',
                 "stream": False,
-                "tools": [function_spec.tool()],
+                "tools": [function_spec.online_tool()],
                 "tool_choice": function_spec.tool_choice(),
                 "parallel_tool_calls": False,
             }

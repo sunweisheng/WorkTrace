@@ -52,3 +52,35 @@ def test_estimate_structured_input_tokens_includes_function_and_codex_schema() -
     assert estimates["online_input_estimated_tokens"] == online_input
     assert estimates["codex_input_estimated_tokens"] == codex_input
     assert estimates["input_estimated_tokens"] == max(online_input, codex_input)
+
+
+def test_online_estimate_uses_provider_compatible_schema_copy() -> None:
+    function_spec = function_call_spec(
+        "preflight",
+        {
+            "type": "object",
+            "properties": {
+                "values": {
+                    "type": "array",
+                    "uniqueItems": True,
+                    "items": {"type": "string"},
+                }
+            },
+            "required": ["values"],
+            "additionalProperties": False,
+        },
+        typical_arguments={"values": []},
+    )
+
+    online_estimate = estimate_function_input_tokens(
+        "处理输入",
+        function_spec=function_spec,
+        append_no_think=True,
+    )
+    codex_estimate = estimate_codex_schema_input_tokens(
+        "处理输入",
+        function_spec=function_spec,
+        append_no_think=True,
+    )
+
+    assert online_estimate < codex_estimate

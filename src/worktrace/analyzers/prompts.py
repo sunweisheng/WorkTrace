@@ -123,6 +123,75 @@ def _build_self_relation_rule(config: RuntimeConfig) -> str:
     )
 
 
+def _event_generation_template(
+    values: tuple[tuple[str, str], ...],
+    *,
+    fields: tuple[str, ...] | None = None,
+) -> dict[str, str]:
+    allowed_fields = set(fields or ())
+    return {
+        key: value
+        for key, value in values
+        if not allowed_fields or key in allowed_fields
+    }
+
+
+def _build_personal_generation_guidance(
+    config: RuntimeConfig,
+    *,
+    include_boundary_rules: bool = True,
+    include_examples: bool = True,
+) -> dict[str, object]:
+    generation = config.event_generation
+    guidance: dict[str, object] = {
+        "shared_writing_rules": list(generation.shared_writing_rules),
+        "template": _event_generation_template(generation.personal_template),
+    }
+    if include_boundary_rules:
+        guidance["event_boundary_rules"] = list(
+            generation.personal_event_boundary_rules
+        )
+    if include_examples:
+        guidance["positive_examples"] = [
+            item.to_prompt_dict() for item in generation.personal_positive_examples
+        ]
+        guidance["negative_examples"] = [
+            item.to_prompt_dict() for item in generation.personal_negative_examples
+        ]
+    return guidance
+
+
+def _build_collected_generation_guidance(
+    config: RuntimeConfig,
+    *,
+    summary_only: bool,
+    include_examples: bool,
+) -> dict[str, object]:
+    generation = config.event_generation
+    template_fields = (
+        ("summary_title", "summary_content", "summary_object_hint")
+        if summary_only
+        else None
+    )
+    guidance: dict[str, object] = {
+        "shared_writing_rules": list(generation.shared_writing_rules),
+        "writing_rules": list(generation.collected_writing_rules),
+        "template": _event_generation_template(
+            generation.collected_template,
+            fields=template_fields,
+        ),
+    }
+    if include_examples:
+        guidance["positive_examples"] = [
+            item.to_prompt_dict()
+            for item in generation.collected_positive_examples
+        ]
+        guidance["negative_examples"] = [
+            item.to_prompt_dict() for item in generation.collected_negative_examples
+        ]
+    return guidance
+
+
 def build_batch_analysis_prompt(
     batch: AnalysisBatch,
     *,
@@ -144,7 +213,7 @@ def build_batch_analysis_prompt(
             "如果只是同群讨论背景信息、但没有明确落到本人，也不要提炼。",
             *_build_personal_retention_rules(runtime_config),
             _build_sensitive_rule(runtime_config),
-            "一件事写一条；如果有多件事就拆开。",
+            "每条输出对应一个可独立汇报的事项，具体合并和拆分边界以 event_generation_guidance 为准。",
             EVENT_TITLE_RULE,
             "content 写完整事项；如果有明确结果，直接融入 content，不要单独返回 result。",
             "action_label 只写主要动作标签，例如：回复、审批、催办、撰写、核对、跟进、同步、确认。",
@@ -166,6 +235,9 @@ def build_batch_analysis_prompt(
             "如果 reply_to 或 quote_to 指向附件、文件消息、飞书文档或 wiki，且事件判断依赖其内容，必须返回 context_requests 请求补读，不要猜。",
             "拿不准就用 context_requests，不要猜。",
         ],
+        "event_generation_guidance": _build_personal_generation_guidance(
+            runtime_config
+        ),
         "input": serialize_batch_for_prompt(batch, config=runtime_config),
     }
     return dump_json(protocol, pretty=True)
@@ -338,7 +410,7 @@ def build_segment_batch_analysis_prompt(
             "每条 candidate 必须在 self_evidence_message_ids 中列出本人发起、负责、审批或跟进的消息；事实来源可由他人的执行、反馈或文件消息组成。",
             _build_self_relation_rule(runtime_config),
             "每条 candidate 至少引用一条本人参与证据，或引用该 segment 的本人回应 signal。",
-            "一个 candidate 只能描述一条工作线；若同一 segment 同时出现两个命名项目、产品、政策或不相干业务对象，必须拆成多个 candidate_events。",
+            "每个 candidate_event 的合并和拆分边界以 event_generation_guidance 为准。",
             ATTACHMENT_FILE_NAME_RULE,
             "图片和文件附件默认只提供元数据；判断依赖其内容时，必须返回 attachment_text 的 context_requests，并给出对应消息和附件 ID，不要猜测图片或文件内容。",
             EVENT_TITLE_RULE,
@@ -346,6 +418,9 @@ def build_segment_batch_analysis_prompt(
             *_build_personal_retention_rules(runtime_config),
             "上下文消息只用于理解当前主消息，不得作为当前事件来源。",
         ],
+        "event_generation_guidance": _build_personal_generation_guidance(
+            runtime_config
+        ),
         "input": {
             "target_date": batch.target_date,
             "conversation_id": batch.conversation_id,
@@ -463,6 +538,11 @@ def build_personal_fact_review_prompt(
             "removed_claims 只写被删除或改写的原候选表述，不要写内部消息 ID。",
             *policy.fact_review_rules,
         ],
+        "event_generation_guidance": _build_personal_generation_guidance(
+            runtime_config,
+            include_boundary_rules=False,
+            include_examples=False,
+        ),
         "retry_feedback": batch.retry_feedback,
         "risk_signal_definitions": fact_risk_types,
         "input": {
@@ -701,6 +781,9 @@ def build_personal_group_render_prompt(
                 "正文应整合前因、动作、决定、结果和待办，不按候选逐条罗列，不补充来源中没有的事实。",
                 "每个 fact_item 必须引用支持其文字的合法消息证据，所有成员至少由一项 content 证据覆盖。",
             ],
+            "event_generation_guidance": _build_personal_generation_guidance(
+                config
+            ),
             "positive_examples": list(config.personal_grouping_positive_examples),
             "negative_examples": list(config.personal_grouping_negative_examples),
             "target_date": target_date,
@@ -834,6 +917,11 @@ def build_collected_grouping_prompt(
             ),
             "risk_flags 标记跨批、对象过宽或来源很多等需要复核的风险。",
         ],
+        "event_generation_guidance": _build_collected_generation_guidance(
+            runtime_config,
+            summary_only=True,
+            include_examples=False,
+        ),
         "group_reason_definitions": {
             item.key: {
                 "description": item.description,
@@ -1005,6 +1093,11 @@ def build_collected_review_prompt(
                 else []
             ),
         ],
+        "event_generation_guidance": _build_collected_generation_guidance(
+            runtime_config,
+            summary_only=True,
+            include_examples=False,
+        ),
         "group_reason_definitions": {
             item.key: {
                 "description": item.description,
@@ -1132,6 +1225,11 @@ def build_collected_render_prompt(
             ),
             _build_sensitive_rule(runtime_config),
         ],
+        "event_generation_guidance": _build_collected_generation_guidance(
+            runtime_config,
+            summary_only=False,
+            include_examples=True,
+        ),
         "target_date": target_date,
         "locked_groups": [
             {
@@ -1188,7 +1286,7 @@ def build_anchor_analysis_prompt(
             "只抽取工作事件。",
             *_build_personal_retention_rules(runtime_config),
             "每个 candidate_event 只能落在当前 anchor_unit 内。",
-            "每个 candidate_event 只表示一个主要动作。",
+            "每个 candidate_event 表示一个可独立汇报的完整事项，具体边界以 event_generation_guidance 为准。",
             EVENT_TITLE_RULE,
             "action_label 只写主要动作标签，例如：回复、审批、催办、撰写、核对、跟进、同步、确认。",
             "object_hint 只写该事项的核心对象或主题。",
@@ -1200,11 +1298,7 @@ def build_anchor_analysis_prompt(
             "self_evidence_message_ids 列出证明本人直接相关的本人消息；事实来源可以是他人的反馈。",
             _build_self_relation_rule(runtime_config),
             ATTACHMENT_FILE_NAME_RULE,
-            "如果窗口里有多个动作，就拆开。",
-            "动作类型比共享名词更重要。",
-            "同步/通知 与 核对/校验/执行/跟进，通常不是同一事件。",
-            "content 里如果包含结果信息，也只能归属于自己的动作，不要串到别的动作上。",
-            "例如：已同步给老板、老板未回复可视为已知悉，属于同步动作，不属于优惠券核对动作。",
+            "同一窗口有多项事实时，按照 event_generation_guidance 中的对象、目标和承接关系判断合并或拆分。",
             "如果上下文不够，就用 context_requests，不要猜。",
             "如果当前消息是在纠正、澄清或替换前文对象，topic、content、object_hint 必须以当前消息确认后的对象为准。",
             "reply_to 或 quote_to 里的内容只能作为背景，不能覆盖当前消息里更具体、更晚确认的对象。",
@@ -1212,6 +1306,9 @@ def build_anchor_analysis_prompt(
             "只有事件明显跨多个锚点窗口或会话时，needs_cross_anchor_merge 才设为 true。",
             "如果有明确结果，直接融入 content，不要单独返回 result。",
         ],
+        "event_generation_guidance": _build_personal_generation_guidance(
+            runtime_config
+        ),
         "input": {
             "target_date": target_date,
             "pass_index": pass_index,
@@ -1241,7 +1338,7 @@ def build_anchor_batch_analysis_prompt(
             "只抽取工作事件。",
             *_build_personal_retention_rules(runtime_config),
             "每个 candidate_event 只能留在自己的 anchor_unit 内。",
-            "每个 candidate_event 只表示一个主要动作。",
+            "每个 candidate_event 表示一个可独立汇报的完整事项，具体边界以 event_generation_guidance 为准。",
             EVENT_TITLE_RULE,
             "action_label 只写主要动作标签，例如：回复、审批、催办、撰写、核对、跟进、同步、确认。",
             "object_hint 只写该事项的核心对象或主题。",
@@ -1253,10 +1350,7 @@ def build_anchor_batch_analysis_prompt(
             "self_evidence_message_ids 列出证明本人直接相关的本人消息；事实来源可以是他人的反馈。",
             _build_self_relation_rule(runtime_config),
             ATTACHMENT_FILE_NAME_RULE,
-            "如果同一窗口有多个动作，就拆开。",
-            "动作类型比共享名词更重要。",
-            "同步/通知 与 核对/校验/执行/跟进，通常不是同一事件。",
-            "content 里如果包含结果信息，也只能归属于自己的动作，不要串到别的动作上。",
+            "同一窗口有多项事实时，按照 event_generation_guidance 中的对象、目标和承接关系判断合并或拆分。",
             "如果上下文不够，就用 context_requests，不要猜。",
             "如果当前消息是在纠正、澄清或替换前文对象，topic、content、object_hint 必须以当前消息确认后的对象为准。",
             "reply_to 或 quote_to 里的内容只能作为背景，不能覆盖当前消息里更具体、更晚确认的对象。",
@@ -1264,6 +1358,9 @@ def build_anchor_batch_analysis_prompt(
             "只有事件明显跨多个锚点窗口或会话时，needs_cross_anchor_merge 才设为 true。",
             "如果有明确结果，直接融入 content，不要单独返回 result。",
         ],
+        "event_generation_guidance": _build_personal_generation_guidance(
+            runtime_config
+        ),
         "input": {
             "target_date": target_date,
             "anchor_units": [
@@ -1309,7 +1406,7 @@ def build_anchor_expansion_prompt(
             "把 previous_analysis 作为先前状态；如果新上下文改变结论，必须修正。",
             "candidate_events 应表示当前 anchor_unit 的最新综合判断。",
             _build_self_relation_rule(runtime_config),
-            "每个 candidate_event 仍然只能表示一个主要动作或工作线索。",
+            "每个 candidate_event 表示当前上下文支持的一个完整事项，具体边界以 event_generation_guidance 为准。",
             "每个 candidate_event 必须包含 object_hint、retention_reason 和 retention_detail。",
             EVENT_TITLE_RULE,
             *_build_personal_retention_rules(runtime_config),
@@ -1318,26 +1415,7 @@ def build_anchor_expansion_prompt(
                 "follow_up_assigned、external_business_progress 或 substantive_approval。"
             ),
             "如需给事项挂涉及文件，只能从对应 source_message_ids 的 links 里选择 referenced_link_ids；拿不准就返回空数组。",
-            (
-                "如果新上下文显示某个先前 candidate_event 实际混合了多个动作，"
-                "应拆成多个 candidate_events。"
-            ),
-            (
-                "动作类型比共享背景名词更重要。通知/同步、审核/核对、执行、设计、"
-                "审批、付款跟进、文档编辑通常是不同事件。"
-            ),
-            (
-                "如果一部分主要是通知或同步信息，另一部分主要是检查、校验、执行或跟进，"
-                "除非文本清楚表明它们是同一个连续动作，否则应保留为不同 candidate_events。"
-            ),
-            (
-                "如果 content 包含结果，该结果只能归属于同一个 candidate_event 的主要动作。"
-                "如果新增上下文显示结果属于另一个动作，应移动或拆分事件，不要混在一起。"
-            ),
-            (
-                "例如：已同步给老板、老板未回复可视为已知悉，属于同步动作，"
-                "不属于单独的优惠券配置核对动作。"
-            ),
+            "新增上下文改变事项边界时，按照 event_generation_guidance 重新合并或拆分，不沿用旧候选的动作边界。",
             "只有新增消息或附件正文仍无法解决事件判断时，才请求更多上下文。",
             "如果当前消息是在纠正、澄清或替换前文对象，topic、content、object_hint 必须以当前消息确认后的对象为准。",
             "reply_to 或 quote_to 里的内容只能作为背景，不能覆盖当前消息里更具体、更晚确认的对象。",
@@ -1345,6 +1423,9 @@ def build_anchor_expansion_prompt(
             "只有事件可能跨其他锚点窗口或会话时，needs_cross_anchor_merge 才设为 true。",
             "如果有明确结果，直接融入 content，不要单独返回 result。",
         ],
+        "event_generation_guidance": _build_personal_generation_guidance(
+            runtime_config
+        ),
         "input": {
             "target_date": target_date,
             "pass_index": pass_index,

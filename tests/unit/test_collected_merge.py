@@ -9,6 +9,7 @@ import pytest
 from src.worktrace import __version__
 from src.worktrace.analyzers.failover import FailoverAnalyzer
 from src.worktrace.collected_merge import (
+    _collected_event_generation_debug_metadata,
     _collected_review_result_basis_error,
     CollectedMergeRunner,
     aggregate_collected_quality_summaries,
@@ -29,6 +30,7 @@ from src.worktrace.analyzers.prompts import (
     build_collected_review_prompt,
 )
 from src.worktrace.config import (
+    EventGenerationConfig,
     EventMetadataItem,
     RuntimeConfig,
     load_runtime_config_overrides,
@@ -1262,6 +1264,122 @@ def test_collected_merge_prompt_contains_sensitive_rules() -> None:
     assert "组成员已经锁定" in prompt
 
 
+def test_collected_prompts_use_stage_specific_generation_guidance() -> None:
+    config = load_runtime_config_overrides(RuntimeConfig(), cwd=Path.cwd())
+    events = [
+        CollectedSourceEvent(
+            "d1",
+            "人员甲",
+            "人员甲.md",
+            _event(event_id="e1", title="问题发现", content="发现结果存在差异。"),
+        ),
+        CollectedSourceEvent(
+            "d2",
+            "人员乙",
+            "人员乙.md",
+            _event(event_id="e2", title="原因确认", content="排查并确认差异原因。"),
+        ),
+    ]
+    candidate_group = CollectedGroupingGroup(
+        "group-001",
+        ["d1", "d2"],
+        summary_title="差异排查",
+        summary_content="发现并排查差异。",
+        summary_object_hint="结果差异",
+    )
+
+    grouping = json.loads(
+        build_collected_grouping_prompt("2026-06-29", events, [], config=config)
+    )["event_generation_guidance"]
+    review = json.loads(
+        build_collected_review_prompt(
+            "2026-06-29",
+            events,
+            candidate_group,
+            config=config,
+        )
+    )["event_generation_guidance"]
+    render_prompt = build_collected_render_prompt(
+        "2026-06-29",
+        events,
+        [["d1", "d2"]],
+        config=config,
+    )
+    render = json.loads(render_prompt)["event_generation_guidance"]
+
+    for summary_guidance in (grouping, review):
+        assert set(summary_guidance["template"]) == {
+            "summary_title",
+            "summary_content",
+            "summary_object_hint",
+        }
+        assert "positive_examples" not in summary_guidance
+        assert "negative_examples" not in summary_guidance
+        assert any("覆盖新组全部成员" in rule for rule in summary_guidance["writing_rules"])
+    assert set(render["template"]) == {
+        "summary_title",
+        "summary_content",
+        "summary_object_hint",
+        "title",
+        "content",
+        "object_hint",
+        "retention_detail",
+    }
+    assert len(render["positive_examples"]) == 2
+    assert len(render["negative_examples"]) == 2
+    assert "source_draft_ids" in render_prompt
+    assert "每个 draft_id 至少要在一项 fact_item" in render_prompt
+    for source_value in (
+        "陈之",
+        "栗栋",
+        "陈珏奇",
+        "共享电单车9月需续保明细",
+        "599辆",
+        "1909个",
+        "1298个",
+    ):
+        assert source_value not in json.dumps(render, ensure_ascii=False)
+
+
+def test_collected_prompt_estimates_include_generation_guidance(
+    tmp_path: Path,
+) -> None:
+    config = replace(
+        load_runtime_config_overrides(RuntimeConfig(), cwd=Path.cwd()),
+        data_root=tmp_path / "data",
+    )
+    events = [
+        CollectedSourceEvent(
+            "d1",
+            "人员甲",
+            "人员甲.md",
+            _event(event_id="e1", title="范围确认", content="确认处理范围。"),
+        ),
+        CollectedSourceEvent(
+            "d2",
+            "人员乙",
+            "人员乙.md",
+            _event(event_id="e2", title="结果交付", content="完成结果交付。"),
+        ),
+    ]
+    with_guidance = _build_runner(tmp_path, config=config)
+    without_guidance = _build_runner(
+        tmp_path,
+        config=replace(config, event_generation=EventGenerationConfig()),
+    )
+
+    assert with_guidance._estimate_collected_grouping_prompt_tokens(
+        "2026-06-29", events, []
+    ) > without_guidance._estimate_collected_grouping_prompt_tokens(
+        "2026-06-29", events, []
+    )
+    assert with_guidance._estimate_collected_render_prompt_tokens(
+        "2026-06-29", events, [["d1", "d2"]]
+    ) > without_guidance._estimate_collected_render_prompt_tokens(
+        "2026-06-29", events, [["d1", "d2"]]
+    )
+
+
 def test_collected_merge_prompt_includes_python_evidence_relations() -> None:
     message_a = "sha256:" + "a" * 64
     message_b = "sha256:" + "b" * 64
@@ -2203,12 +2321,17 @@ def test_collected_merge_trace_writes_step_summary(tmp_path: Path) -> None:
     )
 
     trace_root = tmp_path / "trace"
+    event_generation = load_runtime_config_overrides(
+        RuntimeConfig(),
+        cwd=Path.cwd(),
+    ).event_generation
     result = _build_runner(
         tmp_path,
         config=RuntimeConfig(
             data_root=tmp_path / "data",
             collected_merge_trace_enabled=True,
             collected_merge_trace_root=trace_root,
+            event_generation=event_generation,
         ),
     ).run("2026-06-29")
 
@@ -2221,7 +2344,11 @@ def test_collected_merge_trace_writes_step_summary(tmp_path: Path) -> None:
     assert prompt_path.exists()
     summary = json.loads(summary_path.read_text(encoding="utf-8"))
     assert summary["merged_event_count"] == 1
+    assert summary["event_generation_summary"]["config_loaded"] is True
     step = json.loads(step_path.read_text(encoding="utf-8"))
+    assert step["event_generation_debug"]["guidance_mode"] == "collected_full"
+    assert step["event_generation_debug"]["template_mode"] == "full"
+    assert step["event_generation_debug"]["examples_included"] is True
     assert step["raw_group_count"] == 1
     assert step["retained_metrics"]["event_count"] == 1
     assert len(step["input_events"]) == 1
@@ -2233,6 +2360,34 @@ def test_collected_merge_trace_writes_step_summary(tmp_path: Path) -> None:
     assert input_event["file_keys"] == ["sha256:" + "b" * 64]
     assert "sha256:" not in prompt_path.read_text(encoding="utf-8")
     assert step["deterministic_groups"] == []
+
+
+def test_collected_trace_generation_modes_match_prompt_stages() -> None:
+    config = load_runtime_config_overrides(RuntimeConfig(), cwd=Path.cwd())
+
+    candidate = _collected_event_generation_debug_metadata(
+        config,
+        stage="candidate_grouping_batch_001",
+    )
+    review = _collected_event_generation_debug_metadata(
+        config,
+        stage="high_risk_review",
+    )
+    render = _collected_event_generation_debug_metadata(
+        config,
+        stage="content_merge",
+    )
+
+    assert candidate["guidance_mode"] == "collected_summary_without_examples"
+    assert candidate["template_mode"] == "summary"
+    assert candidate["examples_included"] is False
+    assert review["guidance_mode"] == "collected_summary_without_examples"
+    assert review["template_mode"] == "summary"
+    assert review["examples_included"] is False
+    assert render["guidance_mode"] == "collected_full"
+    assert render["template_mode"] == "full"
+    assert render["examples_included"] is True
+    assert render["config"]["config_loaded"] is True
 
 
 def test_collected_merge_run_result_round_trips_outputs(tmp_path: Path) -> None:

@@ -11,7 +11,12 @@ from typing import Any, Callable, Iterable, Mapping, Sequence
 
 from . import __version__
 from .analyzers.function_calls import FunctionCallSpec, function_call_spec
-from .config import RuntimeConfig, load_online_llm_settings
+from .config import (
+    RuntimeConfig,
+    event_generation_debug_summary,
+    load_online_llm_settings,
+    model_input_budget_debug_summary,
+)
 from .errors import AnalyzerProtocolError, RetryableAnalyzerProtocolError
 from .models import (
     CollectedMergeRunResult,
@@ -31,7 +36,7 @@ _SAFE_KEY_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9_]*$")
 class DiagnosticFact:
     fact_id: str
     kind: str
-    metrics: dict[str, int | float | str]
+    metrics: dict[str, bool | int | float | str]
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -263,7 +268,10 @@ def build_diagnostic_facts(
 ) -> list[DiagnosticFact]:
     facts: list[DiagnosticFact] = []
 
-    def add(kind: str, metrics: dict[str, int | float | str]) -> None:
+    def add(
+        kind: str,
+        metrics: dict[str, bool | int | float | str],
+    ) -> None:
         facts.append(
             DiagnosticFact(
                 fact_id=f"D{len(facts) + 1:03d}",
@@ -289,7 +297,7 @@ def build_diagnostic_facts(
                 "skipped_count": _safe_count(result.skipped_slice_count),
             },
         )
-        stage_summary: Mapping[str, object] = {}
+        stage_summary = result.stage_timing_summary
         error_text = f"{result.error_summary}\n{result.self_delivery_error}"
     else:
         add(
@@ -310,6 +318,15 @@ def build_diagnostic_facts(
         error_text = "\n".join(
             [*result.warning_messages, result.self_delivery_error]
         )
+
+    add(
+        "event_generation_config",
+        event_generation_debug_summary(config.event_generation),
+    )
+    add(
+        "model_input_budget",
+        model_input_budget_debug_summary(config.model_input_budget_selection),
+    )
 
     stage_rows, total_ms = _calculate_stage_rows(
         stage_summary,
@@ -347,13 +364,16 @@ def build_diagnostic_facts(
             ),
         },
     )
-    if normalized_status in {"failed", "invalid_input"} or error_text.strip():
+    delivery_failed = result.self_delivery_status == "failed"
+    if normalized_status in {"failed", "invalid_input"} or delivery_failed:
         add(
             "error_category",
             {
-                "error_category": classify_error_category(
-                    error_text,
-                    settings=settings,
+                "error_category": (
+                    "delivery"
+                    if delivery_failed
+                    and normalized_status not in {"failed", "invalid_input"}
+                    else classify_error_category(error_text, settings=settings)
                 )
             },
         )
@@ -382,14 +402,17 @@ def _calculate_stage_rows(
         duration = _safe_nonnegative_number(raw_metrics.get("wall_clock_ms"))
         if duration is not None:
             values.append((stage, duration))
-    if not values:
-        values = [("total", safe_total)]
     values.sort(key=lambda item: (-item[1], item[0]))
     rows: list[dict[str, int | float | str]] = []
     for rank, (stage, duration) in enumerate(values, start=1):
         share = round((duration / safe_total * 100) if safe_total > 0 else 0.0, 2)
-        rows.append(
-            {
+        raw_metrics = stage_summary.get(stage)
+        request_accumulated_ms = (
+            _safe_nonnegative_number(raw_metrics.get("request_accumulated_ms"))
+            if isinstance(raw_metrics, Mapping)
+            else None
+        )
+        row: dict[str, int | float | str] = {
                 "stage": stage,
                 "wall_clock_ms": duration,
                 "share_percent": share,
@@ -399,7 +422,9 @@ def _calculate_stage_rows(
                     and share >= settings.slow_stage_min_share * 100
                 ),
             }
-        )
+        if request_accumulated_ms is not None:
+            row["request_accumulated_ms"] = request_accumulated_ms
+        rows.append(row)
     return rows, safe_total
 
 
@@ -409,7 +434,7 @@ def _load_safe_usage_summary(
     run_mode: str,
     config: RuntimeConfig,
     cwd: Path,
-) -> dict[str, int]:
+) -> dict[str, int | str]:
     summaries: list[Mapping[str, object]] = []
     request_records: list[Mapping[str, object]] = []
     explicit_retry_count = 0
@@ -436,6 +461,12 @@ def _load_safe_usage_summary(
                 usage = payload.get("llm_usage_summary")
                 if isinstance(usage, Mapping):
                     summaries.append(usage)
+                calls_payload = _read_debug_json(summary_path.parent / "llm_calls.json")
+                raw_calls = calls_payload.get("calls")
+                if isinstance(raw_calls, list):
+                    request_records.extend(
+                        item for item in raw_calls if isinstance(item, Mapping)
+                    )
                 retry_counts = payload.get("retry_count_by_reason")
                 if isinstance(retry_counts, Mapping):
                     explicit_retry_count += sum(
@@ -446,6 +477,26 @@ def _load_safe_usage_summary(
     input_tokens = sum(_mapping_count(item, "input_tokens") for item in summaries)
     output_tokens = sum(_mapping_count(item, "output_tokens") for item in summaries)
     total_tokens = sum(_mapping_count(item, "total_tokens") for item in summaries)
+    reported_token_request_count = sum(
+        max(
+            _reported_token_count(item, "input_tokens"),
+            _reported_token_count(item, "output_tokens"),
+            _reported_token_count(item, "total_tokens"),
+        )
+        for item in summaries
+    )
+    if request_records:
+        reported_from_records = sum(
+            item.get("token_usage_status") == "reported"
+            for item in request_records
+        )
+        if reported_from_records or not summaries:
+            reported_token_request_count = reported_from_records
+    reported_token_request_count = min(reported_token_request_count, request_count)
+    unreported_token_request_count = max(
+        request_count - reported_token_request_count,
+        0,
+    )
     fallback_count = sum(_mapping_count(item, "fallback_count") for item in summaries)
     failed_request_count = sum(_failed_backend_count(item) for item in summaries)
     record_failed_count = sum(
@@ -455,15 +506,56 @@ def _load_safe_usage_summary(
         item.get("status") == "failed" and item.get("backend") == "online"
         for item in request_records
     )
-    return {
+    estimated_inputs = [
+        int(value)
+        for item in request_records
+        for value in [item.get("estimated_input_tokens")]
+        if isinstance(value, int) and not isinstance(value, bool) and value >= 0
+    ]
+    oversized_request_count = max(
+        sum(item.get("oversized_singleton") is True for item in request_records),
+        sum(
+            _mapping_count(item, "oversized_singleton_request_count")
+            for item in summaries
+        ),
+    )
+    result_summary: dict[str, int | str] = {
         "request_count": request_count,
-        "input_tokens": input_tokens,
-        "output_tokens": output_tokens,
-        "total_tokens": total_tokens,
+        "token_reporting_status": (
+            "no_requests"
+            if request_count == 0
+            else "not_reported"
+            if reported_token_request_count == 0
+            else "reported"
+            if unreported_token_request_count == 0
+            else "partially_reported"
+        ),
+        "reported_token_request_count": reported_token_request_count,
+        "unreported_token_request_count": unreported_token_request_count,
         "retry_count": int(retry_count),
         "fallback_count": fallback_count,
         "failed_request_count": max(failed_request_count, record_failed_count),
+        "oversized_request_count": oversized_request_count,
+        "max_input_estimated_tokens": max(estimated_inputs, default=0),
     }
+    if reported_token_request_count:
+        result_summary.update(
+            {
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "total_tokens": total_tokens,
+            }
+        )
+    return result_summary
+
+
+def _reported_token_count(summary: Mapping[str, object], token_key: str) -> int:
+    explicit_key = f"reported_{token_key}_request_count"
+    if explicit_key in summary:
+        return _mapping_count(summary, explicit_key)
+    if token_key in summary:
+        return _mapping_count(summary, "request_count")
+    return 0
 
 
 def classify_error_category(
@@ -721,6 +813,14 @@ def validate_support_analysis(
                 product_suggestion_ids=tuple(product_suggestion_ids or ()),
             )
         )
+    if not errors:
+        errors.extend(
+            _support_analysis_consistency_errors(
+                overall=str(overall),
+                findings=findings,
+                facts=facts,
+            )
+        )
     if errors:
         return None, tuple(dict.fromkeys(errors))
     return (
@@ -730,6 +830,71 @@ def validate_support_analysis(
         ),
         (),
     )
+
+
+def _support_analysis_consistency_errors(
+    *,
+    overall: str,
+    findings: Sequence[SupportFinding],
+    facts: Sequence[DiagnosticFact],
+) -> tuple[str, ...]:
+    facts_by_kind = {fact.kind: fact for fact in facts}
+    run_fact = facts_by_kind.get("run_summary")
+    model_fact = facts_by_kind.get("model_usage")
+    artifact_fact = facts_by_kind.get("artifact_status")
+    run_status = str(run_fact.metrics.get("run_status", "")) if run_fact else ""
+    delivery_status = (
+        str(artifact_fact.metrics.get("delivery_status", ""))
+        if artifact_fact
+        else ""
+    )
+    failed_requests = (
+        _safe_count(model_fact.metrics.get("failed_request_count", 0))
+        if model_fact
+        else 0
+    )
+    retry_count = (
+        _safe_count(model_fact.metrics.get("retry_count", 0)) if model_fact else 0
+    )
+    fallback_count = (
+        _safe_count(model_fact.metrics.get("fallback_count", 0))
+        if model_fact
+        else 0
+    )
+    slow_stage_exists = any(
+        fact.kind == "stage_timing"
+        and _safe_count(fact.metrics.get("is_slow_stage", 0)) == 1
+        for fact in facts
+    )
+    all_causes = {cause for finding in findings for cause in finding.cause_ids}
+    all_suggestions = {
+        suggestion
+        for finding in findings
+        for suggestion in finding.product_suggestion_ids
+    }
+    categories = {finding.category for finding in findings}
+    errors: list[str] = []
+    if overall == "healthy" and any(category != "none" for category in categories):
+        errors.append("overall_assessment_conflicts_with_findings")
+    if "runtime_failed" in all_causes and run_status not in {"failed", "invalid_input"}:
+        errors.append("runtime_status_conflict")
+    if "runtime" in categories and run_status not in {"failed", "invalid_input"}:
+        errors.append("runtime_failure_conflicts_with_python_facts")
+    if delivery_status != "failed" and (
+        "delivery_failed" in all_causes or "delivery" in categories
+    ):
+        errors.append("delivery_status_conflict")
+    if failed_requests == 0 and "model_failure" in all_causes:
+        errors.append("model_failure_conflict")
+    if retry_count == 0 and "model_retry" in all_causes:
+        errors.append("model_retry_conflict")
+    if fallback_count == 0 and "model_fallback" in all_causes:
+        errors.append("model_fallback_conflict")
+    if not slow_stage_exists and "slow_stage" in all_causes:
+        errors.append("slow_stage_conflict")
+    if "none" in all_suggestions and len(all_suggestions) > 1:
+        errors.append("no_change_conflicts_with_product_suggestions")
+    return tuple(errors)
 
 
 def render_support_report(
@@ -774,7 +939,15 @@ def render_support_report(
         lines.append(f"| {fields[key]} | {_escape_markdown(value)} |")
 
     section_fact_kinds = (
-        ("overview", {"run_summary", "timing_summary"}),
+        (
+            "overview",
+            {
+                "run_summary",
+                "event_generation_config",
+                "model_input_budget",
+                "timing_summary",
+            },
+        ),
         ("stages", {"stage_timing"}),
         ("model_calls", {"model_usage"}),
         ("artifacts", {"artifact_status", "error_category"}),
@@ -892,7 +1065,7 @@ def _format_metric_value(
 ) -> str:
     if isinstance(value, str):
         return _escape_markdown(
-            settings.value_labels.get(value, settings.safe_text["unknown"])
+            settings.value_labels.get(value, value)
         )
     return str(value)
 

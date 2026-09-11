@@ -5,8 +5,10 @@ from pathlib import Path
 from subprocess import CompletedProcess
 
 from src.worktrace.config import RuntimeConfig
+from src.worktrace.errors import AnalyzerProtocolError, CodexProtocolViolationError
 from src.worktrace.models import AttachmentMeta, LinkMeta, NormalizedMessage
 from src.worktrace.resolvers.feishu_message import FeishuMessageContentResolver
+from src.worktrace.vision import CodexFirstImageSummarizer, ImageSummarySettings
 
 
 def test_message_resolver_extracts_text_and_links(tmp_path: Path) -> None:
@@ -140,14 +142,19 @@ def test_message_resolver_summarizes_image_only_when_requested(tmp_path: Path) -
 
 def test_message_resolver_queues_bounded_image_failure_warning(tmp_path: Path) -> None:
     class FailingImageSummarizer:
+        def __init__(self) -> None:
+            self.calls = 0
+
         def summarize(self, image_path: Path, *, required: bool = False) -> str:
+            self.calls += 1
             raise RuntimeError("413 response\n" + "x" * 800)
 
     image_path = tmp_path / "image.png"
     image_path.write_bytes(b"image-bytes")
+    summarizer = FailingImageSummarizer()
     resolver = FeishuMessageContentResolver(
         config=RuntimeConfig(data_root=tmp_path / "data"),
-        image_summarizer=FailingImageSummarizer(),
+        image_summarizer=summarizer,
         image_downloader=lambda *_: image_path,
     )
     message = NormalizedMessage(
@@ -185,7 +192,76 @@ def test_message_resolver_queues_bounded_image_failure_warning(tmp_path: Path) -
     )
     assert warnings[0].endswith("...")
     assert "\n" not in warnings[0]
+    assert resolver.load_attachment_text_if_needed(
+        message,
+        ["img_1"],
+        "再次核对图片",
+    ) is None
     assert resolver.drain_warning_messages() == []
+    assert summarizer.calls == 1
+
+
+def test_message_resolver_warns_once_when_image_primary_and_fallback_both_fail(
+    tmp_path: Path,
+) -> None:
+    image_path = tmp_path / "image.png"
+    image_path.write_bytes(b"image-bytes")
+
+    class Codex:
+        calls = 0
+
+        def request_text(self, prompt, *, image_path):
+            self.calls += 1
+            raise CodexProtocolViolationError("unsupported image result")
+
+    class Online:
+        calls = 0
+
+        def summarize(self, image_path, *, required=False):
+            self.calls += 1
+            raise AnalyzerProtocolError("fallback image request failed")
+
+    codex = Codex()
+    online = Online()
+    resolver = FeishuMessageContentResolver(
+        config=RuntimeConfig(data_root=tmp_path / "data"),
+        image_summarizer=CodexFirstImageSummarizer(
+            config=RuntimeConfig(data_root=tmp_path / "data"),
+            settings=ImageSummarySettings(True, "摘要", 12, 1024),
+            codex=codex,
+            online_fallback=online,
+        ),
+        image_downloader=lambda *_: image_path,
+    )
+    message = NormalizedMessage(
+        conversation_id="oc_1",
+        conversation_name="项目群",
+        message_id="om_both_failed",
+        sender_open_id="ou_1",
+        sender_name="Alice",
+        send_time="2026-06-22T10:00:00+08:00",
+        message_type="image",
+        text="[Image: img_1]",
+        reply_to_message_id=None,
+        quote_message_id=None,
+        attachments=[
+            AttachmentMeta(
+                attachment_id="img_1",
+                file_name="image.png",
+                mime_type="image/png",
+                file_size=11,
+            )
+        ],
+    )
+
+    assert resolver.load_required_image_summaries(message, ["img_1"]) is None
+    warnings = resolver.drain_warning_messages()
+    assert len(warnings) == 1
+    assert "fallback image request failed" in warnings[0]
+    assert resolver.load_required_image_summaries(message, ["img_1"]) is None
+    assert resolver.drain_warning_messages() == []
+    assert codex.calls == 1
+    assert online.calls == 1
 
 
 def test_message_resolver_fetches_doc_title_for_bare_feishu_url(tmp_path: Path) -> None:

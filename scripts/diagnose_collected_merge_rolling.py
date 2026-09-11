@@ -26,6 +26,8 @@ from src.worktrace.collected_merge import (
 )
 from src.worktrace.config import (
     DEFAULT_CONFIG,
+    event_generation_debug_metadata,
+    event_generation_debug_summary,
     load_conversation_blacklist_overrides,
     load_runtime_config_overrides,
 )
@@ -137,6 +139,9 @@ def main() -> None:
             "source_retention_warnings": [],
             "owner_warnings": [],
             "merge_warnings": [],
+            "event_generation_summary": event_generation_debug_summary(
+                config.event_generation
+            ),
             "steps": [],
             "batch_decisions": [],
         }
@@ -188,6 +193,9 @@ def main() -> None:
         "owner_warnings": owner_warnings,
         "merge_warnings": merge_warnings,
         "preflight_warnings": [],
+        "event_generation_summary": event_generation_debug_summary(
+            config.event_generation
+        ),
         "steps": runner.step_summaries,
         "batch_decisions": runner._collected_merge_batch_decisions,
     }
@@ -244,6 +252,12 @@ class TracingCollectedMergeRunner(CollectedMergeRunner):
             "prompt_chars": len(prompt),
             **input_estimates,
             "input_target_tokens": self.config.model_input_batch_target_tokens,
+            "event_generation_debug": event_generation_debug_metadata(
+                self.config.event_generation,
+                guidance_mode="collected_full",
+                template_mode="full",
+                examples_included=True,
+            ),
             "function_name": function_spec.name,
             "function_definition": function_spec.tool(),
             "input": input_metrics,
@@ -474,6 +488,7 @@ def _median(values: list[int]) -> float:
 
 
 def _render_summary_markdown(summary: dict[str, Any]) -> str:
+    generation = summary.get("event_generation_summary", {})
     lines = [
         f"# Rolling Merge Specificity Diagnosis · {summary['target_date']}",
         "",
@@ -484,6 +499,9 @@ def _render_summary_markdown(summary: dict[str, Any]) -> str:
         f"- Source events after source filter: {summary['source_event_count_after_source_filter']}",
         f"- Final events: {summary['final_event_count']}",
         f"- Final source IDs: {summary['final_source_id_count']}",
+        "- Event generation config loaded: "
+        f"{str(bool(generation.get('config_loaded', False))).lower()}",
+        f"- Event generation schema version: {generation.get('schema_version', '')}",
     ]
     preflight_warnings = summary.get("preflight_warnings", [])
     if preflight_warnings:

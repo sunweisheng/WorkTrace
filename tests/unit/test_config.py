@@ -7,13 +7,36 @@ import pytest
 
 from src.worktrace.config import (
     RuntimeConfig,
+    event_generation_debug_summary,
     load_conversation_blacklist_overrides,
     load_codex_llm_settings,
     load_llm_timeout_seconds,
+    load_model_input_budget_config,
     load_runtime_config_overrides,
     load_online_llm_settings,
     parse_dotenv_lines,
 )
+
+
+def _write_minimal_runtime_files(root: Path) -> None:
+    source_config = Path.cwd() / "config"
+    target_config = root / "config"
+    target_config.mkdir(parents=True, exist_ok=True)
+    for name in (
+        "event_rules.json",
+        "retention_policy.json",
+        "event_metadata.json",
+        "conversation_window.json",
+        "llm_retry.json",
+        "event_grouping.json",
+        "event_generation.json",
+        "collected_merge.json",
+        "self_delivery.json",
+    ):
+        (target_config / name).write_text(
+            (source_config / name).read_text(encoding="utf-8"),
+            encoding="utf-8",
+        )
 
 
 def test_parse_dotenv_lines_supports_comments_quotes_and_export() -> None:
@@ -209,6 +232,262 @@ def test_runtime_config_uses_model_input_batch_target_by_default() -> None:
 
     assert config.model_input_batch_target_tokens == 7000
     assert not hasattr(config, "collected_merge_prompt_char_threshold")
+
+
+def test_model_input_budget_matches_current_model_pair(tmp_path: Path) -> None:
+    _write_minimal_runtime_files(tmp_path)
+    (tmp_path / ".env").write_text(
+        "WORKTRACE_CODEX_MODEL=primary-model\n"
+        "WORKTRACE_LLM_MODEL=fallback-model\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "config" / "model_input_budget.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "default_target_tokens": 7000,
+                "profiles": [
+                    {
+                        "profile_id": "measured-v1",
+                        "primary_model": "primary-model",
+                        "fallback_model": "fallback-model",
+                        "target_tokens": 20000,
+                        "benchmark_dataset_version": "dataset-v1",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    config = load_runtime_config_overrides(RuntimeConfig(), cwd=tmp_path)
+
+    assert config.model_input_batch_target_tokens == 20000
+    assert config.model_input_budget_selection.profile_matched is True
+    assert config.model_input_budget_selection.profile_id == "measured-v1"
+    assert config.model_input_budget_selection.benchmark_dataset_version == "dataset-v1"
+
+
+def test_model_input_budget_uses_default_without_matching_pair(tmp_path: Path) -> None:
+    _write_minimal_runtime_files(tmp_path)
+    (tmp_path / ".env").write_text(
+        "WORKTRACE_CODEX_MODEL=another-primary\n"
+        "WORKTRACE_LLM_MODEL=another-fallback\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "config" / "model_input_budget.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "default_target_tokens": 7000,
+                "profiles": [
+                    {
+                        "profile_id": "measured-v1",
+                        "primary_model": "primary-model",
+                        "fallback_model": "fallback-model",
+                        "target_tokens": 20000,
+                        "benchmark_dataset_version": "dataset-v1",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    config = load_runtime_config_overrides(RuntimeConfig(), cwd=tmp_path)
+
+    assert config.model_input_batch_target_tokens == 7000
+    assert config.model_input_budget_selection.profile_matched is False
+    assert config.model_input_budget_selection.profile_id == ""
+
+
+@pytest.mark.parametrize(
+    ("change", "message"),
+    [
+        (lambda payload: payload.update(extra=True), "fields"),
+        (lambda payload: payload.pop("profiles"), "fields"),
+        (lambda payload: payload.update(schema_version=2), "schema_version"),
+        (lambda payload: payload.update(default_target_tokens=0), "positive integer"),
+        (lambda payload: payload.update(profiles="invalid"), "non-empty list"),
+        (
+            lambda payload: payload["profiles"][0].update(target_tokens=True),
+            "positive integer",
+        ),
+        (
+            lambda payload: payload["profiles"][0].update(profile_id=""),
+            "non-empty",
+        ),
+        (
+            lambda payload: payload["profiles"].append(
+                {
+                    **payload["profiles"][0],
+                    "profile_id": "another-profile",
+                }
+            ),
+            "model combinations",
+        ),
+    ],
+)
+def test_model_input_budget_rejects_invalid_contract(
+    tmp_path: Path,
+    change,
+    message: str,
+) -> None:
+    payload = {
+        "schema_version": 1,
+        "default_target_tokens": 7000,
+        "profiles": [
+            {
+                "profile_id": "measured-v1",
+                "primary_model": "primary-model",
+                "fallback_model": "fallback-model",
+                "target_tokens": 20000,
+                "benchmark_dataset_version": "dataset-v1",
+            }
+        ],
+    }
+    change(payload)
+    config_path = tmp_path / "model_input_budget.json"
+    config_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match=message):
+        load_model_input_budget_config(config_path)
+
+
+def test_missing_model_input_budget_file_keeps_7000_default(tmp_path: Path) -> None:
+    budget = load_model_input_budget_config(tmp_path / "missing.json")
+
+    assert budget.default_target_tokens == 7000
+    assert budget.profiles == ()
+
+
+def test_repo_event_generation_config_is_loaded_and_anonymized() -> None:
+    config = load_runtime_config_overrides(RuntimeConfig(), cwd=Path.cwd())
+    generation = config.event_generation
+    raw_text = Path("config/event_generation.json").read_text(encoding="utf-8")
+
+    assert generation.schema_version == 1
+    assert generation.shared_writing_rules
+    assert any("先判断当前输入中的事实" in rule for rule in generation.shared_writing_rules)
+    assert any("异常、范围变化、关键决定" in rule for rule in generation.shared_writing_rules)
+    assert generation.personal_event_boundary_rules
+    assert dict(generation.personal_template).keys() == {
+        "topic",
+        "content",
+        "action_label",
+        "object_hint",
+        "retention_detail",
+    }
+    assert len(generation.personal_positive_examples) == 4
+    assert len(generation.personal_negative_examples) == 2
+    assert generation.collected_writing_rules
+    assert dict(generation.collected_template).keys() == {
+        "summary_title",
+        "summary_content",
+        "summary_object_hint",
+        "title",
+        "content",
+        "object_hint",
+        "retention_detail",
+    }
+    assert len(generation.collected_positive_examples) == 2
+    assert len(generation.collected_negative_examples) == 2
+    assert event_generation_debug_summary(generation) == {
+        "schema_version": 1,
+        "config_loaded": True,
+        "shared_writing_rule_count": 10,
+        "personal_boundary_rule_count": 6,
+        "personal_template_field_count": 5,
+        "personal_positive_example_count": 4,
+        "personal_negative_example_count": 2,
+        "collected_writing_rule_count": 9,
+        "collected_template_field_count": 7,
+        "collected_positive_example_count": 2,
+        "collected_negative_example_count": 2,
+    }
+    for source_value in (
+        "陈之",
+        "栗栋",
+        "陈珏奇",
+        "共享电单车9月需续保明细",
+        "车辆编码.csv",
+        "599辆",
+        "1909个",
+        "1298个",
+    ):
+        assert source_value not in raw_text
+
+
+def test_event_generation_config_is_optional_for_isolated_environments(
+    tmp_path: Path,
+) -> None:
+    config = load_runtime_config_overrides(RuntimeConfig(), cwd=tmp_path)
+
+    assert config.event_generation.shared_writing_rules == ()
+    assert config.event_generation.personal_template == ()
+    assert config.event_generation.collected_template == ()
+    assert event_generation_debug_summary(config.event_generation) == {
+        "schema_version": 1,
+        "config_loaded": False,
+        "shared_writing_rule_count": 0,
+        "personal_boundary_rule_count": 0,
+        "personal_template_field_count": 0,
+        "personal_positive_example_count": 0,
+        "personal_negative_example_count": 0,
+        "collected_writing_rule_count": 0,
+        "collected_template_field_count": 0,
+        "collected_positive_example_count": 0,
+        "collected_negative_example_count": 0,
+    }
+
+
+@pytest.mark.parametrize(
+    "invalid_case",
+    [
+        "missing_field",
+        "extra_field",
+        "wrong_type",
+        "wrong_version",
+        "fractional_version",
+        "empty_template",
+        "empty_rules",
+        "duplicate_example_name",
+    ],
+)
+def test_load_runtime_config_rejects_invalid_event_generation_config(
+    tmp_path: Path,
+    invalid_case: str,
+) -> None:
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    payload = json.loads(
+        Path("config/event_generation.json").read_text(encoding="utf-8")
+    )
+    if invalid_case == "missing_field":
+        del payload["personal"]["template"]
+    elif invalid_case == "extra_field":
+        payload["collected"]["unexpected"] = []
+    elif invalid_case == "wrong_type":
+        payload["shared_writing_rules"] = "只写事实"
+    elif invalid_case == "wrong_version":
+        payload["schema_version"] = 2
+    elif invalid_case == "fractional_version":
+        payload["schema_version"] = 1.0
+    elif invalid_case == "empty_template":
+        payload["personal"]["template"]["topic"] = " "
+    elif invalid_case == "empty_rules":
+        payload["personal"]["event_boundary_rules"] = []
+    elif invalid_case == "duplicate_example_name":
+        payload["personal"]["negative_examples"][0]["name"] = payload[
+            "personal"
+        ]["positive_examples"][0]["name"]
+    (config_dir / "event_generation.json").write_text(
+        json.dumps(payload, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="Invalid event generation config"):
+        load_runtime_config_overrides(RuntimeConfig(), cwd=tmp_path)
 
 
 def test_load_runtime_config_overrides_reads_rule_lists(

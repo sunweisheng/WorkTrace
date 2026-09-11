@@ -291,6 +291,11 @@ def test_personal_fact_review_runs_three_single_candidate_batches_concurrently(
         "personal-fact-review-002",
         "personal-fact-review-003",
     ]
+    generation_debug = debug_payload["event_generation_debug"]
+    assert generation_debug["guidance_mode"] == "personal_review_without_examples"
+    assert generation_debug["template_mode"] == "full"
+    assert generation_debug["examples_included"] is False
+    assert generation_debug["config"]["config_loaded"] is True
 
 
 def test_runner_rewrites_unsupported_personal_facts_before_daily_merge(

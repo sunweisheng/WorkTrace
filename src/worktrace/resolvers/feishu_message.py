@@ -47,6 +47,7 @@ class FeishuMessageContentResolver(ContentResolver):
     _image_summary_cache: dict[tuple[str, str], AttachmentTextBlock] = field(
         default_factory=dict
     )
+    _failed_image_summary_keys: set[tuple[str, str]] = field(default_factory=set)
     _warning_messages: list[str] = field(default_factory=list)
     _image_summary_lock: Lock = field(default_factory=Lock)
 
@@ -252,6 +253,8 @@ class FeishuMessageContentResolver(ContentResolver):
             cached = self._image_summary_cache.get(key)
             if cached is not None:
                 return cached
+            if key in self._failed_image_summary_keys:
+                return None
             try:
                 summary = self._summarize_image_attachment(
                     message,
@@ -259,6 +262,7 @@ class FeishuMessageContentResolver(ContentResolver):
                     required=required,
                 )
             except Exception as exc:
+                self._failed_image_summary_keys.add(key)
                 detail = _warning_detail(exc)
                 warning = (
                     f"Skipped image summary for message {message.message_id}: "

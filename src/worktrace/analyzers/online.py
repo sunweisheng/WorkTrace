@@ -476,7 +476,7 @@ def _build_responses_request_body(
         "model": settings.model,
         "input": prompt,
         "stream": settings.stream_enabled,
-        "tools": [function_spec.tool()],
+        "tools": [function_spec.online_tool()],
         "tool_choice": function_spec.tool_choice(),
         "parallel_tool_calls": False,
     }

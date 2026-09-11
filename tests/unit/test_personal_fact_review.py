@@ -382,3 +382,13 @@ def test_fact_review_prompt_states_exact_fact_item_coverage_contract() -> None:
     assert "仍无法支持标题、正文、具体对象和保留依据" in prompt
     assert "Python 会直接连接所有 content.text 生成正文" in prompt
     assert "同批其他候选中出现了某个消息 ID" in prompt
+    guidance = json.loads(prompt)["event_generation_guidance"]
+    assert set(guidance) == {"shared_writing_rules", "template"}
+    assert set(guidance["template"]) == {
+        "topic",
+        "content",
+        "action_label",
+        "object_hint",
+        "retention_detail",
+    }
+    assert any("局部表述缺少证据" in rule for rule in guidance["shared_writing_rules"])

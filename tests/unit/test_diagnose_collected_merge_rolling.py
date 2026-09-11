@@ -73,6 +73,10 @@ def test_diagnostic_step_is_running_during_llm_call_and_success_afterward(
     assert completed["status"] == "success"
     assert completed["completed_at_utc"]
     assert completed["elapsed_ms"] >= 0
+    assert completed["event_generation_debug"]["guidance_mode"] == "collected_full"
+    assert completed["event_generation_debug"]["template_mode"] == "full"
+    assert completed["event_generation_debug"]["examples_included"] is True
+    assert completed["event_generation_debug"]["config"]["config_loaded"] is False
     assert 'status="running"' in captured.err
     assert 'status="success"' in captured.err
 
@@ -187,5 +191,6 @@ def test_diagnostic_main_stops_before_read_and_model_after_preflight_failure(
     assert summary["source_event_count_before_preflight"] == 1
     assert summary["source_event_count_after_source_filter"] == 0
     assert summary["steps"] == []
+    assert summary["event_generation_summary"]["config_loaded"] is False
     assert "## Preflight Warnings" in summary_markdown
     assert "Missing conversation evidence or manual edit marker" in summary_markdown

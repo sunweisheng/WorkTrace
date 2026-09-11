@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 import json
 from pathlib import Path
 
@@ -16,6 +17,7 @@ from src.worktrace.analyzers.prompts import (
     build_day_group_discovery_prompt,
     build_day_group_review_prompt,
     build_merge_prompt,
+    build_personal_group_render_prompt,
     serialize_message_for_prompt,
     serialize_anchor_unit_for_prompt,
     serialize_batch_for_prompt,
@@ -38,10 +40,11 @@ from src.worktrace.models import (
 )
 
 
-REPO_RETENTION_POLICY = load_runtime_config_overrides(
+REPO_CONFIG = load_runtime_config_overrides(
     RuntimeConfig(),
     cwd=Path.cwd(),
-).retention_policy
+)
+REPO_RETENTION_POLICY = REPO_CONFIG.retention_policy
 
 
 TEMPORARY_COORDINATION_RULE_SNIPPETS = (
@@ -219,7 +222,8 @@ def test_prompt_serialization_is_compact(tmp_path: Path) -> None:
 
 
 def test_batch_prompt_uses_original_message_ids_and_slim_rules(tmp_path: Path) -> None:
-    config = RuntimeConfig(
+    config = replace(
+        REPO_CONFIG,
         data_root=tmp_path / "data",
         prompt_slice_message_limit=3,
         prompt_message_char_limit=50,
@@ -332,6 +336,17 @@ def test_batch_prompt_uses_original_message_ids_and_slim_rules(tmp_path: Path) -
     assert "等工作保密信息，不要提炼为事项。" not in prompt
     assert "等非工作敏感内容，不要提炼为事项。" not in prompt
     assert "按会话 slice 独立提炼，不要串会话信息。" not in prompt
+    guidance = json.loads(prompt)["event_generation_guidance"]
+    assert len(guidance["positive_examples"]) == 4
+    assert len(guidance["negative_examples"]) == 2
+    assert set(guidance["template"]) == {
+        "topic",
+        "content",
+        "action_label",
+        "object_hint",
+        "retention_detail",
+    }
+    assert any("完整业务事项" in rule for rule in guidance["event_boundary_rules"])
 
 
 def test_batch_prompt_uses_configured_sensitive_keywords(tmp_path: Path) -> None:
@@ -379,7 +394,8 @@ def test_batch_prompt_uses_configured_sensitive_keywords(tmp_path: Path) -> None
 
 
 def test_anchor_prompt_serialization_is_compact(tmp_path: Path) -> None:
-    config = RuntimeConfig(
+    config = replace(
+        REPO_CONFIG,
         data_root=tmp_path / "data",
         prompt_slice_message_limit=1,
         prompt_message_char_limit=12,
@@ -424,9 +440,11 @@ def test_anchor_prompt_serialization_is_compact(tmp_path: Path) -> None:
     status_schema = anchor_output_schema(config)["properties"]["anchor_status"]
     assert AnchorStatus.NEEDS_MORE_CONTEXT.value in status_schema["enum"]
     assert '"anchor_status"' not in prompt
-    assert "每个 candidate_event 只表示一个主要动作。" in prompt
+    assert "每个 candidate_event 表示一个可独立汇报的完整事项" in prompt
+    assert "每个 candidate_event 只表示一个主要动作。" not in prompt
+    assert "如果窗口里有多个动作，就拆开。" not in prompt
+    assert "动作类型比共享名词更重要。" not in prompt
     assert "具体对象 + 关键动作、进展、结果或风险" in prompt
-    assert "例如：已同步给老板、老板未回复可视为已知悉" in prompt
     assert "本人参与、回复或被询问，只能证明事项与本人有关" in prompt
     assert "单纯询问人员当前状态、位置或是否可用" in prompt
     _assert_temporary_coordination_rules(prompt)
@@ -450,7 +468,8 @@ def test_anchor_prompt_serialization_is_compact(tmp_path: Path) -> None:
 
 
 def test_anchor_expansion_prompt_includes_previous_result_and_expansion(tmp_path: Path) -> None:
-    config = RuntimeConfig(
+    config = replace(
+        REPO_CONFIG,
         data_root=tmp_path / "data",
         prompt_message_char_limit=20,
         prompt_attachment_char_limit=20,
@@ -545,9 +564,10 @@ def test_anchor_expansion_prompt_includes_previous_result_and_expansion(tmp_path
     assert '"attachment_texts"' in prompt
     assert '"linked_file_texts"' in prompt
     assert AnchorStatus.NEEDS_ATTACHMENT_TEXT.value in prompt
-    assert "如果新上下文显示某个先前 candidate_event 实际混合了多个动作" in prompt
+    assert "新增上下文改变事项边界时" in prompt
+    assert "如果新上下文显示某个先前 candidate_event 实际混合了多个动作" not in prompt
     assert "具体对象 + 关键动作、进展、结果或风险" in prompt
-    assert "该结果只能归属于同一个 candidate_event 的主要动作" in prompt
+    assert "动作类型比共享背景名词更重要" not in prompt
     assert "私人饭局、约饭、离职告别聚餐、同事口碑评价、人际寒暄，不要提炼为事项。" in prompt
     assert "个人请假、家庭原因、孩子学校证明、个人行程报备，不要提炼为工作事件。" in prompt
     assert "follow_up_assigned 必须包含明确业务对象" in prompt
@@ -626,7 +646,8 @@ def test_prompts_do_not_include_removed_reasoning_summary_rule(tmp_path: Path) -
 
 
 def test_anchor_batch_prompt_includes_low_retention_rules(tmp_path: Path) -> None:
-    config = RuntimeConfig(
+    config = replace(
+        REPO_CONFIG,
         data_root=tmp_path / "data",
         retention_policy=REPO_RETENTION_POLICY,
     )
@@ -676,6 +697,52 @@ def test_anchor_batch_prompt_includes_low_retention_rules(tmp_path: Path) -> Non
     assert "follow_up_assigned 必须包含明确业务对象" in prompt
     assert "不符合以上任何明确排除条件" in prompt
     _assert_temporary_coordination_rules(prompt)
+    payload = json.loads(prompt)
+    assert len(payload["event_generation_guidance"]["positive_examples"]) == 4
+    assert "每个 candidate_event 只表示一个主要动作。" not in prompt
+    assert "如果同一窗口有多个动作，就拆开。" not in prompt
+
+
+def test_personal_group_render_uses_full_generation_guidance() -> None:
+    candidates = [
+        SourceBackedEventDraft(
+            draft_id="d1",
+            date="2026-06-22",
+            topic="范围确认",
+            content="确认处理范围。",
+            object_hint="目标范围",
+            source_message_ids=["om_1"],
+            source_conversation_id="oc_1",
+            source_slice_id="slice-1",
+            confidence=0.9,
+        ),
+        SourceBackedEventDraft(
+            draft_id="d2",
+            date="2026-06-22",
+            topic="结果交付",
+            content="按确认范围完成交付。",
+            object_hint="目标范围",
+            source_message_ids=["om_2"],
+            source_conversation_id="oc_2",
+            source_slice_id="slice-2",
+            confidence=0.9,
+        ),
+    ]
+    prompt = build_personal_group_render_prompt(
+        "2026-06-22",
+        group=CrossConversationGroup(
+            group_id="group-001",
+            draft_ids=["d1", "d2"],
+        ),
+        candidates=candidates,
+        config=REPO_CONFIG,
+    )
+
+    guidance = json.loads(prompt)["event_generation_guidance"]
+    assert len(guidance["positive_examples"]) == 4
+    assert len(guidance["negative_examples"]) == 2
+    assert any("完整业务事项" in rule for rule in guidance["event_boundary_rules"])
+    assert "所有成员至少由一项 content 证据覆盖" in prompt
 
 
 def test_media_messages_are_compressed_for_prompt(tmp_path: Path) -> None:

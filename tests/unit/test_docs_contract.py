@@ -33,6 +33,57 @@ def test_readme_mentions_event_rules_file() -> None:
     assert "普通事件排除" in content
 
 
+def test_docs_describe_complete_event_generation_without_state_library() -> None:
+    documents = [
+        Path("README.md").read_text(encoding="utf-8"),
+        Path("docs/detailed-design.md").read_text(encoding="utf-8"),
+        Path("docs/collected-people-merge-plan.md").read_text(encoding="utf-8"),
+    ]
+
+    for content in documents:
+        assert "config/event_generation.json" in content
+        assert "完整事项" in content or "完整业务事项" in content
+        assert "脱敏正反例" in content or "脱敏正例" in content
+        assert "model_input_batch_target_tokens" in content
+        assert "config/model_input_budget.json" in content
+        assert "7000" in content and "回退" in content
+        assert "跨日事项状态库" in content
+        assert "不要求固定输出" in content
+    assert Path("config/event_generation.json").is_file()
+    skill = Path("SKILL.md").read_text(encoding="utf-8")
+    assert "config/event_generation.json" in skill
+    assert "完整事项" in skill
+    assert "tests/fixtures/event_generation_quality_cases.json" in documents[0]
+    assert "scripts/evaluate_event_generation_quality.py" in documents[0]
+    assert "不读取真实飞书聊天" in documents[0]
+
+
+def test_docs_describe_profile_budget_benchmark_and_diagnostics() -> None:
+    readme = Path("README.md").read_text(encoding="utf-8")
+    detailed_design = Path("docs/detailed-design.md").read_text(encoding="utf-8")
+    collected_design = Path("docs/collected-people-merge-plan.md").read_text(
+        encoding="utf-8"
+    )
+    skill = Path("SKILL.md").read_text(encoding="utf-8")
+
+    for content in (readme, detailed_design, collected_design, skill):
+        assert "config/model_input_budget.json" in content
+        assert "7000" in content and "回退" in content
+        assert "当前预算 profile" in content or "模型预算 profile" in content
+        assert "备用线路只验证" in content
+        assert "20000" in content and "各一次" in content
+    for content in (readme, detailed_design, collected_design):
+        assert "scripts/benchmark_model_input_budget.py" in content
+        assert "盲审" in content
+        assert "不送达" in content or "关闭送达" in content
+    for content in (readme, detailed_design, skill):
+        assert "服务端未上报" in content
+        assert "success_with_warnings" in content
+        assert "墙钟耗时" in content
+        assert "无需产品改动" in content
+    assert Path("config/model_input_budget.json").is_file()
+
+
 def test_readme_describes_current_segmented_personal_flow() -> None:
     content = Path("README.md").read_text(encoding="utf-8")
 
@@ -406,6 +457,30 @@ def test_current_docs_describe_function_calling_and_input_estimation() -> None:
     assert "HTTP 字节数" in combined
     assert "oversized_retry" in combined
     assert "每次请求" in combined and "关闭" in combined and "客户端" in combined
+
+
+def test_current_docs_match_primary_route_and_budget_profile() -> None:
+    documents = [
+        Path("README.md"),
+        Path("docs/conversation-slice-retry-design.md"),
+        Path("docs/workstream-free-event-grouping-design.md"),
+        Path("docs/online-analyzer-usage.md"),
+        Path("docs/cross-conversation-merge-design.md"),
+        Path("docs/two-level-collected-merge-improvement-plan.md"),
+    ]
+    combined = "\n".join(path.read_text(encoding="utf-8") for path in documents)
+
+    assert "Codex 主线路" in combined
+    assert "Online 备用" in combined
+    assert "当前预算 profile" in combined or "模型预算 profile" in combined
+    assert "回退 `7000`" in combined
+    assert "Online 首次返回非法结果" not in combined
+    assert "下一项模型请求重新优先 Online" not in combined
+    assert "交给 Codex 一次" not in combined
+    assert "Codex 备用" not in combined
+    assert "model_input_batch_target_tokens=7000" not in combined
+    assert "当前实现使用 7000" not in combined
+    assert "当前生产配置目标是 7000" not in combined
 
 
 def test_current_docs_describe_python_computed_collected_evidence() -> None:

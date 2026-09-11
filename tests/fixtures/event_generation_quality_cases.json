@@ -1,0 +1,141 @@
+{
+  "schema_version": 1,
+  "dataset_version": "event-generation-quality-v1",
+  "benchmark_non_fact_context": {
+    "repeat": 14,
+    "line_template": "【脱敏评测输入占位】来源{source_id}的第{index}段占位值为{payload}；该行不是事项事实，不得写入标题、正文或判断事项关系。"
+  },
+  "benchmark_source_metadata": {
+    "retention_detail": "该脱敏来源明确提供了具体业务对象、处理动作或结果，满足评测输入的保留要求。"
+  },
+  "cases": [
+    {
+      "case_id": "personal_service_renewal",
+      "mode": "personal",
+      "category": "complete_item",
+      "source_items": [
+        {"source_id": "p1-f1", "text": "业务组核对本月到期服务并排除已经终止的项目。"},
+        {"source_id": "p1-f2", "text": "续签申请已经提交，财务组计划次日付款。"},
+        {"source_id": "p1-f3", "text": "供应方确认付款时间满足到期要求，完成后回传凭证。"}
+      ],
+      "expected_groups": [["p1-f1", "p1-f2", "p1-f3"]],
+      "forbidden_title_fragments": ["日常工作"],
+      "forbidden_content_fragments": []
+    },
+    {
+      "case_id": "personal_configuration_rollout",
+      "mode": "personal",
+      "category": "complete_item",
+      "source_items": [
+        {"source_id": "p2-f1", "text": "区域A确认旧配置关闭范围。"},
+        {"source_id": "p2-f2", "text": "业务方确认替换方案按全区域执行。"},
+        {"source_id": "p2-f3", "text": "替换完成后补充特殊配置并完成上线。"}
+      ],
+      "expected_groups": [["p2-f1", "p2-f2", "p2-f3"]],
+      "forbidden_title_fragments": ["配置工作"],
+      "forbidden_content_fragments": []
+    },
+    {
+      "case_id": "personal_data_difference",
+      "mode": "personal",
+      "category": "complete_item",
+      "source_items": [
+        {"source_id": "p3-f1", "text": "对账时发现申请金额与统计金额不一致。"},
+        {"source_id": "p3-f2", "text": "研发组排查基础单价和关联费用数据。"},
+        {"source_id": "p3-f3", "text": "确认关联费用未同步修改是差异原因。"}
+      ],
+      "expected_groups": [["p3-f1", "p3-f2", "p3-f3"]],
+      "forbidden_title_fragments": ["数据处理"],
+      "forbidden_content_fragments": []
+    },
+    {
+      "case_id": "personal_metric_delivery",
+      "mode": "personal",
+      "category": "complete_item",
+      "source_items": [
+        {"source_id": "p4-f1", "text": "确认区域A和区域B的统计范围。"},
+        {"source_id": "p4-f2", "text": "统计口径调整为排除测试数据。"},
+        {"source_id": "p4-f3", "text": "交付区域明细，并标明仍需确认归属的数据。"}
+      ],
+      "expected_groups": [["p4-f1", "p4-f2", "p4-f3"]],
+      "forbidden_title_fragments": ["统计工作"],
+      "forbidden_content_fragments": []
+    },
+    {
+      "case_id": "personal_avoid_action_split",
+      "mode": "personal",
+      "category": "avoid_split",
+      "source_items": [
+        {"source_id": "p5-f1", "text": "同一项目验收报告先完成范围核对。"},
+        {"source_id": "p5-f2", "text": "根据验收报告核对结果提交修改申请。"},
+        {"source_id": "p5-f3", "text": "验收报告修改后完成复核和交付。"}
+      ],
+      "expected_groups": [["p5-f1", "p5-f2", "p5-f3"]],
+      "forbidden_title_fragments": [],
+      "forbidden_content_fragments": []
+    },
+    {
+      "case_id": "personal_avoid_unrelated_merge",
+      "mode": "personal",
+      "category": "avoid_merge",
+      "source_items": [
+        {"source_id": "p6-f1", "text": "确认合作协议签署方案。"},
+        {"source_id": "p6-f2", "text": "核对另一份月度报表的数据口径。"}
+      ],
+      "expected_groups": [["p6-f1"], ["p6-f2"]],
+      "forbidden_title_fragments": ["业务工作推进"],
+      "forbidden_content_fragments": []
+    },
+    {
+      "case_id": "collected_issue_resolution",
+      "mode": "collected",
+      "category": "complete_item",
+      "source_items": [
+        {"source_id": "c1-e1", "text": "业务组发现结算结果与统计结果不一致，并提供该差异的数据范围。"},
+        {"source_id": "c1-e2", "text": "研发组针对该结算与统计差异排查，确认字段映射未同步更新。"},
+        {"source_id": "c1-e3", "text": "业务组围绕该字段映射差异确认修订方案，并复核修订后结算与统计结果一致。"}
+      ],
+      "expected_groups": [["c1-e1", "c1-e2", "c1-e3"]],
+      "forbidden_title_fragments": ["团队协作"],
+      "forbidden_content_fragments": []
+    },
+    {
+      "case_id": "collected_report_delivery",
+      "mode": "collected",
+      "category": "complete_item",
+      "source_items": [
+        {"source_id": "c2-e1", "text": "数据组为区域A和区域B月报准备月度明细。"},
+        {"source_id": "c2-e2", "text": "业务组核对上述两区域月度明细，确认排除测试数据并调整地区简称。"},
+        {"source_id": "c2-e3", "text": "报告负责人按该口径完成区域A、区域B月报修改并交付最终版本。"}
+      ],
+      "expected_groups": [["c2-e1", "c2-e2", "c2-e3"]],
+      "forbidden_title_fragments": ["部门月度工作"],
+      "forbidden_content_fragments": []
+    },
+    {
+      "case_id": "collected_avoid_person_list",
+      "mode": "collected",
+      "category": "avoid_person_list",
+      "source_items": [
+        {"source_id": "c3-e1", "text": "人员甲发现库存数据差异。"},
+        {"source_id": "c3-e2", "text": "人员乙完成该库存差异的原因排查。"},
+        {"source_id": "c3-e3", "text": "人员丙完成该库存差异的修订验证。"}
+      ],
+      "expected_groups": [["c3-e1", "c3-e2", "c3-e3"]],
+      "forbidden_title_fragments": [],
+      "forbidden_content_fragments": ["人员甲：", "人员乙：", "人员丙："]
+    },
+    {
+      "case_id": "collected_avoid_wrong_merge",
+      "mode": "collected",
+      "category": "avoid_merge",
+      "source_items": [
+        {"source_id": "c4-e1", "text": "研发组完成区域A配置上线。"},
+        {"source_id": "c4-e2", "text": "业务组完成月度报表核对。"}
+      ],
+      "expected_groups": [["c4-e1"], ["c4-e2"]],
+      "forbidden_title_fragments": ["部门重点工作推进"],
+      "forbidden_content_fragments": []
+    }
+  ]
+}

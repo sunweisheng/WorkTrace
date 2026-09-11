@@ -175,15 +175,19 @@ codex_estimate = estimate(codex_prepared_prompt + 同一 parameters output-schem
 input_estimated_tokens = max(online_estimate, codex_estimate)
 ```
 
-Python 以 `model_input_batch_target_tokens=7000` 为分批目标。每尝试加入一个候选都会重建拟提交批次的 prompt、Function 和编号清单后重新估算；组批和实际调用前使用同一个生产函数。不可继续拆分的最小输入仍超过目标时标记后发送；校验反馈导致当前重试超限时标记 `oversized_retry` 后发送。该值是模型输入估算目标，不是 HTTP 字节数或服务端上下文上限，服务端精确 token 只用于事后核对。
+Python 从 `config/model_input_budget.json` 按仓库本地 `.env` 的主模型和备用模型组合读取 `model_input_batch_target_tokens`；没有匹配项或配置文件不存在时保守回退 `7000`。个人日报和多人汇总共用该目标，备用线路不重新分批。每尝试加入一个候选都会重建拟提交批次的 prompt、Function 和编号清单后重新估算；组批和实际调用前使用同一个生产函数。不可继续拆分的最小输入仍超过目标时标记后发送；校验反馈导致当前重试超限时标记 `oversized_retry` 后发送。该值是模型输入估算目标，不是 HTTP 字节数或服务端上下文上限，服务端精确 token 只用于事后核对。
+
+`config/event_generation.json` 提供团队汇总的共同事实规则、完整事项边界、摘要模板、正式正文模板和脱敏正反例。案例只用于学习边界和表达结构，不得复制其中的人员、对象、数字或结论。模板和案例随最终 prompt 一起进入上述完整输入估算，不新增字符阈值；调用次数、输入长度、重试和耗时继续由 Python 统计。
 
 第一阶段发送内部草稿 ID、来源人员、来源负责人、标题、具体对象、动作、完整事件正文和当前证据编号清单。新模型输出只返回 `semantic_reasons`、`reason_detail`、逐条覆盖全部组员的 `member_connections` 和 `risk_flags`，不再返回 `evidence_relation_ids`，也不能直接返回 `shared_message`、`shared_file` 或内部 `group_reason`。`member_connections` 必须与组内 `draft_ids` 完全一致，不能遗漏、重复、引用组外编号或留空。多成员组在同一次调用中同时返回候选标题、候选内容和候选对象，单成员组由 Python 保留原事件。
+
+初步分组和完整复核只接收团队事项边界和 `summary_title`、`summary_content`、`summary_object_hint` 简短模板，不发送完整案例。每个重新组合后的摘要必须覆盖新组全部成员，围绕共同对象和整体进展表达，不按来源人员逐条罗列。不同动作类型不能单独证明应拆分；人员、部门、地区、文件或阶段相同或不同也不能直接决定边界。决定拆分时必须分别说明两侧可以独立汇报的目标或结果，拿不准时仍保持分开。
 
 模型返回分组后，Python 只保留全部端点都位于当前组内的消息和文件关系，再按证据目录顺序选择能够连接全部成员的最小关系集合；消息和文件可以共同组成连接链。完整连接成功后，Python 恢复内部 `shared_message`、`shared_file` 和兼容旧 trace 的 `evidence_relation_ids`。局部证据只写入 `evidence_audit`，不恢复为全组合并依据。没有完整证据且没有合法语义理由时返回 `merge_reason_missing`；有局部证据但覆盖不足时返回 `evidence_does_not_cover_group`，并列出关系端点和未覆盖编号。
 
 `config/event_grouping.json` 是个人与多人分组语义说明的共同来源。每个 `group_reason_definitions` 项除描述和关系类型外，还配置 `acceptance_rules` 与 `rejection_rules`：`same_object` 要求唯一共同对象和逐事件直接关系；`continuous_action` 要求前一结果明确成为后一动作的输入、条件或后续动作；`same_deliverable_batch` 覆盖同一批配套产物、同一交付物的多个版本，以及不同时间、状态、地区或阶段形成但需要统一汇报或交付的连续产物，并说明每项在整体中的角色。共同消息或共同文件必须由 Python 计算并连接全组；同一会话不能单独支持合并。具体中文判断规则不复制到 Python。`config/collected_merge.json` 只保留多人高风险复核开关和阈值。
 
-初步分组后，`collected_group_discovery` 把当前 scope 全部组的 `group_id` 和组合标题作为一个请求提交。组合标题由 Python 按稳定顺序覆盖初步组全部来源事件标题，避免候选摘要的主标题掩盖其他成员；请求不发送日期、正文、对象、附件、人员、来源信息或其他分组阶段的业务正反例，字段仍严格只有 `group_id` 和 `title`。模型必须逐组比较全部标题，并按输入顺序为每个组恰好返回一次 `group_checks`，列出可能相关的其他编号和非空理由；Python 校验全量覆盖、编号、自关联和重复后，将重叠关系形成可包含两个或更多组的候选。协议不包含特定日期、人员、业务关键词或固定长度片段。超过 7000 token 仍整体提交。Codex 重试和当前请求 Online 备用后仍失败时，按没有标题候选继续并记录 warning。
+初步分组后，`collected_group_discovery` 把当前 scope 全部组的 `group_id` 和组合标题作为一个请求提交。组合标题由 Python 按稳定顺序覆盖初步组全部来源事件标题，避免候选摘要的主标题掩盖其他成员；请求不发送日期、正文、对象、附件、人员、来源信息或其他分组阶段的业务正反例，字段仍严格只有 `group_id` 和 `title`。模型必须逐组比较全部标题，并按输入顺序为每个组恰好返回一次 `group_checks`，列出可能相关的其他编号和非空理由；Python 校验全量覆盖、编号、自关联和重复后，将重叠关系形成可包含两个或更多组的候选。协议不包含特定日期、人员、业务关键词或固定长度片段。超过当前预算 profile 仍整体提交。Codex 重试和当前请求 Online 备用后仍失败时，按没有标题候选继续并记录 warning。
 
 标题候选、共同消息、共同文件、同一附件基础名称、同日会话候选和下列高风险条件共同建立检查范围。配置文件 `config/collected_merge.json` 的默认高风险条件是：
 
@@ -198,6 +202,10 @@ Python 以 `model_input_batch_target_tokens=7000` 为分批目标。每尝试加
 完整复核不预设方向，可以拆开初步组并跨组重新组合。标题发现的候选范围可以包含任意多个组，但其中每条实际组间连接单独编号，使同一范围能够分别确认或否定不同关系。每个保留的多事件子组必须有合法语义理由或 Python 自动确定的完整共同证据，并分别提供自己的 `reason_detail` 和 `member_connections`；单条组不要求这些字段。模型先逐条判断 `relation_resolutions`，再统一处理重叠关系并形成最终分组，不得用初步组或预设最终组反向解释关系：成立时 `connected_draft_ids` 只填写证明关系成立所需的最少成员，直接两端关系必须包含左右两端，且所有关联成员必须真实进入同一最终组；决定分开时 `connected_draft_ids` 可以为空，也可以填写关系两侧代表成员，填写后代表成员必须位于不同最终组，并必须给出具体业务差异和关系各侧的 `evidence_draft_ids`。相同 `event_id` 的不可拆成员块若被拆开、关系遗漏或重复、来源覆盖错误、缺少合并依据或拆分证据时，只重试当前检查范围，并把具体错误反馈给模型。Codex 局部重试和当前请求 Online 备用后仍非法时，保留复核前分组并记录 warning，不影响其他检查范围或整次部门汇总。
 
 第二阶段展开回原始事件，按已确认组发送完整内容并生成正式汇总。模型必须返回与锁定组完全一致的 `covered_draft_ids`，并用 `fact_items.source_draft_ids` 标明关键事实来源。Python 检查整批 draft 分配、锁定组、正文覆盖和事实来源；失败时只重试当前内容组，重试后仍不完整则不写文件。单条组直接保留，不增加模型调用。
+
+正式正文阶段接收团队完整模板、两类脱敏正例和两类反例。标题围绕共同业务对象和整体结果，正文按触发、范围、协作动作、决定、结果和风险组织。责任分工确有业务价值时可以保留姓名或角色，但不能退化为逐人员工作清单。负责人来源优先、明确冲突标记、敏感过滤、人工修改来源和来源覆盖校验保持不变。
+
+该优化不新增团队 Markdown 公开字段，不要求固定输出“下一步”、责任人或目标时间，不强制缺失信息显示“待确认”，也不建设跨日事项状态库。来源已有的待办、责任人、时间和当前状态仍可作为事项事实自然写入正文。
 
 - 候选发现完整输入估算不超过 `model_input_batch_target_tokens` 时一次处理
 - 超过统一 token 上限时按消息、文件和会话关系集合优先分批，各批初步组由 Python 直接合并；不构造候选摘要，也不做摘要再次分组
@@ -284,6 +292,7 @@ WORKTRACE_COLLECTED_MERGE_TRACE_ROOT=data/debug/collected_merge
 - `prompt_estimated_tokens`、`online_input_estimated_tokens`、`codex_input_estimated_tokens`、最终 `input_estimated_tokens`、分批目标、超限原因、`actual_input_tokens` 和估算差值
 - 每个来源的完整/实际发送字符数、是否缩短及候选摘要来源
 - 来源文件/事件指标
+- `event_generation_debug`：候选分组和完整复核记录摘要模板且不带案例，正式正文记录完整模板且包含脱敏案例；只保存配置方式、版本和数量，不复制规则或案例正文
 - 每个候选和复核 step 的 `grouping_protocol_version: 2`，以及阶段类型、Function 名、去敏定义、证据编号清单、完整 `input_events` 和 `deterministic_groups`；`candidate_discovery_context` 只作为候选上下文
 - 候选分组解析前的 `raw_function_payload`，用于定位被解析器丢弃的非法字段结构；不额外复制原始聊天
 - 原始 group 和字段缺失统计
@@ -301,7 +310,9 @@ WORKTRACE_COLLECTED_MERGE_TRACE_ROOT=data/debug/collected_merge
 - 最终保留事件
 - 每个 step 的阶段、状态、批次、尝试次数、批次加入/换批依据、重试原因和错误摘要；Python 校验失败标记为 `validation_failed`，并进入 `failed_step_indexes`
 
-`summary.json` 和 `summary.md` 还包含 Python 计算的 `quality_summary` 与 `stage_timing_summary`。前者记录输入/过滤后/输出事件数、来源覆盖、标题发现请求、逐组检查与候选、跨组合并、初步组拆分、关系成立、证据分开、复核失败、内容重写失败、正文重试和提示缩短；后者记录各阶段墙钟耗时和请求累计耗时。比例只用于人工检查，不作为强制减少门槛；一个人部门或当天没有重复事项时，输出事件数允许等于输入事件数。并发请求耗时不能相加后当作实际运行耗时。
+`summary.json` 和 `summary.md` 还包含 `event_generation_summary`、Python 计算的 `quality_summary` 与 `stage_timing_summary`。事件生成摘要只记录配置是否加载、版本以及规则/模板/案例数量；质量摘要记录输入/过滤后/输出事件数、来源覆盖、标题发现请求、逐组检查与候选、跨组合并、初步组拆分、关系成立、证据分开、复核失败、内容重写失败、正文重试和提示缩短；耗时摘要记录各阶段墙钟耗时和请求累计耗时。比例只用于人工检查，不作为强制减少门槛；一个人部门或当天没有重复事项时，输出事件数允许等于输入事件数。并发请求耗时不能相加后当作实际运行耗时。
+
+输入阈值通过 `scripts/benchmark_model_input_budget.py` 评测 `7000、12000、16000、20000、24000`。主线路每档重复两次；备用线路只验证 `7000` 旧基线和 `20000` 重点候选，各一次，不测试中间档位。脱敏数据仍同时覆盖个人和团队，使用唯一且明确不是事项事实的占位上下文模拟长输入，因此低频备用线路的兼容性、固定格式、来源覆盖和事项边界仍有检查。脚本默认不读飞书、不送达、不上传、不生成诊断报告；已有完整主线路结果时可用 `--reuse-primary-existing` 只运行备用线路。盲审完成后必须用 `--reuse-existing` 读取原结果，不能重新调用模型后套用旧评分。两条线路的固定格式、来源覆盖、边界错误和人工盲审均不低于 7000 基线后，必须先完成只使用临时数据和缓存目录的日期隔离验证；隔离验证成功后才可把结果写入当前模型 profile，正式 Markdown 不会被覆盖。
 
 每个 scope 写入 Markdown 后，默认由飞书 CLI 发送给当前登录用户。把 `config/self_delivery.json` 的 `enabled` 改为 `false` 可同时关闭个人日报和多人汇总的这一步；此时不会调用飞书 CLI，`self_delivery_status` 返回 `disabled`，不影响 Markdown、统计或其他合并流程。显式使用 `merge-collected --owner-name 姓名 --offline` 时，会同时跳过飞书身份查询和自送达，适用于未安装飞书 CLI 的服务器；离线模式仍请求在线模型完成事件合并。
 
@@ -338,4 +349,5 @@ WORKTRACE_COLLECTED_MERGE_TRACE_ROOT=data/debug/collected_merge
 - `src/worktrace/stores/markdown.py`
 - `src/worktrace/delivery/feishu_cli.py`
 - `config/event_grouping.json`
+- `config/event_generation.json`
 - `config/collected_merge.json`

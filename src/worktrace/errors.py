@@ -18,6 +18,10 @@ class AnalyzerProtocolError(WorkTraceError):
     """Raised when analyzer input/output violates protocol constraints."""
 
 
+class CodexProtocolViolationError(AnalyzerProtocolError):
+    """Raised when Codex emits a tool or another unsupported protocol item."""
+
+
 class PersonalGroupingValidationError(AnalyzerProtocolError):
     """Raised when a personal grouping result fails its task contract."""
 

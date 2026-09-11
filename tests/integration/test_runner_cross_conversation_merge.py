@@ -846,6 +846,17 @@ def test_new_day_grouping_trace_contains_only_new_artifacts(tmp_path: Path) -> N
         "personal_group_render.json",
         "resolved_groups.json",
     }
+    input_payload = json.loads(
+        (directory / "input.json").read_text(encoding="utf-8")
+    )
+    assert input_payload["event_generation_summary"]["config_loaded"] is False
+    render_payload = json.loads(
+        (directory / "personal_group_render.json").read_text(encoding="utf-8")
+    )
+    assert render_payload["event_generation_debug"]["guidance_mode"] == (
+        "personal_full"
+    )
+    assert render_payload["event_generation_debug"]["examples_included"] is True
     assert "workstream" not in "\n".join(
         path.read_text(encoding="utf-8") for path in directory.iterdir()
     ).lower()

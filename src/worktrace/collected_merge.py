@@ -13,7 +13,13 @@ from threading import Event, Lock
 from time import perf_counter
 from typing import Any, Sequence
 
-from .config import RetentionPolicyConfig, RuntimeConfig
+from .config import (
+    RetentionPolicyConfig,
+    RuntimeConfig,
+    event_generation_debug_metadata,
+    event_generation_debug_summary,
+    model_input_budget_debug_summary,
+)
 from .constants import DailyRunStatus
 from .delivery.feishu_cli import FeishuCliSelfDelivery
 from .errors import (
@@ -115,6 +121,33 @@ COLLECTED_REQUEST_KIND_STAGES = {
     "collected_group_review": "high_risk_review",
     "collected_event_merge": "content_merge",
 }
+
+
+def _collected_event_generation_debug_metadata(
+    config: RuntimeConfig,
+    *,
+    stage: str,
+) -> dict[str, object]:
+    if stage.startswith("candidate_") or stage == "high_risk_review":
+        return event_generation_debug_metadata(
+            config.event_generation,
+            guidance_mode="collected_summary_without_examples",
+            template_mode="summary",
+            examples_included=False,
+        )
+    if stage == "content_merge":
+        return event_generation_debug_metadata(
+            config.event_generation,
+            guidance_mode="collected_full",
+            template_mode="full",
+            examples_included=True,
+        )
+    return event_generation_debug_metadata(
+        config.event_generation,
+        guidance_mode="not_applicable",
+        template_mode="none",
+        examples_included=False,
+    )
 
 
 @dataclass(frozen=True)
@@ -4237,6 +4270,10 @@ class CollectedMergeRunner:
             "rolling_step_index": rolling_step_index,
             "attempt_index": attempt_index,
             "retry_reason": retry_reason,
+            "event_generation_debug": _collected_event_generation_debug_metadata(
+                self.config,
+                stage=stage,
+            ),
             "prompt_chars": len(prompt),
             **estimates,
             "final_grouping_input_estimated_tokens": input_estimated_tokens,
@@ -4673,6 +4710,12 @@ class CollectedMergeRunner:
             "quality_summary": quality_summary.to_dict(),
             "collected_group_discovery": self._collected_group_discovery_artifact,
             "collected_group_review": self._collected_group_review_artifact,
+            "event_generation_summary": event_generation_debug_summary(
+                self.config.event_generation
+            ),
+            "model_input_budget": model_input_budget_debug_summary(
+                self.config.model_input_budget_selection
+            ),
             "llm_usage_summary": self._collected_merge_llm_usage_summary(),
             "stage_timing_summary": self._collected_stage_timing_summary(),
             "source_files": self._collected_merge_source_audit,
@@ -5271,6 +5314,7 @@ def collected_merge_text_metrics(rows: list[dict[str, str]]) -> dict[str, Any]:
 def render_collected_merge_trace_summary(summary: dict[str, Any]) -> str:
     quality = summary.get("quality_summary", {})
     timings = summary.get("stage_timing_summary", {})
+    generation = summary.get("event_generation_summary", {})
     lines = [
         f"# Collected Merge Trace · {summary['target_date']}",
         "",
@@ -5283,6 +5327,17 @@ def render_collected_merge_trace_summary(summary: dict[str, Any]) -> str:
         f"- Source events: {summary['source_event_count']}",
         f"- Merged events: {summary['merged_event_count']}",
         f"- Output: `{summary['output_path']}`",
+        "",
+        "## Event Generation Config",
+        "",
+        f"- Loaded: {str(bool(generation.get('config_loaded', False))).lower()}",
+        f"- Schema version: {generation.get('schema_version', '')}",
+        "- Personal examples: "
+        f"{generation.get('personal_positive_example_count', 0)} positive, "
+        f"{generation.get('personal_negative_example_count', 0)} negative",
+        "- Collected examples: "
+        f"{generation.get('collected_positive_example_count', 0)} positive, "
+        f"{generation.get('collected_negative_example_count', 0)} negative",
         "",
         "## Quality Summary",
         "",

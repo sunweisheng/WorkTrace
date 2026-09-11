@@ -16,6 +16,7 @@ from typing import Any, Callable, ClassVar, Sequence
 from ..config import RuntimeConfig, load_codex_llm_settings
 from ..errors import (
     AnalyzerProtocolError,
+    CodexProtocolViolationError,
     ModelInputLimitError,
     RetryableAnalyzerProtocolError,
 )
@@ -156,7 +157,7 @@ def validate_codex_jsonl_events(stdout: str) -> tuple[dict[str, object], ...]:
         if isinstance(item, dict):
             item_type = item.get("type")
             if not isinstance(item_type, str) or item_type not in _CODEX_SAFE_ITEM_TYPES:
-                raise AnalyzerProtocolError(
+                raise CodexProtocolViolationError(
                     "Codex protocol violation: tool or unsupported item was emitted "
                     f"(item_type={item_type or 'missing'})."
                 )

@@ -53,6 +53,8 @@ Online 保持 `WORKTRACE_LLM_REASONING_EFFORT=none`、`WORKTRACE_LLM_STREAM=fals
 
 固定结构任务都由 `FunctionCallSpec` 提供同一份 `name`、`description`、`strict`、动态 `parameters`、典型参数、结构示例和最终自检。函数名称、描述、`strict:true` 与 Codex 提交规则来自 `config/llm_function_contracts.json`，不在 Python 中重复硬编码。
 
+部分兼容 Responses API 的 Online 服务不接受 `uniqueItems`，也会拒绝“数组最小数量大于当前动态枚举数量”的不可满足约束。程序只在 Online 发送前生成兼容副本并移除这两类限制；原始 Function schema、Codex `--output-schema` 和 Python 的重复、数量、证据及来源覆盖校验保持不变。输入估算使用实际发送的 Online 兼容副本，并继续与 Codex 完整契约估算取较大值。
+
 | 线路 | 传输方式 | 严格保证 |
 | --- | --- | --- |
 | Online 备用 | 原生 Function Calling：`tools`、强制 `tool_choice`、`parallel_tool_calls=false` | `strict:true`；只接受一次预期 Function 调用 |
@@ -74,7 +76,7 @@ codex_estimate = estimate(codex_prepared_prompt + 同一 parameters output-schem
 input_estimated_tokens = max(online_estimate, codex_estimate)
 ```
 
-`model_input_batch_target_tokens=7000` 是输入估算目标，不是 HTTP 字节数或服务端上下文上限。局部重试加入校验错误后若超限，会标记为 `oversized_retry` 后发送。
+`model_input_batch_target_tokens` 从 `config/model_input_budget.json` 中与当前主模型、备用模型精确匹配的预算 profile 读取；配置不存在或没有匹配项时回退 `7000`。它是输入估算目标，不是 HTTP 字节数或服务端上下文上限。局部重试加入校验错误后若超限，会标记为 `oversized_retry` 后发送。
 
 ## 4. Codex 应用级隔离
 

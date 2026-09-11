@@ -138,9 +138,10 @@ sequenceDiagram
 2. 这些图片摘要直接进入话题切分与事件提炼输入；目标消息在当天窗口外时一并补入
 3. 其他图片仅在模型判断依赖图片内容时返回 `attachment_text` 请求
 4. 临时下载图片，并按字节上限筛选；按需图片另受数量上限限制
-5. 用当前在线模型、`detail=low` 生成工作内容摘要，并作为 `AttachmentTextBlock` 补回当前片段
+5. 先用 Codex 生成工作内容摘要；主线路重试后仍为空、产生工具调用等不合法结果，或命中 `config/image_summary.json` 配置的无法识别说法时，只把当前图片交给 Online 备用一次
+6. Online 备用使用 `detail=low`，成功摘要作为 `AttachmentTextBlock` 补回当前片段；备用不可用或仍失败时跳过该图
 
-同一消息图片在单次运行内复用摘要。失败只产生 warning，临时目录结束后删除，不阻断日报。
+同一消息图片在单次运行内复用摘要，最终失败也会在本次运行内记住，避免后续阶段重复调用。每张图最终失败只产生一次 warning，临时目录结束后删除，不阻断日报。正式流程和 `--debug-output` 使用同一摘要线路；调试账本额外记录触发切换的 `codex -> online`、原因和按请求类型计算的 `fallback_count`。
 
 ### 5.5 锚点窗口
 
@@ -168,6 +169,10 @@ sequenceDiagram
 ### 5.7 分段组批与候选提炼
 
 同一会话的多个片段由 `pack_segment_units(...)` 按完整模型输入估算打包成 `SegmentAnalysisBatch`。估算包含最终提示词、合法参数示例、重试反馈、`/no_think` 和动态 ID 枚举，并取 Online Function 定义与 `tool_choice`、Codex 完整 output-schema 两种输入估算的较大值。组合输入超过 `model_input_batch_target_tokens` 时继续拆分；单个片段仍超过目标时标记为 `oversized_singleton` 后发送。该估算覆盖调用前客户端已知输入；服务端精确 `usage.input_tokens` 只用于事后核对。每个结果必须按 `segment_id` 返回：
+
+事件写作和事项边界统一来自 `config/event_generation.json`。`build_segment_batch_analysis_prompt`、旧批量入口、单锚点、锚点批量和扩展上下文入口都接收共同事实规则、个人事项边界、字段模板及脱敏正反例。事项最小单位是同一具体对象和共同目标下可以独立汇报的完整业务事项；具有直接承接关系的不同动作组成一条，只有对象或目标不同、事实互不承接且能够分别汇报时才拆分。Python 只严格读取并传递配置，不通过新增业务关键词判断事项边界。
+
+`build_personal_fact_review_prompt` 只接收共同事实规则和个人字段模板，不重复案例；局部事实缺少证据时删除或改写局部表述，其余有证据的动作链仍保留。最终多成员组的 `build_personal_group_render_prompt` 使用完整模板和案例，将锁定成员改写为一条连贯事项，同时继续要求每个成员至少被一项正文事实证据覆盖。
 
 - `candidate_events`
 - `context_requests`
@@ -233,7 +238,7 @@ sequenceDiagram
 
 `config/retention_policy.json` 还定义了当前个人保留边界：会议时间、参会人和沟通渠道的确定不属于业务决策；单纯参会、调整日程、听取或查看附件、简单确认都不单独形成事件。同一段聊天中已经形成的业务结论、具体任务、问题风险或交付变化仍单独提炼。附件存在、文件名明确或确认已查看都不能单独作为保留理由；已明确要求提交总结、审核结论或修改结果等具体产出时，即使当天没有反馈结果，仍可作为后续业务动作。聊天已明确说明数据核查或问题排查已经完成，并给出排查对象和结论时，应记录排查事实；结论为正常且本人随后只回复收到，也不改变这一处理，不需要为了同消息中的配图或附件再读取正文。
 
-复核使用保留复核专用 Function，按统一完整输入估算以 `model_input_batch_target_tokens=7000` 为目标分批。组合候选超过目标时继续拆分，单个候选仍超过目标时标记后发送。模型明确拒绝输入时直接失败且不重试；模型漏回、重复返回、字段不完整、信号类型非法或证据消息不属于当前候选时，只重试当前批次，并把具体错误反馈给模型。重试反馈导致超限时标记 `oversized_retry` 后发送。重试后仍错误或发生技术失败时，整次运行返回 `failed`，不写 Markdown。正常语义删除不产生 warning。
+复核使用保留复核专用 Function，按统一完整输入估算以当前预算 profile 为目标分批。组合候选超过目标时继续拆分，单个候选仍超过目标时标记后发送。模型明确拒绝输入时直接失败且不重试；模型漏回、重复返回、字段不完整、信号类型非法或证据消息不属于当前候选时，只重试当前批次，并把具体错误反馈给模型。重试反馈导致超限时标记 `oversized_retry` 后发送。重试后仍错误或发生技术失败时，整次运行返回 `failed`，不写 Markdown。正常语义删除不产生 warning。
 
 `DailyRunResult.retention_review_summary` 由 Python 计算 `selected_candidate_count`、`reviewed_candidate_count`、`kept_candidate_count`、`dropped_routine_count`、`dropped_uncertain_count`、`review_batch_count` 和 `review_retry_count`，并随 CLI stdout JSON 输出。Markdown 不增加字段。
 
@@ -258,7 +263,7 @@ sequenceDiagram
 - Python 派生的标题、正文、动作、对象和保留依据必须被事实项完整覆盖
 - `supported=false` 时事实文字和证据必须为空，并提供被删除表述
 
-Python 不阅读聊天文字判断对比案例、责任人或流程建议，只接收模型的结构化结果并执行 `unsupported_policy`。原聊天无法同时支持非空标题、正文、具体对象和保留依据时删除；复核技术失败、漏回、重复、字段不完整、非法消息 ID 或覆盖不完整时只重试当前候选，重试反馈明确列出错误字段和 ID，重试后仍错误则整次个人日报 `failed` 且不写文件。不同候选通过线程池最多同时处理 `config/llm_retry.json` 配置的 3 条，同一候选内部的重试仍然串行。每个请求使用个人事实复核专用 Function，并按统一完整输入估算以 `model_input_batch_target_tokens=7000` 为分批目标；单个候选允许越过目标，模型明确拒绝输入时不重试。
+Python 不阅读聊天文字判断对比案例、责任人或流程建议，只接收模型的结构化结果并执行 `unsupported_policy`。原聊天无法同时支持非空标题、正文、具体对象和保留依据时删除；复核技术失败、漏回、重复、字段不完整、非法消息 ID 或覆盖不完整时只重试当前候选，重试反馈明确列出错误字段和 ID，重试后仍错误则整次个人日报 `failed` 且不写文件。不同候选通过线程池最多同时处理 `config/llm_retry.json` 配置的 3 条，同一候选内部的重试仍然串行。每个请求使用个人事实复核专用 Function，并按统一完整输入估算以当前预算 profile 为分批目标；单个候选允许越过目标，模型明确拒绝输入时不重试。
 
 `DailyRunResult.personal_fact_review_summary` 由 Python 计算选择数、复核数、确认数、修订数、无依据删除数、批次数和重试数。统计进入 CLI stdout JSON 和调试文件 `personal_fact_review.json`，不增加 Markdown 可见字段。
 
@@ -280,6 +285,12 @@ Python 不阅读聊天文字判断对比案例、责任人或流程建议，只�
 初始分组通过后，系统先用 `day_group_discovery` 单次提交全部稳定组编号和组合标题；组合标题由 Python 按稳定顺序覆盖初步组全部成员标题，请求字段仍只有 `group_id` 和 `title`，不发送日期、正文或其他分组阶段的正反例。模型必须逐组比较全部标题，并为每个输入组恰好返回一次 `group_checks`，列出其他可能相关组和非空理由；`parse_day_group_discovery_payload(...)` 校验全量覆盖、编号合法、无自关联和无重复后，将重叠的单向关系转换为 `candidate_groups`。这是一套与日期、人员和业务内容无关的协议，不使用 Python 关键词或固定长度片段判断。`pipeline/day_event_grouping.py` 再依据同一 `source_slice_id`、直接 reply/quote、共享来源消息、共享文件、同一附件基础名称和标题候选生成稳定关系编号；同一会话本身不触发。标题候选仍可形成不限组数的完整检查范围，但其中每条实际组间连接单独编号，允许同一范围内同时出现成立和分开的关系。重叠关系形成完整检查范围，最多按 `max_concurrent_day_group_review_requests=3` 并行复核。范围内原始候选可以拆开初步组并重新组合。模型先逐条判断每项 `relation_resolutions`，再统一处理重叠关系并形成最终组；不得先沿用初步组或预设最终组，再用组归属反向解释关系。分开时可返回两侧代表成员。每条关系只返回覆盖两侧判断所需的最少消息编号，Function 示例也由 Python 按关系两侧生成代表成员和代表证据，不按关系数重复整个范围的消息清单。`validate_day_group_review_result(...)` 校验候选完整唯一覆盖、关系逐条处理、成立成员确实同组、分开代表成员确实位于不同组和两侧证据完整。复核失败或持续非法时保留复核前分组并记录 warning。
 
 最终多成员组锁定后，`personal_group_render` 重新生成覆盖全部成员且带证据的标题、正文和具体对象；单成员组沿用原内容。内容重写失败时使用确定性拼接结果并记录 warning，不阻止个人 Markdown 写入和本人送达。
+
+模板和案例属于最终提示词输入，个人分段打包、事实复核、完整内容复核和多人汇总都通过原有完整输入估算自动计入其长度。超过当前预算 profile 时沿用现有分批、`oversized_singleton` 和 `oversized_retry` 记录，不增加新的字符阈值。输入长度、调用次数、重试和耗时继续由 Python 统计。
+
+脱敏评测使用 `tests/fixtures/event_generation_quality_cases.json` 的 10 个固定场景，不读取真实飞书消息，也不调用日报写入和自送达。`scripts/benchmark_model_input_budget.py` 依次评测 `7000、12000、16000、20000、24000`，主线路每档重复两次；备用线路只验证 `7000` 旧基线和 `20000` 重点候选，各一次，不测试中间档位。备用线路仍同时覆盖个人和团队模式，用于确认兼容性、固定格式、来源覆盖和事项边界没有退步，不承担完整多档性能测量。长输入通过每条来源唯一、明确不是事项事实的占位上下文构造，不重复业务正文。已有完整主线路结果时使用 `--reuse-primary-existing`，只重跑两档备用线路请求且每档一次；自动校验通过后生成不含线路、阈值和轮次的盲审材料。盲审完成阶段必须带 `--reuse-existing` 读取同一输出目录，不允许重新调用模型后使用旧评分。两条线路、个人和团队都不低于 7000 基线且人工事实准确性、完整性和可读性通过后，先执行显式日期隔离验证；隔离验证使用临时数据和缓存目录，关闭送达且删除临时 Markdown，不生成诊断报告。只有隔离验证成功，才写回 `config/model_input_budget.json` 的当前 profile。
+
+相同模型、服务、推理强度和流式设置下分别保存基线与优化结果后，`scripts/evaluate_event_generation_quality.py` 严格核对案例覆盖和运行设置，并由 Python 计算事件数、错误拆分对、错误合并对、来源事实覆盖、输入估算、调用次数、重试次数和耗时差异。事实准确性、事项完整性和可读性保持人工复核，脚本不通过关键词推断业务事实。
 
 个人分组规则和多人合并理由共同读取 `config/event_grouping.json`。Python 不读取聊天文字判断业务含义，只负责关系构造、结构校验、完整性和统计。最终分组物化为 `MergedEventDraft`，动作按消息顺序去重，参与方式按配置顺序去重。`DayGroupingSummary` 由 Python 计算候选数、初始/最终组数、标题发现、跨组合并、初步组拆分、关系处理、复核失败、内容重写、校验重试、Online 备用、拆单修补和 warning 数。
 
@@ -375,15 +386,19 @@ flowchart TD
     L --> M["最终过滤、写入、自发送"]
 ```
 
-多人合并初步分组默认发送来源 MD 中的完整事件正文。Python 根据共同消息、共同文件形成 `evidence_relations`，并在每个滚动批次或完整复核请求的内存中，仅把数量大于零的关系编号为 `MSG-xxx`、`FILE-xxx`；不创建临时目录或独立文件。同日会话候选放在 `candidate_discovery_context.same_conversation_comparison_sets` 中，并以 `member_refs` 明确表示仅供对照，只用于初步发现，不使用输出分组字段。初步分组完成后，`collected_group_discovery` 单次只发送全部组的编号和标题；超过 7000 token 仍整体提交，失败时按没有标题候选继续。
+多人合并初步分组默认发送来源 MD 中的完整事件正文。Python 根据共同消息、共同文件形成 `evidence_relations`，并在每个滚动批次或完整复核请求的内存中，仅把数量大于零的关系编号为 `MSG-xxx`、`FILE-xxx`；不创建临时目录或独立文件。同日会话候选放在 `candidate_discovery_context.same_conversation_comparison_sets` 中，并以 `member_refs` 明确表示仅供对照，只用于初步发现，不使用输出分组字段。初步分组完成后，`collected_group_discovery` 单次只发送全部组的编号和标题；超过当前预算 profile 仍整体提交，失败时按没有标题候选继续。
+
+多人初步分组和完整复核从 `config/event_generation.json` 读取共同事实规则、团队事项边界及三个简短摘要字段模板，不发送完整写作案例。`summary_title` 必须覆盖共同对象和整体进展，`summary_content` 必须覆盖新组全部成员对共同过程的作用，不按人员罗列。不同动作、人员、部门、地区、文件或阶段都不能单独成为拆分理由；拆分必须说明各侧可以独立汇报的目标或结果。成员锁定后的正式正文才接收团队完整字段模板及脱敏正反例，并继续遵守负责人来源优先、冲突标记、敏感过滤和来源覆盖规则。
 
 部门标题发现使用覆盖初步组全部来源事件标题的组合标题，请求仍严格只有编号和标题，并使用与个人相同的逐组完整 `group_checks` 协议。Python 校验后形成的标题候选、共同消息、共同文件、同一附件基础名称、同日会话候选和高风险条件统一建立检查范围。完整复核可以拆开初步组并跨组重新组合；相同 `event_id` 且内容相似的来源形成不可拆成员块，但可整体加入更大组。模型先逐条判断 `relation_resolutions`，再统一处理重叠关系并形成最终组；关系决定与最终分组必须一致，决定分开时用关系各侧证据说明差异。新模型输出不再返回 `evidence_relation_ids`；Python 在最终分组后排除端点位于组外的关系，再按稳定目录顺序选择能够连接全部成员的最小关系集合并恢复内部证据编号，局部证据只写审计。即使消息或文件集合完全相同也不能自动合并。
 
 `config/event_grouping.json` 是个人和多人合并中文判断规则的共同来源。每个 `group_reason_definitions` 项配置 `acceptance_rules` 和 `rejection_rules`；`same_deliverable_batch` 支持配套产物、同一交付物多个版本，以及不同时间、状态、地区或阶段形成但需要统一汇报或交付的连续产物。文件、版本、时期、状态、地区、项目归属、名称和格式只是上下文信息，任何单项都不能直接决定合并或拆分。Python 只读取规则供提示使用，并负责编号、证据连接、覆盖和标准化字段比较，不硬编码业务关键词。`member_connections` 必须与组内 `draft_ids` 完全一致，遗漏、重复、未知编号、空说明、重复组员和单成员合并组都作为结果质量错误，不静默修复。
 
+本次内容质量优化不改变 CLI、Function schema、公开 Markdown 字段、原子 `fact_items`、证据归属或送达方式，也不建设跨日事项状态库、事项身份、状态流转和历史时间线。模板不要求固定输出“下一步”、责任人、目标时间、背景、范围、状态或风险字段；来源中明确存在的信息可以自然写入正文，缺少时直接省略，不强制填“待确认”。
+
 单条候选如果没有进入跨组关系可直接保留。多条候选在来源事件达到 10 条、来源文件达到 4 个、跨批、Python 修复、同一会话连接多个无共同消息或文件的部分、无完整共同证据且对象不一致，或模型标记 `broad_object` 时加入检查范围。完整复核不预设保留或拆分方向；协议错误反馈包含错误组、关系编号、不可拆成员块、证据端点和缺失成员。结果质量错误固定走 Codex 首次请求、Codex 局部重试 1 次、Online 当前请求备用 1 次；最后仍非法时保留复核前分组并写 warning，不影响其他范围或整次部门汇总。正式内容仍按锁定组严格检查，失败时当前 scope 不写文件。
 
-候选、复核和正式正文使用各自任务专用 Function，并调用同一生产估算函数：`prepared_prompt` 包含最终提示词、当前合法参数示例、证据编号、重试错误反馈和 `/no_think`；`online_estimate` 再加入完整 Function 定义与 `tool_choice`，`codex_estimate` 再加入完整 output-schema，最终取两者较大值。估算器区分 ASCII 和非 ASCII 字符，并为混合中文 JSON、动态编号及协议固定开销留出余量。`model_input_batch_target_tokens=7000` 是模型输入估算目标，不是 HTTP 字节数或服务端上下文上限。每尝试加入一个候选都重新构建并估算；复核超过目标时按关系分批，单条正文仍过长时复用正文切片和分层摘要；不可继续拆分的最小输入允许发送。校验错误只重试当前请求，加入具体错误后重新估算，超限时标记 `oversized_retry` 后发送。正式内容必须返回完整 `covered_draft_ids` 和 `fact_items`；Python 检查整批 draft 分配、锁定组和事实来源，模型明确拒绝输入或结果仍不完整时当前 scope 失败且不写文件。若 scope 目录已有同名历史输出，失败不会删除或覆盖旧文件，是否成功必须以本次 CLI JSON 为准。调试 step 在 Python 校验失败时标记 `validation_failed`，`failed_step_indexes` 同时包含调用失败和校验失败；候选分组还保存解析前的 `raw_function_payload`，用于检查被解析器丢弃的非法结构。
+候选、复核和正式正文使用各自任务专用 Function，并调用同一生产估算函数：`prepared_prompt` 包含最终提示词、当前合法参数示例、证据编号、重试错误反馈和 `/no_think`；`online_estimate` 再加入完整 Function 定义与 `tool_choice`，`codex_estimate` 再加入完整 output-schema，最终取两者较大值。估算器区分 ASCII 和非 ASCII 字符，并为混合中文 JSON、动态编号及协议固定开销留出余量。`model_input_batch_target_tokens` 从当前模型预算 profile 读取，配置不存在或主备模型组合未匹配时回退 `7000`；它是输入估算目标，不是 HTTP 字节数或服务端上下文上限。每尝试加入一个候选都重新构建并估算；复核超过目标时按关系分批，单条正文仍过长时复用正文切片和分层摘要；不可继续拆分的最小输入允许发送。校验错误只重试当前请求，加入具体错误后重新估算，超限时标记 `oversized_retry` 后发送。正式内容必须返回完整 `covered_draft_ids` 和 `fact_items`；Python 检查整批 draft 分配、锁定组和事实来源，模型明确拒绝输入或结果仍不完整时当前 scope 失败且不写文件。若 scope 目录已有同名历史输出，失败不会删除或覆盖旧文件，是否成功必须以本次 CLI JSON 为准。调试 step 在 Python 校验失败时标记 `validation_failed`，`failed_step_indexes` 同时包含调用失败和校验失败；候选分组还保存解析前的 `raw_function_payload`，用于检查被解析器丢弃的非法结构。
 
 部门负责人和中心负责人复用同一个 `merge-collected` 命令，当前代码没有自动的层级编排。第一级由部门负责人收集本部门个人 MD 后运行；第二级由中心负责人收集各部门 `*-merged.md` 后再次运行。带会话证据的自动事件和带合法人工修订标记的事件都可参与，修订类型会逐级传递。个人 MD 和部门 MD 可以同时作为输入，程序不比较两者的 `source_event_ids`，不拦截，也不提示重复来源。输出名默认取当前飞书登录人姓名，显式传入 `--owner-name` 时才改为指定姓名；`--offline` 必须同时传入该姓名，并且不访问飞书 CLI。一级子目录是并列 scope，不会自动把子目录输出再送入根目录。上游汇总继续保留原始来源人员和事件 ID，并从 `*-merged.md` 文件名提取上一级负责人；中心公开输出显示 `来源负责人`，来源事件 ID 仅保存在隐藏信息中。
 
@@ -439,7 +454,7 @@ FailoverAnalyzer -> CodexAnalyzer -> Codex CLI
 - `anchor_batch_retry_limit = 1`
 - `conversation_segmentation_failure_threshold = 2`
 - `reaction_discovery_page_limit = 3`
-- `model_input_batch_target_tokens = 7000`（模型输入估算目标；统一取 Online 完整 Function 请求和 Codex 完整 output-schema 估算的较大值，最小输入可以越过目标，服务端精确 token 只用于事后核对）
+- `model_input_batch_target_tokens`（从 `config/model_input_budget.json` 的当前主备模型 profile 读取；未匹配时回退 `7000`。统一取 Online 完整 Function 请求和 Codex 完整 output-schema 估算的较大值，最小输入可以越过目标，服务端精确 token 只用于事后核对）
 - `max_anchor_gap_minutes = 10`
 - `max_unrelated_intervening_messages = 3`
 - `initial_context_messages_before = 2`
@@ -460,7 +475,7 @@ FailoverAnalyzer -> CodexAnalyzer -> Codex CLI
 
 ### 9.2 `.env` 与环境变量
 
-Codex 主线路必填项是仓库本地 `.env` 中的模型、推理强度和五项中转提供方设置：`WORKTRACE_CODEX_MODEL`、`WORKTRACE_CODEX_REASONING_EFFORT`、`WORKTRACE_CODEX_PROVIDER_ID`、`WORKTRACE_CODEX_PROVIDER_NAME`、`WORKTRACE_CODEX_PROVIDER_BASE_URL`、`WORKTRACE_CODEX_PROVIDER_WIRE_API`、`WORKTRACE_CODEX_PROVIDER_REQUIRES_OPENAI_AUTH`。它们不从进程环境变量或个人 Codex 配置继承；中转站 Key 继续由 Codex CLI 的认证存储提供，不写入 WorkTrace `.env`。Online 备用连接仍使用 `WORKTRACE_LLM_BASE_URL`、`WORKTRACE_LLM_MODEL`、`WORKTRACE_LLM_API_KEY` 三项，缺少或不合法时只禁用备用。Online 的 `WORKTRACE_LLM_REASONING_EFFORT` 必须为 `none`；timeout/stream/TLS 位于 `.env` 或进程环境变量，环境变量优先。两条线路共用 `WORKTRACE_LLM_TIMEOUT_SECONDS`（未配置时 180 秒）作为整次请求总时限；Codex 到点终止子进程，Online 到点关闭当前连接。可切换失败按 `primary_request_retry_limit=1` 只让当前请求再试 Codex 1 次，仍失败才由 Online 执行一次，下一请求继续 Codex 优先。请求级重试次数和 Codex 间隔都在 `config/llm_retry.json` 统一控制。`WORKTRACE_LLM_TLS_VERIFY` 只进入 Online preflight 和文本 analyzer 的 HTTP client；图片摘要的 Online 备用使用独立 SDK client。
+Codex 主线路必填项是仓库本地 `.env` 中的模型、推理强度和五项中转提供方设置：`WORKTRACE_CODEX_MODEL`、`WORKTRACE_CODEX_REASONING_EFFORT`、`WORKTRACE_CODEX_PROVIDER_ID`、`WORKTRACE_CODEX_PROVIDER_NAME`、`WORKTRACE_CODEX_PROVIDER_BASE_URL`、`WORKTRACE_CODEX_PROVIDER_WIRE_API`、`WORKTRACE_CODEX_PROVIDER_REQUIRES_OPENAI_AUTH`。它们不从进程环境变量或个人 Codex 配置继承；中转站 Key 继续由 Codex CLI 的认证存储提供，不写入 WorkTrace `.env`。Online 备用连接仍使用 `WORKTRACE_LLM_BASE_URL`、`WORKTRACE_LLM_MODEL`、`WORKTRACE_LLM_API_KEY` 三项，缺少或不合法时只禁用备用。Online 的 `WORKTRACE_LLM_REASONING_EFFORT` 必须为 `none`；timeout/stream/TLS 位于 `.env` 或进程环境变量，环境变量优先。两条线路共用 `WORKTRACE_LLM_TIMEOUT_SECONDS`（未配置时 180 秒）作为整次请求总时限；Codex 到点终止子进程，Online 到点关闭当前连接。可切换失败按 `primary_request_retry_limit=1` 只让当前请求再试 Codex 1 次，仍失败才由 Online 执行一次，下一请求继续 Codex 优先。图片摘要中的 Codex 工具调用等不合法结果和配置定义的无法识别回复直接触发当前图片的 Online 备用，不改变文字请求规则。请求级重试次数和 Codex 间隔都在 `config/llm_retry.json` 统一控制。`WORKTRACE_LLM_TLS_VERIFY` 只进入 Online preflight 和文本 analyzer 的 HTTP client；图片摘要的 Online 备用使用独立 SDK client。
 
 多人汇总 trace 和字段缺失重试也支持环境覆盖：
 
@@ -483,7 +498,9 @@ CLI 会开启 `collected_merge_trace_enabled`，并保留环境配置的 trace �
 - `config/llm_retry.json`：Codex 主线路请求级重试、分段/提炼/全日分组结果质量重试、Online 流式首次返回超时、Codex 间隔，以及切分、提炼、个人事实复核、个人完整内容复核和多人完整复核并发数
 - `config/llm_function_contracts.json`：Function 名称、描述、`strict` 和 Codex 单次参数 JSON 提交规则
 - `config/retention_policy.json`：个人保留提示、既有业务词、临时协作复核、个人事实复核条件和模型信号定义
+- `config/event_generation.json`：个人与团队共同写作规则、完整事项边界、字段模板和脱敏正反例
 - `config/event_grouping.json`：个人与多人共同分组说明，以及合并理由的描述、成立条件和排除条件
+- `config/model_input_budget.json`：主模型和备用模型组合对应的个人与团队共用输入分批目标及评测数据版本
 - `config/collected_merge.json`：多人汇总高风险复核开关、阈值和条件
 - `config/attachment_text.json`：文本附件限制
 - `config/image_summary.json`：图片摘要限制和 prompt
@@ -536,20 +553,24 @@ LLM 中间缓存指纹使用 schema v3；旧缓存不复用、不迁移，避免
 - `day_group_review_replay.json`：只重放失败检查范围时的线路、耗时、校验反馈、结果或放弃原因；不直接修改正式个人 MD
 - `resolved_groups.json`：稳定最终分组、warning 和 Python 计算的 `day_grouping_summary`
 - `retention_review.json`：临时协作复核每次尝试的候选摘要、证据范围、模型信号、覆盖统计和协议错误，不额外复制原聊天正文
-- `personal_fact_review.json`：个人事实复核的触发原因、修订前后字段、事实证据覆盖、Python 统计及每次失败返回，不额外复制原聊天正文
+- `personal_fact_review.json`：个人事实复核的触发原因、修订前后字段、事实证据覆盖、Python 统计及每次失败返回；`event_generation_debug` 标记完整个人模板且不带案例，不额外复制原聊天正文
 - `final_events.json`：过滤后的合并草稿、文件聚合和排序完成后的 `WorkEvent`、最终阶段 warning
 - `llm_calls.json`：每次调用的编号、严格契约、最终提示词、线路、模型、推理强度、原始结果、Python 校验、重试和切换原因；不保存密钥、认证文件、个人 Codex 配置、完整环境变量、图片内容或原始 Codex JSONL
-- `llm_usage.json`：每次文字调用的线路、成功或失败、切换方向、安全错误类别、耗时和输入字符数；Online 线路保留 Responses API token，Codex 明确标记 token 不可用
+- `llm_usage.json`：每次文字调用的线路、成功或失败、切换方向、安全错误类别、耗时和输入字符数；`event_generation_summary` 只记录事件生成配置是否加载、版本以及规则/模板/案例数量；Online 线路保留 Responses API token，Codex 明确标记 token 不可用
 
 segmentation 和 segment batch 的模型失败轮次保存输入、prompt 与 `failure.json`。批次拆分后的单片段回退保存在片段目录的 `fallback-01/`；分段耗尽后的直接提炼保存在 `_anchor_fallback/<conversation>/<anchor-key>/attempt-XX/`。成功轮次继续保存输出和校验结果，异常轮次不伪造模型输出。
 
-从仓库根目录执行 `python3 -m scripts.replay_day_with_trace --date YYYY-MM-DD`。脚本生成的 `summary.json` 通过 `review_artifact_summary` 汇总两类事实复核，通过 `day_grouping_artifact_summary` 汇总标题发现、完整内容复核、多成员内容重写和失败范围重放等分组文件，并优先从 CLI 结果、其次从 `resolved_groups.json` 读取 `day_grouping_summary`；旧 trace 缺少新文件时保持不可用，不补造数据。`llm_usage_summary` 从 `llm_usage.json` 汇总准确的调用类型、次数、token、累计耗时、平均耗时和最长单次耗时。
+从仓库根目录执行 `python3 -m scripts.replay_day_with_trace --date YYYY-MM-DD`。脚本生成的 `summary.json` 通过 `review_artifact_summary` 汇总两类事实复核，通过 `day_grouping_artifact_summary` 汇总标题发现、完整内容复核、多成员内容重写和失败范围重放等分组文件，并优先从 CLI 结果、其次从 `resolved_groups.json` 读取 `day_grouping_summary`；旧 trace 缺少新文件时保持不可用，不补造数据。`llm_usage_summary` 从 `llm_usage.json` 汇总准确的调用类型、次数、token、累计耗时、平均耗时和最长单次耗时，`event_generation_summary` 汇总事件生成配置状态。
 
 `scripts/report_replay_timings.py` 按 `request_kind` 展示调用统计；`analyze_segment_batch` 是并发提炼批次累计工作量，`analyze_segment_batches_all` 是事件提炼真实墙钟耗时；`personal_fact_review` 是并发候选累计工作量，`personal_fact_review_all` 是事实复核真实墙钟耗时。`stage_totals` 只为真实墙钟或非并发阶段计算运行时间占比，并发累计记录不计算占比。全日分组分别报告 `day_candidate_merge`、`day_group_discovery`、`day_group_review` 和 `personal_group_render` 的请求累计耗时，以及 `day_group_discovery_all`、`day_group_review_all`、`personal_group_render_all` 和 `merge_day_candidates` 墙钟耗时；`--baseline-trace-root` 由 Python 计算差值。
 
 `scripts/report_replay_call_inputs.py` 会把分段、提炼、分段失败后的直接提炼、两类事实复核、全日初始分组、标题发现、每次完整内容复核、多成员内容重写和失败范围重放写入 `call-input-report.md`；旧 trace 中的调用标为“旧版工作流归属”，新 trace 不生成该类别。在线模型成功响应数分为文字与图片摘要，调试文件保存的是文字调用尝试，两种口径不要求相等。`scripts/report_event_grouping_comparison.py` 读取基线与当前 trace，输出候选覆盖、分组数量、合并或拆分的候选关系、完整内容复核结果、理由和证据；它只做结构与关系统计，不判断业务语义。
 
-多人汇总 trace 写 `source-audit.json`、`collected_group_discovery.json`、`collected_group_review.json`、step JSON、`step-NNN-prompt.txt`、`summary.json` 和 `summary.md`。标题发现产物记录全部编号标题、估算、超限、尝试和结果；完整复核产物记录初步组、关系、不可拆成员块、跨组合并、初步组拆分和最终分组。候选 step 保存 `input_events` 与 `deterministic_groups`；复核 step 还保存与实际请求一致的关系 Function、输入估算、关系处理、`boundary_warnings` 和 Python 校验错误。旧 trace 缺少新节点时显示不可用，不补造数据。
+多人汇总 trace 写 `source-audit.json`、`collected_group_discovery.json`、`collected_group_review.json`、step JSON、`step-NNN-prompt.txt`、`summary.json` 和 `summary.md`。标题发现产物记录全部编号标题、估算、超限、尝试和结果；完整复核产物记录初步组、关系、不可拆成员块、跨组合并、初步组拆分和最终分组。候选分组和完整复核 step 的 `event_generation_debug` 记录 `collected_summary_without_examples`、摘要模板和不带案例；正式正文 step 记录 `collected_full`、完整模板和包含案例。`summary.json` 与 `summary.md` 记录配置是否加载、版本及各项数量。候选 step 保存 `input_events` 与 `deterministic_groups`；复核 step 还保存与实际请求一致的关系 Function、输入估算、关系处理、`boundary_warnings` 和 Python 校验错误。旧 trace 缺少新节点时显示不可用，不补造数据。
+
+首次个人提炼、失败备用入口和个人多成员组正文改写的调试 JSON 记录 `personal_full`；个人事实复核记录 `personal_review_without_examples`。调试阶段字段只保存提示配置方式和数量，不复制规则或案例正文。安全诊断报告也只把配置状态、版本和数量作为 Python 诊断事实，完整配置、提示词、原始模型返回和本机路径不会交给报告模型。
+
+安全诊断中的数量、输入估算、token、阶段耗时、重试、备用线路和送达状态均由 Python 计算。`success_with_warnings` 和普通 warning 不形成“运行过程失败”；只有运行未完成、输入无效或送达失败时才增加对应错误类别。token 全部未上报时显示“服务端未上报”，部分上报时同时记录已上报与未上报请求数。个人日报的来源获取、消息准备、候选生成、候选复核、全日分组、事件构建、Markdown 写入、本人送达和总耗时分别记录；阶段占比只使用墙钟耗时，请求累计耗时单独显示，没有细分阶段时不把总耗时本身标成慢阶段。诊断模型结论与 Python 事实冲突时只重试报告整理，仍冲突则输出 Python 基础报告；“无需产品改动”不能和具体改进建议同时出现。
 
 `scripts/replay_collected_review_failures.py` 可直接离线回放候选分组和完整复核 step。旧 trace 使用 `legacy_audit`，不补造初步组、关系或不可拆成员块；新 trace 使用 `current` 恢复 `initial_groups`、`strong_relations` 和 `atomic_groups` 并完整校验。脚本明确记录 `model_call_count: 0`，不调用模型，也不生成正式 Markdown。
 
@@ -557,7 +578,7 @@ segmentation 和 segment batch 的模型失败轮次保存输入、prompt 与 `f
 
 ## 13. 已知边界
 
-- 图片摘要依赖当前模型支持图片输入；失败只跳过摘要
+- 图片摘要依赖至少一条已配置线路支持图片输入；主线路与单次备用都失败时只跳过该图
 - 图片摘要不复用文本 analyzer 的 HTTP client，因此不读取 `WORKTRACE_LLM_TLS_VERIFY` 的开关值
 - 文本附件只支持配置中的小型文本扩展名
 - 飞书链接正文当前只处理可识别的 Docx/Wiki

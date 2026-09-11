@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 import json
 from pathlib import Path
 
@@ -9,7 +10,11 @@ from src.worktrace.analyzers.prompts import (
     restore_conversation_segmentation_references,
 )
 from src.worktrace.analyzers.output_schemas import conversation_segmentation_output_schema
-from src.worktrace.config import RuntimeConfig, load_runtime_config_overrides
+from src.worktrace.config import (
+    EventGenerationConfig,
+    RuntimeConfig,
+    load_runtime_config_overrides,
+)
 from src.worktrace.models import (
     AttachmentMeta,
     AttachmentTextBlock,
@@ -450,6 +455,36 @@ def test_segment_prompt_recombines_context_and_primary_messages_in_time_order() 
     assert any("图片和文件附件默认只提供元数据" in rule for rule in payload["rules"])
     assert [item["id"] for item in prompt_messages] == ["om_1", "om_2"]
     assert [item["role"] for item in prompt_messages] == ["context", "primary"]
+    guidance = payload["event_generation_guidance"]
+    assert len(guidance["positive_examples"]) == 4
+    assert len(guidance["negative_examples"]) == 2
+    assert any("完整业务事项" in rule for rule in guidance["event_boundary_rules"])
+
+
+def test_segment_batch_estimate_includes_generation_guidance() -> None:
+    unit = _unit(
+        "turn-guidance",
+        [_message("om_1", sender_open_id="ou_self", minute=0, text="确认交付范围")],
+        primary_message_ids=["om_1"],
+        self_evidence_message_ids=["om_1"],
+    )
+
+    with_guidance = pack_segment_units(
+        target_date="2026-07-10",
+        self_open_id="ou_self",
+        self_display_name="人员甲",
+        units=[unit],
+        config=CONFIG,
+    )[0]
+    without_guidance = pack_segment_units(
+        target_date="2026-07-10",
+        self_open_id="ou_self",
+        self_display_name="人员甲",
+        units=[unit],
+        config=replace(CONFIG, event_generation=EventGenerationConfig()),
+    )[0]
+
+    assert with_guidance.estimated_input_tokens > without_guidance.estimated_input_tokens
 
 
 def test_segment_batch_packing_preserves_validated_turn_order() -> None:

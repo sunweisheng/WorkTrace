@@ -6,7 +6,11 @@ from pathlib import Path
 from threading import Lock
 from time import sleep
 
-from src.worktrace.config import EventMetadataItem, RuntimeConfig
+from src.worktrace.config import (
+    EventMetadataItem,
+    RuntimeConfig,
+    load_runtime_config_overrides,
+)
 from src.worktrace.constants import DailyRunStatus
 from src.worktrace.errors import AnalyzerProtocolError, ModelInputRejectedError
 from src.worktrace.factories import RuntimeDependencies
@@ -335,7 +339,13 @@ def test_runner_does_not_summarize_images_before_segment_batch_analysis(
             raise AssertionError("images must be summarized only after a context request")
 
     debug_root = tmp_path / "debug"
-    config = _config(data_root=tmp_path / "data", conversation_debug_root=debug_root)
+    config = load_runtime_config_overrides(
+        _config(
+            data_root=tmp_path / "data",
+            conversation_debug_root=debug_root,
+        ),
+        cwd=Path.cwd(),
+    )
     runner = DailyTraceRunner(
         config=config,
         dependencies=RuntimeDependencies(
@@ -355,7 +365,23 @@ def test_runner_does_not_summarize_images_before_segment_batch_analysis(
     input_payload = json.loads((batch_dirs[0] / "input.json").read_text(encoding="utf-8"))
     assert "图片内容摘要" not in json.dumps(input_payload, ensure_ascii=False)
     assert (batch_dirs[0] / "output.json").is_file()
-    assert (batch_dirs[0] / "candidate_validation.json").is_file()
+    validation_payload = json.loads(
+        (batch_dirs[0] / "candidate_validation.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    generation_debug = validation_payload["event_generation_debug"]
+    assert generation_debug["guidance_mode"] == "personal_full"
+    assert generation_debug["template_mode"] == "full"
+    assert generation_debug["examples_included"] is True
+    assert generation_debug["config"]["config_loaded"] is True
+    usage_payload = json.loads(
+        (debug_root / "2026-07-10" / "llm_usage.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert usage_payload["event_generation_summary"]["schema_version"] == 1
+    assert usage_payload["event_generation_summary"]["config_loaded"] is True
 
 
 def test_runner_does_not_eagerly_summarize_images(tmp_path: Path) -> None:

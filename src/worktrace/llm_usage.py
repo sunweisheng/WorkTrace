@@ -227,7 +227,7 @@ class LLMUsageRecorder:
         *,
         fallback_from: str,
         fallback_to: str,
-        error_category: str,
+        error_category: str | None,
     ) -> bool:
         """Mark the latest matching request as the attempt that triggered fallback."""
         with self._lock:
@@ -241,9 +241,10 @@ class LLMUsageRecorder:
                         "status": "failed",
                         "fallback_from": fallback_from,
                         "fallback_to": fallback_to,
-                        "error_category": error_category,
                     }
                 )
+                if error_category is not None:
+                    record["error_category"] = error_category
                 return True
         return False
 

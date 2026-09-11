@@ -55,7 +55,7 @@ def estimate_function_input_tokens(
     )
     function_input = json.dumps(
         {
-            "tools": [function_spec.tool()],
+            "tools": [function_spec.online_tool()],
             "tool_choice": function_spec.tool_choice(),
             "parallel_tool_calls": False,
         },

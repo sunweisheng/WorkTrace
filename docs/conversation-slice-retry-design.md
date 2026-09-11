@@ -1,6 +1,6 @@
 # WorkTrace 分段、扩窗与回退设计
 
-> 状态：正式个人日报主链。`ConversationSlice` 仍是兼容和扩窗载体，但当前默认 Online analyzer 已改为“锚点窗口分段 + 会话内片段组批”。
+> 状态：正式个人日报主链。`ConversationSlice` 仍是兼容和扩窗载体；当前默认流程使用 Codex 主线路和 Online 当前请求备用，并采用“锚点窗口分段 + 会话内片段组批”。
 
 ## 1. 文档目标
 
@@ -62,7 +62,7 @@ flowchart TD
 - 已生成的图片摘要
 - reaction 的本地中文说明和语义
 
-进入分段模型前，Python 会生成任务专用 Function、当前合法消息 ID 参数示例和最终分段 prompt。统一估算器分别计算“最终 prompt 与 `/no_think` 加完整 Function 定义和 `tool_choice`”以及“相同 prompt 加 Codex 完整 output-schema”，并取较大值。超出 `model_input_batch_target_tokens=7000` 时先按锚点拆分，再按连续消息拆分，并保留拆分窗口需要的直接 reply/quote 上下文；单条消息和必要协议字段组成的最小窗口仍超过目标时标记为 `oversized_singleton` 后发送，由模型服务决定是否接受。7000 是模型输入估算目标，不是 HTTP 字节数或服务端上下文上限。
+进入分段模型前，Python 会生成任务专用 Function、当前合法消息 ID 参数示例和最终分段 prompt。统一估算器分别计算“最终 prompt 与 `/no_think` 加完整 Function 定义和 `tool_choice`”以及“相同 prompt 加 Codex 完整 output-schema”，并取较大值。`model_input_batch_target_tokens` 从 `config/model_input_budget.json` 中与当前主模型、备用模型精确匹配的预算 profile 读取；配置不存在或没有匹配项时回退 `7000`。超出当前目标时先按锚点拆分，再按连续消息拆分，并保留拆分窗口需要的直接 reply/quote 上下文；单条消息和必要协议字段组成的最小窗口仍超过目标时标记为 `oversized_singleton` 后发送，由模型服务决定是否接受。该值是模型输入估算目标，不是 HTTP 字节数或服务端上下文上限。
 
 ## 5. 会话分段
 

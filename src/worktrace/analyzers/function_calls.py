@@ -88,6 +88,12 @@ class FunctionCallSpec:
             "strict": self.strict,
         }
 
+    def online_tool(self) -> dict[str, object]:
+        tool = copy.deepcopy(self.tool())
+        _remove_schema_keyword(tool["parameters"], "uniqueItems")
+        _remove_impossible_array_min_items(tool["parameters"])
+        return tool
+
     def tool_choice(self) -> dict[str, str]:
         return {"type": "function", "name": self.name}
 
@@ -188,6 +194,43 @@ class FunctionCallSpec:
                 )
             )
         return prepared
+
+
+def _remove_schema_keyword(value: object, keyword: str) -> None:
+    if isinstance(value, dict):
+        value.pop(keyword, None)
+        for child in value.values():
+            _remove_schema_keyword(child, keyword)
+    elif isinstance(value, list):
+        for child in value:
+            _remove_schema_keyword(child, keyword)
+
+
+def _remove_impossible_array_min_items(value: object) -> None:
+    if isinstance(value, dict):
+        item_schema = value.get("items")
+        enum_values = item_schema.get("enum") if isinstance(item_schema, dict) else None
+        min_items = value.get("minItems")
+        max_items = value.get("maxItems")
+        if (
+            value.get("type") == "array"
+            and isinstance(min_items, int)
+            and not isinstance(min_items, bool)
+            and (
+                (isinstance(enum_values, list) and min_items > len(enum_values))
+                or (
+                    isinstance(max_items, int)
+                    and not isinstance(max_items, bool)
+                    and min_items > max_items
+                )
+            )
+        ):
+            value.pop("minItems", None)
+        for child in value.values():
+            _remove_impossible_array_min_items(child)
+    elif isinstance(value, list):
+        for child in value:
+            _remove_impossible_array_min_items(child)
 
 
 @dataclass(frozen=True)

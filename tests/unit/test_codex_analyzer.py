@@ -17,6 +17,7 @@ from src.worktrace.analyzers.function_calls import FunctionCallSpec
 from src.worktrace.config import RuntimeConfig, load_runtime_config_overrides
 from src.worktrace.errors import (
     AnalyzerProtocolError,
+    CodexProtocolViolationError,
     ModelInputLimitError,
     RetryableAnalyzerProtocolError,
 )
@@ -702,7 +703,7 @@ def test_codex_analyzer_rejects_tool_events(tmp_path: Path) -> None:
         cwd=tmp_path,
     )
 
-    with pytest.raises(AnalyzerProtocolError, match="protocol violation"):
+    with pytest.raises(CodexProtocolViolationError, match="protocol violation"):
         analyzer._invoke_codex("处理输入")
 
 
