@@ -12,6 +12,8 @@ from src.worktrace.analyzers.codex import (
     CodexAnalyzer,
     CodexRequestPacer,
     build_codex_subprocess_env,
+    toml_string_literal,
+    validate_codex_jsonl_events,
 )
 from src.worktrace.analyzers.function_calls import FunctionCallSpec
 from src.worktrace.config import RuntimeConfig, load_runtime_config_overrides
@@ -633,9 +635,9 @@ def test_codex_analyzer_passes_output_schema_in_default_mode(tmp_path: Path) -> 
     assert "--disable" in captured["args"]
     assert captured["args"][captured["args"].index("--disable") + 1] == "multi_agent"
     assert "agents.enabled=false" not in captured["args"]
-    assert 'model_provider="test-relay"' in captured["args"]
+    assert "model_provider='test-relay'" in captured["args"]
     assert (
-        'model_providers.test-relay.base_url="https://relay.example/v1"'
+        "model_providers.test-relay.base_url='https://relay.example/v1'"
         in captured["args"]
     )
     assert "--json" in captured["args"]
@@ -655,6 +657,46 @@ def test_codex_subprocess_environment_is_allowlisted() -> None:
 
     assert environment == {"PATH": "/usr/bin", "LANG": "zh_CN.UTF-8"}
     assert CODEX_GLOBAL_CONCURRENCY_LIMIT == 3
+
+
+def test_codex_subprocess_environment_keeps_windows_runtime_values() -> None:
+    environment = build_codex_subprocess_env(
+        {
+            "AppData": r"C:\Users\worker\AppData\Roaming",
+            "ComSpec": r"C:\Windows\System32\cmd.exe",
+            "LOCALAPPDATA": r"C:\Users\worker\AppData\Local",
+            "SystemRoot": r"C:\Windows",
+            "TEMP": r"C:\Users\worker\AppData\Local\Temp",
+            "USERPROFILE": r"C:\Users\worker",
+            "WORKTRACE_LLM_API_KEY": "must-not-pass",
+            "OTHER_SERVICE_TOKEN": "must-not-pass",
+        },
+        os_name="nt",
+    )
+
+    assert environment == {
+        "AppData": r"C:\Users\worker\AppData\Roaming",
+        "ComSpec": r"C:\Windows\System32\cmd.exe",
+        "LOCALAPPDATA": r"C:\Users\worker\AppData\Local",
+        "SystemRoot": r"C:\Windows",
+        "TEMP": r"C:\Users\worker\AppData\Local\Temp",
+        "USERPROFILE": r"C:\Users\worker",
+    }
+
+
+def test_toml_string_literal_uses_literal_and_safe_fallback() -> None:
+    assert toml_string_literal("https://relay.example/v1") == "'https://relay.example/v1'"
+    assert toml_string_literal("provider's relay") == "\"provider's relay\""
+    assert toml_string_literal("line one\nline two") == '"line one\\nline two"'
+
+
+def test_codex_jsonl_allows_non_executing_error_item() -> None:
+    events = validate_codex_jsonl_events(
+        '{"type":"item.completed","item":{"type":"error","message":"warning"}}\n'
+        '{"type":"item.completed","item":{"type":"agent_message","text":"done"}}\n'
+    )
+
+    assert [event["item"]["type"] for event in events] == ["error", "agent_message"]
 
 
 def test_codex_analyzer_uses_configured_llm_timeout(tmp_path: Path) -> None:

@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 from threading import Event
 from time import monotonic
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -20,8 +21,11 @@ from src.worktrace.analyzers.online import (
     OnlineLLMAnalyzer,
     _FirstStreamEventTimeoutError,
     _apply_soft_no_think,
+    _build_chat_completions_request_body,
     _build_http_client,
     _build_responses_request_body,
+    _extract_chat_stream_function_arguments,
+    _extract_function_arguments_from_chat_payload,
     _extract_text_from_responses_payload,
     _extract_text_from_responses_stream_event,
     _extract_function_arguments_from_responses_payload,
@@ -78,6 +82,35 @@ def function_response(arguments: dict[str, object], *, usage=None) -> dict[str, 
                 "call_id": "call_1",
                 "name": "submit_batch_analysis",
                 "arguments": json.dumps(arguments),
+            }
+        ]
+    }
+    if usage is not None:
+        payload["usage"] = usage
+    return payload
+
+
+def chat_function_response(
+    arguments: dict[str, object],
+    *,
+    name: str = "submit_batch_analysis",
+    usage=None,
+) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "choices": [
+            {
+                "message": {
+                    "tool_calls": [
+                        {
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {
+                                "name": name,
+                                "arguments": json.dumps(arguments),
+                            },
+                        }
+                    ]
+                }
             }
         ]
     }
@@ -438,6 +471,7 @@ def build_settings(**overrides: object) -> OnlineLLMSettings:
         stream_enabled=False,
         tls_verify=False,
         reasoning_effort=None,
+        wire_api="responses",
     )
     return OnlineLLMSettings(**(base.__dict__ | overrides))
 
@@ -1357,3 +1391,390 @@ def test_online_analyzer_classifies_retryable_and_permanent_errors(
             analyzer.analyze_batch("2026-06-23", sample_batch())
 
         assert type(exc_info.value) is expected_type
+
+
+def test_build_chat_completions_request_body_disables_thinking() -> None:
+    function_spec = sample_function_spec()
+    body = _build_chat_completions_request_body(
+        "prompt",
+        settings=build_settings(
+            wire_api="chat_completions",
+            stream_enabled=True,
+            reasoning_effort="none",
+        ),
+        function_spec=function_spec,
+    )
+
+    assert body["model"] == "provider-model"
+    assert body["messages"][0]["content"].startswith(
+        "prompt\n\n典型 Function 参数示例："
+    )
+    assert body["messages"][0]["content"].endswith("/no_think")
+    assert body["stream_options"] == {"include_usage": True}
+    assert body["extra_body"] == {"thinking": {"type": "disabled"}}
+    assert "reasoning" not in body
+    assert "input" not in body
+    assert body["tools"] == [function_spec.chat_tool()]
+    assert body["tool_choice"] == function_spec.chat_tool_choice()
+    assert body["parallel_tool_calls"] is False
+    assert body["tools"][0]["function"]["strict"] is True
+
+
+def test_chat_non_stream_response_accepts_exactly_one_expected_function() -> None:
+    payload = chat_function_response(
+        {"candidate_events": [], "context_requests": []}
+    )
+
+    assert _extract_function_arguments_from_chat_payload(
+        payload,
+        expected_name="submit_batch_analysis",
+    ) == {"candidate_events": [], "context_requests": []}
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"choices": [{"message": {"tool_calls": []}}]},
+        {
+            "choices": [
+                {
+                    "message": {
+                        "tool_calls": [
+                            {
+                                "type": "function",
+                                "function": {
+                                    "name": "submit_batch_analysis",
+                                    "arguments": "{}",
+                                },
+                            },
+                            {
+                                "type": "function",
+                                "function": {
+                                    "name": "submit_batch_analysis",
+                                    "arguments": "{}",
+                                },
+                            },
+                        ]
+                    }
+                }
+            ]
+        },
+    ],
+)
+def test_chat_non_stream_response_rejects_missing_or_repeated_functions(
+    payload: dict[str, object],
+) -> None:
+    with pytest.raises(RetryableAnalyzerProtocolError, match="exactly one"):
+        _extract_function_arguments_from_chat_payload(
+            payload,
+            expected_name="submit_batch_analysis",
+        )
+
+
+def test_chat_non_stream_response_rejects_wrong_function() -> None:
+    with pytest.raises(RetryableAnalyzerProtocolError, match="unexpected Function"):
+        _extract_function_arguments_from_chat_payload(
+            chat_function_response({}, name="wrong_function"),
+            expected_name="submit_batch_analysis",
+        )
+
+
+def test_chat_non_stream_response_rejects_non_function_tool() -> None:
+    payload = chat_function_response({})
+    payload["choices"][0]["message"]["tool_calls"][0]["type"] = "custom"
+
+    with pytest.raises(RetryableAnalyzerProtocolError, match="unsupported tool"):
+        _extract_function_arguments_from_chat_payload(
+            payload,
+            expected_name="submit_batch_analysis",
+        )
+
+
+def test_chat_stream_response_joins_function_arguments_by_index() -> None:
+    events = [
+        {
+            "choices": [
+                {
+                    "delta": {
+                        "tool_calls": [
+                            {
+                                "index": 0,
+                                "id": "call_1",
+                                "type": "function",
+                                "function": {
+                                    "name": "submit_batch_analysis",
+                                    "arguments": '{"candidate_events":[],',
+                                },
+                            }
+                        ]
+                    }
+                }
+            ]
+        },
+        {
+            "choices": [
+                {
+                    "delta": {
+                        "tool_calls": [
+                            {
+                                "index": 0,
+                                "function": {"arguments": '"context_requests":[]}'},
+                            }
+                        ]
+                    }
+                }
+            ]
+        },
+    ]
+
+    assert _extract_chat_stream_function_arguments(
+        events,
+        expected_name="submit_batch_analysis",
+    ) == {"candidate_events": [], "context_requests": []}
+
+
+def test_chat_stream_response_rejects_non_function_tool() -> None:
+    events = [
+        {
+            "choices": [
+                {
+                    "delta": {
+                        "tool_calls": [
+                            {
+                                "index": 0,
+                                "type": "custom",
+                                "function": {"name": "submit_batch_analysis"},
+                            }
+                        ]
+                    }
+                }
+            ]
+        }
+    ]
+
+    with pytest.raises(RetryableAnalyzerProtocolError, match="unsupported tool"):
+        _extract_chat_stream_function_arguments(
+            events,
+            expected_name="submit_batch_analysis",
+        )
+
+
+def test_chat_stream_response_rejects_repeated_calls_across_choices() -> None:
+    events = [
+        {
+            "choices": [
+                {
+                    "index": choice_index,
+                    "delta": {
+                        "tool_calls": [
+                            {
+                                "index": 0,
+                                "type": "function",
+                                "function": {
+                                    "name": "submit_batch_analysis",
+                                    "arguments": "{}",
+                                },
+                            }
+                        ]
+                    },
+                }
+                for choice_index in (0, 1)
+            ]
+        }
+    ]
+
+    with pytest.raises(RetryableAnalyzerProtocolError, match="exactly one"):
+        _extract_chat_stream_function_arguments(
+            events,
+            expected_name="submit_batch_analysis",
+        )
+
+
+def test_chat_stream_response_rejects_wrong_function() -> None:
+    events = [
+        {
+            "choices": [
+                {
+                    "index": 0,
+                    "delta": {
+                        "tool_calls": [
+                            {
+                                "index": 0,
+                                "type": "function",
+                                "function": {
+                                    "name": "wrong_function",
+                                    "arguments": "{}",
+                                },
+                            }
+                        ]
+                    },
+                }
+            ]
+        }
+    ]
+
+    with pytest.raises(RetryableAnalyzerProtocolError, match="unexpected Function"):
+        _extract_chat_stream_function_arguments(
+            events,
+            expected_name="submit_batch_analysis",
+        )
+
+
+def test_online_analyzer_parses_chat_non_stream_response_and_usage(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = build_settings(
+        wire_api="chat_completions",
+        reasoning_effort="none",
+    )
+    requests: list[dict[str, object]] = []
+
+    class FakeResponse:
+        def model_dump(self):
+            return chat_function_response(
+                {"candidate_events": [], "context_requests": []},
+                usage={"prompt_tokens": 12, "completion_tokens": 7, "total_tokens": 19},
+            )
+
+    class FakeCompletions:
+        def create(self, **kwargs):
+            requests.append(kwargs)
+            return FakeResponse()
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            self.chat = SimpleNamespace(completions=FakeCompletions())
+
+        def close(self):
+            return None
+
+    class FakeHttpClient:
+        def close(self):
+            return None
+
+    monkeypatch.setattr(
+        "src.worktrace.analyzers.online._build_http_client",
+        lambda settings: FakeHttpClient(),
+    )
+    monkeypatch.setattr(
+        "src.worktrace.analyzers.online.OpenAI",
+        lambda **kwargs: FakeClient(),
+    )
+
+    analyzer = OnlineLLMAnalyzer(
+        config=RuntimeConfig(data_root=tmp_path / "data"),
+        cwd=tmp_path,
+        settings_loader=lambda *args, **kwargs: settings,
+    )
+
+    result = analyzer.analyze_batch("2026-06-23", sample_batch())
+
+    assert result.candidate_events == []
+    assert result.context_requests == []
+    assert analyzer.usage_recorder.summary()["input_tokens"] == 12
+    assert analyzer.usage_recorder.summary()["output_tokens"] == 7
+    assert len(requests) == 1
+    assert requests[0]["extra_body"] == {"thinking": {"type": "disabled"}}
+    assert "reasoning" not in requests[0]
+
+
+def test_online_analyzer_parses_chat_stream_response(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = build_settings(wire_api="chat_completions", stream_enabled=True)
+
+    class FakeEvent:
+        def __init__(self, payload: dict[str, object]):
+            self._payload = payload
+
+        def model_dump(self):
+            return self._payload
+
+    class FakeCompletions:
+        def create(self, **kwargs):
+            return iter(
+                [
+                    FakeEvent(
+                        {
+                            "choices": [
+                                {
+                                    "delta": {
+                                        "tool_calls": [
+                                            {
+                                                "index": 0,
+                                                "type": "function",
+                                                "function": {
+                                                    "name": "submit_batch_analysis",
+                                                    "arguments": '{"candidate_events":[],',
+                                                },
+                                            }
+                                        ]
+                                    }
+                                }
+                            ]
+                        }
+                    ),
+                    FakeEvent(
+                        {
+                            "choices": [
+                                {
+                                    "delta": {
+                                        "tool_calls": [
+                                            {
+                                                "index": 0,
+                                                "function": {
+                                                    "arguments": '"context_requests":[]}'
+                                                },
+                                            }
+                                        ]
+                                    }
+                                }
+                            ]
+                        }
+                    ),
+                    FakeEvent(
+                        {
+                            "choices": [],
+                            "usage": {
+                                "prompt_tokens": 11,
+                                "completion_tokens": 4,
+                                "total_tokens": 15,
+                            },
+                        }
+                    ),
+                ]
+            )
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            self.chat = SimpleNamespace(completions=FakeCompletions())
+
+        def close(self):
+            return None
+
+    class FakeHttpClient:
+        def close(self):
+            return None
+
+    monkeypatch.setattr(
+        "src.worktrace.analyzers.online._build_http_client",
+        lambda settings: FakeHttpClient(),
+    )
+    monkeypatch.setattr(
+        "src.worktrace.analyzers.online.OpenAI",
+        lambda **kwargs: FakeClient(),
+    )
+
+    analyzer = OnlineLLMAnalyzer(
+        config=RuntimeConfig(data_root=tmp_path / "data"),
+        cwd=tmp_path,
+        settings_loader=lambda *args, **kwargs: settings,
+    )
+
+    result = analyzer.analyze_batch("2026-06-23", sample_batch())
+
+    assert result.candidate_events == []
+    assert result.context_requests == []
+    assert analyzer.usage_recorder.summary()["output_tokens"] == 4

@@ -9,10 +9,80 @@ from src.worktrace.config import OnlineLLMSettings, RuntimeConfig
 from src.worktrace.errors import AnalyzerProtocolError, CodexProtocolViolationError
 from src.worktrace.llm_usage import LLMUsageRecorder
 from src.worktrace.vision import (
+    _build_image_request_body,
     CodexFirstImageSummarizer,
     ImageSummarySettings,
     OnlineImageSummarizer,
 )
+
+
+def test_build_chat_image_request_uses_chat_content_and_disables_thinking() -> None:
+    body = _build_image_request_body(
+        prompt="摘要",
+        image_url="data:image/png;base64,aW1hZ2U=",
+        model="test-model",
+        stream_enabled=False,
+        reasoning_effort="none",
+        wire_api="chat_completions",
+    )
+
+    assert "input" not in body
+    assert "reasoning" not in body
+    assert body["extra_body"] == {"thinking": {"type": "disabled"}}
+    content = body["messages"][0]["content"]
+    assert content[0] == {"type": "text", "text": "摘要\n/no_think"}
+    assert content[1] == {
+        "type": "image_url",
+        "image_url": {
+            "url": "data:image/png;base64,aW1hZ2U=",
+            "detail": "low",
+        },
+    }
+
+
+def test_online_image_summary_uses_chat_completions(tmp_path, monkeypatch) -> None:
+    image_path = tmp_path / "required.png"
+    image_path.write_bytes(b"image")
+    requests: list[dict[str, object]] = []
+
+    class _Completions:
+        def create(self, **kwargs):
+            requests.append(kwargs)
+            return SimpleNamespace(
+                model_dump=lambda: {
+                    "choices": [{"message": {"content": "图片摘要"}}],
+                    "usage": {
+                        "prompt_tokens": 8,
+                        "completion_tokens": 2,
+                        "total_tokens": 10,
+                    },
+                }
+            )
+
+    monkeypatch.setattr(
+        "src.worktrace.vision.load_online_llm_settings",
+        lambda config, **kwargs: OnlineLLMSettings(
+            base_url="https://example.test/v1",
+            model="test-model",
+            api_key="test-key",
+            timeout_seconds=1,
+            stream_first_response_timeout_seconds=1,
+            stream_enabled=False,
+            tls_verify=True,
+            reasoning_effort="none",
+            wire_api="chat_completions",
+        ),
+    )
+    summarizer = OnlineImageSummarizer(
+        config=RuntimeConfig(data_root=tmp_path / "data"),
+        settings=ImageSummarySettings(True, "摘要", 1, 1024),
+        client=SimpleNamespace(chat=SimpleNamespace(completions=_Completions())),
+    )
+
+    assert summarizer.summarize(image_path) == "图片摘要"
+    assert len(requests) == 1
+    assert requests[0]["extra_body"] == {"thinking": {"type": "disabled"}}
+    assert "reasoning" not in requests[0]
 
 
 def test_required_image_summary_bypasses_optional_image_limit(tmp_path, monkeypatch) -> None:
@@ -36,6 +106,7 @@ def test_required_image_summary_bypasses_optional_image_limit(tmp_path, monkeypa
             stream_enabled=False,
             tls_verify=True,
             reasoning_effort="none",
+            wire_api="responses",
         ),
     )
     summarizer = OnlineImageSummarizer(

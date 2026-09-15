@@ -45,6 +45,7 @@ from ..models import (
     RetentionReviewResult,
 )
 from ..utils.json_io import load_json_object
+from ..utils.commands import run_text_command
 from ..utils.token_estimation import (
     estimate_model_input_tokens,
     estimate_structured_input_tokens,
@@ -103,24 +104,36 @@ CODEX_GLOBAL_SEMAPHORE = threading.BoundedSemaphore(CODEX_GLOBAL_CONCURRENCY_LIM
 _CODEX_ENV_ALLOWLIST = frozenset(
     {
         "ALL_PROXY",
+        "APPDATA",
         "CODEX_HOME",
+        "COMSPEC",
         "HOME",
+        "HOMEDRIVE",
+        "HOMEPATH",
         "HTTPS_PROXY",
         "HTTP_PROXY",
         "LANG",
         "LC_ALL",
+        "LOCALAPPDATA",
         "LOGNAME",
         "NO_COLOR",
         "NO_PROXY",
         "PATH",
+        "PATHEXT",
         "SHELL",
         "SSL_CERT_DIR",
         "SSL_CERT_FILE",
+        "SYSTEMROOT",
+        "TEMP",
         "TMPDIR",
+        "TMP",
         "USER",
+        "USERNAME",
+        "USERPROFILE",
+        "WINDIR",
     }
 )
-_CODEX_SAFE_ITEM_TYPES = frozenset({"agent_message", "reasoning"})
+_CODEX_SAFE_ITEM_TYPES = frozenset({"agent_message", "error", "reasoning"})
 _CODEX_NON_RETRYABLE_FAILURE_CATEGORIES = frozenset(
     {"authentication", "permission", "configuration"}
 )
@@ -128,13 +141,28 @@ _CODEX_NON_RETRYABLE_FAILURE_CATEGORIES = frozenset(
 
 def build_codex_subprocess_env(
     environ: dict[str, str] | None = None,
+    *,
+    os_name: str | None = None,
 ) -> dict[str, str]:
     source = os.environ if environ is None else environ
+    case_insensitive = (os.name if os_name is None else os_name) == "nt"
     return {
         key: value
         for key, value in source.items()
-        if key in _CODEX_ENV_ALLOWLIST and isinstance(value, str)
+        if (
+            (key.upper() if case_insensitive else key) in _CODEX_ENV_ALLOWLIST
+            and isinstance(value, str)
+        )
     }
+
+
+def toml_string_literal(value: str) -> str:
+    """Return a TOML string literal safe for one command-line argument."""
+    if "'" not in value and all(
+        char == "\t" or 0x20 <= ord(char) != 0x7F for char in value
+    ):
+        return f"'{value}'"
+    return json.dumps(value, ensure_ascii=False)
 
 
 def validate_codex_jsonl_events(stdout: str) -> tuple[dict[str, object], ...]:
@@ -660,14 +688,11 @@ class CodexAnalyzer(Analyzer):
         input_text: str | None = None,
         env: dict[str, str] | None = None,
     ) -> subprocess.CompletedProcess[str]:
-        return subprocess.run(
-            list(args),
-            cwd=str(cwd) if cwd else None,
-            capture_output=True,
-            text=True,
-            input=input_text,
+        return run_text_command(
+            args,
+            cwd=cwd,
             timeout=timeout,
-            check=False,
+            input_text=input_text,
             env=env,
         )
 
@@ -773,23 +798,24 @@ class CodexAnalyzer(Analyzer):
                     "read-only",
                     "--json",
                     "-c",
-                    f"model_provider={json.dumps(settings.provider_id)}",
+                    f"model_provider={toml_string_literal(settings.provider_id)}",
                     "-c",
                     (
                         "model_providers."
-                        f"{settings.provider_id}.name={json.dumps(settings.provider_name)}"
+                        f"{settings.provider_id}.name="
+                        f"{toml_string_literal(settings.provider_name)}"
                     ),
                     "-c",
                     (
                         "model_providers."
                         f"{settings.provider_id}.base_url="
-                        f"{json.dumps(settings.provider_base_url)}"
+                        f"{toml_string_literal(settings.provider_base_url)}"
                     ),
                     "-c",
                     (
                         "model_providers."
                         f"{settings.provider_id}.wire_api="
-                        f"{json.dumps(settings.provider_wire_api)}"
+                        f"{toml_string_literal(settings.provider_wire_api)}"
                     ),
                     "-c",
                     (
@@ -800,11 +826,14 @@ class CodexAnalyzer(Analyzer):
                     "--model",
                     settings.model,
                     "-c",
-                    f"model_reasoning_effort={json.dumps(settings.reasoning_effort)}",
+                    (
+                        "model_reasoning_effort="
+                        f"{toml_string_literal(settings.reasoning_effort)}"
+                    ),
                     "-c",
-                    'shell_environment_policy.inherit="none"',
+                    f"shell_environment_policy.inherit={toml_string_literal('none')}",
                     "-c",
-                    'web_search="disabled"',
+                    f"web_search={toml_string_literal('disabled')}",
                     "--disable",
                     "multi_agent",
                 ]

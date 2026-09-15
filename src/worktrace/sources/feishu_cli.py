@@ -16,6 +16,7 @@ from ..errors import ChatSourceError
 from ..logging_utils import log_timing
 from ..models import ConversationRef, NormalizedMessage, SelfIdentity
 from ..utils.dates import day_bounds, is_same_target_date, normalize_datetime_string
+from ..utils.commands import run_text_command
 from ..utils.text import clean_text
 from .base import ChatSource
 
@@ -355,13 +356,10 @@ class FeishuCliChatSource(ChatSource):
         cwd: Path | None = None,
         timeout: int | float | None = None,
     ) -> subprocess.CompletedProcess[str]:
-        return subprocess.run(
-            list(args),
-            cwd=str(cwd) if cwd else None,
-            capture_output=True,
-            text=True,
+        return run_text_command(
+            args,
+            cwd=cwd,
             timeout=timeout,
-            check=False,
         )
 
     def _run_json(self, args: Sequence[str]) -> dict[str, Any]:

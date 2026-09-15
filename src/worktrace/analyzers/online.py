@@ -367,6 +367,65 @@ def _extract_function_arguments_from_responses_payload(
     ).payload
 
 
+def _extract_function_arguments_with_diagnostics_from_chat_payload(
+    payload: object,
+    *,
+    expected_name: str,
+) -> _ParsedFunctionArguments:
+    if not isinstance(payload, dict):
+        raise RetryableAnalyzerProtocolError(
+            "Online LLM response did not contain a Function call."
+        )
+    choices = payload.get("choices")
+    calls: list[dict[str, object]] = []
+    if isinstance(choices, list):
+        for choice in choices:
+            if not isinstance(choice, dict):
+                continue
+            message = choice.get("message")
+            if not isinstance(message, dict):
+                continue
+            tool_calls = message.get("tool_calls")
+            if isinstance(tool_calls, list):
+                if any(not isinstance(item, dict) for item in tool_calls):
+                    raise RetryableAnalyzerProtocolError(
+                        "Online LLM response contained an unsupported tool call."
+                    )
+                calls.extend(tool_calls)
+    if len(calls) != 1:
+        raise RetryableAnalyzerProtocolError(
+            "Online LLM response must contain exactly one Function call."
+        )
+    call = calls[0]
+    if call.get("type") not in {None, "function"}:
+        raise RetryableAnalyzerProtocolError(
+            "Online LLM response contained an unsupported tool call."
+        )
+    function = call.get("function")
+    if not isinstance(function, dict):
+        raise RetryableAnalyzerProtocolError(
+            "Online LLM Function call did not contain a function payload."
+        )
+    actual_name = str(function.get("name", ""))
+    if actual_name != expected_name:
+        raise RetryableAnalyzerProtocolError(
+            "Online LLM called an unexpected Function: "
+            f"expected={expected_name} actual={actual_name}"
+        )
+    return _parse_function_arguments_with_diagnostics(function.get("arguments"))
+
+
+def _extract_function_arguments_from_chat_payload(
+    payload: object,
+    *,
+    expected_name: str,
+) -> object:
+    return _extract_function_arguments_with_diagnostics_from_chat_payload(
+        payload,
+        expected_name=expected_name,
+    ).payload
+
+
 def _extract_stream_function_arguments_with_diagnostics(
     event_payloads: list[dict[str, object]],
     *,
@@ -458,6 +517,87 @@ def _extract_stream_function_arguments(
     ).payload
 
 
+def _extract_chat_stream_function_arguments_with_diagnostics(
+    event_payloads: list[dict[str, object]],
+    *,
+    expected_name: str,
+) -> _ParsedFunctionArguments:
+    chunks_by_call: dict[str, list[str]] = {}
+    names_by_call: dict[str, str] = {}
+    for event in event_payloads:
+        choices = event.get("choices")
+        if not isinstance(choices, list):
+            continue
+        for choice_position, choice in enumerate(choices):
+            if not isinstance(choice, dict):
+                continue
+            raw_choice_index = choice.get("index")
+            choice_key = str(
+                raw_choice_index
+                if isinstance(raw_choice_index, int)
+                and not isinstance(raw_choice_index, bool)
+                else choice_position
+            )
+            delta = choice.get("delta")
+            if not isinstance(delta, dict):
+                continue
+            tool_calls = delta.get("tool_calls")
+            if not isinstance(tool_calls, list):
+                continue
+            for call in tool_calls:
+                if not isinstance(call, dict):
+                    raise RetryableAnalyzerProtocolError(
+                        "Online LLM stream contained an unsupported tool call."
+                    )
+                if call.get("type") not in {None, "function"}:
+                    raise RetryableAnalyzerProtocolError(
+                        "Online LLM stream contained an unsupported tool call."
+                    )
+                raw_index = call.get("index")
+                tool_key = str(
+                    raw_index
+                    if isinstance(raw_index, int) and not isinstance(raw_index, bool)
+                    else call.get("id") or "0"
+                )
+                call_key = f"{choice_key}:{tool_key}"
+                function = call.get("function")
+                if not isinstance(function, dict):
+                    continue
+                name = function.get("name")
+                if isinstance(name, str) and name:
+                    names_by_call[call_key] = name
+                arguments = function.get("arguments")
+                if isinstance(arguments, str):
+                    chunks_by_call.setdefault(call_key, []).append(arguments)
+
+    call_keys = set(chunks_by_call) | set(names_by_call)
+    if len(call_keys) != 1:
+        raise RetryableAnalyzerProtocolError(
+            "Online LLM stream must contain exactly one Function call."
+        )
+    call_key = next(iter(call_keys))
+    actual_name = names_by_call.get(call_key, "")
+    if actual_name != expected_name:
+        raise RetryableAnalyzerProtocolError(
+            "Online LLM stream called an unexpected Function: "
+            f"expected={expected_name} actual={actual_name or 'missing'}"
+        )
+    return _parse_function_arguments_with_diagnostics(
+        "".join(chunks_by_call.get(call_key, []))
+    )
+
+
+def _extract_chat_stream_function_arguments(
+    event_payloads: list[dict[str, object]],
+    *,
+    expected_name: str,
+) -> object:
+    return _extract_chat_stream_function_arguments_with_diagnostics(
+        event_payloads,
+        expected_name=expected_name,
+    ).payload
+
+
 def _has_usage(payload: dict[str, object]) -> bool:
     if isinstance(payload.get("usage"), dict):
         return True
@@ -485,6 +625,68 @@ def _build_responses_request_body(
     if settings.reasoning_effort == "none":
         body["reasoning"] = {"effort": "none"}
     return body
+
+
+def _build_chat_completions_request_body(
+    prompt: str,
+    *,
+    settings: OnlineLLMSettings,
+    function_spec: FunctionCallSpec,
+) -> dict[str, object]:
+    prompt = _apply_soft_no_think(function_spec.prompt_with_example(prompt))
+    body: dict[str, object] = {
+        "model": settings.model,
+        "messages": [{"role": "user", "content": prompt}],
+        "stream": settings.stream_enabled,
+        "tools": [function_spec.chat_tool()],
+        "tool_choice": function_spec.chat_tool_choice(),
+        "parallel_tool_calls": False,
+    }
+    if settings.stream_enabled:
+        body["stream_options"] = {"include_usage": True}
+    if settings.reasoning_effort == "none":
+        body["extra_body"] = {"thinking": {"type": "disabled"}}
+    return body
+
+
+def _build_online_function_request_body(
+    prompt: str,
+    *,
+    settings: OnlineLLMSettings,
+    function_spec: FunctionCallSpec,
+) -> dict[str, object]:
+    if settings.wire_api == "chat_completions":
+        return _build_chat_completions_request_body(
+            prompt,
+            settings=settings,
+            function_spec=function_spec,
+        )
+    return _build_responses_request_body(
+        prompt,
+        settings=settings,
+        function_spec=function_spec,
+    )
+
+
+def _request_prompt(body: dict[str, object], *, wire_api: str) -> str:
+    if wire_api == "responses":
+        return str(body.get("input", ""))
+    messages = body.get("messages")
+    if not isinstance(messages, list) or not messages:
+        return ""
+    message = messages[0]
+    return str(message.get("content", "")) if isinstance(message, dict) else ""
+
+
+def _create_sdk_request(
+    client: OpenAI,
+    body: dict[str, object],
+    *,
+    wire_api: str,
+) -> object:
+    if wire_api == "chat_completions":
+        return client.chat.completions.create(**body)
+    return client.responses.create(**body)
 
 
 def _build_http_client(settings: OnlineLLMSettings) -> httpx.Client:
@@ -534,6 +736,7 @@ def _read_first_stream_event(
     *,
     first_response_timeout_seconds: float,
     subsequent_read_timeout_seconds: float,
+    wire_api: str = "responses",
 ) -> _FirstStreamEventResult:
     result_queue: Queue[_FirstStreamEventResult | BaseException] = Queue(maxsize=1)
     state_lock = threading.Lock()
@@ -542,7 +745,7 @@ def _read_first_stream_event(
 
     def read_first_event() -> None:
         try:
-            stream = client.responses.create(**body)
+            stream = _create_sdk_request(client, body, wire_api=wire_api)
             _set_stream_body_read_timeout(stream, subsequent_read_timeout_seconds)
             with state_lock:
                 state["stream"] = stream
@@ -604,13 +807,14 @@ def _read_non_stream_response(
     body: dict[str, object],
     *,
     timeout_seconds: float,
+    wire_api: str = "responses",
 ) -> dict[str, object]:
     result_queue: Queue[dict[str, object] | BaseException] = Queue(maxsize=1)
     cancelled = threading.Event()
 
     def read_response() -> None:
         try:
-            response = client.responses.create(**body)
+            response = _create_sdk_request(client, body, wire_api=wire_api)
             result: dict[str, object] | BaseException = response.model_dump()
         except BaseException as exc:
             result = exc
@@ -1081,13 +1285,12 @@ class OnlineLLMAnalyzer(Analyzer):
         except AnalyzerProtocolError as exc:
             final_prompt = _apply_soft_no_think(function_spec.prompt_with_example(prompt))
             if settings is not None:
-                final_prompt = str(
-                    _build_responses_request_body(
-                        prompt,
-                        settings=settings,
-                        function_spec=function_spec,
-                    )["input"]
+                body = _build_online_function_request_body(
+                    prompt,
+                    settings=settings,
+                    function_spec=function_spec,
                 )
+                final_prompt = _request_prompt(body, wire_api=settings.wire_api)
             self.usage_recorder.record(
                 request_kind,
                 {},
@@ -1122,7 +1325,7 @@ class OnlineLLMAnalyzer(Analyzer):
         oversized_singleton: bool,
     ) -> object:
         started_at = perf_counter()
-        body = _build_responses_request_body(
+        body = _build_online_function_request_body(
             prompt,
             settings=settings,
             function_spec=function_spec,
@@ -1192,6 +1395,7 @@ class OnlineLLMAnalyzer(Analyzer):
             prompt_chars=len(prompt),
             stream_enabled=settings.stream_enabled,
             tls_verify=settings.tls_verify,
+            wire_api=settings.wire_api,
             input_tokens=usage["input_tokens"],
             output_tokens=usage["output_tokens"],
             total_tokens=usage["total_tokens"],
@@ -1203,7 +1407,7 @@ class OnlineLLMAnalyzer(Analyzer):
             prompt_chars=len(prompt),
             backend="online",
             function_spec=function_spec,
-            final_prompt=str(body["input"]),
+            final_prompt=_request_prompt(body, wire_api=settings.wire_api),
             model=settings.model,
             reasoning_effort=settings.reasoning_effort,
             raw_result=payload,
@@ -1262,6 +1466,7 @@ class OnlineLLMAnalyzer(Analyzer):
                         settings.stream_first_response_timeout_seconds
                     ),
                     subsequent_read_timeout_seconds=settings.timeout_seconds,
+                    wire_api=settings.wire_api,
                 )
                 event_payloads: list[dict[str, object]] = []
                 usage_payload: dict[str, object] = {}
@@ -1278,10 +1483,18 @@ class OnlineLLMAnalyzer(Analyzer):
                             usage_payload = event_payload
                 finally:
                     _close_stream(first_event.stream)
-                parsed_arguments = _extract_stream_function_arguments_with_diagnostics(
-                    event_payloads,
-                    expected_name=function_spec.name,
-                )
+                if settings.wire_api == "chat_completions":
+                    parsed_arguments = (
+                        _extract_chat_stream_function_arguments_with_diagnostics(
+                            event_payloads,
+                            expected_name=function_spec.name,
+                        )
+                    )
+                else:
+                    parsed_arguments = _extract_stream_function_arguments_with_diagnostics(
+                        event_payloads,
+                        expected_name=function_spec.name,
+                    )
                 return (
                     parsed_arguments.payload,
                     usage_payload or (event_payloads[-1] if event_payloads else {}),
@@ -1291,13 +1504,22 @@ class OnlineLLMAnalyzer(Analyzer):
                 client,
                 body,
                 timeout_seconds=settings.timeout_seconds,
+                wire_api=settings.wire_api,
             )
-            parsed_arguments = (
-                _extract_function_arguments_with_diagnostics_from_responses_payload(
-                    response_payload,
-                    expected_name=function_spec.name,
+            if settings.wire_api == "chat_completions":
+                parsed_arguments = (
+                    _extract_function_arguments_with_diagnostics_from_chat_payload(
+                        response_payload,
+                        expected_name=function_spec.name,
+                    )
                 )
-            )
+            else:
+                parsed_arguments = (
+                    _extract_function_arguments_with_diagnostics_from_responses_payload(
+                        response_payload,
+                        expected_name=function_spec.name,
+                    )
+                )
             return parsed_arguments.payload, response_payload, parsed_arguments.repair
         finally:
             close = getattr(client, "close", None)

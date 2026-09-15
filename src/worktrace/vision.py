@@ -22,11 +22,67 @@ from .logging_utils import log_timing
 from .llm_usage import LLMUsageRecorder, extract_usage
 from .analyzers.online import (
     _build_http_client,
+    _create_sdk_request,
+    _extract_text_from_chat_payload,
+    _extract_text_from_chat_stream_event,
+    _extract_text_from_responses_payload,
     _extract_text_from_responses_stream_event,
     _has_usage,
 )
 
 logger = logging.getLogger("worktrace")
+
+
+def _build_image_request_body(
+    *,
+    prompt: str,
+    image_url: str,
+    model: str,
+    stream_enabled: bool,
+    reasoning_effort: str | None,
+    wire_api: str,
+) -> dict[str, object]:
+    if wire_api == "chat_completions":
+        body: dict[str, object] = {
+            "model": model,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": f"{prompt}\n/no_think"},
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": image_url, "detail": "low"},
+                        },
+                    ],
+                }
+            ],
+            "stream": stream_enabled,
+        }
+        if reasoning_effort == "none":
+            body["extra_body"] = {"thinking": {"type": "disabled"}}
+        return body
+
+    body = {
+        "model": model,
+        "input": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "input_text", "text": f"{prompt}\n/no_think"},
+                    {
+                        "type": "input_image",
+                        "image_url": image_url,
+                        "detail": "low",
+                    },
+                ],
+            }
+        ],
+        "stream": stream_enabled,
+    }
+    if reasoning_effort == "none":
+        body["reasoning"] = {"effort": "none"}
+    return body
 
 
 @dataclass(frozen=True)
@@ -102,21 +158,14 @@ class OnlineImageSummarizer:
         online = load_online_llm_settings(self.config, cwd=self.cwd)
         mime_type = mimetypes.guess_type(image_path.name)[0] or "image/png"
         encoded = base64.b64encode(image_path.read_bytes()).decode("ascii")
-        content: list[dict[str, object]] = [
-            {"type": "input_text", "text": f"{self.settings.prompt}\n/no_think"},
-            {
-                "type": "input_image",
-                "image_url": f"data:{mime_type};base64,{encoded}",
-                "detail": "low",
-            },
-        ]
-        body: dict[str, object] = {
-            "model": online.model,
-            "input": [{"role": "user", "content": content}],
-            "stream": online.stream_enabled,
-        }
-        if online.reasoning_effort == "none":
-            body["reasoning"] = {"effort": "none"}
+        body = _build_image_request_body(
+            prompt=self.settings.prompt,
+            image_url=f"data:{mime_type};base64,{encoded}",
+            model=online.model,
+            stream_enabled=online.stream_enabled,
+            reasoning_effort=online.reasoning_effort,
+            wire_api=online.wire_api,
+        )
         http_client = None
         client = self._client
         if client is None:
@@ -129,14 +178,21 @@ class OnlineImageSummarizer:
             )
         started_at = perf_counter()
         try:
-            response = client.responses.create(**body)
+            response = _create_sdk_request(client, body, wire_api=online.wire_api)
             if online.stream_enabled:
                 chunks: list[str] = []
                 payload: dict[str, object] = {}
                 try:
                     for event in response:
                         event_payload = event.model_dump()
-                        chunks.append(_extract_text_from_responses_stream_event(event_payload))
+                        if online.wire_api == "chat_completions":
+                            chunks.append(
+                                _extract_text_from_chat_stream_event(event_payload)
+                            )
+                        else:
+                            chunks.append(
+                                _extract_text_from_responses_stream_event(event_payload)
+                            )
                         if _has_usage(event_payload):
                             payload = event_payload
                 finally:
@@ -146,7 +202,13 @@ class OnlineImageSummarizer:
                 text = "".join(chunks).strip()
             else:
                 payload = response.model_dump() if hasattr(response, "model_dump") else {}
-                text = str(getattr(response, "output_text", "")).strip()
+                if online.wire_api == "chat_completions":
+                    text = _extract_text_from_chat_payload(payload).strip()
+                else:
+                    text = (
+                        _extract_text_from_responses_payload(payload)
+                        or str(getattr(response, "output_text", ""))
+                    ).strip()
         except Exception as exc:
             duration_ms = log_timing(
                 logger,
@@ -157,6 +219,7 @@ class OnlineImageSummarizer:
                 prompt_chars=len(self.settings.prompt),
                 image_bytes=image_path.stat().st_size,
                 stream_enabled=online.stream_enabled,
+                wire_api=online.wire_api,
             )
             self.usage_recorder.record(
                 "image_summary",
@@ -185,6 +248,7 @@ class OnlineImageSummarizer:
             prompt_chars=len(self.settings.prompt),
             image_bytes=image_path.stat().st_size,
             stream_enabled=online.stream_enabled,
+            wire_api=online.wire_api,
             input_tokens=usage["input_tokens"],
             output_tokens=usage["output_tokens"],
             total_tokens=usage["total_tokens"],

@@ -22,6 +22,7 @@ from .config import (
 )
 from .constants import DailyRunStatus
 from .delivery.feishu_cli import FeishuCliSelfDelivery
+from .utils.commands import run_text_command
 from .errors import (
     AnalyzerProtocolError,
     DayGroupDiscoveryValidationError,
@@ -4792,13 +4793,7 @@ class CollectedMergeRunner:
         *,
         cwd: Path | None = None,
     ) -> subprocess.CompletedProcess[str]:
-        return subprocess.run(
-            list(args),
-            cwd=str(cwd) if cwd else None,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
+        return run_text_command(args, cwd=cwd)
 
 
 def extract_person_name_from_filename(filename: str, *, target_date: str = "") -> str:

@@ -49,7 +49,7 @@ python3 -m src.worktrace.cli sync-reaction-catalog --source feishu
 
 个人日报把未完成任务的模型中间结果临时保存在 `data/cache/llm/YYYY/MM/YYYY-MM-DD/`：先完成全部窗口切分，再逐批提炼事件。默认重新生成会在 preflight 通过后先删除旧个人日报、当天中间结果和当天个人调试目录，再从头执行；明确使用 `--resume` 时保留这三类旧产物，并只复用输入未变化的中间结果。Markdown 写入成功后，模型中间结果目录自动删除。
 
-`config/llm_retry.json` 可分别设置 Codex 主线路技术失败后的 `primary_request_retry_limit`、窗口切分、事件提炼和全日分组的结果质量重试次数、Online 流式响应首次返回时间、Codex 调用间隔，以及切分、提炼、个人事实复核、完整内容复核和多人完整复核并发数。旧键 `online_request_retry_limit` 仍兼容读取。`WORKTRACE_LLM_STREAM` 只控制 Online 文字和图片备用请求，默认关闭；显式开启时，从请求开始到首个流事件的限制为 60 秒，首个流事件返回后不再使用该限制，后续读取使用 `.env` 的 `WORKTRACE_LLM_TIMEOUT_SECONDS`。
+`config/llm_retry.json` 可分别设置 Codex 主线路技术失败后的 `primary_request_retry_limit`、窗口切分、事件提炼和全日分组的结果质量重试次数、Online 流式响应首次返回时间、Codex 调用间隔，以及切分、提炼、个人事实复核、完整内容复核和多人完整复核并发数。旧键 `online_request_retry_limit` 仍兼容读取。`WORKTRACE_LLM_WIRE_API` 默认是 `responses`；只有显式设为 `chat_completions` 时，Online 文字、图片和独立探针才改用 Chat Completions。`WORKTRACE_LLM_STREAM` 只控制 Online 文字和图片备用请求，默认关闭；显式开启时，从请求开始到首个流事件的限制为 60 秒，首个流事件返回后不再使用该限制，后续读取使用 `.env` 的 `WORKTRACE_LLM_TIMEOUT_SECONDS`。
 
 `config/self_delivery.json` 控制个人日报和多人汇总是否发送给当前登录用户。默认是 `{"enabled": true}`；改为 `{"enabled": false}` 后仍会完整生成 Markdown，但不调用飞书 CLI。多人汇总额外传入 `--offline` 时，也会跳过飞书身份查询，并且必须传入 `--owner-name`。CLI JSON 会返回 `self_delivery_status: "disabled"`，这不是发送失败。
 
@@ -427,9 +427,10 @@ Online 当前请求备用的连接配置有三项；缺少或不合法时只禁�
 WORKTRACE_LLM_BASE_URL=https://your-openai-compatible-endpoint.example/v1
 WORKTRACE_LLM_MODEL=your-model-name
 WORKTRACE_LLM_API_KEY=your-api-key
+WORKTRACE_LLM_WIRE_API=responses
 ```
 
-Online 备用要求最终生效的 reasoning effort 为 `none`。未配置 `WORKTRACE_LLM_REASONING_EFFORT` 时，代码默认使用 `none`；模板显式写出该项，便于检查：
+Online 备用要求最终生效的 reasoning effort 为 `none`。未配置 `WORKTRACE_LLM_REASONING_EFFORT` 时，代码默认使用 `none`；模板显式写出该项，便于检查。Responses 模式发送 `reasoning.effort=none`；Chat Completions 模式不发送这个字段，改为发送 `thinking.type=disabled`：
 
 ```dotenv
 WORKTRACE_LLM_REASONING_EFFORT=none
@@ -447,9 +448,9 @@ WORKTRACE_COLLECTED_MERGE_MISSING_FIELD_RETRY_RATIO=0.2
 WORKTRACE_COLLECTED_MERGE_MISSING_FIELD_RETRY_LIMIT=1
 ```
 
-Codex 的模型和推理强度只从仓库本地 `.env` 读取；Online 备用连接配置仍可由环境变量覆盖 `.env`。真实密钥不能和代码一起提交到 git。Online 请求追加 `/no_think`，其 reasoning effort 必须为 `none`；Codex 实际提示词不追加 `/no_think`。每个 Online 请求都会重新读取当前配置，创建并在请求结束后关闭独立的 OpenAI 和 HTTP 客户端，不缓存进程级单例。
+Codex 的模型和推理强度只从仓库本地 `.env` 读取；Online 备用连接配置仍可由环境变量覆盖 `.env`。真实密钥不能和代码一起提交到 git。Online 请求追加 `/no_think`，其 reasoning effort 必须为 `none`；Codex 实际提示词不追加 `/no_think`。`WORKTRACE_LLM_WIRE_API` 只允许 `responses` 或 `chat_completions`，不根据模型名或服务地址自动判断。每个 Online 请求都会重新读取当前配置，创建并在请求结束后关闭独立的 OpenAI 和 HTTP 客户端，不缓存进程级单例。
 
-固定结构任务使用同一份 `FunctionCallSpec`。Online 备用使用原生 Function Calling：`tools`、`strict:true`、强制 `tool_choice` 与 `parallel_tool_calls=false`；非流式默认读取一次完整 Function 调用，流式按调用 ID 拼接参数片段后再统一解析和校验。Codex 没有 `--strict=true` 参数：它在完整契约提示词中明确 `strict=true`，把同一份动态 `parameters` 传入 `--output-schema`，并只接受一次参数 JSON 对象。普通文字和图片理解不强制 Function Calling。两条线路共同以 `WORKTRACE_LLM_TIMEOUT_SECONDS` 作为整次请求总时限，未配置时为 180 秒。
+固定结构任务使用同一份 `FunctionCallSpec`。Online 备用在两种接口下都使用原生 Function Calling：`tools`、`strict:true`、强制 `tool_choice` 与 `parallel_tool_calls=false`；非流式只接受一次预期 Function 调用，流式按调用编号拼接参数片段后执行相同校验。输入预算同时估算 Responses、Chat Completions 和 Codex 三种实际请求结构并取最大值，原有调试字段和统计口径不变。Codex 没有 `--strict=true` 参数：它在完整契约提示词中明确 `strict=true`，把同一份动态 `parameters` 传入 `--output-schema`，并只接受一次参数 JSON 对象。普通文字和图片理解不强制 Function Calling。两条线路共同以 `WORKTRACE_LLM_TIMEOUT_SECONDS` 作为整次请求总时限，未配置时为 180 秒。
 
 每个新请求先走 Codex。网络、超时、429、5xx、空结果和无效 JSON 时，当前请求按 `primary_request_retry_limit=1` 再试 Codex 1 次，仍失败才交给 Online 一次；下一请求重新优先 Codex。模型结果通过传输但未通过 Python 结构、编号、证据或覆盖校验时，先按任务既有质量次数把具体错误反馈给 Codex，用尽后再交给 Online 一次。图片摘要还有一项局部保护：Codex 返回工具调用等不合法图片结果，或明确表示无法识别图片时，不重跑整天，只把该图交给 Online 一次。401、403、TLS、模型、推理强度和请求配置错误不会重试或切换。正式流程中的调试模式使用同一线路，只增加 trace、日志和按请求类型统计的备用次数。
 
@@ -605,6 +606,8 @@ Windows PowerShell：
 powershell -ExecutionPolicy Bypass -File .\scripts\install_worktrace.ps1
 ```
 
+Windows 上通过 npm 安装的 `lark-cli` 和 `codex` 通常实际对应 `.cmd` 文件。WorkTrace 会自动定位它们并通过系统 `COMSPEC` 启动，命令参数和输出统一按 UTF-8 处理；个人日报、附件/图片读取、本人送达、多人汇总身份识别和诊断版本读取都使用同一入口。依赖中的 `tzdata` 用于系统没有 IANA 时区库时继续加载 `Asia/Shanghai`。
+
 手动安装依赖：
 
 ```bash
@@ -625,7 +628,7 @@ python3 -m pip install -r requirements.txt
 - [跨会话合并历史设计](docs/cross-conversation-merge-design.md)：已被当前事件分组设计替代的历史方案
 - [多人汇总设计](docs/collected-people-merge-plan.md)：`merge-collected` 当前实现
 - [部门到中心两级汇总改造说明](docs/two-level-collected-merge-improvement-plan.md)：当前实现、历史样本结论和真实 V2 验收边界
-- [Online Analyzer](docs/online-analyzer-usage.md)：Responses API 调用和错误边界
+- [Online Analyzer](docs/online-analyzer-usage.md)：Responses / Chat Completions 调用和错误边界
 - [Markdown 输出](docs/markdown-output-simplification-design.md)：去掉管理者总结后的当前事件文件格式
 - [日报手工编辑支持](docs/manual-report-editing-design.md)：外部编辑识别、修订标记传播和删除即遗忘边界
 - [锚点实验使用说明](docs/anchor-experiment-usage.md)：独立实验入口，不等同于正式日报

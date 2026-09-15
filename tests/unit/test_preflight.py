@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import subprocess
 from pathlib import Path
+from zoneinfo import ZoneInfo, reset_tzpath
 
 import httpx
 import pytest
@@ -12,6 +13,8 @@ from src.worktrace.preflight import (
     CommandResult,
     classify_codex_failure,
     classify_online_failure,
+    ensure_timezone_available,
+    probe_online_llm,
     run_preflight_checks,
 )
 
@@ -323,3 +326,112 @@ def test_run_subprocess_supports_stdin_input(tmp_path: Path) -> None:
 
     assert result.returncode == 0
     assert result.stdout == "HELLO"
+
+
+@pytest.mark.parametrize("wire_api", ["responses", "chat_completions"])
+def test_probe_online_llm_uses_configured_wire_api(
+    wire_api: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (tmp_path / ".env").write_text(
+        "WORKTRACE_LLM_BASE_URL=https://llm.example/v1\n"
+        "WORKTRACE_LLM_MODEL=provider-model\n"
+        "WORKTRACE_LLM_API_KEY=file-key\n"
+        "WORKTRACE_LLM_REASONING_EFFORT=none\n"
+        f"WORKTRACE_LLM_WIRE_API={wire_api}\n",
+        encoding="utf-8",
+    )
+    requests: list[tuple[str, dict[str, object]]] = []
+
+    class FakeResponse:
+        def model_dump(self):
+            if wire_api == "chat_completions":
+                return {
+                    "choices": [
+                        {
+                            "message": {
+                                "tool_calls": [
+                                    {
+                                        "type": "function",
+                                        "function": {
+                                            "name": "submit_worktrace_probe",
+                                            "arguments": '{"probe":"ok"}',
+                                        },
+                                    }
+                                ]
+                            }
+                        }
+                    ]
+                }
+            return {
+                "output": [
+                    {
+                        "type": "function_call",
+                        "name": "submit_worktrace_probe",
+                        "arguments": '{"probe":"ok"}',
+                    }
+                ]
+            }
+
+    class FakeResponses:
+        def create(self, **kwargs):
+            requests.append(("responses", kwargs))
+            return FakeResponse()
+
+    class FakeCompletions:
+        def create(self, **kwargs):
+            requests.append(("chat_completions", kwargs))
+            return FakeResponse()
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            self.responses = FakeResponses()
+            self.chat = type("Chat", (), {"completions": FakeCompletions()})()
+
+        def close(self):
+            return None
+
+    class FakeHttpClient:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    monkeypatch.setattr(
+        "src.worktrace.preflight.httpx.Client",
+        lambda **kwargs: FakeHttpClient(),
+    )
+    monkeypatch.setattr(
+        "src.worktrace.preflight.OpenAI",
+        lambda **kwargs: FakeClient(),
+    )
+
+    result = probe_online_llm(
+        RuntimeConfig(data_root=tmp_path / "data"),
+        cwd=tmp_path,
+    )
+
+    assert result["online_probe"] == "ok"
+    assert result["wire_api"] == wire_api
+    assert requests[0][0] == wire_api
+    if wire_api == "chat_completions":
+        assert "input" not in requests[0][1]
+        assert "reasoning" not in requests[0][1]
+        assert requests[0][1]["extra_body"] == {
+            "thinking": {"type": "disabled"}
+        }
+    else:
+        assert requests[0][1]["reasoning"] == {"effort": "none"}
+
+
+def test_timezone_uses_tzdata_when_system_database_is_unavailable() -> None:
+    ZoneInfo.clear_cache()
+    reset_tzpath([])
+    try:
+        ensure_timezone_available("Asia/Shanghai")
+        assert ZoneInfo("Asia/Shanghai").key == "Asia/Shanghai"
+    finally:
+        ZoneInfo.clear_cache()
+        reset_tzpath()

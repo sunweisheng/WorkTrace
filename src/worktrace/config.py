@@ -15,6 +15,7 @@ DEFAULT_LLM_TIMEOUT_ENV_VAR = "WORKTRACE_LLM_TIMEOUT_SECONDS"
 DEFAULT_LLM_STREAM_ENV_VAR = "WORKTRACE_LLM_STREAM"
 DEFAULT_LLM_TLS_VERIFY_ENV_VAR = "WORKTRACE_LLM_TLS_VERIFY"
 DEFAULT_LLM_REASONING_EFFORT_ENV_VAR = "WORKTRACE_LLM_REASONING_EFFORT"
+DEFAULT_LLM_WIRE_API_ENV_VAR = "WORKTRACE_LLM_WIRE_API"
 DEFAULT_CODEX_MODEL_ENV_VAR = "WORKTRACE_CODEX_MODEL"
 DEFAULT_CODEX_REASONING_EFFORT_ENV_VAR = "WORKTRACE_CODEX_REASONING_EFFORT"
 DEFAULT_CODEX_PROVIDER_ID_ENV_VAR = "WORKTRACE_CODEX_PROVIDER_ID"
@@ -57,6 +58,7 @@ class OnlineLLMSettings:
     stream_enabled: bool
     tls_verify: bool
     reasoning_effort: str | None
+    wire_api: str
 
 
 @dataclass(frozen=True)
@@ -451,6 +453,14 @@ def load_online_llm_settings(
     reasoning_effort_raw = values.get(config.llm_reasoning_effort_env_var, "").strip()
     reasoning_effort = reasoning_effort_raw or config.llm_reasoning_effort
 
+    wire_api_raw = values.get(config.llm_wire_api_env_var, "").strip()
+    wire_api = wire_api_raw or config.llm_wire_api
+    if wire_api not in {"responses", "chat_completions"}:
+        raise ValueError(
+            f"Invalid Online LLM wire API: {config.llm_wire_api_env_var} must be "
+            "responses or chat_completions."
+        )
+
     return OnlineLLMSettings(
         base_url=values[config.llm_base_url_env_var].strip(),
         model=values[config.llm_model_env_var].strip(),
@@ -460,6 +470,7 @@ def load_online_llm_settings(
         stream_enabled=stream_enabled,
         tls_verify=tls_verify,
         reasoning_effort=reasoning_effort,
+        wire_api=wire_api,
     )
 
 
@@ -2147,6 +2158,7 @@ class RuntimeConfig:
     llm_stream_env_var: str = DEFAULT_LLM_STREAM_ENV_VAR
     llm_tls_verify_env_var: str = DEFAULT_LLM_TLS_VERIFY_ENV_VAR
     llm_reasoning_effort_env_var: str = DEFAULT_LLM_REASONING_EFFORT_ENV_VAR
+    llm_wire_api_env_var: str = DEFAULT_LLM_WIRE_API_ENV_VAR
     codex_model_env_var: str = DEFAULT_CODEX_MODEL_ENV_VAR
     codex_reasoning_effort_env_var: str = DEFAULT_CODEX_REASONING_EFFORT_ENV_VAR
     codex_provider_id_env_var: str = DEFAULT_CODEX_PROVIDER_ID_ENV_VAR
@@ -2175,6 +2187,7 @@ class RuntimeConfig:
     llm_stream_enabled: bool = False
     llm_tls_verify: bool = False
     llm_reasoning_effort: str | None = "none"
+    llm_wire_api: str = "responses"
 
     def __post_init__(self) -> None:
         primary = self.primary_request_retry_limit

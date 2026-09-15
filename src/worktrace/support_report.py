@@ -23,6 +23,7 @@ from .models import (
     DailyRunResult,
     SupportReportReference,
 )
+from .utils.commands import run_text_command
 
 
 SUPPORT_REPORT_CONFIG_PATH = Path("config") / "support_report.json"
@@ -1015,7 +1016,7 @@ def scan_support_report_privacy(
 
 
 def collect_environment_versions(
-    command_runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+    command_runner: Callable[..., subprocess.CompletedProcess[str]] = run_text_command,
 ) -> dict[str, str]:
     return {
         "worktrace_version": _safe_version(__version__),
@@ -1186,10 +1187,7 @@ def _command_version(
     try:
         result = command_runner(
             command,
-            capture_output=True,
-            text=True,
             timeout=3,
-            check=False,
         )
     except (OSError, subprocess.SubprocessError):
         return "unknown"

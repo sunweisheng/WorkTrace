@@ -97,6 +97,21 @@ class FunctionCallSpec:
     def tool_choice(self) -> dict[str, str]:
         return {"type": "function", "name": self.name}
 
+    def chat_tool(self) -> dict[str, object]:
+        tool = self.online_tool()
+        return {
+            "type": "function",
+            "function": {
+                "name": tool["name"],
+                "description": tool["description"],
+                "parameters": tool["parameters"],
+                "strict": tool["strict"],
+            },
+        }
+
+    def chat_tool_choice(self) -> dict[str, object]:
+        return {"type": "function", "function": {"name": self.name}}
+
     def prompt_with_example(self, prompt: str) -> str:
         return self._prepare_prompt(prompt, include_codex_contract=False)
 

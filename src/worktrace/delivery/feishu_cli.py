@@ -13,6 +13,7 @@ from ..utils.filenames import (
     build_personal_markdown_filename,
     parse_worktrace_markdown_filename,
 )
+from ..utils.commands import run_text_command
 from ..utils.text import sanitize_filename_component
 from .base import DeliveryChannel
 
@@ -69,13 +70,7 @@ class FeishuCliSelfDelivery(DeliveryChannel):
         *,
         cwd: Path | None = None,
     ) -> subprocess.CompletedProcess[str]:
-        return subprocess.run(
-            list(args),
-            cwd=str(cwd) if cwd else None,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
+        return run_text_command(args, cwd=cwd)
 
     def _prepare_delivery_copy(
         self,

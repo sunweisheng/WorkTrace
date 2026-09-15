@@ -15,6 +15,7 @@ def test_env_example_contains_required_online_llm_keys() -> None:
     assert "WORKTRACE_LLM_API_KEY=" in content
     assert "WORKTRACE_LLM_REASONING_EFFORT=none" in content
     assert "WORKTRACE_LLM_STREAM=false" in content
+    assert "WORKTRACE_LLM_WIRE_API=responses" in content
 
 
 def test_readme_mentions_local_online_llm_configuration() -> None:
@@ -24,6 +25,27 @@ def test_readme_mentions_local_online_llm_configuration() -> None:
     assert "WORKTRACE_LLM_BASE_URL" in content
     assert "不能和代码一起提交到 git" in content
     assert "/no_think" in content
+
+
+def test_current_docs_describe_windows_and_online_wire_compatibility() -> None:
+    documents = [
+        Path("README.md").read_text(encoding="utf-8"),
+        Path("SKILL.md").read_text(encoding="utf-8"),
+        Path("docs/detailed-design.md").read_text(encoding="utf-8"),
+        Path("docs/employee-guide.md").read_text(encoding="utf-8"),
+        Path("docs/online-analyzer-usage.md").read_text(encoding="utf-8"),
+    ]
+    combined = "\n".join(documents)
+
+    for content in documents:
+        assert "WORKTRACE_LLM_WIRE_API" in content
+        assert "chat_completions" in content or "Chat Completions" in content
+    assert "lark-cli.cmd" in combined
+    assert "codex.cmd" in combined
+    assert "UTF-8" in combined
+    assert "tzdata" in combined
+    assert "thinking.type=disabled" in combined
+    assert "不根据模型名" in combined or "不按模型名" in combined
 
 
 def test_readme_mentions_event_rules_file() -> None:

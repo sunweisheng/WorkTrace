@@ -18,6 +18,7 @@ from ..config import RuntimeConfig
 from ..constants import LinkType
 from ..models import AttachmentTextBlock, LinkMeta, LinkedFileTextBlock, NormalizedMessage
 from ..utils.link_refs import build_message_link_candidates, classify_link_type, collect_message_links
+from ..utils.commands import run_text_command
 from ..utils.text import clean_text, extract_urls
 from ..vision import CodexFirstImageSummarizer, OnlineImageSummarizer
 from .base import ContentResolver
@@ -162,12 +163,7 @@ class FeishuMessageContentResolver(ContentResolver):
         self,
         args: Sequence[str],
     ) -> subprocess.CompletedProcess[str]:
-        return subprocess.run(
-            list(args),
-            capture_output=True,
-            text=True,
-            check=False,
-        )
+        return run_text_command(args)
 
     def load_attachment_text_if_needed(
         self,
@@ -289,16 +285,13 @@ class FeishuMessageContentResolver(ContentResolver):
             path = self.attachment_downloader(message, attachment.attachment_id)
             return self.text_attachment_extractor.extract(path, file_name=attachment.file_name)
         with tempfile.TemporaryDirectory(prefix="worktrace-attachment-") as temp_dir:
-            result = subprocess.run(
-                [
+            result = self.command_runner(
+                (
                     "lark-cli", "im", "+messages-resources-download", "--as", "user",
                     "--message-id", message.message_id, "--file-key", attachment.attachment_id,
                     "--type", "file", "--output", "attachment",
-                ],
-                cwd=temp_dir,
-                capture_output=True,
-                text=True,
-                check=False,
+                ),
+                cwd=Path(temp_dir),
             )
             if result.returncode != 0:
                 raise RuntimeError(result.stderr.strip() or "attachment download failed")
@@ -323,16 +316,13 @@ class FeishuMessageContentResolver(ContentResolver):
                 required=required,
             )
         with tempfile.TemporaryDirectory(prefix="worktrace-image-") as temp_dir:
-            result = subprocess.run(
-                [
+            result = self.command_runner(
+                (
                     "lark-cli", "im", "+messages-resources-download", "--as", "user",
                     "--message-id", message.message_id, "--file-key", attachment_id,
                     "--type", "image", "--output", "image",
-                ],
-                cwd=temp_dir,
-                capture_output=True,
-                text=True,
-                check=False,
+                ),
+                cwd=Path(temp_dir),
             )
             if result.returncode != 0:
                 raise RuntimeError(result.stderr.strip() or "image download failed")

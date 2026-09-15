@@ -42,7 +42,7 @@ flowchart LR
     RUN --> ANA["Analyzer\nOnlineLLMAnalyzer"]
     RUN --> STORE["EventStore\nMarkdownEventStore"]
     RUN --> DEL["DeliveryChannel\nFeishuCliSelfDelivery"]
-    ANA --> API["OpenAI SDK\nResponses API"]
+    ANA --> API["OpenAI SDK\nResponses / Chat Completions"]
     SRC --> LARK["lark-cli user"]
     RES --> LARK
     DEL --> BOT["lark-cli bot"]
@@ -426,20 +426,20 @@ flowchart TD
 
 ```text
 FailoverAnalyzer -> CodexAnalyzer -> Codex CLI
-                       -> OnlineLLMAnalyzer -> Responses API provider（仅当前请求备用）
+                       -> OnlineLLMAnalyzer -> Responses / Chat Completions（仅当前请求备用）
 ```
 
 固定结构的正式语义请求：
 
 - Codex 提示词完整展示 Function 契约、`strict=true`、典型参数、结构示例和最终自检，不追加 `/no_think`
-- Online 备用 prompt 追加 `/no_think`，并发送 `reasoning.effort=none`
+- Online 备用 prompt 追加 `/no_think`；Responses 发送 `reasoning.effort=none`，Chat Completions 改发 `thinking.type=disabled`
 - 会话分段、事件提炼、保留复核、事实复核、全日分组、个人标题发现、个人完整复核、个人内容重写、多人候选分组、部门标题发现、部门完整复核、正式内容生成和表情元数据补全分别构造 `FunctionCallSpec`
 - 参数完整声明必填字段、动态 ID 枚举、数组数量与去重约束和 `additionalProperties:false`，并在 prompt 中加入当前合法 ID 的典型参数示例
-- Online 设置 `strict:true`、`tools`、强制 `tool_choice` 和 `parallel_tool_calls=false`，非流式必须且只能调用一次预期 Function；流式按调用 ID 拼接 Function 参数后执行相同检查
+- Online 两种接口都设置 `strict:true`、`tools`、强制 `tool_choice` 和 `parallel_tool_calls=false`，非流式必须且只能调用一次预期 Function；流式按调用编号拼接 Function 参数后执行相同检查
 - Codex 使用同一参数结构作为 `--output-schema`，只提交一次参数 JSON；CLI 没有 `--strict=true` 参数，`--strict-config` 不等同该参数
 - 普通文字总结和图片理解不要求固定结构时不强制 Function Calling
 
-`WORKTRACE_LLM_STREAM` 是 Online 备用的流式开关，默认 `false`。每个 Online 请求都会重新读取当前配置，创建并关闭独立 OpenAI 与 HTTP 客户端；不保留全局单例、配置指纹或锁。每次 Codex 调用在空临时目录执行，提示词经 stdin 输入，Schema、结果和图片副本随临时目录删除，解析 `--json` 事件并拒绝工具调用。`read-only` 是写保护，不等同操作系统级读取隔离。preflight 使用正式 `FunctionCallSpec`、正式 Schema 和隔离参数执行 Codex 探针；Online 只检查配置。
+`WORKTRACE_LLM_WIRE_API` 默认 `responses`，显式设为 `chat_completions` 时统一切换 Online 结构化请求、图片备用和独立探针；不按模型名或地址判断。`WORKTRACE_LLM_STREAM` 是 Online 备用的流式开关，默认 `false`。每个 Online 请求都会重新读取当前配置，创建并关闭独立 OpenAI 与 HTTP 客户端；不保留全局单例、配置指纹或锁。每次 Codex 调用在空临时目录执行，提示词经 stdin 输入，Schema、结果和图片副本随临时目录删除，解析 `--json` 事件；允许非执行型 `error` 提示，仍拒绝工具调用和未知项。`read-only` 是写保护，不等同操作系统级读取隔离。preflight 使用正式 `FunctionCallSpec`、正式 Schema 和隔离参数执行 Codex 探针；日常 preflight 对 Online 只检查配置。
 
 `CodexAnalyzer` 是默认主线路。每个新请求先走 Codex，网络、超时、限流、服务端异常、空结果和无效 JSON 时最多额外重试一次，再将当前请求交给 Online 一次；下一请求再次优先 Codex。登录、权限、模型、推理强度、TLS 和配置错误不会切换。runner 根据 analyzer 是否提供分段能力决定主链；不支持时回退到会话级 `ConversationSlice` 兼容路径。
 
@@ -474,10 +474,13 @@ FailoverAnalyzer -> CodexAnalyzer -> Codex CLI
 - `anchor_batch_size = 3`
 - `llm_stream_enabled = False`
 - `llm_reasoning_effort = "none"`
+- `llm_wire_api = "responses"`
 
 ### 9.2 `.env` 与环境变量
 
-Codex 主线路必填项是仓库本地 `.env` 中的模型、推理强度和五项中转提供方设置：`WORKTRACE_CODEX_MODEL`、`WORKTRACE_CODEX_REASONING_EFFORT`、`WORKTRACE_CODEX_PROVIDER_ID`、`WORKTRACE_CODEX_PROVIDER_NAME`、`WORKTRACE_CODEX_PROVIDER_BASE_URL`、`WORKTRACE_CODEX_PROVIDER_WIRE_API`、`WORKTRACE_CODEX_PROVIDER_REQUIRES_OPENAI_AUTH`。它们不从进程环境变量或个人 Codex 配置继承；中转站 Key 继续由 Codex CLI 的认证存储提供，不写入 WorkTrace `.env`。Online 备用连接仍使用 `WORKTRACE_LLM_BASE_URL`、`WORKTRACE_LLM_MODEL`、`WORKTRACE_LLM_API_KEY` 三项，缺少或不合法时只禁用备用。Online 的 `WORKTRACE_LLM_REASONING_EFFORT` 必须为 `none`；timeout/stream/TLS 位于 `.env` 或进程环境变量，环境变量优先。两条线路共用 `WORKTRACE_LLM_TIMEOUT_SECONDS`（未配置时 180 秒）作为整次请求总时限；Codex 到点终止子进程，Online 到点关闭当前连接。可切换失败按 `primary_request_retry_limit=1` 只让当前请求再试 Codex 1 次，仍失败才由 Online 执行一次，下一请求继续 Codex 优先。图片摘要中的 Codex 工具调用等不合法结果和配置定义的无法识别回复直接触发当前图片的 Online 备用，不改变文字请求规则。请求级重试次数和 Codex 间隔都在 `config/llm_retry.json` 统一控制。`WORKTRACE_LLM_TLS_VERIFY` 只进入 Online preflight 和文本 analyzer 的 HTTP client；图片摘要的 Online 备用使用独立 SDK client。
+Codex 主线路必填项是仓库本地 `.env` 中的模型、推理强度和五项中转提供方设置：`WORKTRACE_CODEX_MODEL`、`WORKTRACE_CODEX_REASONING_EFFORT`、`WORKTRACE_CODEX_PROVIDER_ID`、`WORKTRACE_CODEX_PROVIDER_NAME`、`WORKTRACE_CODEX_PROVIDER_BASE_URL`、`WORKTRACE_CODEX_PROVIDER_WIRE_API`、`WORKTRACE_CODEX_PROVIDER_REQUIRES_OPENAI_AUTH`。它们不从进程环境变量或个人 Codex 配置继承；中转站 Key 继续由 Codex CLI 的认证存储提供，不写入 WorkTrace `.env`。Online 备用连接仍使用 `WORKTRACE_LLM_BASE_URL`、`WORKTRACE_LLM_MODEL`、`WORKTRACE_LLM_API_KEY` 三项，缺少或不合法时只禁用备用。`WORKTRACE_LLM_WIRE_API` 可选 `responses` 或 `chat_completions`，未配置时保持 Responses；Online 的 `WORKTRACE_LLM_REASONING_EFFORT` 必须为 `none`。timeout/stream/TLS 位于 `.env` 或进程环境变量，环境变量优先。两条线路共用 `WORKTRACE_LLM_TIMEOUT_SECONDS`（未配置时 180 秒）作为整次请求总时限；Codex 到点终止子进程，Online 到点关闭当前连接。可切换失败按 `primary_request_retry_limit=1` 只让当前请求再试 Codex 1 次，仍失败才由 Online 执行一次，下一请求继续 Codex 优先。图片摘要中的 Codex 工具调用等不合法结果和配置定义的无法识别回复直接触发当前图片的 Online 备用，不改变文字请求规则。请求级重试次数和 Codex 间隔都在 `config/llm_retry.json` 统一控制。`WORKTRACE_LLM_TLS_VERIFY` 进入 Online 的文本、图片和独立探针 HTTP client。
+
+所有正式外部命令都通过同一执行入口。Windows 会定位 npm 生成的 `lark-cli.cmd` 和 `codex.cmd`，经 `COMSPEC /d /s /c` 启动并安全处理空格、中文和引号；其他系统保持参数列表调用。输出统一按 UTF-8 解码，异常字节替换为可见占位。Codex 隔离环境在 Windows 保留系统、用户和临时目录变量，同时继续排除 `WORKTRACE_*` 和其他凭据。`tzdata` 为缺少系统 IANA 时区库的 Windows 环境提供 `Asia/Shanghai` 后备。
 
 多人汇总 trace 和字段缺失重试也支持环境覆盖：
 
@@ -558,7 +561,7 @@ LLM 中间缓存指纹使用 schema v3；旧缓存不复用、不迁移，避免
 - `personal_fact_review.json`：个人事实复核的触发原因、修订前后字段、事实证据覆盖、Python 统计及每次失败返回；`event_generation_debug` 标记完整个人模板且不带案例，不额外复制原聊天正文
 - `final_events.json`：过滤后的合并草稿、文件聚合和排序完成后的 `WorkEvent`、最终阶段 warning
 - `llm_calls.json`：每次调用的编号、严格契约、最终提示词、线路、模型、推理强度、原始结果、Python 校验、重试和切换原因；不保存密钥、认证文件、个人 Codex 配置、完整环境变量、图片内容或原始 Codex JSONL
-- `llm_usage.json`：每次文字调用的线路、成功或失败、切换方向、安全错误类别、耗时和输入字符数；`event_generation_summary` 只记录事件生成配置是否加载、版本以及规则/模板/案例数量；Online 线路保留 Responses API token，Codex 明确标记 token 不可用
+- `llm_usage.json`：每次文字调用的线路、成功或失败、切换方向、安全错误类别、耗时和输入字符数；`event_generation_summary` 只记录事件生成配置是否加载、版本以及规则/模板/案例数量；Online 线路保留 Responses 或 Chat Completions 返回的 token，Codex 明确标记 token 不可用
 
 segmentation 和 segment batch 的模型失败轮次保存输入、prompt 与 `failure.json`。批次拆分后的单片段回退保存在片段目录的 `fallback-01/`；分段耗尽后的直接提炼保存在 `_anchor_fallback/<conversation>/<anchor-key>/attempt-XX/`。成功轮次继续保存输出和校验结果，异常轮次不伪造模型输出。
 

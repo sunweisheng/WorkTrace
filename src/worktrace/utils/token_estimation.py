@@ -53,7 +53,7 @@ def estimate_function_input_tokens(
         function_spec.prompt_with_example(prompt),
         append_no_think=append_no_think,
     )
-    function_input = json.dumps(
+    responses_function_input = json.dumps(
         {
             "tools": [function_spec.online_tool()],
             "tool_choice": function_spec.tool_choice(),
@@ -63,7 +63,21 @@ def estimate_function_input_tokens(
         separators=(",", ":"),
         sort_keys=True,
     )
-    return estimate_text_tokens(f"{prepared_prompt}\n{function_input}")
+    chat_function_input = json.dumps(
+        {
+            "messages": [{"role": "user", "content": prepared_prompt}],
+            "tools": [function_spec.chat_tool()],
+            "tool_choice": function_spec.chat_tool_choice(),
+            "parallel_tool_calls": False,
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    return max(
+        estimate_text_tokens(f"{prepared_prompt}\n{responses_function_input}"),
+        estimate_text_tokens(chat_function_input),
+    )
 
 
 def estimate_codex_schema_input_tokens(

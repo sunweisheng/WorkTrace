@@ -69,7 +69,7 @@ WorkTrace 会读取你在指定日期里发过消息或做过 reaction 的飞书
 - 已安装 Python 3.11 或更高版本
 - 已安装 `lark-cli`
 - 你的 `lark-cli` 已登录为飞书 `user` 身份
-- 已安装 `codex` 命令，供在线文字请求失败时切换当前请求
+- 已安装 `codex` 命令，作为文字分析主线路
 - 飞书 CLI 配置的机器人可向你发送文件消息
 - 你自己可用的在线模型配置
 
@@ -79,6 +79,7 @@ WorkTrace 会读取你在指定日期里发过消息或做过 reaction 的飞书
 WORKTRACE_LLM_BASE_URL=
 WORKTRACE_LLM_MODEL=
 WORKTRACE_LLM_API_KEY=
+WORKTRACE_LLM_WIRE_API=responses
 ```
 
 其中：
@@ -86,6 +87,7 @@ WORKTRACE_LLM_API_KEY=
 - `WORKTRACE_LLM_BASE_URL` 是模型服务地址
 - `WORKTRACE_LLM_MODEL` 是模型名
 - `WORKTRACE_LLM_API_KEY` 是你的密钥
+- `WORKTRACE_LLM_WIRE_API` 是 Online 备用接口，默认 `responses`；服务明确要求 Chat Completions 时才改为 `chat_completions`
 
 `WORKTRACE_LLM_REASONING_EFFORT` 不属于缺一不可的连接配置；不填写时，代码默认使用 `none`。模板显式保留 `WORKTRACE_LLM_REASONING_EFFORT=none`，表示当前主流程关闭推理过程。如果把它改成其他值，首次自检会失败。
 
@@ -154,6 +156,8 @@ lark-cli --help
 ```
 
 如果能正常显示帮助信息，说明这一步完成。
+
+通过 npm 安装时，Windows 实际使用的通常是 `lark-cli.cmd`；`codex` 也可能是 `codex.cmd`。WorkTrace 会自动定位并通过系统命令解释器启动，包含空格或中文的文件路径也会按原参数传递，输出统一按 UTF-8 读取。
 
 ### 5.3 登录飞书 CLI
 
@@ -257,9 +261,11 @@ cp .env.example .env
 - `codex` 命令是否可用
 - 仓库本地 `.env` 是否显式配置 `WORKTRACE_CODEX_MODEL`、`WORKTRACE_CODEX_REASONING_EFFORT` 和全部 `WORKTRACE_CODEX_PROVIDER_*` 项
 - 使用正式 Schema、临时目录和隔离参数的 Codex 小探针是否成功
-- Online 三项备用连接配置是否完整；缺少时禁用备用但不阻止 Codex 主线路
+- Online 三项备用连接配置及接口开关是否合法；缺少时禁用备用但不阻止 Codex 主线路
 - `data/` 目录是否可写
 - `Asia/Shanghai` 时区是否可用
+
+Python 依赖中的 `tzdata` 会在 Windows 没有系统时区数据库时提供后备，不改变日报日期判断。
 
 自检不会发送测试文件，因此飞书机器人的发文件权限和应用可见范围仍需在首次正式运行时验证。投递失败不会删除已经生成的本地 Markdown。
 

@@ -75,6 +75,7 @@ def test_load_online_llm_settings_reads_local_env(tmp_path: Path) -> None:
     assert settings.stream_enabled is False
     assert settings.tls_verify is False
     assert settings.reasoning_effort == "none"
+    assert settings.wire_api == "responses"
 
 
 def test_load_llm_timeout_seconds_does_not_require_online_credentials(
@@ -194,7 +195,8 @@ def test_load_online_llm_settings_reads_stream_tls_and_reasoning_overrides(tmp_p
         "WORKTRACE_LLM_API_KEY=file-key\n"
         "WORKTRACE_LLM_STREAM=true\n"
         "WORKTRACE_LLM_TLS_VERIFY=true\n"
-        "WORKTRACE_LLM_REASONING_EFFORT=none\n",
+        "WORKTRACE_LLM_REASONING_EFFORT=none\n"
+        "WORKTRACE_LLM_WIRE_API=chat_completions\n",
         encoding="utf-8",
     )
 
@@ -203,6 +205,20 @@ def test_load_online_llm_settings_reads_stream_tls_and_reasoning_overrides(tmp_p
     assert settings.stream_enabled is True
     assert settings.tls_verify is True
     assert settings.reasoning_effort == "none"
+    assert settings.wire_api == "chat_completions"
+
+
+def test_load_online_llm_settings_rejects_unknown_wire_api(tmp_path: Path) -> None:
+    (tmp_path / ".env").write_text(
+        "WORKTRACE_LLM_BASE_URL=https://llm.example/v1\n"
+        "WORKTRACE_LLM_MODEL=provider-model\n"
+        "WORKTRACE_LLM_API_KEY=file-key\n"
+        "WORKTRACE_LLM_WIRE_API=unknown\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="responses or chat_completions"):
+        load_online_llm_settings(RuntimeConfig(), cwd=tmp_path, environ={})
 
 
 def test_load_online_llm_settings_reads_false_stream_override(tmp_path: Path) -> None:

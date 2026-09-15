@@ -7,7 +7,7 @@ description: 帮员工从指定日期里与自己直接相关的飞书工作聊�
 
 ## 用途
 
-WorkTrace 用于从飞书聊天中提取指定日期里与本人直接相关的工作沟通内容，围绕本人发言上下文整理工作事件，调用兼容 OpenAI `Responses API` 的在线模型做结构化提炼，并将结果写入本地 Markdown 文件，随后通过飞书 CLI 机器人身份把文件发给当前登录用户自己。
+WorkTrace 用于从飞书聊天中提取指定日期里与本人直接相关的工作沟通内容，围绕本人发言上下文整理工作事件，通过 Codex 主线路和可配置为 Responses 或 Chat Completions 的 Online 备用线路做结构化提炼，并将结果写入本地 Markdown 文件，随后通过飞书 CLI 机器人身份把文件发给当前登录用户自己。
 
 这个 skill 的目标是帮助员工整理自己的工作事件，不是为了抓取私人聊天，也不是为了直接替员工向上级发汇总。
 
@@ -30,7 +30,7 @@ WorkTrace 另有一个管理人员汇总模式：管理人员先收集多人已�
 - `WORKTRACE_CODEX_MODEL`、`WORKTRACE_CODEX_REASONING_EFFORT` 与五项 `WORKTRACE_CODEX_PROVIDER_*` 缺一不可
 - 它们只从仓库本地 `.env` 读取，不继承个人 Codex 的模型或中转提供方配置；中转站 Key 仍由 Codex CLI 自己的认证存储提供
 - 不硬编码模型名或推理强度枚举，由 `--preflight` 的正式严格 Schema 小探针验证组合
-- Online 当前请求备用使用 `WORKTRACE_LLM_BASE_URL`、`WORKTRACE_LLM_MODEL` 和 `WORKTRACE_LLM_API_KEY`；缺少或不合法时禁用备用但不阻止 Codex 主线路
+- Online 当前请求备用使用 `WORKTRACE_LLM_BASE_URL`、`WORKTRACE_LLM_MODEL` 和 `WORKTRACE_LLM_API_KEY`；`WORKTRACE_LLM_WIRE_API` 默认 `responses`，只在显式配置时切换为 `chat_completions`；缺少或不合法时禁用备用但不阻止 Codex 主线路
 - 真实密钥和本地 `.env` 都不能提交到 git 仓库
 
 诊断请求例外：不要因为配置缺失或 preflight 失败而由 Codex 提前中止。仍要执行带 `--debug-output` 的 CLI，让 WorkTrace 生成能够说明环境问题的安全诊断报告；正式日报流程是否继续仍由 CLI 自己决定。
@@ -42,7 +42,7 @@ WorkTrace 另有一个管理人员汇总模式：管理人员先收集多人已�
 3. 让 Python 负责聊天抓取、窗口裁剪、批量组装、模型信号和证据校验、固定保留规则、统计、全日分组完整性、文件链接聚合、Markdown 写入和自送达。
 4. 每日 Markdown 文件创建成功后，按 `config/self_delivery.json` 的 `enabled` 决定是否通过飞书 CLI 机器人身份发给当前登录用户自己；默认开启。
 5. 仅在需要语义提取时调用 Codex 做批量分析；Online 只在当前请求的 Codex 技术失败后作为备用。
-6. Online 备用保持 `/no_think` 与 `reasoning.effort=none`；Codex 不追加 `/no_think`，而是在完整契约提示词中明确 `strict=true` 与单次参数 JSON 提交要求。
+6. Online 备用保持 `/no_think` 与关闭思考：Responses 使用 `reasoning.effort=none`，Chat Completions 使用 `thinking.type=disabled`；Codex 不追加 `/no_think`，而是在完整契约提示词中明确 `strict=true` 与单次参数 JSON 提交要求。
 7. 每个新请求先走 Codex。网络、超时、429、5xx、空结果和无效 JSON 时，按 `config/llm_retry.json` 的 `primary_request_retry_limit=1` 只对当前请求再试 Codex 1 次，仍失败才交给 Online 一次；下一个新请求重新优先 Codex。登录、权限、模型、推理强度、TLS 和配置错误不切换。两条线路都以 `WORKTRACE_LLM_TIMEOUT_SECONDS`（未配置时 180 秒）作为整次请求总时限；Codex 的全局同时调用上限为 3，文字、图片、表情补全和诊断报告共用。图片摘要也先走 Codex 普通文本任务，使用临时图片副本的 `--image`，不强制 Function Calling；Codex 返回工具调用等不合法图片结果，或命中 `config/image_summary.json` 配置的无法识别说法时，只把当前图片交给 Online 一次。正式流程和调试模式共用此线路，调试账本记录切换方向、原因和备用次数。
 8. 调试模式只为正式日报或多人汇总增加 trace 和日志，不改变正式模型线路。任务结束后另有一次独立的诊断报告模型调用；报告模型只读取 Python 已脱敏并计算好的编号事实。除非用户明确要求做单独的 Codex 后端诊断，否则不得通过临时配置、包装命令或代码参数把整次个人日报或多人汇总强制切到 Codex。
 9. Codex 成功返回、但结果未通过 Python 证据或结构校验时，先按程序现有配置用 Codex 局部重试当前请求，并把具体错误放入提示词；结果质量重试用尽后，只把当前请求交给 Online 一次。技术请求经过 Codex 重试和 Online 备用仍失败时直接执行该节点的失败策略，不消耗结果质量重试，也不重新从 Codex 开始一轮。Online 结果合法时继续流程，下一请求仍优先 Codex；普通结构化任务中 Online 失败或结果仍不合法时停止整次生成。全日分组的专用边界是：Online 技术调用失败时终止；Online 返回但仍非法时保留完全合法组，其余候选拆成单例并记录 warning。标题发现全部尝试失败时按没有候选继续并记录 warning；局部复核失败或持续非法时保留复核前分组并记录 warning。不得擅自增加重试次数或重新运行整次流程。
@@ -162,9 +162,9 @@ python3 -m src.worktrace.cli --debug-output merge-collected --date YYYY-MM-DD
 - 核心实现应放在 `src/`，测试放在 `tests/`，设计文档放在 `docs/`。
 - 不要让 LLM 参与数据计算；统计或计算必须由 Python 完成。
 - 个人保留提示、既有业务词、临时协作与事实复核条件和语义信号说明维护在 `config/retention_policy.json`；个人和团队事件写作规则、完整事项边界、字段模板及脱敏案例维护在 `config/event_generation.json`；个人和多人分组理由的描述、成立条件和排除条件维护在 `config/event_grouping.json`；多人高风险复核开关和阈值维护在 `config/collected_merge.json`。不得在 Python 中新增聊天关键词或具体中文业务判断规则。
-- 个人日报和多人汇总统一从 `config/model_input_budget.json` 按仓库本地 `.env` 的主模型和备用模型组合读取 `model_input_batch_target_tokens`，不另设多人合并字符阈值。配置不存在或没有精确匹配项时回退 `7000`，只在调试统计中记录 `profile_matched=false`，不增加日报 warning。分批和调用前检查必须调用同一个 Python 估算函数，并取 Online 原生 Function 与 `tool_choice`、Codex 完整契约和同一 output-schema 两种估算的较大值；模型名、URL、API Key、timeout 和 stream 不计入。会话分段窗口、锚点降级批次、全日候选分组及多人汇总等仍可拆的组合输入必须继续拆分；最小必要输入仍超过目标时允许发送，并在调试记录中保存两条线路估算、目标值、超限原因、实际 token 和估算差。该值不是 HTTP 字节数或服务端上下文上限。
+- 个人日报和多人汇总统一从 `config/model_input_budget.json` 按仓库本地 `.env` 的主模型和备用模型组合读取 `model_input_batch_target_tokens`，不另设多人合并字符阈值。配置不存在或没有精确匹配项时回退 `7000`，只在调试统计中记录 `profile_matched=false`，不增加日报 warning。分批和调用前检查必须调用同一个 Python 估算函数，并取 Responses、Chat Completions 和 Codex 三种实际请求结构估算的最大值；模型名、URL、API Key、timeout 和 stream 不计入。会话分段窗口、锚点降级批次、全日候选分组及多人汇总等仍可拆的组合输入必须继续拆分；最小必要输入仍超过目标时允许发送，并在调试记录中保存原有两条线路估算、目标值、超限原因、实际 token 和估算差。该值不是 HTTP 字节数或服务端上下文上限。
 - 阈值变更必须使用 `scripts/benchmark_model_input_budget.py` 的脱敏个人与团队数据：主线路验证 `7000、12000、16000、20000、24000` 五档且每档重复两次，备用线路只验证 `7000` 旧基线和 `20000` 重点候选且各一次。备用线路不测试中间档位，但两种模式和 Python 校验仍必须全部通过；人工盲审通过后还要完成显式日期隔离验证，隔离验证成功才能写回当前 profile。评测默认不读飞书、不送达、不上传、不生成诊断报告；已有完整主线路结果时用 `--reuse-primary-existing` 只运行备用线路，显式日期隔离验证只写临时数据和缓存目录，不能覆盖正式 Markdown。
-- `WORKTRACE_LLM_STREAM` 是 Online 文字和图片备用请求的唯一流式开关，默认 `false`。每次 Online 请求重新读取配置，创建并关闭独立 OpenAI 和 HTTP 客户端；固定结构 Online 请求强制且只允许调用一次预期 Function，显式开启流式时按调用 ID 拼接 Function 参数。Codex 每次都在空临时目录以 stdin 和 `--output-schema` 运行，读取 `--json` 事件并拒绝工具调用；`read-only` 是写保护，不是操作系统级读取隔离。请求级可重试错误按配置再试 Codex 1 次，仍失败才将当前请求交给 Online 一次。图片工具调用等不合法结果和配置定义的无法识别回复只触发当前图片的 Online 备用一次；备用失败时记一次 warning 并跳过该图，不停止整次生成。Python 校验失败先走 Codex 局部重试并反馈具体错误，结果质量重试用尽后再交给 Online 一次。下一请求重新优先 Codex。除图片摘要的局部失败外，Online 失败或结果仍不合法时停止整次生成。调试、诊断或一次运行失败都不构成整次切换后端的授权；需要改变重试次数时，先停止并取得用户明确同意。
+- `WORKTRACE_LLM_STREAM` 是 Online 文字和图片备用请求的唯一流式开关，默认 `false`。`WORKTRACE_LLM_WIRE_API` 同时控制结构化调用、图片备用和独立探针，不按模型名或地址判断。每次 Online 请求重新读取配置，创建并关闭独立 OpenAI 和 HTTP 客户端；固定结构 Online 请求强制且只允许调用一次预期 Function，显式开启流式时按调用编号拼接 Function 参数。Codex 每次都在空临时目录以 stdin 和 `--output-schema` 运行，读取 `--json` 事件；允许非执行型 `error` 提示，仍拒绝工具调用和未知项。Windows 上所有正式调用统一解析 npm `.cmd`，按 UTF-8 读取输出，并为 Codex 保留必要系统、用户和临时目录变量，同时继续排除凭据。请求级可重试错误按配置再试 Codex 1 次，仍失败才将当前请求交给 Online 一次。图片工具调用等不合法结果和配置定义的无法识别回复只触发当前图片的 Online 备用一次；备用失败时记一次 warning 并跳过该图，不停止整次生成。Python 校验失败先走 Codex 局部重试并反馈具体错误，结果质量重试用尽后再交给 Online 一次。下一请求重新优先 Codex。除图片摘要的局部失败外，Online 失败或结果仍不合法时停止整次生成。调试、诊断或一次运行失败都不构成整次切换后端的授权；需要改变重试次数时，先停止并取得用户明确同意。
 - 原始聊天内容不应长期落盘，长期保留的只有结构化事件清单。
 - 安全诊断报告的数量、耗时、排序、比例、token、重试、输入预算和送达统计必须由 Python 计算；大模型只解释编号事实并从 `config/support_report.json` 的允许项中选择判断和建议。普通 warning 和 `success_with_warnings` 不得写成运行失败；token 未上报时显示“服务端未上报”，部分上报时同时显示两类请求数。阶段占比只用墙钟耗时，并发请求累计耗时单独显示；没有细分阶段时不能把“完整运行”列为慢阶段。报告结论与 Python 事实冲突时局部重试，仍冲突则只输出 Python 基础报告；“无需产品改动”不得与具体建议同时出现。
 - 报告模型不得读取目标日期、姓名、本机路径、飞书 ID、聊天正文、事件文字、文件名、URL、模型名称、模型地址、密钥、prompt、原始模型返回、原始错误或日志原文。

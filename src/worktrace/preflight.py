@@ -5,7 +5,7 @@ import ssl
 import shutil
 import subprocess
 import tempfile
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Sequence
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -22,7 +22,13 @@ from .config import (
 )
 from .errors import PreflightError
 from .analyzers.function_calls import function_call_spec
-from .analyzers.online import _extract_function_arguments_from_responses_payload
+from .analyzers.online import (
+    _build_online_function_request_body,
+    _create_sdk_request,
+    _extract_function_arguments_from_chat_payload,
+    _extract_function_arguments_from_responses_payload,
+)
+from .utils.commands import run_text_command
 
 
 MIN_PYTHON = (3, 11)
@@ -51,14 +57,11 @@ def run_subprocess(
     input_text: str | None = None,
     env: dict[str, str] | None = None,
 ) -> CommandResult:
-    completed = subprocess.run(
-        list(args),
-        cwd=str(cwd) if cwd else None,
-        capture_output=True,
-        text=True,
-        input=input_text,
+    completed = run_text_command(
+        args,
+        cwd=cwd,
         timeout=timeout,
-        check=False,
+        input_text=input_text,
         env=env,
     )
     return CommandResult(
@@ -280,18 +283,18 @@ def probe_online_llm(config: RuntimeConfig, *, cwd: Path) -> dict[str, str]:
                 probe_schema,
                 typical_arguments={"probe": "ok"},
             )
-            kwargs: dict[str, object] = {
-                "model": settings.model,
-                "input": '请只调用指定 Function，并把 probe 设为 "ok"。\n/no_think',
-                "stream": False,
-                "tools": [function_spec.online_tool()],
-                "tool_choice": function_spec.tool_choice(),
-                "parallel_tool_calls": False,
-            }
-            if settings.reasoning_effort == "none":
-                kwargs["reasoning"] = {"effort": "none"}
+            request_settings = replace(settings, stream_enabled=False)
+            kwargs = _build_online_function_request_body(
+                '请只调用指定 Function，并把 probe 设为 "ok"。',
+                settings=request_settings,
+                function_spec=function_spec,
+            )
             try:
-                response = client.responses.create(**kwargs)
+                response = _create_sdk_request(
+                    client,
+                    kwargs,
+                    wire_api=settings.wire_api,
+                )
                 payload = response.model_dump()
             finally:
                 close_client = getattr(client, "close", None)
@@ -301,10 +304,16 @@ def probe_online_llm(config: RuntimeConfig, *, cwd: Path) -> dict[str, str]:
         raise PreflightError(classify_online_failure(exc)) from exc
 
     try:
-        normalized = _extract_function_arguments_from_responses_payload(
-            payload,
-            expected_name=function_spec.name,
-        )
+        if settings.wire_api == "chat_completions":
+            normalized = _extract_function_arguments_from_chat_payload(
+                payload,
+                expected_name=function_spec.name,
+            )
+        else:
+            normalized = _extract_function_arguments_from_responses_payload(
+                payload,
+                expected_name=function_spec.name,
+            )
     except Exception as exc:
         raise PreflightError(
             "Online LLM does not support the required Function Calling contract."
@@ -316,6 +325,7 @@ def probe_online_llm(config: RuntimeConfig, *, cwd: Path) -> dict[str, str]:
         "online_probe": "ok",
         "tls_verify": str(settings.tls_verify).lower(),
         "reasoning_effort": settings.reasoning_effort or "",
+        "wire_api": settings.wire_api,
         "certificate_verification": (
             "enabled" if settings.tls_verify else "disabled"
         ),
