@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from dataclasses import replace
 from pathlib import Path
+from threading import Lock
+from time import sleep
 
 import pytest
 
@@ -1262,6 +1264,7 @@ def test_collected_merge_prompt_contains_sensitive_rules() -> None:
     assert "版本号、结论、状态、结果或待办方向明确冲突" in prompt
     assert "is_merge_owner_source=true" in prompt
     assert "组成员已经锁定" in prompt
+    assert "每组可以包含一个或多个来源事件" in prompt
 
 
 def test_collected_prompts_use_stage_specific_generation_guidance() -> None:
@@ -2746,7 +2749,12 @@ def test_same_conversation_is_not_automatically_merged(tmp_path: Path) -> None:
 
     assert result.merged_event_count == 2
     assert len(analyzer.grouping_calls) == 1
-    assert analyzer.merge_calls == []
+    assert len(analyzer.merge_calls) == 2
+    assert all(
+        len(call["deterministic_groups"]) == 1
+        and len(call["deterministic_groups"][0]) == 1
+        for call in analyzer.merge_calls
+    )
 
 
 def test_merge_collected_stops_for_v1_without_conversation_or_manual_marker(
@@ -3242,7 +3250,7 @@ def test_collected_merge_allows_personal_and_upstream_markdown_together(
     assert not any("duplicate" in warning.casefold() for warning in result.warning_messages)
 
 
-def test_one_person_department_can_keep_same_event_count(tmp_path: Path) -> None:
+def test_one_person_department_rewrites_its_only_final_event(tmp_path: Path) -> None:
     inbox = tmp_path / "merge_inbox" / "2026" / "06" / "29"
     _write_day_doc(
         inbox / "2026-06-29-张三.md",
@@ -3256,7 +3264,8 @@ def test_one_person_department_can_keep_same_event_count(tmp_path: Path) -> None
     assert result.source_event_count == 1
     assert result.merged_event_count == 1
     assert result.quality_summary.event_count_output_input_ratio == 1.0
-    assert analyzer.merge_calls == []
+    assert len(analyzer.merge_calls) == 1
+    assert len(analyzer.merge_calls[0]["deterministic_groups"][0]) == 1
 
 
 def test_source_report_owner_accumulates_across_merge_levels(tmp_path: Path) -> None:
@@ -4721,7 +4730,7 @@ def test_collected_content_coverage_retries_only_current_group(tmp_path: Path) -
     assert any("source coverage was invalid" in item for item in result.warning_messages)
 
 
-def test_collected_content_coverage_terminal_failure_does_not_write_output(
+def test_collected_content_coverage_terminal_failure_falls_back_current_event(
     tmp_path: Path,
 ) -> None:
     class InvalidCoverageAnalyzer(ReviewAnalyzer):
@@ -4761,10 +4770,175 @@ def test_collected_content_coverage_terminal_failure_does_not_write_output(
     ).run("2026-06-29")
 
     expected_output = inbox / "2026-06-29-管理者-merged.md"
-    assert result.output_path is None
+    assert result.output_path == str(expected_output.resolve())
     assert result.quality_summary.content_rewrite_failure_count == 1
-    assert not expected_output.exists()
-    assert any("did not preserve source coverage" in item for item in result.warning_messages)
+    assert expected_output.exists()
+    output = MarkdownEventStore(config=RuntimeConfig()).parse_day_document(
+        expected_output.read_text(encoding="utf-8")
+    )
+    assert len(output.events) == 1
+    assert "事实 1" in output.events[0].content
+    assert "事实 2" in output.events[0].content
+    assert any(
+        "Kept deterministic collected group content" in item
+        and "did not preserve source coverage" in item
+        for item in result.warning_messages
+    )
+
+
+def test_collected_final_render_handles_mixed_groups_and_isolates_failure(
+    tmp_path: Path,
+) -> None:
+    class MixedRenderAnalyzer(TwoStageAnalyzer):
+        def group_collected_events(self, target_date, events, deterministic_groups):
+            self.grouping_calls.append(list(events))
+            draft_id_by_title = {
+                item.event.title: item.draft_id for item in events
+            }
+            return CollectedGroupingResult(
+                groups=[
+                    CollectedGroupingGroup(
+                        "multi",
+                        [
+                            draft_id_by_title["共同事项前序"],
+                            draft_id_by_title["共同事项结果"],
+                        ],
+                    ),
+                    CollectedGroupingGroup(
+                        "failed-single",
+                        [draft_id_by_title["失败单条"]],
+                    ),
+                    CollectedGroupingGroup(
+                        "successful-single",
+                        [draft_id_by_title["成功单条"]],
+                    ),
+                ]
+            )
+
+        def merge_collected_events(self, target_date, events, deterministic_groups):
+            self.merge_calls.append(
+                {
+                    "events": list(events),
+                    "deterministic_groups": [list(item) for item in deterministic_groups],
+                }
+            )
+            group = list(deterministic_groups[0])
+            if any(item.event.title == "失败单条" for item in events):
+                raise AnalyzerProtocolError("single render failed")
+            return CollectedMergeResult(
+                groups=[
+                    CollectedMergeGroup(
+                        group_id="rendered",
+                        draft_ids=group,
+                        title="完整团队事项",
+                        content="完整正文：" + "；".join(
+                            item.event.content for item in events
+                        ),
+                        object_hint="完整团队事项",
+                        retention_reason="decision_made",
+                        retention_detail="形成完整团队事项结果。",
+                    )
+                ]
+            )
+
+    inbox = tmp_path / "merge_inbox" / "2026" / "06" / "29"
+    for index, (person, title) in enumerate(
+        (
+            ("人员甲", "共同事项前序"),
+            ("人员乙", "共同事项结果"),
+            ("人员丙", "失败单条"),
+            ("人员丁", "成功单条"),
+        ),
+        start=1,
+    ):
+        _write_day_doc(
+            inbox / f"2026-06-29-{person}.md",
+            [_event(event_id=f"e{index}", title=title, content=f"{title}原始正文。")],
+            tmp_path,
+        )
+    analyzer = MixedRenderAnalyzer()
+    trace_root = tmp_path / "trace"
+
+    result = _build_runner(
+        tmp_path,
+        analyzer=analyzer,
+        config=RuntimeConfig(
+            data_root=tmp_path / "data",
+            collected_merge_trace_enabled=True,
+            collected_merge_trace_root=trace_root,
+        ),
+    ).run("2026-06-29")
+
+    assert result.output_path is not None
+    assert len(analyzer.merge_calls) == 3
+    assert sorted(
+        len(call["deterministic_groups"][0]) for call in analyzer.merge_calls
+    ) == [1, 1, 2]
+    assert result.quality_summary.content_rewrite_failure_count == 1
+    output = MarkdownEventStore(config=RuntimeConfig()).parse_day_document(
+        Path(result.output_path).read_text(encoding="utf-8")
+    )
+    assert len(output.events) == 3
+    assert sum(event.content.startswith("完整正文：") for event in output.events) == 2
+    assert any(event.content == "失败单条原始正文。" for event in output.events)
+    assert any("single render failed" in item for item in result.warning_messages)
+    trace = json.loads(
+        (trace_root / "2026-06-29" / "summary.json").read_text(encoding="utf-8")
+    )
+    content_steps = [
+        step for step in trace["steps"] if step["stage"] == "content_merge"
+    ]
+    assert len(content_steps) == 3
+    assert sum(step["status"] == "failed" for step in content_steps) == 1
+    assert trace["quality_summary"]["content_rewrite_failure_count"] == 1
+
+
+def test_collected_final_render_uses_at_most_three_parallel_requests(
+    tmp_path: Path,
+) -> None:
+    class ParallelRenderAnalyzer(TwoStageAnalyzer):
+        def __init__(self) -> None:
+            super().__init__()
+            self.active = 0
+            self.peak = 0
+            self.lock = Lock()
+
+        def merge_collected_events(self, target_date, events, deterministic_groups):
+            with self.lock:
+                self.active += 1
+                self.peak = max(self.peak, self.active)
+            sleep(0.03)
+            try:
+                return super().merge_collected_events(
+                    target_date,
+                    events,
+                    deterministic_groups,
+                )
+            finally:
+                with self.lock:
+                    self.active -= 1
+
+    inbox = tmp_path / "merge_inbox" / "2026" / "06" / "29"
+    for index in range(5):
+        _write_day_doc(
+            inbox / f"2026-06-29-人员{index}.md",
+            [_event(event_id=f"e{index}", title=f"事项{index}", content=f"事实{index}")],
+            tmp_path,
+        )
+    analyzer = ParallelRenderAnalyzer()
+
+    result = _build_runner(
+        tmp_path,
+        analyzer=analyzer,
+        config=RuntimeConfig(
+            data_root=tmp_path / "data",
+            max_concurrent_collected_merge_review_requests=3,
+        ),
+    ).run("2026-06-29")
+
+    assert result.output_path is not None
+    assert len(analyzer.merge_calls) == 5
+    assert analyzer.peak == 3
 
 
 def test_collected_content_stops_after_codex_validation_failure(

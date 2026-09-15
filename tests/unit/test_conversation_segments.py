@@ -456,8 +456,11 @@ def test_segment_prompt_recombines_context_and_primary_messages_in_time_order() 
     assert [item["id"] for item in prompt_messages] == ["om_1", "om_2"]
     assert [item["role"] for item in prompt_messages] == ["context", "primary"]
     guidance = payload["event_generation_guidance"]
-    assert len(guidance["positive_examples"]) == 4
-    assert len(guidance["negative_examples"]) == 2
+    assert len(guidance["positive_examples"]) == 5
+    assert len(guidance["negative_examples"]) == 3
+    assert any(
+        "不能只选择少数较相关消息" in rule for rule in payload["rules"]
+    )
     assert any("完整业务事项" in rule for rule in guidance["event_boundary_rules"])
 
 

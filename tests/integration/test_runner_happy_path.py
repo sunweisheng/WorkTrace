@@ -114,6 +114,87 @@ class FakeAnalyzer:
     def merge_day_candidates(self, target_date, candidates, *, validation_feedback=""):
         raise AssertionError("Should not group when there is only one candidate")
 
+    def request_function(
+        self,
+        prompt,
+        *,
+        function_spec,
+        allow_oversized_input=False,
+    ):
+        payload = json.loads(prompt)
+        if function_spec.request_kind == "day_group_discovery":
+            return {
+                "group_checks": [
+                    {
+                        "group_id": group["group_id"],
+                        "related_group_ids": [],
+                        "reason": "标题不足以指向另一个明确事项。",
+                    }
+                    for group in payload["groups"]
+                ]
+            }
+        if function_spec.request_kind == "day_group_review":
+            evidence_ids = list(
+                dict.fromkeys(
+                    message_id
+                    for candidate in payload["candidates"]
+                    for message_id in candidate["source_message_ids"]
+                )
+            )
+            return {
+                "merged_groups": [],
+                "singleton_draft_ids": [
+                    candidate["draft_id"] for candidate in payload["candidates"]
+                ],
+                "relation_resolutions": [
+                    {
+                        "relation_id": relation["relation_id"],
+                        "decision": "separate",
+                        "connected_draft_ids": [],
+                        "reason": "现有证据支持分别保留。",
+                        "evidence_message_ids": evidence_ids,
+                    }
+                    for relation in payload["strong_relations"]
+                ],
+            }
+        if function_spec.request_kind != "personal_group_render":
+            raise AssertionError(
+                f"Unexpected request kind: {function_spec.request_kind}"
+            )
+        locked_group = payload["locked_group"]
+        members = locked_group["members"]
+        primary = members[0]
+        return {
+            "groups": [
+                {
+                    "group_id": locked_group["group_id"],
+                    "covered_draft_ids": locked_group["draft_ids"],
+                    "fact_items": [
+                        {
+                            "field": "topic",
+                            "text": primary["topic"],
+                            "evidence_message_ids": primary["source_message_ids"],
+                        },
+                        *[
+                            {
+                                "field": "content",
+                                "text": member["content"],
+                                "evidence_message_ids": member[
+                                    "source_message_ids"
+                                ],
+                            }
+                            for member in members
+                        ],
+                        {
+                            "field": "object_hint",
+                            "text": primary["object_hint"],
+                            "evidence_message_ids": primary["source_message_ids"],
+                        },
+                    ],
+                }
+            ]
+        }
+
 
 class FakeDelivery:
     def deliver_to_self(self, *, self_identity, markdown_path):
@@ -121,6 +202,42 @@ class FakeDelivery:
 
 
 def test_runner_happy_path(tmp_path: Path) -> None:
+    class RichFinalAnalyzer(FakeAnalyzer):
+        def request_function(
+            self,
+            prompt,
+            *,
+            function_spec,
+            allow_oversized_input=False,
+        ):
+            payload = json.loads(prompt)
+            locked_group = payload["locked_group"]
+            return {
+                "groups": [
+                    {
+                        "group_id": locked_group["group_id"],
+                        "covered_draft_ids": locked_group["draft_ids"],
+                        "fact_items": [
+                            {
+                                "field": "topic",
+                                "text": "发布目标确认、沟通完成及上线安排",
+                                "evidence_message_ids": ["om_1"],
+                            },
+                            {
+                                "field": "content",
+                                "text": "围绕发布目标完成沟通，并确认后续上线窗口安排。",
+                                "evidence_message_ids": ["om_1"],
+                            },
+                            {
+                                "field": "object_hint",
+                                "text": "发布目标及上线窗口",
+                                "evidence_message_ids": ["om_1"],
+                            },
+                        ],
+                    }
+                ]
+            }
+
     config = RuntimeConfig(
         data_root=tmp_path / "data",
         excluded_event_keywords=("代码同步", "git pull"),
@@ -130,7 +247,7 @@ def test_runner_happy_path(tmp_path: Path) -> None:
         dependencies=RuntimeDependencies(
             chat_source=FakeSource(),
             content_resolver=FakeResolver(),
-            analyzer=FakeAnalyzer(),
+            analyzer=RichFinalAnalyzer(),
             delivery_channel=FakeDelivery(),
             event_store=MarkdownEventStore(config=config),
         ),
@@ -140,8 +257,13 @@ def test_runner_happy_path(tmp_path: Path) -> None:
 
     assert result.status == DailyRunStatus.SUCCESS.value
     assert result.event_count == 1
+    assert result.day_grouping_summary.content_render_request_count == 1
+    assert result.day_grouping_summary.content_render_failure_count == 0
     assert result.output_path is not None
     assert Path(result.output_path).name == "2026-06-22-Me.md"
+    assert "围绕发布目标完成沟通，并确认后续上线窗口安排。" in Path(
+        result.output_path
+    ).read_text(encoding="utf-8")
     assert result.self_delivery_status == "success"
     assert result.self_delivery_target == "ou_self"
     assert set(result.stage_timing_summary) == {

@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "dataset_version": "event-generation-quality-v1",
+  "dataset_version": "event-generation-quality-v2",
   "benchmark_non_fact_context": {
     "repeat": 14,
     "line_template": "【脱敏评测输入占位】来源{source_id}的第{index}段占位值为{payload}；该行不是事项事实，不得写入标题、正文或判断事项关系。"
@@ -62,15 +62,26 @@
       "forbidden_content_fragments": []
     },
     {
+      "case_id": "personal_singleton_repositioning",
+      "mode": "personal",
+      "category": "complete_item",
+      "source_items": [
+        {"source_id": "p5-f1", "text": "负责人提供现有说明、资料目录说明和最新修改方案，明确把资料整理工具从技术资料归档调整为面向业务审阅的结构化业务框架；该框架用于导航和检查，不作为封闭清单。当前已形成完整执行说明，下一步更新文档、目录和模板。"}
+      ],
+      "expected_groups": [["p5-f1"]],
+      "forbidden_title_fragments": ["日常工作"],
+      "forbidden_content_fragments": ["已完成相关工作"]
+    },
+    {
       "case_id": "personal_avoid_action_split",
       "mode": "personal",
       "category": "avoid_split",
       "source_items": [
-        {"source_id": "p5-f1", "text": "同一项目验收报告先完成范围核对。"},
-        {"source_id": "p5-f2", "text": "根据验收报告核对结果提交修改申请。"},
-        {"source_id": "p5-f3", "text": "验收报告修改后完成复核和交付。"}
+        {"source_id": "p6-f1", "text": "同一项目验收报告先完成范围核对。"},
+        {"source_id": "p6-f2", "text": "根据验收报告核对结果提交修改申请。"},
+        {"source_id": "p6-f3", "text": "验收报告修改后完成复核和交付。"}
       ],
-      "expected_groups": [["p5-f1", "p5-f2", "p5-f3"]],
+      "expected_groups": [["p6-f1", "p6-f2", "p6-f3"]],
       "forbidden_title_fragments": [],
       "forbidden_content_fragments": []
     },
@@ -79,10 +90,10 @@
       "mode": "personal",
       "category": "avoid_merge",
       "source_items": [
-        {"source_id": "p6-f1", "text": "确认合作协议签署方案。"},
-        {"source_id": "p6-f2", "text": "核对另一份月度报表的数据口径。"}
+        {"source_id": "p7-f1", "text": "确认合作协议签署方案。"},
+        {"source_id": "p7-f2", "text": "核对另一份月度报表的数据口径。"}
       ],
-      "expected_groups": [["p6-f1"], ["p6-f2"]],
+      "expected_groups": [["p7-f1"], ["p7-f2"]],
       "forbidden_title_fragments": ["业务工作推进"],
       "forbidden_content_fragments": []
     },

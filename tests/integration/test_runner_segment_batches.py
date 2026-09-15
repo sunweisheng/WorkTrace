@@ -48,6 +48,7 @@ from src.worktrace.runner import (
     _split_anchor_unit_to_model_limit,
 )
 from src.worktrace.stores.markdown import MarkdownEventStore
+from tests.helpers import FunctionRequestStub
 
 
 def _config(**overrides) -> RuntimeConfig:
@@ -165,7 +166,7 @@ class SegmentDelivery:
         return ("success", self_identity.open_id)
 
 
-class SegmentBatchAnalyzer:
+class SegmentBatchAnalyzer(FunctionRequestStub):
     def __init__(self) -> None:
         self.segmentation_calls = 0
         self.batch_calls = 0
@@ -620,7 +621,7 @@ def test_runner_limits_parallel_segmentation_and_waits_for_its_phase(
                 for index in range(1, 7)
             ]
 
-    class ParallelAnalyzer:
+    class ParallelAnalyzer(FunctionRequestStub):
         def __init__(self) -> None:
             self.lock = Lock()
             self.active_segmentations = 0
@@ -746,7 +747,7 @@ def test_runner_prioritizes_larger_inputs_for_segmentation_and_event_extraction(
                 ),
             ]
 
-    class OrderedAnalyzer:
+    class OrderedAnalyzer(FunctionRequestStub):
         def __init__(self) -> None:
             self.segmentation_order: list[str] = []
             self.event_extraction_order: list[str] = []
@@ -858,7 +859,7 @@ def test_runner_resegments_only_the_context_requesting_turn(tmp_path: Path) -> N
                 )
             ]
 
-    class ExpansionAnalyzer:
+    class ExpansionAnalyzer(FunctionRequestStub):
         def __init__(self) -> None:
             self.segmentation_calls = 0
             self.batch_calls = 0

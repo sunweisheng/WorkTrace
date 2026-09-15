@@ -362,7 +362,7 @@ def test_collected_merge_facts_use_python_stage_and_usage_calculations(
     )
     assert generation_fact.metrics["schema_version"] == 1
     assert generation_fact.metrics["config_loaded"] is True
-    assert generation_fact.metrics["personal_positive_example_count"] == 4
+    assert generation_fact.metrics["personal_positive_example_count"] == 5
     assert generation_fact.metrics["collected_positive_example_count"] == 2
     serialized_generation_fact = json.dumps(
         generation_fact.to_dict(),

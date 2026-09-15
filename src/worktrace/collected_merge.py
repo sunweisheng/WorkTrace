@@ -197,6 +197,7 @@ class CollectedMergeRunner:
             self.self_identity_resolver = self._resolve_self_identity
         self.store = MarkdownEventStore(config=self.config)
         self._collected_merge_trace_lock = Lock()
+        self._collected_quality_lock = Lock()
         self._collected_merge_trace_dir: Path | None = None
         self._collected_merge_trace_steps: list[dict[str, Any]] = []
         self._collected_merge_batch_decisions: list[dict[str, Any]] = []
@@ -224,6 +225,14 @@ class CollectedMergeRunner:
         self._collected_merge_stage_wall_clock_ms[stage] += (
             perf_counter() - started_at
         ) * 1000
+
+    def _increment_collected_quality_counter(
+        self,
+        name: str,
+        value: int = 1,
+    ) -> None:
+        with self._collected_quality_lock:
+            self._collected_quality_counters[name] += value
 
     def _collected_stage_timing_summary(self) -> dict[str, dict[str, float]]:
         request_totals: Counter[str] = Counter()
@@ -912,25 +921,10 @@ class CollectedMergeRunner:
             )
         content_merge_started_at = perf_counter()
         try:
-            source_by_id = {item.draft_id: item for item in source_events}
-            multi_groups = [
-                group for group in grouping_result.groups if len(group.draft_ids) > 1
-            ]
-            singleton_groups = [
-                group for group in grouping_result.groups if len(group.draft_ids) == 1
-            ]
-            retry_warnings: list[str] = []
-            rendered_groups: list[CollectedMergeGroup] = []
-            if multi_groups:
-                rendered_groups, retry_warnings = self._render_collected_multi_groups(
-                    target_date,
-                    source_events,
-                    multi_groups,
-                )
-
-            rendered_groups.extend(
-                _build_singleton_collected_group(source_by_id[group.draft_ids[0]], index)
-                for index, group in enumerate(singleton_groups, start=1)
+            rendered_groups, retry_warnings = self._render_collected_multi_groups(
+                target_date,
+                source_events,
+                grouping_result.groups,
             )
             merged_events, final_warnings = self._finalize_collected_merge_result(
                 target_date,
@@ -938,7 +932,9 @@ class CollectedMergeRunner:
                 CollectedMergeResult(groups=rendered_groups),
             )
         except (AnalyzerProtocolError, ValueError):
-            self._collected_quality_counters["content_rewrite_failure_count"] += 1
+            self._increment_collected_quality_counter(
+                "content_rewrite_failure_count"
+            )
             raise
         finally:
             self._record_collected_stage_timing(
@@ -1737,7 +1733,7 @@ class CollectedMergeRunner:
                 ),
                 prompt_original_content_chars=len(clean_text(original.event.content)),
             )
-            self._collected_quality_counters["shortened_prompt_count"] += 1
+            self._increment_collected_quality_counter("shortened_prompt_count")
             reviewed, review_warnings = self._invoke_collected_review_with_retry(
                 target_date,
                 [summarized_event],
@@ -1752,7 +1748,7 @@ class CollectedMergeRunner:
                 *review_warnings,
             ]
 
-        self._collected_quality_counters["shortened_prompt_count"] += 1
+        self._increment_collected_quality_counter("shortened_prompt_count")
         warnings = [
             "Using relation-priority high-risk review batches: "
             f"group={candidate_group.group_id} depth={depth + 1} "
@@ -2269,7 +2265,7 @@ class CollectedMergeRunner:
                 low = quota + 1
             else:
                 high = quota - 1
-        self._collected_quality_counters["shortened_prompt_count"] += 1
+        self._increment_collected_quality_counter("shortened_prompt_count")
         return best_events, [
             "Used balanced high-risk review content to fit model input: "
             f"group={candidate_group.group_id} estimated_tokens={best_tokens} "
@@ -2282,79 +2278,93 @@ class CollectedMergeRunner:
         source_events: list[CollectedSourceEvent],
         groups: list[CollectedGroupingGroup],
     ) -> tuple[list[CollectedMergeGroup], list[str]]:
-        input_limit_tokens = self.config.model_input_batch_target_tokens
-        batches: list[list[CollectedGroupingGroup]] = []
-        current: list[CollectedGroupingGroup] = []
+        if not groups:
+            return [], []
 
-        for group in groups:
-            candidate_groups = [*current, group]
-            candidate_ids = {
-                draft_id
-                for candidate_group in candidate_groups
-                for draft_id in candidate_group.draft_ids
-            }
-            candidate_events = [
-                item for item in source_events if item.draft_id in candidate_ids
-            ]
-            candidate_tokens = self._estimate_collected_render_prompt_tokens(
-                target_date,
-                candidate_events,
-                [list(item.draft_ids) for item in candidate_groups],
-            )
-            if current and candidate_tokens > input_limit_tokens:
-                batches.append(current)
-                current = []
-            current.append(group)
-        if current:
-            batches.append(current)
+        source_by_id = {item.draft_id: item for item in source_events}
 
-        rendered_groups: list[CollectedMergeGroup] = []
-        warnings: list[str] = []
-        for batch_index, batch_groups in enumerate(batches, start=1):
-            batch_ids = {
-                draft_id
-                for group in batch_groups
+        def render_group(
+            group_index: int,
+            group: CollectedGroupingGroup,
+        ) -> tuple[CollectedMergeGroup, list[str]]:
+            group_events = [
+                source_by_id[draft_id]
                 for draft_id in group.draft_ids
-            }
-            batch_events = [
-                item for item in source_events if item.draft_id in batch_ids
+                if draft_id in source_by_id
             ]
-            batch_locked = [list(group.draft_ids) for group in batch_groups]
-            batch_tokens = self._estimate_collected_render_prompt_tokens(
-                target_date,
-                batch_events,
-                batch_locked,
-            )
-            if len(batch_groups) == 1 and batch_tokens > input_limit_tokens:
-                rendered_group, group_warnings = self._render_oversized_locked_group(
+            try:
+                group_tokens = self._estimate_collected_render_prompt_tokens(
                     target_date,
-                    batch_events,
-                    batch_groups[0],
-                    depth=0,
+                    group_events,
+                    [list(group.draft_ids)],
                 )
-                rendered_groups.append(rendered_group)
-                warnings.extend(group_warnings)
-                continue
-            result, retry_warnings = self._invoke_collected_merge_with_retry(
-                target_date,
-                batch_events,
-                batch_locked,
-                rolling_step_index=batch_index,
-            )
-            result, repair_warnings = repair_collected_merge_result(
-                result,
-                batch_events,
-                batch_locked,
-            )
-            rendered_groups.extend(result.groups)
-            warnings.extend([*retry_warnings, *repair_warnings])
-        if len(batches) > 1:
-            warnings.insert(
-                0,
-                "Using locked-group collected content batches: "
-                f"batches={len(batches)} input_target_tokens={input_limit_tokens}.",
-            )
-        return rendered_groups, warnings
+                if group_tokens > self.config.model_input_batch_target_tokens:
+                    return self._render_oversized_locked_group(
+                        target_date,
+                        group_events,
+                        group,
+                        depth=0,
+                    )
+                result, retry_warnings = self._invoke_collected_merge_with_retry(
+                    target_date,
+                    group_events,
+                    [list(group.draft_ids)],
+                    rolling_step_index=group_index,
+                )
+                result, repair_warnings = repair_collected_merge_result(
+                    result,
+                    group_events,
+                    [list(group.draft_ids)],
+                )
+                if len(result.groups) != 1:
+                    raise AnalyzerProtocolError(
+                        "Collected content render did not return exactly one locked group: "
+                        f"group={group.group_id}."
+                    )
+                return result.groups[0], [*retry_warnings, *repair_warnings]
+            except (
+                AnalyzerProtocolError,
+                RetryableAnalyzerProtocolError,
+                ValueError,
+            ) as exc:
+                self._increment_collected_quality_counter(
+                    "content_rewrite_failure_count"
+                )
+                warning = (
+                    "Kept deterministic collected group content because content render "
+                    f"failed: group={group.group_id}: {exc}"
+                )
+                self._collected_merge_failure_warnings.append(warning)
+                return (
+                    _build_fallback_collected_group(group, group_events),
+                    [warning],
+                )
+
+        max_workers = min(
+            self.config.max_concurrent_collected_merge_review_requests,
+            len(groups),
+        )
+        rendered_by_group_id: dict[str, CollectedMergeGroup] = {}
+        warnings_by_group_id: dict[str, list[str]] = {}
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {
+                executor.submit(render_group, index, group): group
+                for index, group in enumerate(groups, start=1)
+            }
+            for future in as_completed(futures):
+                group = futures[future]
+                rendered, group_warnings = future.result()
+                rendered_by_group_id[group.group_id] = rendered
+                warnings_by_group_id[group.group_id] = group_warnings
+
+        return (
+            [rendered_by_group_id[group.group_id] for group in groups],
+            [
+                warning
+                for group in groups
+                for warning in warnings_by_group_id.get(group.group_id, [])
+            ],
+        )
 
     def _render_oversized_locked_group(
         self,
@@ -2394,7 +2404,7 @@ class CollectedMergeRunner:
                 [*retry_warnings, *repair_warnings],
             )
 
-        self._collected_quality_counters["shortened_prompt_count"] += 1
+        self._increment_collected_quality_counter("shortened_prompt_count")
         expanded_events: list[CollectedSourceEvent] = []
         original_id_by_expanded_id: dict[str, str] = {}
         split_warnings: list[str] = []
@@ -3120,7 +3130,7 @@ class CollectedMergeRunner:
             f"estimated_tokens={best_tokens} target={input_limit_tokens} "
             f"shortened_sources={shortened_sources}."
         )
-        self._collected_quality_counters["shortened_prompt_count"] += 1
+        self._increment_collected_quality_counter("shortened_prompt_count")
         return best_events, [warning]
 
     def _invoke_collected_grouping_once(
@@ -3416,7 +3426,7 @@ class CollectedMergeRunner:
                         f"{coverage_error}"
                     )
                 missing_field_retry_count += 1
-                self._collected_quality_counters["content_retry_count"] += 1
+                self._increment_collected_quality_counter("content_retry_count")
                 warning = (
                     "Retrying collected content because source coverage was "
                     f"invalid: {coverage_error}"
@@ -3459,7 +3469,7 @@ class CollectedMergeRunner:
                     )
                 return merge_result, warnings
             missing_field_retry_count += 1
-            self._collected_quality_counters["content_retry_count"] += 1
+            self._increment_collected_quality_counter("content_retry_count")
             warning = (
                 "Retrying collected merge because required fields were missing: "
                 f"{format_collected_merge_missing_field_summary(missing_summary)}"
@@ -6795,19 +6805,51 @@ def compact_collected_grouping_assignment(
     }
 
 
-def _build_singleton_collected_group(
-    source_event: CollectedSourceEvent,
-    index: int,
+def _build_fallback_collected_group(
+    group: CollectedGroupingGroup,
+    source_events: list[CollectedSourceEvent],
 ) -> CollectedMergeGroup:
-    event = source_event.event
+    source_by_id = {item.draft_id: item for item in source_events}
+    items = [
+        source_by_id[draft_id]
+        for draft_id in group.draft_ids
+        if draft_id in source_by_id
+    ]
+    if not items:
+        raise ValueError(
+            f"Cannot build collected content fallback without sources: {group.group_id}"
+        )
+    if len(items) == 1:
+        title = items[0].event.title
+        content = items[0].event.content
+        object_hint = items[0].event.object_hint
+        retention_reason = items[0].event.retention_reason
+        retention_detail = items[0].event.retention_detail
+    else:
+        title = clean_text(group.summary_title) or combine_group_titles(
+            "",
+            [item.event.title for item in items],
+        )
+        content = " ".join(
+            line.strip()
+            for line in build_balanced_group_content(items).splitlines()
+            if line.strip()
+        )
+        object_hint = clean_text(group.summary_object_hint) or choose_preferred_text(
+            [item.event.object_hint for item in items]
+        )
+        retention_reason = choose_preferred_text(
+            [item.event.retention_reason for item in items]
+        )
+        retention_detail = derive_collected_merge_retention_detail(items)
     return CollectedMergeGroup(
-        group_id=f"singleton-{index}",
-        draft_ids=[source_event.draft_id],
-        title=event.title,
-        content=event.content,
-        object_hint=event.object_hint,
-        retention_reason=event.retention_reason,
-        retention_detail=event.retention_detail,
+        group_id=group.group_id,
+        draft_ids=list(group.draft_ids),
+        title=title,
+        content=content,
+        object_hint=object_hint,
+        retention_reason=retention_reason,
+        retention_detail=retention_detail,
     )
 
 

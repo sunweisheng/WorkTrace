@@ -378,8 +378,8 @@ def test_repo_event_generation_config_is_loaded_and_anonymized() -> None:
         "object_hint",
         "retention_detail",
     }
-    assert len(generation.personal_positive_examples) == 4
-    assert len(generation.personal_negative_examples) == 2
+    assert len(generation.personal_positive_examples) == 5
+    assert len(generation.personal_negative_examples) == 3
     assert generation.collected_writing_rules
     assert dict(generation.collected_template).keys() == {
         "summary_title",
@@ -398,8 +398,8 @@ def test_repo_event_generation_config_is_loaded_and_anonymized() -> None:
         "shared_writing_rule_count": 10,
         "personal_boundary_rule_count": 6,
         "personal_template_field_count": 5,
-        "personal_positive_example_count": 4,
-        "personal_negative_example_count": 2,
+            "personal_positive_example_count": 5,
+            "personal_negative_example_count": 3,
         "collected_writing_rule_count": 9,
         "collected_template_field_count": 7,
         "collected_positive_example_count": 2,

@@ -21,6 +21,7 @@ from src.worktrace.models import (
 )
 from src.worktrace.runner import DailyTraceRunner
 from src.worktrace.stores.markdown import MarkdownEventStore
+from tests.helpers import FunctionRequestStub
 
 
 BASE_CONFIG = load_runtime_config_overrides(RuntimeConfig(), cwd=Path.cwd())
@@ -87,7 +88,7 @@ class ReviewDelivery:
         return ("success", self_identity.open_id)
 
 
-class ReviewAnalyzer:
+class ReviewAnalyzer(FunctionRequestStub):
     def __init__(self, result: RetentionReviewResult):
         self.result = result
         self.review_calls = 0

@@ -507,27 +507,70 @@ class DailyTraceRunner:
 
                 day_grouping_marker = self._start_personal_stage()
                 if len(all_candidates) == 1:
+                    merge_started_at = perf_counter()
+                    groups = [
+                        CrossConversationGroup(
+                            group_id="single",
+                            draft_ids=[all_candidates[0].draft_id],
+                            primary_draft_id=all_candidates[0].draft_id,
+                            merge_reason="单条保留",
+                            evidence_message_ids=[],
+                        )
+                    ]
+                    render_outcome = self._render_personal_multi_groups(
+                        target_date=target_date,
+                        groups=groups,
+                        candidates=all_candidates,
+                    )
+                    warning_messages.extend(render_outcome.warnings)
                     day_grouping_summary = DayGroupingSummary(
                         candidate_count=1,
                         initial_group_count=1,
                         final_group_count=1,
+                        content_render_request_count=render_outcome.request_count,
+                        content_render_retry_count=render_outcome.retry_count,
+                        content_render_failure_count=render_outcome.failure_count,
+                        validation_retry_count=render_outcome.retry_count,
+                        fallback_count=render_outcome.fallback_count,
+                        warning_count=len(render_outcome.warnings),
+                    )
+                    self._dump_merge_debug_artifacts(
+                        target_date=target_date,
+                        candidates=all_candidates,
+                        grouping_attempts=[],
+                        discovery_artifact={
+                            "status": "not_needed",
+                            "groups": [],
+                            "attempts": [],
+                        },
+                        review_attempts=[],
+                        review_components=[],
+                        render_artifact=render_outcome.artifact,
+                        groups=groups,
+                        warnings=render_outcome.warnings,
+                        summary=day_grouping_summary,
                     )
                     merged_drafts = materialize_grouped_merged_drafts(
                         all_candidates,
-                        [
-                            CrossConversationGroup(
-                                group_id="single",
-                                draft_ids=[all_candidates[0].draft_id],
-                                primary_draft_id=all_candidates[0].draft_id,
-                                merge_reason="单条保留",
-                                evidence_message_ids=[],
-                            )
-                        ],
+                        groups,
                         target_date=target_date,
                         message_order=all_message_order,
                         self_relation_order=tuple(
                             item.key for item in self.config.self_relation_types
                         ),
+                        rendered_groups=render_outcome.rendered_groups,
+                    )
+                    merged_drafts = validate_merged_event_drafts(
+                        merged_drafts,
+                        message_order=all_message_order,
+                    )
+                    log_timing(
+                        logger,
+                        "runner.stage.completed",
+                        merge_started_at,
+                        stage="merge_day_candidates",
+                        candidate_event_count=1,
+                        merged_event_count=len(merged_drafts),
                     )
                 else:
                     merge_started_at = perf_counter()
@@ -4381,13 +4424,13 @@ class DailyTraceRunner:
         groups: list[CrossConversationGroup],
         candidates: list[SourceBackedEventDraft],
     ) -> _PersonalGroupRenderOutcome:
-        multi_groups = [group for group in groups if len(group.draft_ids) > 1]
+        final_groups = list(groups)
         artifact: dict[str, object] = {
-            "status": "not_needed" if not multi_groups else "success",
+            "status": "not_needed" if not final_groups else "success",
             "groups": [],
             "attempts": [],
         }
-        if not multi_groups:
+        if not final_groups:
             return _PersonalGroupRenderOutcome({}, [], artifact, 0, 0, 0, 0)
         request_function = getattr(self.dependencies.analyzer, "request_function", None)
         if not callable(request_function):
@@ -4395,14 +4438,35 @@ class DailyTraceRunner:
                 "Kept deterministic personal group content because the analyzer has "
                 "no personal group render capability."
             )
-            artifact.update({"status": "failed", "failure_reason": warning})
+            artifact.update(
+                {
+                    "status": "failed",
+                    "failure_reason": warning,
+                    "groups": [
+                        {
+                            "group_id": group.group_id,
+                            "draft_ids": list(group.draft_ids),
+                            "status": "fallback",
+                            "result": {},
+                        }
+                        for group in final_groups
+                    ],
+                    "summary": {
+                        "group_count": len(final_groups),
+                        "request_count": 0,
+                        "retry_count": 0,
+                        "fallback_count": 0,
+                        "failure_count": len(final_groups),
+                    },
+                }
+            )
             return _PersonalGroupRenderOutcome(
-                {}, [warning], artifact, 0, 0, 0, len(multi_groups)
+                {}, [warning], artifact, 0, 0, 0, len(final_groups)
             )
 
         all_started_at = perf_counter()
         worker_count = min(
-            len(multi_groups),
+            len(final_groups),
             self.config.max_concurrent_day_group_review_requests,
         )
         results: list[
@@ -4423,7 +4487,7 @@ class DailyTraceRunner:
                     group=group,
                     candidates=candidates,
                 )
-                for group in multi_groups
+                for group in final_groups
             ]
             for future in futures:
                 results.append(future.result())
@@ -4444,7 +4508,7 @@ class DailyTraceRunner:
         ]
         retry_count = sum(item[4] for item in results)
         fallback_count = sum(item[5] for item in results)
-        failure_count = len(multi_groups) - len(rendered_groups)
+        failure_count = len(final_groups) - len(rendered_groups)
         recorder = getattr(self.dependencies.analyzer, "usage_recorder", None)
         records = (
             recorder.records()
@@ -4477,12 +4541,12 @@ class DailyTraceRunner:
                             else {}
                         ),
                     }
-                    for group in multi_groups
+                    for group in final_groups
                 ],
                 "attempts": attempts,
                 "usage_attempts": usage_attempts,
                 "summary": {
-                    "group_count": len(multi_groups),
+                    "group_count": len(final_groups),
                     "request_count": request_count,
                     "retry_count": retry_count,
                     "fallback_count": fallback_count,
@@ -4495,7 +4559,7 @@ class DailyTraceRunner:
             "runner.stage.completed",
             all_started_at,
             stage="personal_group_render_all",
-            group_count=len(multi_groups),
+            group_count=len(final_groups),
             worker_count=worker_count,
             request_count=request_count,
             retry_count=retry_count,
@@ -4555,7 +4619,7 @@ class DailyTraceRunner:
                 {
                     "field": "content",
                     "text": item.content or "该成员属于同一事项。",
-                    "evidence_message_ids": item.source_message_ids[:1],
+                    "evidence_message_ids": item.source_message_ids,
                 }
                 for item in group_candidates
             ]

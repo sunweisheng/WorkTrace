@@ -691,6 +691,154 @@ def test_personal_group_render_rewrites_locked_multi_group_content(
     assert drafts[0].retention_reason == candidates[0].retention_reason
 
 
+def test_personal_group_render_rewrites_locked_singleton_content(
+    tmp_path: Path,
+) -> None:
+    class RenderAnalyzer:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def request_function(self, prompt, *, function_spec, allow_oversized_input=False):
+            self.calls += 1
+            assert function_spec.request_kind == "personal_group_render"
+            return {
+                "groups": [
+                    {
+                        "group_id": "group-001",
+                        "covered_draft_ids": ["d1"],
+                        "fact_items": [
+                            {
+                                "field": "topic",
+                                "text": "事项背景、处理过程及后续安排",
+                                "evidence_message_ids": ["m1"],
+                            },
+                            {
+                                "field": "content",
+                                "text": "事项由明确需求触发，已完成处理并形成后续安排。",
+                                "evidence_message_ids": ["m1"],
+                            },
+                            {
+                                "field": "object_hint",
+                                "text": "事项需求及后续安排",
+                                "evidence_message_ids": ["m1"],
+                            },
+                        ],
+                    }
+                ]
+            }
+
+    candidates = [_draft("d1", "m1")]
+    group = CrossConversationGroup(
+        group_id="group-001",
+        draft_ids=["d1"],
+        primary_draft_id="d1",
+        merge_reason="单条保留",
+    )
+    analyzer = RenderAnalyzer()
+    runner = _runner(tmp_path, analyzer)
+
+    outcome = runner._render_personal_multi_groups(
+        target_date="2026-07-22",
+        groups=[group],
+        candidates=candidates,
+    )
+    drafts = materialize_grouped_merged_drafts(
+        candidates,
+        [group],
+        target_date="2026-07-22",
+        message_order=["m1"],
+        rendered_groups=outcome.rendered_groups,
+    )
+
+    assert analyzer.calls == 1
+    assert outcome.failure_count == 0
+    assert drafts[0].topic == "事项背景、处理过程及后续安排"
+    assert drafts[0].content == "事项由明确需求触发，已完成处理并形成后续安排。"
+    assert drafts[0].object_hint == "事项需求及后续安排"
+
+
+def test_personal_group_render_rewrites_singleton_and_multi_groups(
+    tmp_path: Path,
+) -> None:
+    class RenderAnalyzer:
+        def __init__(self) -> None:
+            self.group_ids: list[str] = []
+            self.lock = Lock()
+
+        def request_function(self, prompt, *, function_spec, allow_oversized_input=False):
+            payload = json.loads(prompt)
+            locked_group = payload["locked_group"]
+            group_id = locked_group["group_id"]
+            members = locked_group["members"]
+            with self.lock:
+                self.group_ids.append(group_id)
+            evidence_ids = [
+                message_id
+                for member in members
+                for message_id in member["source_message_ids"]
+            ]
+            return {
+                "groups": [
+                    {
+                        "group_id": group_id,
+                        "covered_draft_ids": locked_group["draft_ids"],
+                        "fact_items": [
+                            {
+                                "field": "topic",
+                                "text": f"完整标题 {group_id}",
+                                "evidence_message_ids": evidence_ids,
+                            },
+                            *[
+                                {
+                                    "field": "content",
+                                    "text": f"完整内容 {member['draft_id']}。",
+                                    "evidence_message_ids": member[
+                                        "source_message_ids"
+                                    ],
+                                }
+                                for member in members
+                            ],
+                            {
+                                "field": "object_hint",
+                                "text": f"完整对象 {group_id}",
+                                "evidence_message_ids": evidence_ids,
+                            },
+                        ],
+                    }
+                ]
+            }
+
+    candidates = [_draft("d1", "m1"), _draft("d2", "m2"), _draft("d3", "m3")]
+    groups = [
+        CrossConversationGroup(
+            group_id="group-001",
+            draft_ids=["d1", "d2"],
+            primary_draft_id="d1",
+            merge_reason="两个候选直接参与同一完整过程。",
+            evidence_message_ids=["m1", "m2"],
+        ),
+        CrossConversationGroup(
+            group_id="group-002",
+            draft_ids=["d3"],
+            primary_draft_id="d3",
+            merge_reason="单条保留",
+        ),
+    ]
+    analyzer = RenderAnalyzer()
+    runner = _runner(tmp_path, analyzer)
+
+    outcome = runner._render_personal_multi_groups(
+        target_date="2026-07-22",
+        groups=groups,
+        candidates=candidates,
+    )
+
+    assert set(analyzer.group_ids) == {"group-001", "group-002"}
+    assert set(outcome.rendered_groups) == {"group-001", "group-002"}
+    assert outcome.request_count == 2
+    assert outcome.failure_count == 0
+
+
 def test_personal_group_render_failure_uses_deterministic_content(
     tmp_path: Path,
 ) -> None:
@@ -758,6 +906,138 @@ def test_personal_group_render_failure_uses_deterministic_content(
         candidate.content for candidate in candidates
     )
     assert any("Kept deterministic personal group content" in item for item in outcome.warnings)
+
+
+def test_personal_singleton_render_rejects_unknown_message_evidence(
+    tmp_path: Path,
+) -> None:
+    class InvalidEvidenceAnalyzer:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def request_function(self, prompt, *, function_spec, allow_oversized_input=False):
+            self.calls += 1
+            return {
+                "groups": [
+                    {
+                        "group_id": "group-001",
+                        "covered_draft_ids": ["d1"],
+                        "fact_items": [
+                            {
+                                "field": "topic",
+                                "text": "完整事项",
+                                "evidence_message_ids": ["unknown-message"],
+                            },
+                            {
+                                "field": "content",
+                                "text": "完整处理过程。",
+                                "evidence_message_ids": ["unknown-message"],
+                            },
+                            {
+                                "field": "object_hint",
+                                "text": "具体事项",
+                                "evidence_message_ids": ["unknown-message"],
+                            },
+                        ],
+                    }
+                ]
+            }
+
+    candidate = _draft("d1", "m1")
+    group = CrossConversationGroup(
+        group_id="group-001",
+        draft_ids=["d1"],
+        primary_draft_id="d1",
+        merge_reason="单条保留",
+    )
+    analyzer = InvalidEvidenceAnalyzer()
+    runner = _runner(tmp_path, analyzer, day_group_validation_retry_limit=1)
+
+    outcome = runner._render_personal_multi_groups(
+        target_date="2026-07-22",
+        groups=[group],
+        candidates=[candidate],
+    )
+
+    assert analyzer.calls == 2
+    assert outcome.retry_count == 1
+    assert outcome.failure_count == 1
+    assert outcome.rendered_groups == {}
+    assert any("invalid evidence" in item for item in outcome.warnings)
+
+
+def test_personal_render_failure_only_falls_back_current_event(
+    tmp_path: Path,
+) -> None:
+    class PartiallyFailingAnalyzer:
+        def request_function(self, prompt, *, function_spec, allow_oversized_input=False):
+            payload = json.loads(prompt)
+            locked_group = payload["locked_group"]
+            if locked_group["group_id"] == "group-001":
+                raise AnalyzerProtocolError("temporary model request failure")
+            member = locked_group["members"][0]
+            return {
+                "groups": [
+                    {
+                        "group_id": locked_group["group_id"],
+                        "covered_draft_ids": locked_group["draft_ids"],
+                        "fact_items": [
+                            {
+                                "field": "topic",
+                                "text": "第二项完整标题",
+                                "evidence_message_ids": member["source_message_ids"],
+                            },
+                            {
+                                "field": "content",
+                                "text": "第二项完整正文。",
+                                "evidence_message_ids": member["source_message_ids"],
+                            },
+                            {
+                                "field": "object_hint",
+                                "text": "第二项具体对象",
+                                "evidence_message_ids": member["source_message_ids"],
+                            },
+                        ],
+                    }
+                ]
+            }
+
+    candidates = [_draft("d1", "m1"), _draft("d2", "m2")]
+    groups = [
+        CrossConversationGroup(
+            group_id="group-001",
+            draft_ids=["d1"],
+            primary_draft_id="d1",
+            merge_reason="单条保留",
+        ),
+        CrossConversationGroup(
+            group_id="group-002",
+            draft_ids=["d2"],
+            primary_draft_id="d2",
+            merge_reason="单条保留",
+        ),
+    ]
+    runner = _runner(tmp_path, PartiallyFailingAnalyzer())
+
+    outcome = runner._render_personal_multi_groups(
+        target_date="2026-07-22",
+        groups=groups,
+        candidates=candidates,
+    )
+    drafts = materialize_grouped_merged_drafts(
+        candidates,
+        groups,
+        target_date="2026-07-22",
+        message_order=["m1", "m2"],
+        rendered_groups=outcome.rendered_groups,
+    )
+
+    assert outcome.failure_count == 1
+    assert outcome.request_count == 2
+    assert set(outcome.rendered_groups) == {"group-002"}
+    assert drafts[0].content == candidates[0].content
+    assert drafts[1].content == "第二项完整正文。"
+    assert len(outcome.warnings) == 1
 
 
 def test_cross_batch_results_keep_existing_multi_event_evidence_without_summary_request(

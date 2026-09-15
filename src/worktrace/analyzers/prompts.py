@@ -71,6 +71,10 @@ EVENT_TITLE_RULE = (
     "优先采用‘具体对象 + 关键动作、进展、结果或风险’的结构，"
     "保持简洁，不得只写无法区分实际事项的通用类别。"
 )
+PERSONAL_SOURCE_MESSAGE_COVERAGE_RULE = (
+    "每条事项的 source_message_ids 必须覆盖 topic、content、action_label、object_hint、"
+    "retention_reason 和 retention_detail 实际使用的全部事实证据；不能只选择少数较相关消息。"
+)
 
 ATTACHMENT_FILE_NAME_RULE = (
     "附件元数据中的 file_name 仅用于识别文件。候选按个人保留规则确认可提炼后，"
@@ -202,8 +206,7 @@ def build_batch_analysis_prompt(
         "instruction": (
             "按会话切片提炼当天讨论过的工作事项摘要。"
             "只调用指定 Function 一次，提交 candidate_events 和 context_requests。"
-            "请给我简洁的答案，不要推理，跳过思考步骤。"
-            "直接作答，不要展示你的推理过程。"
+            "请按指定结构完整作答，不要输出推理、思考步骤或解释性文字。"
         ),
         "rules": [
             "只提炼工作事项。",
@@ -222,7 +225,7 @@ def build_batch_analysis_prompt(
                 "retention_reason 必须从以下枚举选择：deliverable_updated、decision_made、"
                 "issue_or_risk_found、follow_up_assigned、external_business_progress、substantive_approval。"
             ),
-            "每条事项附上最相关的消息 id。",
+            PERSONAL_SOURCE_MESSAGE_COVERAGE_RULE,
             "只能使用输入里出现过的真实 message id，不要自造占位符 id。",
             "如需给事项挂涉及文件，只能从对应 source_message_ids 的 links 里选择 referenced_link_ids；拿不准就返回空数组。",
             "self_evidence_message_ids 必须列出证明本人发起、负责、审批或跟进该事项的本人消息；它可以与 source_message_ids 不同。",
@@ -407,6 +410,7 @@ def build_segment_batch_analysis_prompt(
             "每个 segment 独立判断，禁止从其它 segment 借用事实、对象、结论或来源。",
             "每个输入 segment_id 必须且只能返回一个 result。",
             "candidate_events 的 source_message_ids 只能使用该 segment 的 primary_message_ids，不能使用 context_message_ids。",
+            PERSONAL_SOURCE_MESSAGE_COVERAGE_RULE,
             "每条 candidate 必须在 self_evidence_message_ids 中列出本人发起、负责、审批或跟进的消息；事实来源可由他人的执行、反馈或文件消息组成。",
             _build_self_relation_rule(runtime_config),
             "每条 candidate 至少引用一条本人参与证据，或引用该 segment 的本人回应 signal。",
@@ -770,7 +774,7 @@ def build_personal_group_render_prompt(
     return dump_json(
         {
             "instruction": (
-                "为成员已经锁定的个人多事件组重新生成与成员范围一致的标题、正文和具体对象。"
+                "为成员已经锁定的最终个人事件组重新生成与成员范围一致的标题、正文和具体对象。"
                 "只调用指定 Function 一次提交 groups，不重新分组，不展示推理过程。"
             ),
             "rules": [
@@ -778,7 +782,6 @@ def build_personal_group_render_prompt(
                 "locked_group 的成员已经确定，covered_draft_ids 必须原样返回。",
                 "fact_items 只返回 topic、content 和 object_hint；topic 和 object_hint 各一项，content 可以有一项或多项并按正文顺序排列。",
                 "标题和具体对象必须准确覆盖全部成员；范围较宽的完整过程使用能够概括全部成员的标题，具体交付过程使用具体标题。",
-                "正文应整合前因、动作、决定、结果和待办，不按候选逐条罗列，不补充来源中没有的事实。",
                 "每个 fact_item 必须引用支持其文字的合法消息证据，所有成员至少由一项 content 证据覆盖。",
             ],
             "event_generation_guidance": _build_personal_generation_guidance(
@@ -1204,7 +1207,8 @@ def build_collected_render_prompt(
     events_by_id = {item.draft_id: item for item in events}
     protocol = {
         "instruction": (
-            "为已经确认属于同一真实事项的多人事件组生成正式汇总内容。"
+            "为已经完成分组的团队最终事件生成正式汇总内容；"
+            "每组可以包含一个或多个来源事件。"
             "组成员已经锁定，不要重新分组。只调用指定 Function 一次提交 groups。"
         ),
         "rules": [
@@ -1273,8 +1277,7 @@ def build_anchor_analysis_prompt(
             "分析一个锚点聊天窗口。"
             "只调用指定 Function 一次提交 anchor_status、candidate_events、"
             "context_requests 和 needs_cross_anchor_merge。"
-            "请给我简洁的答案，不要推理，跳过思考步骤。"
-            "直接作答，不要展示你的推理过程。"
+            "请按指定结构完整作答，不要输出推理、思考步骤或解释性文字。"
         ),
         "rules": [
             (
@@ -1287,6 +1290,7 @@ def build_anchor_analysis_prompt(
             *_build_personal_retention_rules(runtime_config),
             "每个 candidate_event 只能落在当前 anchor_unit 内。",
             "每个 candidate_event 表示一个可独立汇报的完整事项，具体边界以 event_generation_guidance 为准。",
+            PERSONAL_SOURCE_MESSAGE_COVERAGE_RULE,
             EVENT_TITLE_RULE,
             "action_label 只写主要动作标签，例如：回复、审批、催办、撰写、核对、跟进、同步、确认。",
             "object_hint 只写该事项的核心对象或主题。",
@@ -1329,8 +1333,7 @@ def build_anchor_batch_analysis_prompt(
         "instruction": (
             "一次分析多个彼此独立的锚点聊天窗口。"
             "只调用指定 Function 一次提交 results；每个 result 必须对应一个 anchor_unit_id。"
-            "请给我简洁的答案，不要推理，跳过思考步骤。"
-            "直接作答，不要展示你的推理过程。"
+            "请按指定结构完整作答，不要输出推理、思考步骤或解释性文字。"
         ),
         "rules": [
             "每个 anchor unit 独立判断，不要串信息。",
@@ -1339,6 +1342,7 @@ def build_anchor_batch_analysis_prompt(
             *_build_personal_retention_rules(runtime_config),
             "每个 candidate_event 只能留在自己的 anchor_unit 内。",
             "每个 candidate_event 表示一个可独立汇报的完整事项，具体边界以 event_generation_guidance 为准。",
+            PERSONAL_SOURCE_MESSAGE_COVERAGE_RULE,
             EVENT_TITLE_RULE,
             "action_label 只写主要动作标签，例如：回复、审批、催办、撰写、核对、跟进、同步、确认。",
             "object_hint 只写该事项的核心对象或主题。",
@@ -1391,8 +1395,7 @@ def build_anchor_expansion_prompt(
             "在 Python 扩展上下文后，继续分析一个锚点聊天窗口。"
             "只调用指定 Function 一次提交 anchor_status、candidate_events、"
             "context_requests 和 needs_cross_anchor_merge。不要返回普通文字。"
-            "请给我简洁的答案，不要推理，跳过思考步骤。"
-            "直接作答，不要展示你的推理过程。"
+            "请按指定结构完整作答，不要输出推理、思考步骤或解释性文字。"
         ),
         "rules": [
             (
@@ -1407,6 +1410,7 @@ def build_anchor_expansion_prompt(
             "candidate_events 应表示当前 anchor_unit 的最新综合判断。",
             _build_self_relation_rule(runtime_config),
             "每个 candidate_event 表示当前上下文支持的一个完整事项，具体边界以 event_generation_guidance 为准。",
+            PERSONAL_SOURCE_MESSAGE_COVERAGE_RULE,
             "每个 candidate_event 必须包含 object_hint、retention_reason 和 retention_detail。",
             EVENT_TITLE_RULE,
             *_build_personal_retention_rules(runtime_config),

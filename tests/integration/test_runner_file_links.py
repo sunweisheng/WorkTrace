@@ -19,6 +19,7 @@ from src.worktrace.models import (
 from src.worktrace.runner import DailyTraceRunner
 from src.worktrace.resolvers.feishu_message import FeishuMessageContentResolver
 from src.worktrace.stores.markdown import MarkdownEventStore
+from tests.helpers import FunctionRequestStub
 
 
 class LinkSource:
@@ -68,7 +69,7 @@ class LinkResolver:
         return None
 
 
-class LinkAnalyzer:
+class LinkAnalyzer(FunctionRequestStub):
     def build_batch_prompt(self, batch_input):
         return "prompt"
 

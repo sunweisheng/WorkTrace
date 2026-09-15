@@ -423,7 +423,8 @@ def test_docs_match_failover_and_collected_merge_optimizations() -> None:
     assert "primary_request_retry_limit" in content
     assert "online_request_retry_limit" in content
     assert "当前请求" in content
-    assert "单条事件组直接保留" in content
+    assert "单条事件组和多来源事件组都逐事件调用正式正文模型" in content
+    assert "其他事件继续生成" in content
     assert "标题候选、共同消息、共同文件" in content
     assert "split_reason" in content
     assert "最多三路" in content

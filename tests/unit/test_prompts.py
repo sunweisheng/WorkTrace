@@ -316,7 +316,8 @@ def test_batch_prompt_uses_original_message_ids_and_slim_rules(tmp_path: Path) -
     assert "required_output_schema" not in prompt
     assert '"id": "om_1"' in prompt
     assert '"id": "om_2"' in prompt
-    assert "每条事项附上最相关的消息 id。" in prompt
+    assert "必须覆盖 topic、content、action_label、object_hint" in prompt
+    assert "不能只选择少数较相关消息" in prompt
     assert "referenced_link_ids" in prompt
     assert "只能从对应 source_message_ids 的 links 里选择 referenced_link_ids" in prompt
     assert "具体对象 + 关键动作、进展、结果或风险" in prompt
@@ -328,8 +329,8 @@ def test_batch_prompt_uses_original_message_ids_and_slim_rules(tmp_path: Path) -
         "items"
     ]["properties"]
     assert "如果有明确结果，直接融入 content，不要单独返回 result。" in prompt
-    assert "请给我简洁的答案，不要推理，跳过思考步骤。" in prompt
-    assert "直接作答，不要展示你的推理过程。" in prompt
+    assert "请按指定结构完整作答" in prompt
+    assert "不要输出推理、思考步骤或解释性文字" in prompt
     assert "不要自造占位符 id。" in prompt
     assert '"slice_id": "slice-1"' in prompt
     assert '"conversation_id": "oc_1"' in prompt
@@ -337,8 +338,8 @@ def test_batch_prompt_uses_original_message_ids_and_slim_rules(tmp_path: Path) -
     assert "等非工作敏感内容，不要提炼为事项。" not in prompt
     assert "按会话 slice 独立提炼，不要串会话信息。" not in prompt
     guidance = json.loads(prompt)["event_generation_guidance"]
-    assert len(guidance["positive_examples"]) == 4
-    assert len(guidance["negative_examples"]) == 2
+    assert len(guidance["positive_examples"]) == 5
+    assert len(guidance["negative_examples"]) == 3
     assert set(guidance["template"]) == {
         "topic",
         "content",
@@ -463,8 +464,8 @@ def test_anchor_prompt_serialization_is_compact(tmp_path: Path) -> None:
     assert ContextRequestType.LINKED_FILE_TEXT.value in context_request_schema["items"][
         "properties"
     ]["request_type"]["enum"]
-    assert "请给我简洁的答案，不要推理，跳过思考步骤。" in prompt
-    assert "直接作答，不要展示你的推理过程。" in prompt
+    assert "请按指定结构完整作答" in prompt
+    assert "不能只选择少数较相关消息" in prompt
 
 
 def test_anchor_expansion_prompt_includes_previous_result_and_expansion(tmp_path: Path) -> None:
@@ -565,6 +566,8 @@ def test_anchor_expansion_prompt_includes_previous_result_and_expansion(tmp_path
     assert '"linked_file_texts"' in prompt
     assert AnchorStatus.NEEDS_ATTACHMENT_TEXT.value in prompt
     assert "新增上下文改变事项边界时" in prompt
+    assert "请按指定结构完整作答" in prompt
+    assert "不能只选择少数较相关消息" in prompt
     assert "如果新上下文显示某个先前 candidate_event 实际混合了多个动作" not in prompt
     assert "具体对象 + 关键动作、进展、结果或风险" in prompt
     assert "动作类型比共享背景名词更重要" not in prompt
@@ -698,7 +701,7 @@ def test_anchor_batch_prompt_includes_low_retention_rules(tmp_path: Path) -> Non
     assert "不符合以上任何明确排除条件" in prompt
     _assert_temporary_coordination_rules(prompt)
     payload = json.loads(prompt)
-    assert len(payload["event_generation_guidance"]["positive_examples"]) == 4
+    assert len(payload["event_generation_guidance"]["positive_examples"]) == 5
     assert "每个 candidate_event 只表示一个主要动作。" not in prompt
     assert "如果同一窗口有多个动作，就拆开。" not in prompt
 
@@ -739,10 +742,12 @@ def test_personal_group_render_uses_full_generation_guidance() -> None:
     )
 
     guidance = json.loads(prompt)["event_generation_guidance"]
-    assert len(guidance["positive_examples"]) == 4
-    assert len(guidance["negative_examples"]) == 2
+    assert len(guidance["positive_examples"]) == 5
+    assert len(guidance["negative_examples"]) == 3
     assert any("完整业务事项" in rule for rule in guidance["event_boundary_rules"])
     assert "所有成员至少由一项 content 证据覆盖" in prompt
+    assert "完整事项过度压缩成一句话" in prompt
+    assert "触发原因、关键输入、主要动作、方案变化" in prompt
 
 
 def test_media_messages_are_compressed_for_prompt(tmp_path: Path) -> None:

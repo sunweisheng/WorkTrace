@@ -68,9 +68,9 @@ WorkTrace 另有一个管理人员汇总模式：管理人员先收集多人已�
 - `supported=true` 必须同时有合法证据支持非空标题、正文、具体对象和保留依据；候选只有局部表述缺少证据时先删除或改写局部内容，只有修订后任一必填字段仍无法得到支持时才返回 `supported=false`，Python 按配置删除该事件。
 - 不同候选最多按 `config/llm_retry.json` 同时处理 3 条，同一候选内部重试保持顺序。复核结果缺失、重复、字段不完整、引用非法证据或覆盖不完整时只重试当前候选；技术失败或重试后仍错误时整次生成失败且不写文件。
 - 选择数、确认数、修订数、无依据删除数、批次数和重试数由 Python 写入 `personal_fact_review_summary`；Markdown 不新增可见字段。
-- 使用 `--debug-output` 时，两类局部复核分别写入 `retention_review.json` 和 `personal_fact_review.json`，保留每次成功或失败尝试的候选摘要、证据范围、模型返回和 Python 校验结果，但不额外复制整段原聊天。个人首次提炼、失败备用入口和多成员组正文改写的调试 JSON 使用 `personal_full`，事实复核使用 `personal_review_without_examples`；只记录事件生成配置版本、数量、模板方式和是否带案例，不复制完整规则或案例。调试回放的 `llm_usage_summary` 按调用类型汇总次数、token 和耗时，`event_generation_summary` 汇总配置状态；事实复核并发阶段必须用 `personal_fact_review_all` 的墙钟耗时判断，不能把各候选累计耗时当作实际运行耗时。
+- 使用 `--debug-output` 时，两类局部复核分别写入 `retention_review.json` 和 `personal_fact_review.json`，保留每次成功或失败尝试的候选摘要、证据范围、模型返回和 Python 校验结果，但不额外复制整段原聊天。个人首次提炼、失败备用入口和全部最终事件正文改写的调试 JSON 使用 `personal_full`，事实复核使用 `personal_review_without_examples`；只记录事件生成配置版本、数量、模板方式和是否带案例，不复制完整规则或案例。调试回放的 `llm_usage_summary` 按调用类型汇总次数、token 和耗时，`event_generation_summary` 汇总配置状态；事实复核并发阶段必须用 `personal_fact_review_all` 的墙钟耗时判断，不能把各候选累计耗时当作实际运行耗时。
 
-个人与团队事件生成统一读取 `config/event_generation.json`。个人首次提炼和失败备用入口使用完整事项边界、字段模板及脱敏正反例；个人事实复核只使用共同事实规则和字段模板，多成员组正式改写再使用完整案例。团队初步分组和完整复核只使用共同规则、团队事项边界及简短摘要模板，锁定成员后的正式正文才使用完整模板和案例。该配置不新增 Markdown 公开字段，不要求固定输出下一步、责任人或目标时间，也不建设跨日事项状态库；所有模板和案例继续计入当前 `model_input_batch_target_tokens` 输入估算。
+个人与团队事件生成统一读取 `config/event_generation.json`。个人首次提炼和失败备用入口使用完整事项边界、字段模板及脱敏正反例；个人事实复核只使用共同事实规则和字段模板，全部最终事件正式改写再使用完整案例。团队初步分组和完整复核只使用共同规则、团队事项边界及简短摘要模板，锁定成员后的全部最终事件正文才使用完整模板和案例。该配置不新增 Markdown 公开字段，不要求固定输出下一步、责任人或目标时间，也不建设跨日事项状态库；所有模板和案例继续计入当前 `model_input_batch_target_tokens` 输入估算。
 
 个人全日事件分组约定：
 
@@ -78,7 +78,7 @@ WorkTrace 另有一个管理人员汇总模式：管理人员先收集多人已�
 - Python 检查两个数组完整且互斥，候选无遗漏、无重复，主事件属于组内，每个成员恰好说明一次且证据属于该成员；全部单例仍是合法结果。完整输入超过当前预算 profile 时按候选分批完成初步分组，再合并所有批次结果并统一校验、编号；不构造候选摘要，也不做摘要再次分组，跨批关系交给随后的全部组标题发现和完整内容复核。
 - 初步分组后，`day_group_discovery` 单次提交全部组且每组严格只有 `group_id` 和 `title`；不发送日期、正文或其他分组阶段的正反例，组合标题由 Python 按稳定顺序覆盖初步组全部成员标题。模型必须逐组比较全部标题并完整返回 `group_checks`，每组列出可能相关的零个、一个或多个其他编号和非空理由；Python 校验全量覆盖后把重叠关系形成 `candidate_groups`。协议不包含特定日期、人员、业务关键词或固定长度片段。超过当前预算 profile 时不拆批、不跳过，仍整体提交并记录超限；全部尝试失败时放弃该节点，不阻止个人 Markdown 和本人送达。
 - 同一来源片段、直接 reply/quote、共享来源消息、共享文件、按配置去除版本后缀后的同一非图片附件基础名称，以及标题发现候选建立复核范围；同一会话不单独触发。标题候选仍可包含任意多个组，重叠候选形成同一个完整范围，但模型实际指出的每条组间连接分别编号，允许同一范围内部分成立、部分分开。范围内每个原始候选都可脱离初步组重新组合。模型必须先逐条判断关系，再统一处理重叠关系并形成最终组，不得用初步组或预设的最终组反向解释关系。分开时可以返回关系两侧代表成员，必须分别说明两侧可独立汇报的目标或结果；Python 校验完整覆盖、关系逐条处理、成立成员真实同组、分开成员真实位于不同组、两侧证据和最终成员唯一性。每条关系只返回覆盖两侧判断所需的最少消息编号，Function 示例按关系两侧生成代表成员和代表证据，其中的决定只是字段结构占位，不代表当前关系结论。
-- 最终多成员组锁定后使用 `personal_group_render` 重新生成覆盖全部成员的标题、正文和具体对象；失败时使用 Python 确定性拼接结果并写 warning，不阻止个人 Markdown 和本人送达。单成员组不增加调用。
+- 最终单成员组和多成员组锁定后都使用 `personal_group_render` 重新生成覆盖全部成员的标题、正文和具体对象；最多同时处理 3 项，失败时使用 Python 确定性拼接结果并写 warning，不阻止个人 Markdown 和本人送达。
 - 个人与多人分组语义说明统一读取 `config/event_grouping.json`；Python 不读取聊天文字判断业务含义。
 - `--debug-output` 在 `_merge_day_candidates/` 写入 `input.json`、`prompt.txt`、`grouping_attempts.json`、`day_group_discovery.json`、`day_group_review.json`、`personal_group_render.json` 和 `resolved_groups.json`。完整回放成功后可用 `scripts/replay_failed_day_group_reviews.py` 只重放失败复核范围，结果写入 `day_group_review_replay.json`，不直接修改正式个人 MD。CLI 与回放 `summary.json` 的 `day_grouping_summary` 由 Python 计算。
 - 旧 Markdown 和旧 trace 中的工作流字段允许读取但会丢弃；新 Markdown、缓存和 trace 不再生成这些字段。
@@ -145,7 +145,7 @@ python3 -m src.worktrace.cli --debug-output merge-collected --date YYYY-MM-DD
 - `config/event_grouping.json` 是个人与多人分组语义说明的共同来源：每个 `group_reason_definitions` 项配置 `acceptance_rules` 和 `rejection_rules`，具体中文判断规则不得复制到 Python；`config/collected_merge.json` 只保留多人高风险复核开关和阈值。`same_deliverable_batch` 可用于同一批配套产物、同一交付物多个版本，以及不同时间、状态、地区或阶段形成但需要统一汇报或交付的连续产物。文件、版本、时期、状态、地区、项目归属、名称和格式只是上下文信息，任何单项都不能直接决定合并或拆分。模型能看到 Python 编号的 `MSG-xxx`、`FILE-xxx` 证据目录，但新结果只返回 `semantic_reasons`、`reason_detail`、逐条覆盖全部成员的 `member_connections` 和 `risk_flags`，不再返回 `evidence_relation_ids`，也不能直接声明 `shared_message`、`shared_file` 或内部 `group_reason`。Python 只使用端点都在当前组内的关系，按稳定目录顺序计算连接全部成员的最小证据集合，并恢复内部原因；局部证据只写审计，不作为全组合并依据。内部 `evidence_relation_ids` 仅保存 Python 计算结果并兼容旧 trace；同会话候选放入 `candidate_discovery_context`，不用输出分组字段或组编号。逐事件说明遗漏、重复、组外引用或空说明，以及重复事件编号和单成员合并组，都必须进入当前请求局部重试，不得静默修复。
 - 初步分组后，`collected_group_discovery` 单次只提交全部组编号和组合标题，组合标题覆盖组内全部来源事件标题；模型逐组完整返回 `group_checks`，Python 校验后形成重叠候选。超过当前预算 profile 仍整体提交，全部失败时按没有标题候选继续并记录 warning。标题候选与共同消息、共同文件、同一附件基础名称、同日会话候选和现有高风险条件共同建立完整检查范围。
 - 完整复核可以拆开初步组并跨组重新组合；同一 `event_id` 的相似重复来源是不可拆成员块，但整个成员块可以继续加入更大事件。标题发现的多组候选继续作为完整检查范围，但每条实际组间连接单独编号。模型先逐条判断待处理关系，再统一处理重叠关系并形成最终组；确认成立时最少关联成员必须真实同组，分开时可以返回两侧代表成员，并必须提供关系各侧证据和可独立汇报的目标或结果。复核结果持续非法时保留复核前分组并记录 warning，不让整次部门汇总失败。
-- 正式正文必须完整覆盖锁定组并给出关键事实来源；局部重试后仍不完整时不写文件。单条事件组直接保留，不增加模型调用。
+- 正式正文对最终单成员组和多成员组逐事件生成，最多同时处理 3 项；必须完整覆盖锁定组并给出关键事实来源。调用失败或局部重试后仍不完整时，只回退当前组已经脱敏的来源内容并写 warning，其他团队事件和当前汇总范围继续生成。
 - 日期根目录和每个一级子目录分别作为独立合并范围；更深层目录不递归处理。
 - 每个合并范围输出本目录 `YYYY-MM-DD-登录人姓名-merged.md`。
 - 团队汇总文件会公开保留来源人员，并在隐藏信息中逐级保留来源事件 ID；中心结果还公开显示从上游 `*-merged.md` 文件名提取并逐级保留的来源负责人。

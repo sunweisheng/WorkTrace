@@ -20,7 +20,7 @@ from src.worktrace.models import (
 )
 from src.worktrace.runner import DailyTraceRunner
 from src.worktrace.stores.markdown import MarkdownEventStore
-from tests.helpers import NullDelivery
+from tests.helpers import FunctionRequestStub, NullDelivery
 
 
 class RetrySource:
@@ -83,7 +83,7 @@ class RetryResolver:
         return []
 
 
-class RetryAnalyzer:
+class RetryAnalyzer(FunctionRequestStub):
     def __init__(self):
         self.calls = 0
 

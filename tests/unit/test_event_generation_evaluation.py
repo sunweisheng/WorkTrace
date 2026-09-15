@@ -77,16 +77,23 @@ def test_anonymized_dataset_has_planned_case_coverage() -> None:
     dataset = _dataset()
     cases = dataset["cases"]
 
-    assert dataset["dataset_version"] == "event-generation-quality-v1"
+    assert dataset["dataset_version"] == "event-generation-quality-v2"
     assert dataset["benchmark_non_fact_context"]["repeat"] == 14
     assert "不得写入" in dataset["benchmark_non_fact_context"]["line_template"]
-    assert len(cases) == 10
-    assert sum(case["mode"] == "personal" for case in cases) == 6
+    assert len(cases) == 11
+    assert sum(case["mode"] == "personal" for case in cases) == 7
     assert sum(case["mode"] == "collected" for case in cases) == 4
     assert sum(
         case["mode"] == "personal" and case["category"] == "complete_item"
         for case in cases
-    ) == 4
+    ) == 5
+    singleton_case = next(
+        case
+        for case in cases
+        if case["case_id"] == "personal_singleton_repositioning"
+    )
+    assert len(singleton_case["source_items"]) == 1
+    assert singleton_case["expected_groups"] == [["p5-f1"]]
     assert sum(
         case["mode"] == "collected" and case["category"] == "complete_item"
         for case in cases
@@ -111,16 +118,16 @@ def test_evaluator_counts_split_merge_coverage_and_runtime_metrics() -> None:
     )
     summary = report["summary"]
 
-    assert summary["case_count"] == 10
-    assert summary["event_count"] == 13
+    assert summary["case_count"] == 11
+    assert summary["event_count"] == 14
     assert summary["incorrect_split_pair_count"] == 3
     assert summary["incorrect_merge_pair_count"] == 1
     assert summary["forbidden_style_hit_count"] == 1
     assert summary["source_coverage_rate"] == 1.0
-    assert summary["model_call_count"] == 10
+    assert summary["model_call_count"] == 11
     assert summary["retry_count"] == 0
-    assert summary["elapsed_ms"] == 1000
-    assert summary["input_estimated_tokens_total"] == 10000
+    assert summary["elapsed_ms"] == 1100
+    assert summary["input_estimated_tokens_total"] == 11000
 
 
 def test_evaluator_rejects_fractional_version_and_invalid_expected_group() -> None:
