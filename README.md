@@ -606,7 +606,7 @@ Windows PowerShell：
 powershell -ExecutionPolicy Bypass -File .\scripts\install_worktrace.ps1
 ```
 
-Windows 上通过 npm 安装的 `lark-cli` 和 `codex` 通常实际对应 `.cmd` 文件。WorkTrace 会自动定位它们并通过系统 `COMSPEC` 启动，命令参数和输出统一按 UTF-8 处理；个人日报、附件/图片读取、本人送达、多人汇总身份识别和诊断版本读取都使用同一入口。依赖中的 `tzdata` 用于系统没有 IANA 时区库时继续加载 `Asia/Shanghai`。
+Windows 会从 `PATH` 自动定位 `lark-cli` 和 `codex` 的真实启动文件。`.cmd` 或 `.bat` 通过系统 `COMSPEC` 启动，`codex.exe` 等原生可执行文件直接启动；命令参数和输出统一按 UTF-8 处理。个人日报、附件/图片读取、本人送达、多人汇总身份识别和诊断版本读取都使用同一入口。依赖中的 `tzdata` 用于系统没有 IANA 时区库时继续加载 `Asia/Shanghai`。
 
 手动安装依赖：
 

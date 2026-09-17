@@ -157,7 +157,7 @@ lark-cli --help
 
 如果能正常显示帮助信息，说明这一步完成。
 
-通过 npm 安装时，Windows 实际使用的通常是 `lark-cli.cmd`；`codex` 也可能是 `codex.cmd`。WorkTrace 会自动定位并通过系统命令解释器启动，包含空格或中文的文件路径也会按原参数传递，输出统一按 UTF-8 读取。
+Windows 会自动从 `PATH` 定位 `lark-cli` 和 `codex`。`lark-cli.cmd`、`codex.cmd` 等命令脚本通过系统命令解释器启动，`codex.exe` 等原生程序直接启动；包含空格或中文的文件路径仍按原参数传递，输出统一按 UTF-8 读取。
 
 ### 5.3 登录飞书 CLI
 

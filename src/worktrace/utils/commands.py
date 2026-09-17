@@ -7,7 +7,8 @@ from pathlib import Path
 from typing import Callable, Mapping, Sequence
 
 
-_WINDOWS_CMD_COMMANDS = frozenset({"codex", "lark-cli"})
+_WINDOWS_LAUNCHER_COMMANDS = frozenset({"codex", "lark-cli"})
+_WINDOWS_SHELL_LAUNCHER_SUFFIXES = frozenset({".bat", ".cmd"})
 
 
 def prepare_command_args(
@@ -22,15 +23,26 @@ def prepare_command_args(
     if (
         platform_name != "nt"
         or not command
-        or command[0].casefold() not in _WINDOWS_CMD_COMMANDS
+        or command[0].casefold() not in _WINDOWS_LAUNCHER_COMMANDS
     ):
         return command
 
-    launcher = which(f"{command[0]}.cmd")
+    launcher = next(
+        (
+            resolved
+            for candidate in (command[0], f"{command[0]}.cmd", f"{command[0]}.exe")
+            if (resolved := which(candidate)) is not None
+        ),
+        None,
+    )
     if launcher is None:
         raise FileNotFoundError(
-            f"Could not find Windows command launcher: {command[0]}.cmd"
+            f"Could not find Windows command launcher: {command[0]}.cmd or "
+            f"{command[0]}.exe"
         )
+
+    if Path(launcher).suffix.casefold() not in _WINDOWS_SHELL_LAUNCHER_SUFFIXES:
+        return [launcher, *command[1:]]
 
     environment = os.environ if environ is None else environ
     comspec = next(

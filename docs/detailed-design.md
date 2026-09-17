@@ -480,7 +480,7 @@ FailoverAnalyzer -> CodexAnalyzer -> Codex CLI
 
 Codex 主线路必填项是仓库本地 `.env` 中的模型、推理强度和五项中转提供方设置：`WORKTRACE_CODEX_MODEL`、`WORKTRACE_CODEX_REASONING_EFFORT`、`WORKTRACE_CODEX_PROVIDER_ID`、`WORKTRACE_CODEX_PROVIDER_NAME`、`WORKTRACE_CODEX_PROVIDER_BASE_URL`、`WORKTRACE_CODEX_PROVIDER_WIRE_API`、`WORKTRACE_CODEX_PROVIDER_REQUIRES_OPENAI_AUTH`。它们不从进程环境变量或个人 Codex 配置继承；中转站 Key 继续由 Codex CLI 的认证存储提供，不写入 WorkTrace `.env`。Online 备用连接仍使用 `WORKTRACE_LLM_BASE_URL`、`WORKTRACE_LLM_MODEL`、`WORKTRACE_LLM_API_KEY` 三项，缺少或不合法时只禁用备用。`WORKTRACE_LLM_WIRE_API` 可选 `responses` 或 `chat_completions`，未配置时保持 Responses；Online 的 `WORKTRACE_LLM_REASONING_EFFORT` 必须为 `none`。timeout/stream/TLS 位于 `.env` 或进程环境变量，环境变量优先。两条线路共用 `WORKTRACE_LLM_TIMEOUT_SECONDS`（未配置时 180 秒）作为整次请求总时限；Codex 到点终止子进程，Online 到点关闭当前连接。可切换失败按 `primary_request_retry_limit=1` 只让当前请求再试 Codex 1 次，仍失败才由 Online 执行一次，下一请求继续 Codex 优先。图片摘要中的 Codex 工具调用等不合法结果和配置定义的无法识别回复直接触发当前图片的 Online 备用，不改变文字请求规则。请求级重试次数和 Codex 间隔都在 `config/llm_retry.json` 统一控制。`WORKTRACE_LLM_TLS_VERIFY` 进入 Online 的文本、图片和独立探针 HTTP client。
 
-所有正式外部命令都通过同一执行入口。Windows 会定位 npm 生成的 `lark-cli.cmd` 和 `codex.cmd`，经 `COMSPEC /d /s /c` 启动并安全处理空格、中文和引号；其他系统保持参数列表调用。输出统一按 UTF-8 解码，异常字节替换为可见占位。Codex 隔离环境在 Windows 保留系统、用户和临时目录变量，同时继续排除 `WORKTRACE_*` 和其他凭据。`tzdata` 为缺少系统 IANA 时区库的 Windows 环境提供 `Asia/Shanghai` 后备。
+所有正式外部命令都通过同一执行入口。Windows 从 `PATH` 定位真实启动文件：`lark-cli.cmd`、`codex.cmd` 或其他 `.cmd/.bat` 经 `COMSPEC /d /s /c` 启动，`codex.exe` 等 `.exe/.com` 文件直接启动；两种方式都安全处理空格、中文和引号。其他系统保持参数列表调用。输出统一按 UTF-8 解码，异常字节替换为可见占位。Codex 隔离环境在 Windows 保留系统、用户和临时目录变量，同时继续排除 `WORKTRACE_*` 和其他凭据。`tzdata` 为缺少系统 IANA 时区库的 Windows 环境提供 `Asia/Shanghai` 后备。
 
 多人汇总 trace 和字段缺失重试也支持环境覆盖：
 

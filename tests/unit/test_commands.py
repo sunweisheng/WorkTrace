@@ -42,10 +42,24 @@ def test_windows_cmd_launcher_uses_comspec_and_preserves_arguments() -> None:
     )
 
 
-def test_windows_codex_without_cmd_launcher_fails_clearly() -> None:
+def test_windows_codex_exe_is_launched_directly() -> None:
+    args = ["codex", "--version"]
+    launcher = r"C:\Program Files\Codex\codex.exe"
+
+    prepared = prepare_command_args(
+        args,
+        os_name="nt",
+        environ={"ComSpec": r"C:\Windows\System32\cmd.exe"},
+        which=lambda command: launcher if command == "codex" else None,
+    )
+
+    assert prepared == [launcher, "--version"]
+
+
+def test_windows_codex_without_launcher_fails_clearly() -> None:
     args = ["codex", "--version"]
 
-    with pytest.raises(FileNotFoundError, match=r"codex\.cmd"):
+    with pytest.raises(FileNotFoundError, match=r"codex\.cmd or codex\.exe"):
         prepare_command_args(
             args,
             os_name="nt",

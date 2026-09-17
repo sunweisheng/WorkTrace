@@ -42,10 +42,21 @@ def test_current_docs_describe_windows_and_online_wire_compatibility() -> None:
         assert "chat_completions" in content or "Chat Completions" in content
     assert "lark-cli.cmd" in combined
     assert "codex.cmd" in combined
+    assert "codex.exe" in combined
     assert "UTF-8" in combined
     assert "tzdata" in combined
     assert "thinking.type=disabled" in combined
     assert "不根据模型名" in combined or "不按模型名" in combined
+
+
+def test_skill_routes_generate_and_upload_without_legacy_cli_or_fixed_path() -> None:
+    skill = Path("SKILL.md").read_text(encoding="utf-8")
+
+    assert "生成并上传" in skill
+    assert "`worktrace-upload-md`" in skill
+    assert "没有上传子命令" in skill
+    assert "Windows 当前用户 DPAPI" in skill
+    assert "/Users/" not in skill
 
 
 def test_readme_mentions_event_rules_file() -> None:

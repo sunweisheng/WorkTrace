@@ -15,9 +15,10 @@ function Write-NextSteps {
 
     Write-Host ""
     Write-Host "下一步："
-    Write-Host "1. 打开 $EnvFilePath，填写 WORKTRACE_LLM_BASE_URL / MODEL / API_KEY"
-    Write-Host "2. 确认 WORKTRACE_LLM_REASONING_EFFORT=none"
-    Write-Host "3. 执行自检命令：python -m src.worktrace.cli --preflight"
+    Write-Host "1. 打开 $EnvFilePath，填写 WORKTRACE_CODEX_* 主线路配置"
+    Write-Host "2. 填写 WORKTRACE_LLM_* 备用线路配置；接口类型只能是 responses 或 chat_completions"
+    Write-Host "3. 确认 WORKTRACE_LLM_REASONING_EFFORT=none"
+    Write-Host "4. 执行自检命令：python -m src.worktrace.cli --preflight"
 }
 
 function Install-SkillLink {
@@ -74,11 +75,16 @@ if (-not (Test-Path $EnvFile)) {
     Write-Host ".env 已存在，跳过初始化。"
 }
 
-Write-Host "[4/5] 检查 lark-cli..."
+Write-Host "[4/5] 检查外部命令..."
 if (Get-Command lark-cli -ErrorAction SilentlyContinue) {
     Write-Host "已找到 lark-cli。"
 } else {
     Write-Host "未找到 lark-cli。请先按组织要求安装并登录飞书 CLI。"
+}
+if (Get-Command codex -ErrorAction SilentlyContinue) {
+    Write-Host "已找到 codex。"
+} else {
+    Write-Host "未找到 codex。请先安装 Codex CLI，并确认 codex.cmd 或 codex.exe 已加入 PATH。"
 }
 
 Write-Host "[5/5] 安装 Skill..."
