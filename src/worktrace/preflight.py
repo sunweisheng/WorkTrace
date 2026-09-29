@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import binascii
 import json
 import ssl
 import shutil
@@ -89,25 +91,36 @@ def run_preflight_checks(
         check_lark_identity(command_runner)
         details["lark_identity"] = "ok"
 
-        details["codex_path"] = require_command("codex")
-        codex_settings = load_codex_llm_settings(config, cwd=cwd)
-        details["codex_config"] = "ok"
-        details["codex_model"] = codex_settings.model
-        details["codex_reasoning_effort"] = codex_settings.reasoning_effort
-        probe_codex(command_runner, config=config, cwd=cwd)
-        details["codex_probe"] = "ok"
-        details["analyzer_backend"] = "codex"
-
-        try:
+        if config.analyzer_backend == "online":
             online_settings = ensure_online_runtime_config(config, cwd=cwd)
             ensure_reasoning_disabled(online_settings.reasoning_effort)
-        except PreflightError as exc:
-            details["online_fallback"] = "disabled"
-            details["online_fallback_warning"] = str(exc)
-        else:
+            details.update(probe_online_llm(config, cwd=cwd))
+            details.update(probe_online_image(config, cwd=cwd))
             details["online_llm_config"] = "ok"
-            details["online_fallback"] = "available"
-            details["online_reasoning_effort"] = online_settings.reasoning_effort or ""
+            details["analyzer_backend"] = "online"
+            details["online_model"] = online_settings.model
+        elif config.analyzer_backend == "codex":
+            details["codex_path"] = require_command("codex")
+            codex_settings = load_codex_llm_settings(config, cwd=cwd)
+            details["codex_config"] = "ok"
+            details["codex_model"] = codex_settings.model
+            details["codex_reasoning_effort"] = codex_settings.reasoning_effort
+            probe_codex(command_runner, config=config, cwd=cwd)
+            details["codex_probe"] = "ok"
+            details["analyzer_backend"] = "codex"
+
+            try:
+                online_settings = ensure_online_runtime_config(config, cwd=cwd)
+                ensure_reasoning_disabled(online_settings.reasoning_effort)
+            except PreflightError as exc:
+                details["online_fallback"] = "disabled"
+                details["online_fallback_warning"] = str(exc)
+            else:
+                details["online_llm_config"] = "ok"
+                details["online_fallback"] = "available"
+                details["online_reasoning_effort"] = online_settings.reasoning_effort or ""
+        else:
+            raise PreflightError(f"Unsupported analyzer backend: {config.analyzer_backend}.")
 
         ensure_data_root_writable(config.data_root)
         details["data_root"] = str(config.data_root.resolve())
@@ -330,6 +343,51 @@ def probe_online_llm(config: RuntimeConfig, *, cwd: Path) -> dict[str, str]:
             "enabled" if settings.tls_verify else "disabled"
         ),
     }
+
+
+def probe_online_image(config: RuntimeConfig, *, cwd: Path) -> dict[str, str]:
+    from .vision import ImageSummarySettings, OnlineImageSummarizer
+
+    try:
+        payload = json.loads(
+            (cwd / "config" / "llm_probe.json").read_text(encoding="utf-8")
+        )
+        prompt = payload["image_prompt"]
+        expected_answer = payload["expected_answer"]
+        image_base64 = payload["image_png_base64"]
+        if not all(
+            isinstance(value, str) and value.strip()
+            for value in (prompt, expected_answer, image_base64)
+        ):
+            raise ValueError("Image probe fields must be non-empty strings.")
+        image_bytes = base64.b64decode(image_base64, validate=True)
+        if not image_bytes.startswith(b"\x89PNG"):
+            raise ValueError("Image probe must contain a PNG image.")
+    except (OSError, KeyError, TypeError, ValueError, binascii.Error) as exc:
+        raise PreflightError("Invalid config/llm_probe.json image probe.") from exc
+
+    settings = ImageSummarySettings(
+        enabled=True,
+        prompt=prompt,
+        max_images_per_run=1,
+        max_image_bytes=len(image_bytes),
+    )
+    with tempfile.TemporaryDirectory(prefix="worktrace-image-probe-") as temp_dir:
+        image_path = Path(temp_dir) / "probe.png"
+        image_path.write_bytes(image_bytes)
+        try:
+            answer = OnlineImageSummarizer(
+                config=config,
+                settings=settings,
+                cwd=cwd,
+            ).summarize(image_path, required=True)
+        except Exception as exc:
+            raise PreflightError(
+                f"Online LLM image probe failed: {classify_online_failure(exc)}"
+            ) from exc
+    if answer.strip().casefold() != expected_answer.strip().casefold():
+        raise PreflightError("Online LLM image probe did not identify the test image.")
+    return {"image_probe": "ok"}
 
 
 def ensure_data_root_writable(data_root: Path) -> None:

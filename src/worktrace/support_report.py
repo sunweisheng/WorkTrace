@@ -232,10 +232,21 @@ def build_support_report_analyzers(
     *,
     cwd: Path,
 ) -> AnalyzerBundle:
-    from .analyzers.codex import CodexAnalyzer
     from .llm_usage import LLMUsageRecorder
 
     recorder = LLMUsageRecorder()
+    if config.analyzer_backend == "online":
+        from .analyzers.online import OnlineLLMAnalyzer
+
+        return AnalyzerBundle(
+            primary=OnlineLLMAnalyzer(config=config, cwd=cwd, usage_recorder=recorder),
+            fallback=None,
+            primary_kind="online",
+            online_request_retry_limit=config.primary_request_retry_limit,
+        )
+
+    from .analyzers.codex import CodexAnalyzer
+
     codex = CodexAnalyzer(config=config, cwd=cwd, usage_recorder=recorder)
     try:
         load_online_llm_settings(config, cwd=cwd)

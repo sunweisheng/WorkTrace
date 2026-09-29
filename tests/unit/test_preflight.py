@@ -9,12 +9,14 @@ import httpx
 import pytest
 
 from src.worktrace.config import RuntimeConfig
+from src.worktrace.errors import PreflightError
 from src.worktrace.preflight import (
     CommandResult,
     classify_codex_failure,
     classify_online_failure,
     ensure_timezone_available,
     probe_online_llm,
+    probe_online_image,
     run_preflight_checks,
 )
 
@@ -100,7 +102,7 @@ def test_preflight_success(
     monkeypatch.setattr("src.worktrace.preflight.OpenAI", lambda **kwargs: FakeClient())
 
     report = run_preflight_checks(
-        RuntimeConfig(data_root=tmp_path / "data"),
+        RuntimeConfig(data_root=tmp_path / "data", analyzer_backend="codex"),
         cwd=tmp_path,
         command_runner=_success_runner_factory(),
         python_version=(3, 13, 0),
@@ -168,7 +170,7 @@ def test_preflight_does_not_send_online_probe(
     monkeypatch.setattr("src.worktrace.preflight.OpenAI", lambda **kwargs: FakeClient())
 
     report = run_preflight_checks(
-        RuntimeConfig(data_root=tmp_path / "data"),
+        RuntimeConfig(data_root=tmp_path / "data", analyzer_backend="codex"),
         cwd=tmp_path,
         command_runner=_success_runner_factory(),
         python_version=(3, 13, 0),
@@ -185,7 +187,7 @@ def test_preflight_disables_online_fallback_when_config_is_missing(tmp_path: Pat
         encoding="utf-8",
     )
     report = run_preflight_checks(
-        RuntimeConfig(data_root=tmp_path / "data"),
+        RuntimeConfig(data_root=tmp_path / "data", analyzer_backend="codex"),
         cwd=tmp_path,
         command_runner=_success_runner_factory(),
         python_version=(3, 13, 0),
@@ -211,7 +213,7 @@ def test_preflight_disables_online_fallback_when_reasoning_effort_is_not_none(
     )
 
     report = run_preflight_checks(
-        RuntimeConfig(data_root=tmp_path / "data"),
+        RuntimeConfig(data_root=tmp_path / "data", analyzer_backend="codex"),
         cwd=tmp_path,
         command_runner=_success_runner_factory(),
         python_version=(3, 13, 0),
@@ -226,7 +228,7 @@ def test_preflight_disables_online_fallback_when_reasoning_effort_is_not_none(
 
 def test_preflight_fails_when_codex_config_is_missing(tmp_path: Path) -> None:
     report = run_preflight_checks(
-        RuntimeConfig(data_root=tmp_path / "data"),
+        RuntimeConfig(data_root=tmp_path / "data", analyzer_backend="codex"),
         cwd=tmp_path,
         command_runner=_success_runner_factory(),
         python_version=(3, 13, 0),
@@ -234,6 +236,71 @@ def test_preflight_fails_when_codex_config_is_missing(tmp_path: Path) -> None:
 
     assert report.ok is False
     assert "Missing Codex configuration" in report.error_summary
+
+
+def test_online_preflight_probes_text_and_image_without_codex(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (tmp_path / ".env").write_text(
+        "LLM_BASE_URL=https://llm.example/v1\n"
+        "LLM_MODEL=qwen3.8-max\n"
+        "LLM_API_KEY=test-key\n",
+        encoding="utf-8",
+    )
+    calls: list[str] = []
+    monkeypatch.setattr(
+        "src.worktrace.preflight.probe_online_llm",
+        lambda *_args, **_kwargs: calls.append("text") or {"online_probe": "ok"},
+    )
+    monkeypatch.setattr(
+        "src.worktrace.preflight.probe_online_image",
+        lambda *_args, **_kwargs: calls.append("image") or {"image_probe": "ok"},
+        raising=False,
+    )
+
+    report = run_preflight_checks(
+        RuntimeConfig(data_root=tmp_path / "data"),
+        cwd=tmp_path,
+        command_runner=_success_runner_factory(),
+        python_version=(3, 13, 0),
+    )
+
+    assert report.ok is True
+    assert report.details["analyzer_backend"] == "online"
+    assert calls == ["text", "image"]
+    assert "codex_probe" not in report.details
+
+
+def test_online_image_probe_checks_actual_image_content(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    (config_dir / "llm_probe.json").write_text(
+        (Path.cwd() / "config" / "llm_probe.json").read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    image_bytes: list[bytes] = []
+
+    def wrong_color(_summarizer, image_path: Path, *, required: bool = False) -> str:
+        image_bytes.append(image_path.read_bytes())
+        return "BLUE"
+
+    monkeypatch.setattr(
+        "src.worktrace.vision.OnlineImageSummarizer.summarize", wrong_color
+    )
+    with pytest.raises(PreflightError, match="image probe"):
+        probe_online_image(RuntimeConfig(), cwd=tmp_path)
+
+    assert image_bytes[0].startswith(b"\x89PNG")
+
+    monkeypatch.setattr(
+        "src.worktrace.vision.OnlineImageSummarizer.summarize",
+        lambda _summarizer, _image_path, *, required=False: "RED",
+    )
+    assert probe_online_image(RuntimeConfig(), cwd=tmp_path) == {"image_probe": "ok"}
 
 
 @pytest.mark.parametrize(
@@ -278,7 +345,7 @@ def test_preflight_reports_safe_codex_authentication_failure(tmp_path: Path) -> 
         raise AssertionError(f"Unexpected command: {command}")
 
     report = run_preflight_checks(
-        RuntimeConfig(data_root=tmp_path / "data"),
+        RuntimeConfig(data_root=tmp_path / "data", analyzer_backend="codex"),
         cwd=tmp_path,
         command_runner=runner,
         python_version=(3, 13, 0),

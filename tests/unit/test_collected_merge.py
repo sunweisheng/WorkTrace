@@ -66,6 +66,18 @@ from src.worktrace.stores.markdown import MarkdownEventStore
 from tests.helpers import NullDelivery
 
 
+def test_direct_online_collected_runner_reports_online_backend(tmp_path: Path) -> None:
+    runner = CollectedMergeRunner(
+        config=RuntimeConfig(data_root=tmp_path / "data"),
+        analyzer=object(),
+        cwd=tmp_path,
+        delivery_channel=object(),
+        self_identity_resolver=object(),
+    )
+
+    assert runner._last_analyzer_request_backend() == "online"
+
+
 def test_grouping_validation_feedback_explains_partial_evidence_action() -> None:
     feedback = collected_grouping_validation_feedback(
         "evidence_does_not_cover_group field=merged_groups[0].draft_ids "

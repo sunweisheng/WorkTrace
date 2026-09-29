@@ -10,12 +10,13 @@ LOCAL_MARKDOWN_LINK_RE = re.compile(r"\[[^\]]+\]\((?!https?://|mailto:)([^)#]+)(
 def test_env_example_contains_required_online_llm_keys() -> None:
     content = Path(".env.example").read_text(encoding="utf-8")
 
-    assert "WORKTRACE_LLM_BASE_URL=" in content
-    assert "WORKTRACE_LLM_MODEL=" in content
-    assert "WORKTRACE_LLM_API_KEY=" in content
+    assert "LLM_BASE_URL=https://ai-gateway.costrip.cn/v1" in content
+    assert "LLM_MODEL=qwen3.8-max" in content
+    assert "LLM_API_KEY=\n" in content
     assert "WORKTRACE_LLM_REASONING_EFFORT=none" in content
     assert "WORKTRACE_LLM_STREAM=false" in content
-    assert "WORKTRACE_LLM_WIRE_API=responses" in content
+    assert "WORKTRACE_LLM_WIRE_API=chat_completions" in content
+    assert "WORKTRACE_LLM_TLS_VERIFY=true" in content
 
 
 def test_readme_mentions_local_online_llm_configuration() -> None:
@@ -99,12 +100,15 @@ def test_docs_describe_profile_budget_benchmark_and_diagnostics() -> None:
     )
     skill = Path("SKILL.md").read_text(encoding="utf-8")
 
-    for content in (readme, detailed_design, collected_design, skill):
+    for content in (readme, detailed_design, collected_design):
         assert "config/model_input_budget.json" in content
         assert "7000" in content and "回退" in content
         assert "当前预算 profile" in content or "模型预算 profile" in content
         assert "备用线路只验证" in content
         assert "20000" in content and "各一次" in content
+    assert "config/model_input_budget.json" in skill
+    assert "当前 Qwen 模型没有已验证的专用 profile" in skill
+    assert "7000" in skill
     for content in (readme, detailed_design, collected_design):
         assert "scripts/benchmark_model_input_budget.py" in content
         assert "盲审" in content
@@ -868,9 +872,11 @@ def test_readme_and_skill_no_longer_mention_merge_drive_upload() -> None:
 def test_skill_mentions_first_run_configuration_requirement() -> None:
     content = Path("SKILL.md").read_text(encoding="utf-8")
 
-    assert "每次使用前" in content
-    assert "必须先检查仓库本地 `.env` 是否已经显式配置 Codex 主线路" in content
-    assert "WORKTRACE_LLM_API_KEY" in content
-    assert "不能提交到 git 仓库" in content
+    assert "普通生成前运行 `--preflight`" in content
+    assert "LLM_BASE_URL" in content
+    assert "LLM_MODEL" in content
+    assert "LLM_API_KEY" in content
+    assert "不能提交到 Git" in content
+    assert "不需要 Codex CLI" in content
     assert "/no_think" in content
     assert "管理人员得到规范化的 `YYYY-MM-DD-登录人姓名-merged.md`" in content

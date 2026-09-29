@@ -16,6 +16,11 @@ DEFAULT_LLM_STREAM_ENV_VAR = "WORKTRACE_LLM_STREAM"
 DEFAULT_LLM_TLS_VERIFY_ENV_VAR = "WORKTRACE_LLM_TLS_VERIFY"
 DEFAULT_LLM_REASONING_EFFORT_ENV_VAR = "WORKTRACE_LLM_REASONING_EFFORT"
 DEFAULT_LLM_WIRE_API_ENV_VAR = "WORKTRACE_LLM_WIRE_API"
+PLATFORM_LLM_ENV_ALIASES = (
+    ("LLM_BASE_URL", DEFAULT_LLM_BASE_URL_ENV_VAR),
+    ("LLM_MODEL", DEFAULT_LLM_MODEL_ENV_VAR),
+    ("LLM_API_KEY", DEFAULT_LLM_API_KEY_ENV_VAR),
+)
 DEFAULT_CODEX_MODEL_ENV_VAR = "WORKTRACE_CODEX_MODEL"
 DEFAULT_CODEX_REASONING_EFFORT_ENV_VAR = "WORKTRACE_CODEX_REASONING_EFFORT"
 DEFAULT_CODEX_PROVIDER_ID_ENV_VAR = "WORKTRACE_CODEX_PROVIDER_ID"
@@ -351,6 +356,19 @@ def _read_local_env_values(
     return merged
 
 
+def _online_connection_values(config: RuntimeConfig, values: Mapping[str, str]) -> dict[str, str]:
+    resolved = dict(values)
+    for platform_name, default_name in PLATFORM_LLM_ENV_ALIASES:
+        if value := values.get(platform_name, "").strip():
+            config_name = {
+                DEFAULT_LLM_BASE_URL_ENV_VAR: config.llm_base_url_env_var,
+                DEFAULT_LLM_MODEL_ENV_VAR: config.llm_model_env_var,
+                DEFAULT_LLM_API_KEY_ENV_VAR: config.llm_api_key_env_var,
+            }[default_name]
+            resolved[config_name] = value
+    return resolved
+
+
 def build_missing_llm_config_message(config: RuntimeConfig, missing_keys: list[str]) -> str:
     missing = ", ".join(missing_keys)
     return (
@@ -421,7 +439,9 @@ def load_online_llm_settings(
     cwd: Path | None = None,
     environ: Mapping[str, str] | None = None,
 ) -> OnlineLLMSettings:
-    values = _read_local_env_values(config, cwd=cwd, environ=environ)
+    values = _online_connection_values(
+        config, _read_local_env_values(config, cwd=cwd, environ=environ)
+    )
     required_keys = [
         config.llm_base_url_env_var,
         config.llm_model_env_var,
@@ -744,9 +764,13 @@ def _load_model_input_budget_overrides(
     budget = load_model_input_budget_config(
         base_dir / config.model_input_budget_file_name
     )
-    values = _read_local_env_values(config, cwd=base_dir)
-    primary_model = values.get(config.codex_model_env_var, "").strip()
-    fallback_model = values.get(config.llm_model_env_var, "").strip()
+    values = _online_connection_values(config, _read_local_env_values(config, cwd=base_dir))
+    if config.analyzer_backend == "online":
+        primary_model = values.get(config.llm_model_env_var, "").strip()
+        fallback_model = ""
+    else:
+        primary_model = values.get(config.codex_model_env_var, "").strip()
+        fallback_model = values.get(config.llm_model_env_var, "").strip()
     profile = next(
         (
             item
@@ -2067,7 +2091,7 @@ def _read_string_list(
 @dataclass(frozen=True)
 class RuntimeConfig:
     timezone: str = "Asia/Shanghai"
-    analyzer_backend: str = "codex"
+    analyzer_backend: str = "online"
     primary_request_retry_limit: int = 1
     online_request_retry_limit: int = 1
     day_group_validation_retry_limit: int = 1
@@ -2185,9 +2209,9 @@ class RuntimeConfig:
     retention_policy_file_name: str = DEFAULT_RETENTION_POLICY_FILE_NAME
     self_delivery_file_name: str = DEFAULT_SELF_DELIVERY_FILE_NAME
     llm_stream_enabled: bool = False
-    llm_tls_verify: bool = False
+    llm_tls_verify: bool = True
     llm_reasoning_effort: str | None = "none"
-    llm_wire_api: str = "responses"
+    llm_wire_api: str = "chat_completions"
 
     def __post_init__(self) -> None:
         primary = self.primary_request_retry_limit

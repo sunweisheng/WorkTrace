@@ -6,9 +6,11 @@ import pytest
 
 from src.worktrace.analyzers.base import Analyzer
 from src.worktrace.analyzers.failover import FailoverAnalyzer
+from src.worktrace.analyzers.online import OnlineLLMAnalyzer
 from src.worktrace.config import RuntimeConfig
 from src.worktrace.delivery.base import DeliveryChannel
 from src.worktrace.factories import build_runtime_dependencies
+from src.worktrace.vision import OnlineImageSummarizer
 from src.worktrace.resolvers.base import ContentResolver
 from src.worktrace.sources.base import ChatSource
 from src.worktrace.stores.base import EventStore
@@ -24,10 +26,18 @@ def test_build_runtime_dependencies_returns_interface_instances(tmp_path: Path) 
     assert isinstance(runtime.chat_source, ChatSource)
     assert isinstance(runtime.content_resolver, ContentResolver)
     assert isinstance(runtime.analyzer, Analyzer)
-    assert isinstance(runtime.analyzer, FailoverAnalyzer)
-    assert runtime.analyzer.primary_request_retry_limit == 2
+    assert isinstance(runtime.analyzer, OnlineLLMAnalyzer)
+    assert isinstance(runtime.content_resolver.image_summarizer, OnlineImageSummarizer)
     assert isinstance(runtime.delivery_channel, DeliveryChannel)
     assert isinstance(runtime.event_store, EventStore)
+
+
+def test_explicit_codex_backend_retains_legacy_failover(tmp_path: Path) -> None:
+    runtime = build_runtime_dependencies(
+        RuntimeConfig(data_root=tmp_path / "data", analyzer_backend="codex")
+    )
+
+    assert isinstance(runtime.analyzer, FailoverAnalyzer)
 
 
 def test_failover_retries_codex_before_using_online() -> None:
@@ -300,13 +310,13 @@ def test_failover_records_provider_input_rejection_without_switching() -> None:
     assert record["oversized_singleton"] is True
 
 
-def test_runtime_config_defaults_to_codex_backend() -> None:
+def test_runtime_config_defaults_to_online_backend() -> None:
     config = RuntimeConfig()
 
-    assert config.analyzer_backend == "codex"
+    assert config.analyzer_backend == "online"
     assert config.primary_request_retry_limit == 1
     assert config.online_request_retry_limit == 1
-    assert config.llm_tls_verify is False
+    assert config.llm_tls_verify is True
     assert config.codex_request_interval_min_seconds == 0.0
     assert config.codex_request_interval_max_seconds == 1.0
 
@@ -318,4 +328,5 @@ def test_build_runtime_dependencies_supports_online_analyzer(tmp_path: Path) -> 
     )
     runtime = build_runtime_dependencies(config)
 
-    assert isinstance(runtime.analyzer, Analyzer)
+    assert isinstance(runtime.analyzer, OnlineLLMAnalyzer)
+    assert isinstance(runtime.content_resolver.image_summarizer, OnlineImageSummarizer)

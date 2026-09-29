@@ -49,11 +49,23 @@ class ContentResolverFactory:
     ) -> ContentResolver:
         from .attachments import TextAttachmentExtractor
         from .resolvers.feishu_message import FeishuMessageContentResolver
-        from .analyzers.codex import CodexAnalyzer
         from .vision import CodexFirstImageSummarizer, ImageSummarySettings, OnlineImageSummarizer
 
         recorder = usage_recorder or LLMUsageRecorder()
         settings = ImageSummarySettings.load(config)
+        if config.analyzer_backend == "online":
+            return FeishuMessageContentResolver(
+                config=config,
+                image_summarizer=OnlineImageSummarizer(
+                    config=config,
+                    settings=settings,
+                    usage_recorder=recorder,
+                ),
+                text_attachment_extractor=TextAttachmentExtractor(config=config),
+            )
+
+        from .analyzers.codex import CodexAnalyzer
+
         online_fallback = None
         try:
             load_online_llm_settings(config)
@@ -92,6 +104,17 @@ class AnalyzerFactory:
     ) -> Analyzer:
         recorder = usage_recorder or LLMUsageRecorder()
         base_dir = cwd or Path.cwd()
+        if config.analyzer_backend == "online":
+            from .analyzers.online import OnlineLLMAnalyzer
+
+            return OnlineLLMAnalyzer(
+                config=config,
+                cwd=base_dir,
+                usage_recorder=recorder,
+            )
+        if config.analyzer_backend != "codex":
+            raise ValueError(f"Unsupported analyzer backend: {config.analyzer_backend}.")
+
         from .analyzers.codex import CodexAnalyzer
         from .analyzers.failover import FailoverAnalyzer
 

@@ -73,9 +73,9 @@ def test_load_online_llm_settings_reads_local_env(tmp_path: Path) -> None:
     assert settings.api_key == "file-key"
     assert settings.timeout_seconds == 45
     assert settings.stream_enabled is False
-    assert settings.tls_verify is False
+    assert settings.tls_verify is True
     assert settings.reasoning_effort == "none"
-    assert settings.wire_api == "responses"
+    assert settings.wire_api == "chat_completions"
 
 
 def test_load_llm_timeout_seconds_does_not_require_online_credentials(
@@ -157,6 +157,62 @@ def test_load_online_llm_settings_prefers_process_environment(tmp_path: Path) ->
     assert settings.base_url == "https://llm.example/v1"
     assert settings.model == "env-model"
     assert settings.api_key == "env-key"
+
+
+def test_load_online_llm_settings_prefers_platform_names_over_worktrace_names(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / ".env").write_text(
+        "WORKTRACE_LLM_BASE_URL=https://old.example/v1\n"
+        "WORKTRACE_LLM_MODEL=old-model\n"
+        "WORKTRACE_LLM_API_KEY=old-key\n",
+        encoding="utf-8",
+    )
+
+    settings = load_online_llm_settings(
+        RuntimeConfig(),
+        cwd=tmp_path,
+        environ={
+            "LLM_BASE_URL": "https://platform.example/v1",
+            "LLM_MODEL": "qwen3.8-max",
+            "LLM_API_KEY": "platform-key",
+        },
+    )
+
+    assert settings.base_url == "https://platform.example/v1"
+    assert settings.model == "qwen3.8-max"
+    assert settings.api_key == "platform-key"
+
+
+def test_online_only_budget_uses_conservative_default(tmp_path: Path) -> None:
+    _write_minimal_runtime_files(tmp_path)
+    (tmp_path / "config" / "model_input_budget.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "default_target_tokens": 7000,
+                "profiles": [
+                    {
+                        "profile_id": "old-codex-pair",
+                        "primary_model": "gpt-5.6-terra",
+                        "fallback_model": "qwen3.8-max",
+                        "target_tokens": 20000,
+                        "benchmark_dataset_version": "old-v1",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / ".env").write_text(
+        "LLM_MODEL=qwen3.8-max\nWORKTRACE_CODEX_MODEL=gpt-5.6-terra\n",
+        encoding="utf-8",
+    )
+
+    config = load_runtime_config_overrides(RuntimeConfig(), cwd=tmp_path)
+
+    assert config.model_input_batch_target_tokens == 7000
+    assert config.model_input_budget_selection.profile_matched is False
 
 
 def test_load_online_llm_settings_requires_all_required_values(tmp_path: Path) -> None:
@@ -276,7 +332,9 @@ def test_model_input_budget_matches_current_model_pair(tmp_path: Path) -> None:
         encoding="utf-8",
     )
 
-    config = load_runtime_config_overrides(RuntimeConfig(), cwd=tmp_path)
+    config = load_runtime_config_overrides(
+        RuntimeConfig(analyzer_backend="codex"), cwd=tmp_path
+    )
 
     assert config.model_input_batch_target_tokens == 20000
     assert config.model_input_budget_selection.profile_matched is True

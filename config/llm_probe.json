@@ -1,0 +1,5 @@
+{
+  "image_prompt": "What color is the image? Answer with exactly RED or BLUE.",
+  "expected_answer": "RED",
+  "image_png_base64": "iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAIAAACQkWg2AAAAF0lEQVR4nGP4z8BAEiJN9aiGUQ1DSgMAkPn/Afnh+ngAAAAASUVORK5CYII="
+}

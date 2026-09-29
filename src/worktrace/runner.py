@@ -3526,7 +3526,7 @@ class DailyTraceRunner:
         )
         if callable(checker):
             return str(checker())
-        return "codex"
+        return self.config.analyzer_backend
 
     def _discover_day_group_review_candidates(
         self,

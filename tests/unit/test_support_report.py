@@ -564,8 +564,20 @@ def test_missing_online_configuration_uses_codex_for_report(
         missing_settings,
     )
 
-    bundle = build_support_report_analyzers(RuntimeConfig(), cwd=REPO_ROOT)
+    bundle = build_support_report_analyzers(
+        RuntimeConfig(analyzer_backend="codex"), cwd=REPO_ROOT
+    )
 
     assert bundle.primary_kind == "codex"
     assert bundle.fallback is None
     assert bundle.primary.__class__.__name__ == "CodexAnalyzer"
+
+
+def test_online_report_analyzer_never_builds_codex(tmp_path: Path) -> None:
+    bundle = build_support_report_analyzers(
+        RuntimeConfig(analyzer_backend="online"), cwd=tmp_path
+    )
+
+    assert bundle.primary_kind == "online"
+    assert bundle.primary.__class__.__name__ == "OnlineLLMAnalyzer"
+    assert bundle.fallback is None

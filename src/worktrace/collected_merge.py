@@ -274,7 +274,7 @@ class CollectedMergeRunner:
         checker = getattr(self.analyzer, "last_request_backend", None)
         if callable(checker):
             return str(checker())
-        return "codex"
+        return self.config.analyzer_backend
 
     def _fallback_current_analyzer_request(
         self,
