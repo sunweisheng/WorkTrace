@@ -1,22 +1,37 @@
 from __future__ import annotations
 
+import json
+from dataclasses import replace
 from pathlib import Path
 
-from src.worktrace.config import RuntimeConfig
+import pytest
+
+from src.worktrace.config import EventMetadataItem, RuntimeConfig
 from src.worktrace.constants import DailyRunStatus
 from src.worktrace.factories import RuntimeDependencies
 from src.worktrace.models import (
     AttachmentMeta,
+    AnchorAnalysisResult,
+    BatchAnchorAnalysisItem,
+    BatchAnchorAnalysisResult,
     BatchAnalysisResult,
+    BatchSegmentAnalysisItem,
+    BatchSegmentAnalysisResult,
     ConversationRef,
+    ContextRequest,
+    ConversationSegment,
+    ConversationSegmentationResult,
+    CrossConversationGroup,
+    CrossConversationGroupResult,
     EventFileLink,
     LinkMeta,
     NormalizedMessage,
     SelfIdentity,
+    SelfRelationEvidence,
     SourceBackedEventDraft,
     WorkEvent,
 )
-from src.worktrace.runner import DailyTraceRunner
+from src.worktrace.runner import DailyTraceRunner, _attach_event_file_links
 from src.worktrace.resolvers.feishu_message import FeishuMessageContentResolver
 from src.worktrace.stores.markdown import MarkdownEventStore
 from tests.helpers import FunctionRequestStub
@@ -410,7 +425,7 @@ def test_runner_drops_referenced_links_outside_source_message_ids(tmp_path: Path
     assert "  - 无" in content
 
 
-def test_runner_drops_selected_link_without_event_text_support(tmp_path: Path) -> None:
+def test_runner_keeps_selected_link_without_event_text_support(tmp_path: Path) -> None:
     resolver = FeishuMessageContentResolver(config=RuntimeConfig(data_root=tmp_path / "data"))
     message = NormalizedMessage(
         conversation_id="oc_1",
@@ -446,7 +461,9 @@ def test_runner_drops_selected_link_without_event_text_support(tmp_path: Path) -
         content_resolver=resolver,
     )
 
-    assert attached[0].file_links == []
+    assert [link.url for link in attached[0].file_links] == [
+        "https://skills.gydev.cn/space/global/worktrace"
+    ]
 
 
 def test_runner_makes_doc_token_references_readable_in_event_text(tmp_path: Path) -> None:
@@ -593,3 +610,323 @@ def test_runner_attaches_plain_attachment_by_reference_or_exact_name(tmp_path: P
     )
 
     assert unattached[0].file_links == []
+
+
+def test_selected_document_survives_summary_rewrite() -> None:
+    message = LinkSource().fetch_conversation_messages("2026-06-22", ["oc_1"])[0]
+    event = WorkEvent(
+        date="2026-06-22", event_id="evt1", title="确认上线安排",
+        content="已确认排期并落实后续跟进。", object_hint="上线排期",
+        source_message_ids=["om_1"], referenced_link_ids=["om_1#link1"],
+    )
+    attached = _attach_event_file_links([event], messages=[message], content_resolver=LinkResolver())
+    assert [(link.title, link.url) for link in attached[0].file_links] == [
+        ("发布方案", "https://foo.feishu.cn/docx/abc")
+    ]
+
+
+def test_file_association_is_limited_to_event_evidence() -> None:
+    message = LinkSource().fetch_conversation_messages("2026-06-22", ["oc_1"])[0]
+    unrelated = replace(message, message_id="om_other", links=[
+        LinkMeta("https://foo.feishu.cn/docx/unrelated", "无关方案", "feishu_doc")
+    ], attachments=[AttachmentMeta("file_other", "无关附件.pdf", "application/pdf", 1)])
+    event = WorkEvent(
+        date="2026-06-22", event_id="evt1", title="确认上线",
+        content="https://foo.feishu.cn/docx/unrelated 无关附件.pdf",
+        source_message_ids=["om_1"],
+        referenced_link_ids=["om_other#link1"], referenced_attachment_ids=["file_other"],
+    )
+    attached = _attach_event_file_links([event], messages=[message, unrelated], content_resolver=LinkResolver())
+    assert attached[0].file_links == []
+    assert attached[0].referenced_attachment_ids == []
+
+
+@pytest.mark.parametrize("first_title", ["", "https://foo.feishu.cn/docx/abc"])
+def test_multiple_documents_and_same_named_distinct_attachments_are_preserved(first_title: str) -> None:
+    message = LinkSource().fetch_conversation_messages("2026-06-22", ["oc_1"])[0]
+    message = replace(message, links=[
+        LinkMeta("https://foo.feishu.cn/docx/abc", first_title, "feishu_doc"),
+        LinkMeta("https://foo.feishu.cn/docx/def", "验收记录", "feishu_doc"),
+        LinkMeta("https://foo.feishu.cn/docx/abc", "发布方案", "feishu_doc"),
+    ], attachments=[
+        AttachmentMeta("file_a", "验收.xlsx", "application/octet-stream", 1),
+        AttachmentMeta("file_b", "验收.xlsx", "application/octet-stream", 2),
+    ])
+    event = WorkEvent(
+        date="2026-06-22", event_id="evt1", title="完成验收", content="已核对并确认结果。",
+        source_message_ids=["om_1"],
+        referenced_link_ids=["om_1#link3", "om_1#link2", "om_1#link1", "om_1#link2"],
+        referenced_attachment_ids=["file_a", "file_b", "file_a"],
+    )
+    attached = _attach_event_file_links([event], messages=[message], content_resolver=LinkResolver())[0]
+    assert [(link.title, link.url) for link in attached.file_links] == [
+        ("发布方案", "https://foo.feishu.cn/docx/abc"),
+        ("验收记录", "https://foo.feishu.cn/docx/def"),
+        ("验收.xlsx", ""), ("验收.xlsx", ""),
+    ]
+    assert attached.referenced_attachment_ids == ["file_a", "file_b"]
+
+
+def test_runner_keeps_document_from_expanded_reply_and_requested_report_date(tmp_path: Path) -> None:
+    class RelatedSource(LinkSource):
+        def fetch_conversation_messages(self, target_date, conversation_ids):
+            message = super().fetch_conversation_messages(target_date, conversation_ids)[0]
+            return [replace(message, text="确认安排", links=[], reply_to_message_id="om_prior")]
+
+        def fetch_related_messages(self, conversation_id, target_message_ids, direction, limit):
+            message = super().fetch_conversation_messages("2026-06-21", [conversation_id])[0]
+            return [replace(message, message_id="om_prior", sender_open_id="ou_other",
+                            send_time="2026-06-21T18:00:00+08:00")]
+
+    class RelatedAnalyzer(LinkAnalyzer):
+        def __init__(self):
+            self.calls = 0
+
+        def analyze_batch(self, target_date, batch_input):
+            self.calls += 1
+            if self.calls == 1:
+                return BatchAnalysisResult(context_requests=[ContextRequest(
+                    slice_id=batch_input.slices[0].slice_id, request_type="earlier_messages",
+                    target_message_ids=["om_1"], target_attachment_ids=[], reason="补齐回复对象", limit=1,
+                )])
+            result = super().analyze_batch(target_date, batch_input)
+            return replace(result, candidate_events=[replace(
+                result.candidate_events[0], source_message_ids=["om_prior", "om_1"],
+                referenced_link_ids=["om_prior#link1"],
+                topic="确认上线安排", content="已确认排期并落实跟进。",
+                object_hint="上线排期", retention_detail="形成明确安排。",
+            )])
+
+    config = RuntimeConfig(data_root=tmp_path / "data")
+    runner = DailyTraceRunner(config=config, dependencies=RuntimeDependencies(
+        chat_source=RelatedSource(), content_resolver=LinkResolver(), analyzer=RelatedAnalyzer(),
+        delivery_channel=LinkDelivery(), event_store=MarkdownEventStore(config=config),
+    ))
+    result = runner.run("2026-06-22")
+    assert result.output_path is not None
+    markdown = Path(result.output_path).read_text(encoding="utf-8")
+    assert "[发布方案](https://foo.feishu.cn/docx/abc)" in markdown
+    assert result.target_date == "2026-06-22"
+    assert runner.dependencies.event_store.read_day("2026-06-22").date == "2026-06-22"
+
+
+@pytest.mark.parametrize("use_fallback", [False, True])
+def test_runner_keeps_external_reply_document_in_segment_and_fallback_paths(
+    tmp_path: Path, use_fallback: bool,
+) -> None:
+    class ExternalSource(LinkSource):
+        def fetch_conversation_messages(self, target_date, conversation_ids):
+            original = super().fetch_conversation_messages(target_date, conversation_ids)[0]
+            return [replace(original, text="确认安排", links=[], conversation_id="p2p_1",
+                            conversation_mode="p2p", reply_to_message_id="om_prior")]
+
+        def fetch_messages_by_ids(self, conversation_id, message_ids):
+            if "om_prior" not in message_ids:
+                return []
+            original = super().fetch_conversation_messages("2026-06-21", [conversation_id])[0]
+            return [replace(original, message_id="om_prior", conversation_id="p2p_1",
+                            sender_open_id="ou_other", send_time="2026-06-21T18:00:00+08:00")]
+
+    class ExternalAnalyzer(LinkAnalyzer):
+        def segment_conversation(self, **kwargs):
+            if use_fallback:
+                return ConversationSegmentationResult()
+            return ConversationSegmentationResult(segments=[ConversationSegment(
+                segment_id="turn", primary_message_ids=[message.message_id for message in kwargs["messages"]],
+            )])
+
+        def candidate(self):
+            return SourceBackedEventDraft(
+                draft_id="d1", date="2026-06-22", topic="确认上线安排", content="已确认上线排期。",
+                source_message_ids=["om_prior", "om_1"], source_conversation_id="p2p_1", source_slice_id="",
+                confidence=0.9, action_label="确认", object_hint="上线排期",
+                retention_reason="decision_made", retention_detail="形成明确安排。",
+                self_evidence_message_ids=["om_1"], referenced_link_ids=["om_prior#link1"],
+                self_relations=[SelfRelationEvidence("initiated", ["om_1"])],
+            )
+
+        def analyze_segment_batch(self, batch):
+            return BatchSegmentAnalysisResult(results=[BatchSegmentAnalysisItem(
+                unit.segment_id, BatchAnalysisResult(candidate_events=[self.candidate()]),
+            ) for unit in batch.segments])
+
+        def analyze_anchor_batch(self, target_date, anchor_units):
+            return BatchAnchorAnalysisResult(results=[BatchAnchorAnalysisItem(
+                anchor_unit_id=unit.anchor_unit_id,
+                analysis=AnchorAnalysisResult(anchor_status="completed", candidate_events=[self.candidate()]),
+            ) for unit in anchor_units])
+
+    config = RuntimeConfig(
+        data_root=tmp_path / "data", anchor_retry_limit=0,
+        self_relation_types=(EventMetadataItem("initiated", "发起", 10),),
+    )
+    runner = DailyTraceRunner(config=config, dependencies=RuntimeDependencies(
+        chat_source=ExternalSource(), content_resolver=LinkResolver(), analyzer=ExternalAnalyzer(),
+        delivery_channel=LinkDelivery(), event_store=MarkdownEventStore(config=config),
+    ))
+    result = runner.run("2026-06-22")
+    assert result.event_count == 1, result.to_dict()
+    markdown = Path(result.output_path).read_text(encoding="utf-8")
+    assert "[发布方案](https://foo.feishu.cn/docx/abc)" in markdown
+    assert runner.dependencies.event_store.read_day("2026-06-22").date == "2026-06-22"
+
+
+def test_runner_merges_multiple_events_without_losing_member_documents(tmp_path: Path) -> None:
+    class MultiSource(LinkSource):
+        def fetch_conversation_messages(self, target_date, conversation_ids):
+            first = super().fetch_conversation_messages(target_date, conversation_ids)[0]
+            return [first, replace(first, message_id="om_2", send_time="2026-06-22T11:00:00+08:00",
+                                   text="完成核对", links=[LinkMeta(
+                                       "https://foo.feishu.cn/docx/def", "验收记录", "feishu_doc",
+                                   )])]
+
+    class MultiAnalyzer(LinkAnalyzer):
+        def analyze_batch(self, target_date, batch_input):
+            first = super().analyze_batch(target_date, batch_input).candidate_events[0]
+            return BatchAnalysisResult(candidate_events=[first, replace(
+                first, draft_id="draft-2", source_message_ids=["om_2"],
+                topic="验收推进", content="完成验收核对", object_hint="验收结果",
+                referenced_link_ids=["om_2#link1"], retention_detail="确认验收核对结果。",
+            )])
+
+        def merge_day_candidates(self, target_date, candidates, *, validation_feedback=""):
+            return CrossConversationGroupResult(groups=[CrossConversationGroup(
+                group_id="g1", draft_ids=[candidate.draft_id for candidate in candidates],
+                primary_draft_id="draft-1", merge_reason="同一发布安排的确认和验收。",
+                evidence_message_ids=["om_1", "om_2"],
+            )])
+
+        def request_function(self, prompt, *, function_spec, allow_oversized_input=False):
+            result = super().request_function(prompt, function_spec=function_spec,
+                                              allow_oversized_input=allow_oversized_input)
+            if function_spec.request_kind == "personal_group_render":
+                # Final wording deliberately omits every document name and URL.
+                for group in result["groups"]:
+                    for fact in group["fact_items"]:
+                        fact["text"] = {
+                            "topic": "确认整体安排", "content": "已确认安排并完成核对。",
+                            "object_hint": "整体安排",
+                        }[fact["field"]]
+            return result
+
+    config = RuntimeConfig(data_root=tmp_path / "data")
+    runner = DailyTraceRunner(config=config, dependencies=RuntimeDependencies(
+        chat_source=MultiSource(), content_resolver=LinkResolver(), analyzer=MultiAnalyzer(),
+        delivery_channel=LinkDelivery(), event_store=MarkdownEventStore(config=config),
+    ))
+    result = runner.run("2026-06-22")
+    assert result.event_count == 1, result.to_dict()
+    markdown = Path(result.output_path).read_text(encoding="utf-8")
+    assert "已确认安排并完成核对。" in markdown
+    assert markdown.count("[发布方案](https://foo.feishu.cn/docx/abc)") == 1
+    assert markdown.count("[验收记录](https://foo.feishu.cn/docx/def)") == 1
+
+
+@pytest.mark.parametrize("same_matter", [True, False])
+def test_shared_document_in_expanded_context_triggers_cross_conversation_review(
+    tmp_path: Path, same_matter: bool,
+) -> None:
+    class SharedDocumentSource(LinkSource):
+        def list_target_conversations(self, target_date, self_identity):
+            return [ConversationRef(conversation_id=value, conversation_name=value)
+                    for value in ("oc_1", "oc_2")]
+
+        def fetch_conversation_messages(self, target_date, conversation_ids):
+            original = super().fetch_conversation_messages(target_date, conversation_ids)[0]
+            return [
+                replace(original, text="确认安排", links=[], reply_to_message_id="om_prior"),
+                replace(original, message_id="om_2", conversation_id="oc_2",
+                        conversation_name="验收群", send_time="2026-06-22T11:00:00+08:00",
+                        text="核对完成", links=original.links + [LinkMeta(
+                            "https://foo.feishu.cn/docx/def", "验收记录", "feishu_doc",
+                        )]),
+            ]
+
+        def fetch_related_messages(self, conversation_id, target_message_ids, direction, limit):
+            original = super().fetch_conversation_messages("2026-06-21", [conversation_id])[0]
+            return [replace(original, message_id="om_prior", sender_open_id="ou_other",
+                            send_time="2026-06-21T18:00:00+08:00")]
+
+    class SharedDocumentAnalyzer(LinkAnalyzer):
+        def __init__(self):
+            self.review_inputs = []
+
+        def analyze_batch(self, target_date, batch_input):
+            unit = batch_input.slices[0]
+            if unit.conversation_id == "oc_1" and "om_prior" not in {
+                message.message_id for message in unit.messages
+            }:
+                return BatchAnalysisResult(context_requests=[ContextRequest(
+                    slice_id=unit.slice_id, request_type="earlier_messages",
+                    target_message_ids=["om_1"], target_attachment_ids=[],
+                    reason="补齐回复对象", limit=1,
+                )])
+            candidate = super().analyze_batch(target_date, batch_input).candidate_events[0]
+            first = unit.conversation_id == "oc_1"
+            return BatchAnalysisResult(candidate_events=[replace(
+                candidate, draft_id="d1" if first else "d2",
+                topic="确认排期" if first else "核对结果", content="已形成明确结论。",
+                object_hint="执行安排", retention_detail="确认处理结果。",
+                source_message_ids=["om_prior", "om_1"] if first else ["om_2"],
+                source_conversation_id=unit.conversation_id,
+                referenced_link_ids=["om_prior#link1"] if first else ["om_2#link1", "om_2#link2"],
+            )])
+
+        def merge_day_candidates(self, target_date, candidates, *, validation_feedback=""):
+            # Initial grouping keeps the two conversations separate.
+            assert {candidate.source_conversation_id for candidate in candidates} == {"oc_1", "oc_2"}
+            return CrossConversationGroupResult(groups=[CrossConversationGroup(
+                group_id=f"g{index}", draft_ids=[candidate.draft_id],
+                primary_draft_id=candidate.draft_id, merge_reason="单条保留",
+            ) for index, candidate in enumerate(candidates, start=1)])
+
+        def request_function(self, prompt, *, function_spec, allow_oversized_input=False):
+            result = super().request_function(prompt, function_spec=function_spec,
+                                              allow_oversized_input=allow_oversized_input)
+            if function_spec.request_kind == "day_group_review":
+                payload = json.loads(prompt)
+                self.review_inputs.append(payload)
+                for resolution in result["relation_resolutions"]:
+                    resolution["reason"] = "共用文件，但聊天内容涉及不同的处理事项。"
+                if same_matter:
+                    candidates = payload["candidates"]
+                    draft_ids = [item["draft_id"] for item in candidates]
+                    result["merged_groups"] = [{
+                        "draft_ids": draft_ids, "primary_draft_id": draft_ids[0],
+                        "common_object": "执行安排", "semantic_reasons": ["continuous_action"],
+                        "reason_detail": "两组分别确认排期和核对执行结果，属于同一过程。",
+                        "member_connections": [{
+                            "draft_id": item["draft_id"], "connection_detail": "参与同一执行过程。",
+                            "evidence_message_ids": item["source_message_ids"],
+                        } for item in candidates],
+                    }]
+                    result["singleton_draft_ids"] = []
+                    for resolution in result["relation_resolutions"]:
+                        resolution.update(decision="merged", connected_draft_ids=draft_ids,
+                                          reason="聊天内容证明属于同一执行过程。")
+            if function_spec.request_kind == "personal_group_render":
+                for group in result["groups"]:
+                    for fact in group["fact_items"]:
+                        fact["text"] = {
+                            "topic": "确认整体安排", "content": "已确认安排并完成核对。",
+                            "object_hint": "整体安排",
+                        }[fact["field"]]
+            return result
+
+    config = RuntimeConfig(data_root=tmp_path / "data")
+    analyzer = SharedDocumentAnalyzer()
+    runner = DailyTraceRunner(config=config, dependencies=RuntimeDependencies(
+        chat_source=SharedDocumentSource(), content_resolver=LinkResolver(), analyzer=analyzer,
+        delivery_channel=LinkDelivery(), event_store=MarkdownEventStore(config=config),
+    ))
+    result = runner.run("2026-06-22")
+    assert result.event_count == (1 if same_matter else 2), result.to_dict()
+    assert len(analyzer.review_inputs) == 1
+    review = analyzer.review_inputs[0]
+    assert {item["draft_id"] for item in review["candidates"]} == {"d1", "d2"}
+    assert any("om_prior" in item["source_message_ids"] for item in review["candidates"])
+    assert any("shared_file" in item["relation_types"] for item in review["strong_relations"])
+    markdown = Path(result.output_path).read_text(encoding="utf-8")
+    assert markdown.count("[发布方案](https://foo.feishu.cn/docx/abc)") == (1 if same_matter else 2)
+    assert markdown.count("[验收记录](https://foo.feishu.cn/docx/def)") == 1
+    assert runner.dependencies.event_store.read_day("2026-06-22").date == "2026-06-22"

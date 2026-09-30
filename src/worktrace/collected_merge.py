@@ -7037,16 +7037,22 @@ def _collected_grouping_split_reason(result: CollectedGroupingResult) -> str:
 
 
 def _merge_file_links(source_events: list[CollectedSourceEvent]) -> list[EventFileLink]:
-    seen: set[tuple[str, str]] = set()
-    links: list[EventFileLink] = []
+    links: dict[tuple[str, str], EventFileLink] = {}
     for source_event in source_events:
         for link in source_event.event.file_links:
-            key = (link.url, link.title)
-            if key in seen:
-                continue
-            seen.add(key)
-            links.append(link)
-    return links
+            # A document keeps its identity when a source uses a different label.
+            key = (
+                ("url", link.url.strip())
+                if link.url.strip()
+                else ("attachment", link.title.strip())
+            )
+            existing = links.get(key)
+            if existing is None or (
+                existing.title.strip() in {"", existing.url.strip()}
+                and link.title.strip() not in {"", link.url.strip()}
+            ):
+                links[key] = link
+    return list(links.values())
 
 
 def _dedupe(values: list[str]) -> list[str]:

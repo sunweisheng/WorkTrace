@@ -24,17 +24,15 @@ def normalize_source_message_ids(
     conversation_slice: ConversationSlice,
 ) -> list[str]:
     allowed = [message.message_id for message in conversation_slice.messages]
-    allowed_set = set(conversation_slice.in_day_message_ids)
     expanded_ids = set(source_message_ids)
+    # Context supports the current event; it must not create a context-only event.
+    if not expanded_ids.intersection(conversation_slice.in_day_message_ids):
+        return []
     normalized: list[str] = []
     seen: set[str] = set()
 
     for message_id in allowed:
-        if (
-            message_id in expanded_ids
-            and message_id in allowed_set
-            and message_id not in seen
-        ):
+        if message_id in expanded_ids and message_id not in seen:
             normalized.append(message_id)
             seen.add(message_id)
     return normalized

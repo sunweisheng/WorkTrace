@@ -409,7 +409,7 @@ def build_segment_batch_analysis_prompt(
         "rules": [
             "每个 segment 独立判断，禁止从其它 segment 借用事实、对象、结论或来源。",
             "每个输入 segment_id 必须且只能返回一个 result。",
-            "candidate_events 的 source_message_ids 只能使用该 segment 的 primary_message_ids，不能使用 context_message_ids。",
+            "candidate_events 的 source_message_ids 至少包含该 segment 的一条 primary_message_ids；事实或文件引用依赖 context_message_ids 时，也必须列入对应的上下文消息 ID，禁止引用未提供的消息。",
             PERSONAL_SOURCE_MESSAGE_COVERAGE_RULE,
             "每条 candidate 必须在 self_evidence_message_ids 中列出本人发起、负责、审批或跟进的消息；事实来源可由他人的执行、反馈或文件消息组成。",
             _build_self_relation_rule(runtime_config),

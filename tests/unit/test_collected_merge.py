@@ -290,6 +290,34 @@ def _unexpected_command(args, *, cwd=None):
     raise AssertionError(f"Unexpected command: {args}")
 
 
+@pytest.mark.parametrize("input_budget", [1, 1_000_000])
+def test_collected_merge_keeps_all_document_urls_after_rewrite_and_repeated_merge(
+    tmp_path: Path, input_budget: int,
+) -> None:
+    inbox = tmp_path / "merge_inbox" / "2026" / "06" / "29"
+    documents = [
+        EventFileLink("https://foo.feishu.cn/docx/abc", "", "feishu_doc"),
+        EventFileLink("https://foo.feishu.cn/docx/abc", "发布方案", "feishu_doc"),
+        EventFileLink("https://foo.feishu.cn/docx/def", "验收记录", "feishu_doc"),
+    ]
+    for index, (person, document) in enumerate(zip(["张三", "李四", "王五"], documents)):
+        event = replace(_event(
+            event_id=f"evt-{index}", title="确认安排", content="完成安排核对。",
+            conversation_fingerprints=["sha256:" + "f" * 64],
+            evidence_fingerprints=["sha256:" + "a" * 64],
+        ), file_links=[document])
+        _write_day_doc(inbox / f"2026-06-29-{person}.md", [event], tmp_path)
+
+    result = _build_runner(tmp_path, analyzer=FakeAnalyzer(), config=RuntimeConfig(
+        data_root=tmp_path / "data", model_input_batch_target_tokens=input_budget,
+    )).run("2026-06-29")
+    assert result.merged_event_count == 1, result.to_dict()
+    markdown = Path(result.output_path).read_text(encoding="utf-8")
+    assert markdown.count("](" + "https://foo.feishu.cn/docx/abc" + ")") == 1
+    assert "[发布方案](https://foo.feishu.cn/docx/abc)" in markdown
+    assert "[验收记录](https://foo.feishu.cn/docx/def)" in markdown
+
+
 def _build_runner(
     tmp_path: Path,
     *,
@@ -5491,6 +5519,61 @@ def test_collected_shared_evidence_builds_review_scope_without_discovery(
     assert [
         relation["relation_types"] for relation in components[0].relation_reasons
     ] == [["shared_message"], ["shared_file"]]
+
+
+@pytest.mark.parametrize("same_matter", [True, False])
+def test_shared_document_from_personal_markdown_triggers_cross_person_review(
+    tmp_path: Path, same_matter: bool,
+) -> None:
+    class SharedDocumentAnalyzer(TwoStageAnalyzer):
+        def __init__(self):
+            super().__init__()
+            self.relations = []
+
+        def review_collected_group(
+            self, target_date, events, candidate_group, *, review_reasons=None,
+            existing_groups=None, relation_reasons=None, atomic_groups=None,
+        ):
+            assert len(existing_groups) == 2
+            assert all(len(group.draft_ids) == 1 for group in existing_groups)
+            assert {event.person_name for event in events} == {"张三", "李四"}
+            self.relations.extend(relation_reasons)
+            draft_ids = [event.draft_id for event in events]
+            return CollectedGroupingResult(
+                split_reason="" if same_matter else "共用文档，但处理的是不同事项。",
+                groups=[CollectedGroupingGroup(
+                    "review-merged", draft_ids,
+                    summary_title="确认整体安排", summary_content="已确认排期并核对结果。",
+                    summary_object_hint="整体安排", group_reason=["continuous_action"],
+                    member_connections=[CollectedGroupMemberConnection(
+                        draft_id, "参与同一执行过程。",
+                    ) for draft_id in draft_ids],
+                )] if same_matter else list(existing_groups),
+                relation_resolutions=[CollectedGroupRelationResolution(
+                    relation_id=relation["relation_id"],
+                    decision="merged" if same_matter else "separate",
+                    connected_draft_ids=draft_ids if same_matter else [],
+                    reason="确认排期后核对执行结果。" if same_matter else "聊天内容证明是不同事项。",
+                    evidence_draft_ids=draft_ids,
+                ) for relation in relation_reasons],
+            )
+
+    inbox = tmp_path / "merge_inbox" / "2026" / "06" / "29"
+    for index, person in enumerate(("张三", "李四"), start=1):
+        event = replace(_event(
+            event_id=f"evt-{index}", title="确认排期" if index == 1 else "核对结果",
+            content=f"已确认执行结论 {index}。",
+        ), file_links=[EventFileLink("https://foo.feishu.cn/docx/abc", "发布方案", "feishu_doc")])
+        _write_day_doc(inbox / f"2026-06-29-{person}.md", [event], tmp_path)
+
+    analyzer = SharedDocumentAnalyzer()
+    runner = _build_runner(tmp_path, analyzer=analyzer)
+    result = runner.run("2026-06-29")
+    assert result.merged_event_count == (1 if same_matter else 2), result.to_dict()
+    assert len(analyzer.relations) == 1
+    assert analyzer.relations[0]["relation_types"] == ["shared_file"]
+    markdown = Path(result.output_path).read_text(encoding="utf-8")
+    assert markdown.count("[发布方案](https://foo.feishu.cn/docx/abc)") == (1 if same_matter else 2)
 
 
 def test_collected_discovery_keeps_multi_group_scope_with_pairwise_relations(

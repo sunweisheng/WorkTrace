@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 import pytest
 
 from src.worktrace.errors import AnalyzerProtocolError
@@ -19,7 +20,26 @@ from src.worktrace.pipeline.validation import (
     normalize_cross_conversation_groups_with_fallback,
     validate_batch_analysis_result,
     validate_cross_conversation_groups,
+    normalize_source_message_ids,
 )
+
+
+def test_source_ids_keep_selected_related_evidence_but_require_primary_message() -> None:
+    primary = NormalizedMessage(
+        conversation_id="oc_1", conversation_name="项目群", message_id="om_today",
+        sender_open_id="ou_self", sender_name="Me", send_time="2026-06-22T10:00:00+08:00",
+        message_type="text", text="确认安排", reply_to_message_id="om_prior", quote_message_id=None,
+    )
+    related = replace(primary, message_id="om_prior", sender_open_id="ou_other",
+                      send_time="2026-06-21T18:00:00+08:00", reply_to_message_id=None)
+    conversation_slice = ConversationSlice(
+        slice_id="s1", conversation_id="oc_1", conversation_name="项目群",
+        anchor_message_ids=["om_today"], in_day_message_ids=["om_today"], messages=[related, primary],
+    )
+    assert normalize_source_message_ids(["om_prior", "om_today", "om_prior", "unknown"], conversation_slice) == [
+        "om_prior", "om_today"
+    ]
+    assert normalize_source_message_ids(["om_prior"], conversation_slice) == []
 
 
 def test_validation_normalizes_source_ids() -> None:

@@ -158,31 +158,17 @@ from .pipeline.validation import (
     validate_cross_conversation_groups,
     validate_merged_event_drafts,
 )
-from .utils.link_refs import build_message_link_id
+from .utils.link_refs import (
+    build_message_link_id,
+    parse_message_link_id,
+    sort_referenced_link_ids,
+)
 from .utils.hashing import file_key_from_attachment_id, file_key_from_url
 from .utils.json_io import dump_json
 from .utils.text import choose_preferred_text, clean_text
 from .utils.token_estimation import estimate_structured_input_tokens
 
 logger = logging.getLogger("worktrace")
-_LINK_TEXT_TOKEN_RE = re.compile(r"[A-Za-z0-9_]{2,}|[\u4e00-\u9fff]{2,}")
-_GENERIC_LINK_HINT_TOKENS = {
-    "https",
-    "http",
-    "www",
-    "github",
-    "feishu",
-    "larksuite",
-    "docx",
-    "wiki",
-    "share",
-    "base",
-    "form",
-    "space",
-    "global",
-    "com",
-    "cn",
-}
 
 
 @dataclass(frozen=True)
@@ -272,6 +258,9 @@ class DailyTraceRunner:
         init=False,
         repr=False,
     )
+    _analyzed_slices: dict[str, ConversationSlice] = field(
+        default_factory=dict, init=False, repr=False,
+    )
 
     def __post_init__(self) -> None:
         if self.reaction_catalog is None:
@@ -281,6 +270,7 @@ class DailyTraceRunner:
     def run(self, target_date: str) -> DailyRunResult:
         run_started_at = perf_counter()
         self._personal_stage_timings = {}
+        self._analyzed_slices = {}
         self.checkpoint_store = LLMCheckpointStore(self.config, target_date)
         warning_messages: list[str] = []
         skipped_slice_count = 0
@@ -363,7 +353,6 @@ class DailyTraceRunner:
         )
         all_candidates: list[SourceBackedEventDraft] = []
         analyzed_batch_count = 0
-        all_message_order = [message.message_id for message in filtered_messages]
         conversation_slices: list[ConversationSlice] = []
 
         candidate_generation_marker = self._start_personal_stage()
@@ -425,6 +414,20 @@ class DailyTraceRunner:
             candidate_generation_marker,
         )
 
+        # Keep the actual evidence inputs, including replies loaded during retries.
+        conversation_slices = sorted(
+            self._analyzed_slices.values(), key=lambda item: item.slice_id,
+        )
+        evidence_by_id = {message.message_id: message for message in filtered_messages}
+        for conversation_slice in conversation_slices:
+            evidence_by_id.update(
+                (message.message_id, message) for message in conversation_slice.messages
+            )
+        evidence_messages = sorted(
+            evidence_by_id.values(), key=lambda item: (item.send_time, item.message_id),
+        )
+        all_message_order = [message.message_id for message in evidence_messages]
+
         warning_messages.extend(
             _drain_content_resolver_warnings(self.dependencies.content_resolver)
         )
@@ -467,7 +470,7 @@ class DailyTraceRunner:
                     target_date=target_date,
                     candidates=all_candidates,
                     conversation_slices=conversation_slices,
-                    messages=filtered_messages,
+                    messages=evidence_messages,
                 )
                 analyzed_batch_count += retention_review_call_count
                 (
@@ -478,7 +481,7 @@ class DailyTraceRunner:
                     target_date=target_date,
                     candidates=all_candidates,
                     conversation_slices=conversation_slices,
-                    messages=filtered_messages,
+                    messages=evidence_messages,
                 )
                 analyzed_batch_count += personal_fact_review_call_count
                 self._record_personal_stage(
@@ -609,7 +612,7 @@ class DailyTraceRunner:
                         target_date=target_date,
                         groups=group_result.groups,
                         candidates=all_candidates,
-                        messages=filtered_messages,
+                        messages=evidence_messages,
                         discovery_result=discovery_outcome.result,
                     )
                     warning_messages.extend(review_warnings)
@@ -777,7 +780,7 @@ class DailyTraceRunner:
             events, merge_warnings = build_work_events(target_date, merged_drafts)
             events = _attach_event_file_links(
                 events,
-                messages=filtered_messages,
+                messages=evidence_messages,
                 content_resolver=self.dependencies.content_resolver,
             )
             events, final_event_filter_warnings = filter_work_events(events, self.config)
@@ -2022,6 +2025,7 @@ class DailyTraceRunner:
             ] = {}
             for unit, analysis, expansion_round in pending:
                 slice_input = _anchor_unit_to_slice(unit)
+                self._analyzed_slices[slice_input.slice_id] = slice_input
                 validated = validate_batch_analysis_result(
                     BatchAnalysisResult(
                         candidate_events=[
@@ -2273,6 +2277,9 @@ class DailyTraceRunner:
         allow_context_expansion: bool = True,
         context_expansion_round: int = 0,
     ) -> tuple[list[SourceBackedEventDraft], list[str], int, int]:
+        for unit in batch.segments:
+            conversation_slice = segment_unit_to_slice(unit)
+            self._analyzed_slices[conversation_slice.slice_id] = conversation_slice
         checkpoint = (
             self.checkpoint_store.load_analysis(batch)
             if self.checkpoint_store is not None
@@ -2667,6 +2674,7 @@ class DailyTraceRunner:
         run_count = 0
 
         for retry_round in range(0, self.config.slice_retry_limit + 1):
+            self._analyzed_slices[current_slice.slice_id] = current_slice
             if retry_round == 0:
                 batch_input = AnalysisBatch(
                     target_date=target_date,
@@ -5927,10 +5935,10 @@ def _attach_event_file_links(
     messages: list,
     content_resolver,
 ) -> list[WorkEvent]:
-    message_by_id = {message.message_id: message for message in messages}
+    message_order = [message.message_id for message in messages]
     link_by_id: dict[str, EventFileLink] = {}
     attachment_by_id: dict[str, EventFileLink] = {}
-    attachment_message_id_by_id: dict[str, str] = {}
+    attachment_message_ids_by_id: dict[str, set[str]] = {}
     references: list[_EventFileReference] = []
     for message in messages:
         for index, link in enumerate(content_resolver.extract_links(message), start=1):
@@ -5956,54 +5964,60 @@ def _attach_event_file_links(
                 title=file_name,
                 link_type="attachment",
             )
-            attachment_message_id_by_id[attachment.attachment_id] = message.message_id
+            attachment_message_ids_by_id.setdefault(attachment.attachment_id, set()).add(
+                message.message_id
+            )
     attached: list[WorkEvent] = []
 
     for event in events:
         deduped: dict[str, EventFileLink] = {}
-        for link_id in event.referenced_link_ids:
+        source_ids = set(event.source_message_ids)
+        resolved_link_ids: list[str] = []
+        for link_id in sort_referenced_link_ids(
+            event.referenced_link_ids, message_order=message_order,
+        ):
             link = link_by_id.get(link_id)
-            if link is None:
+            parsed = parse_message_link_id(link_id)
+            if link is None or parsed is None or parsed[0] not in source_ids:
                 continue
-            if not _event_supports_link(event, link):
-                continue
+            resolved_link_ids.append(link_id)
             key = _file_link_key(link)
             existing = deduped.get(key)
             if existing is None:
                 deduped[key] = link
                 continue
-            if existing.title.strip() or not link.title.strip():
-                continue
-            deduped[key] = link
+            if (
+                existing.title.strip() in {"", existing.url.strip()}
+                and link.title.strip() not in {"", link.url.strip()}
+            ):
+                deduped[key] = link
 
         for reference in references:
-            if not _event_supports_file_reference(event, reference):
+            if reference.message_id not in source_ids:
                 continue
+            # A duplicate source reference can supply the original document title.
             key = _file_link_key(reference.file_link)
             existing = deduped.get(key)
-            if existing is None:
-                deduped[key] = reference.file_link
+            if existing is not None:
+                if (
+                    existing.title.strip() in {"", existing.url.strip()}
+                    and reference.file_link.title.strip() not in {"", reference.file_link.url.strip()}
+                ):
+                    deduped[key] = reference.file_link
                 continue
-            if existing.title.strip() or not reference.file_link.title.strip():
+            if not _event_supports_file_reference(event, reference):
                 continue
             deduped[key] = reference.file_link
 
-        resolved_attachment_ids = list(event.referenced_attachment_ids)
-        source_conversation_ids = {
-            message_by_id[message_id].conversation_id
-            for message_id in event.source_message_ids
-            if message_id in message_by_id
-        }
+        resolved_attachment_ids = [
+            attachment_id
+            for attachment_id in dict.fromkeys(event.referenced_attachment_ids)
+            if source_ids.intersection(attachment_message_ids_by_id.get(attachment_id, set()))
+        ]
         for attachment_id, attachment in attachment_by_id.items():
             if attachment_id in resolved_attachment_ids:
                 continue
-            message_id = attachment_message_id_by_id.get(attachment_id, "")
-            message = message_by_id.get(message_id)
-            if (
-                not source_conversation_ids
-                or message is None
-                or message.conversation_id not in source_conversation_ids
-            ):
+            if not source_ids.intersection(attachment_message_ids_by_id.get(attachment_id, set())):
                 continue
             if not _event_supports_attachment_name(event, attachment):
                 continue
@@ -6013,7 +6027,8 @@ def _attach_event_file_links(
             attachment = attachment_by_id.get(attachment_id)
             if attachment is None:
                 continue
-            deduped.setdefault(_file_link_key(attachment), attachment)
+            # Names do not identify attachments: two uploads may share a name.
+            deduped.setdefault(f"attachment:{attachment_id}", attachment)
 
         file_links = list(deduped.values())
         file_keys = list(
@@ -6055,7 +6070,7 @@ def _attach_event_file_links(
                     event.retention_detail,
                     file_links,
                 ),
-                referenced_link_ids=list(event.referenced_link_ids),
+                referenced_link_ids=resolved_link_ids,
                 referenced_attachment_ids=resolved_attachment_ids,
                 action_labels=list(event.action_labels),
                 self_relations=list(event.self_relations),
@@ -6069,24 +6084,6 @@ def _attach_event_file_links(
         )
 
     return attached
-
-
-def _event_supports_link(event: WorkEvent, link: EventFileLink) -> bool:
-    evidence_text = " ".join(
-        [
-            event.title,
-            event.content,
-            event.object_hint,
-            event.retention_detail,
-        ]
-    ).lower()
-    if not evidence_text.strip():
-        return False
-
-    for token in _link_evidence_tokens(link):
-        if token in evidence_text:
-            return True
-    return False
 
 
 def _event_supports_file_reference(
@@ -6118,16 +6115,6 @@ def _event_file_evidence_text(event: WorkEvent) -> str:
             event.retention_detail,
         ]
     )
-
-
-def _link_evidence_tokens(link: EventFileLink) -> list[str]:
-    evidence_source = link.title.strip() or link.url
-    tokens = [token.lower() for token in _LINK_TEXT_TOKEN_RE.findall(evidence_source)]
-    return [
-        token
-        for token in tokens
-        if token not in _GENERIC_LINK_HINT_TOKENS and len(token.strip()) >= 2
-    ]
 
 
 def _link_exact_evidence_values(link: EventFileLink) -> list[str]:

@@ -329,7 +329,9 @@ def validate_segment_batch_result(
             warnings.append("Filtered invalid segment batch result.")
             continue
         filtered_candidates = []
-        source_ids = set(unit.primary_message_ids)
+        primary_ids = set(unit.primary_message_ids)
+        source_ids = primary_ids | set(unit.context_message_ids)
+        source_ids.intersection_update(message.message_id for message in unit.messages)
         evidence_ids = set(unit.self_evidence_message_ids)
         signal_ids = {signal.signal_id for signal in unit.response_signals}
         available_attachment_ids = {
@@ -349,7 +351,10 @@ def validate_segment_batch_result(
         }
         for candidate in item.analysis.candidate_events:
             candidate_sources = set(candidate.source_message_ids)
-            if not candidate_sources or not candidate_sources.issubset(source_ids):
+            if (
+                not candidate_sources.intersection(primary_ids)
+                or not candidate_sources.issubset(source_ids)
+            ):
                 warnings.append("Filtered candidate with cross-segment source.")
                 continue
             candidate_signals = set(candidate.response_signal_ids)

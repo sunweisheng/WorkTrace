@@ -594,6 +594,30 @@ def test_segment_batch_filters_duplicate_unknown_and_cross_segment_results() -> 
     assert any("cross-segment source" in item for item in warnings)
 
 
+def test_segment_evidence_can_include_selected_reply_context() -> None:
+    parent = _message("om_parent", sender_open_id="ou_other", minute=0)
+    reply = _message("om_reply", sender_open_id="ou_self", minute=1, reply_to_message_id="om_parent")
+    unit = _unit("turn", [parent, reply], primary_message_ids=["om_reply"],
+                 context_message_ids=["om_parent"], self_evidence_message_ids=["om_reply"])
+    batch = SegmentAnalysisBatch(
+        target_date="2026-07-10", conversation_id="oc_1", conversation_name="项目群",
+        self_open_id="ou_self", self_display_name="Me", segments=[unit],
+    )
+    result = BatchSegmentAnalysisResult(results=[BatchSegmentAnalysisItem("turn", BatchAnalysisResult(
+        candidate_events=[_candidate(["om_parent", "om_reply"], self_evidence_message_ids=["om_reply"])]
+    ))])
+    valid, missing, warnings = validate_segment_batch_result(result, batch)
+    assert not missing
+    assert not warnings
+    assert valid["turn"].candidate_events[0].source_message_ids == ["om_parent", "om_reply"]
+
+    context_only = replace(result, results=[BatchSegmentAnalysisItem("turn", BatchAnalysisResult(
+        candidate_events=[_candidate(["om_parent"], self_evidence_message_ids=["om_reply"])]
+    ))])
+    valid, _, _ = validate_segment_batch_result(context_only, batch)
+    assert valid["turn"].candidate_events == []
+
+
 def test_segment_batch_does_not_require_a_response_assessment() -> None:
     first = _message("om_1", sender_open_id="ou_self", minute=0, text="收到")
     second = _message("om_2", sender_open_id="ou_other", minute=1, text="后续继续推进")
