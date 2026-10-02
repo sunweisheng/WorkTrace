@@ -2,6 +2,6 @@
 
 from .config import DEFAULT_CONFIG, RuntimeConfig
 
-__version__ = "4.1.1"
+__version__ = "4.1.2"
 
 __all__ = ["DEFAULT_CONFIG", "RuntimeConfig", "__version__"]
