@@ -29,6 +29,7 @@ from .analyzers.online import (
     _extract_function_arguments_from_responses_payload,
 )
 from .utils.commands import run_text_command
+from .runtime_diagnostics import classify_technical_error
 
 
 MIN_PYTHON = (3, 11)
@@ -77,7 +78,13 @@ def run_preflight_checks(
     cwd: Path,
     command_runner=run_subprocess,
     python_version: tuple[int, int, int] | None = None,
+    full_backend_checks: bool = False,
 ) -> PreflightReport:
+    if full_backend_checks:
+        return _run_full_preflight_checks(
+            config, cwd=cwd, command_runner=command_runner,
+            python_version=python_version,
+        )
     details: dict[str, str] = {}
 
     try:
@@ -117,6 +124,11 @@ def run_preflight_checks(
             else:
                 details["online_llm_config"] = "ok"
                 details["online_fallback"] = "available"
+                details["online_probe_status"] = "not_run"
+                details["tls_verify"] = str(online_settings.tls_verify).lower()
+                details["certificate_verification"] = (
+                    "enabled" if online_settings.tls_verify else "disabled"
+                )
                 details["online_reasoning_effort"] = online_settings.reasoning_effort or ""
         ensure_data_root_writable(config.data_root)
         details["data_root"] = str(config.data_root.resolve())
@@ -127,6 +139,65 @@ def run_preflight_checks(
         return PreflightReport(ok=False, error_summary=str(exc), details=details)
 
     return PreflightReport(ok=True, details=details)
+
+
+def _run_full_preflight_checks(
+    config: RuntimeConfig, *, cwd: Path, command_runner, python_version,
+) -> PreflightReport:
+    """Probe backends independently without reading any work conversations."""
+    details = {"llm_mode": config.llm_mode, "preflight_scope": "full_backends"}
+    errors: list[str] = []
+
+    def check(stage, action):
+        try:
+            action()
+            details[stage] = "ok"
+        except (PreflightError, ValueError, OSError, subprocess.SubprocessError) as exc:
+            details[stage] = "failed"
+            if isinstance(exc, PreflightError) and exc.code:
+                code, summary = exc.code, str(exc)
+            else:
+                code, summary = classify_technical_error(str(exc))
+            details[f"{stage}_error_code"] = code
+            errors.append(f"{stage}: {summary}")
+
+    check("python", lambda: check_python_version(python_version=python_version))
+
+    def lark_check():
+        details["lark_cli_path"] = require_command("lark-cli")
+        check_lark_identity(command_runner)
+
+    check("lark_identity", lark_check)
+
+    if config.llm_mode != "online_only":
+        def codex_check():
+            details["codex_path"] = require_command("codex")
+            settings = load_codex_llm_settings(config, cwd=cwd)
+            details["codex_model"] = settings.model
+            details["codex_reasoning_effort"] = settings.reasoning_effort
+            probe_codex(command_runner, config=config, cwd=cwd)
+
+        check("codex_probe", codex_check)
+    else:
+        details["codex_probe"] = "disabled"
+
+    def online_check():
+        settings = ensure_online_runtime_config(config, cwd=cwd)
+        ensure_reasoning_disabled(settings.reasoning_effort)
+        details["tls_verify"] = str(settings.tls_verify).lower()
+        details["certificate_verification"] = (
+            "enabled" if settings.tls_verify else "disabled"
+        )
+        details.update(probe_online_llm(config, cwd=cwd))
+
+    check("online_probe", online_check)
+    details["online_fallback"] = (
+        "disabled" if config.llm_mode == "online_only" else
+        "verified" if details["online_probe"] == "ok" else "unverified"
+    )
+    check("data_root", lambda: ensure_data_root_writable(config.data_root))
+    check("timezone", lambda: ensure_timezone_available(config.timezone))
+    return PreflightReport(ok=not errors, error_summary="; ".join(errors), details=details)
 
 
 def check_python_version(
@@ -151,15 +222,24 @@ def require_command(command_name: str) -> str:
 def check_lark_identity(command_runner) -> None:
     result = command_runner(("lark-cli", "auth", "status"))
     if result.returncode != 0:
-        raise PreflightError("lark-cli auth status failed.")
+        code, summary = classify_technical_error(f"{result.stdout}\n{result.stderr}")
+        raise PreflightError(summary, code=code)
 
     try:
         payload = json.loads(result.stdout)
     except json.JSONDecodeError as exc:
         raise PreflightError("lark-cli auth status did not return valid JSON.") from exc
 
+    if not isinstance(payload, dict):
+        raise PreflightError("lark-cli auth status did not return a JSON object.")
+    if payload.get("error"):
+        code, summary = classify_technical_error(json.dumps(payload["error"]))
+        raise PreflightError(summary, code=code)
     identity = payload.get("identity")
-    user_info = payload.get("identities", {}).get("user", {})
+    identities = payload.get("identities")
+    user_info = identities.get("user", {}) if isinstance(identities, dict) else {}
+    if not isinstance(user_info, dict):
+        user_info = {}
     available = bool(user_info.get("available"))
     open_id = user_info.get("openId")
 
@@ -197,8 +277,8 @@ def probe_codex(command_runner, *, config: RuntimeConfig, cwd: Path) -> None:
     except ValueError as exc:
         raise PreflightError(str(exc)) from exc
     except Exception as exc:
-        result = CommandResult(returncode=1, stdout="", stderr=str(exc))
-        raise PreflightError(classify_codex_failure(result)) from exc
+        code, summary = classify_technical_error(str(exc))
+        raise PreflightError(summary, code=code) from exc
 
     if not isinstance(payload, dict) or payload.get("probe") != "ok":
         raise PreflightError("Codex probe returned unexpected JSON content.")
@@ -219,38 +299,33 @@ def ensure_reasoning_disabled(reasoning_effort: str | None) -> None:
 
 
 def classify_codex_failure(result: CommandResult) -> str:
-    combined = f"{result.stdout}\n{result.stderr}".lower()
-    if any(
-        token in combined
-        for token in (
-            "503 service unavailable",
-            "service temporarily unavailable",
-            "stream disconnected",
-            "reconnecting...",
-            "unexpected status 503",
-        )
-    ):
-        return "Codex provider or service is temporarily unavailable."
-    if "login" in combined or "auth" in combined or "api key" in combined:
-        return "Codex is not logged in or lacks permission."
-    if any(token in combined for token in ("network", "unreachable", "connection", "timed out")):
-        return "Codex network or service is unreachable."
-    return "Codex probe failed."
+    _, summary = classify_technical_error(f"{result.stdout}\n{result.stderr}")
+    return summary
 
 
 def classify_online_failure(exc: Exception) -> str:
-    if isinstance(exc, (AuthenticationError, PermissionDeniedError)):
-        return "Online LLM API key is invalid or lacks permission."
+    if isinstance(exc, AuthenticationError):
+        return classify_technical_error("401")[1]
+    if isinstance(exc, PermissionDeniedError):
+        return classify_technical_error("403")[1]
     if isinstance(exc, RateLimitError):
         return "Online LLM is rate limited."
     if isinstance(exc, APIStatusError):
         if exc.status_code >= 500:
             return "Online LLM upstream provider or service is temporarily unavailable."
-        return f"HTTP {exc.status_code}: {exc.message}"
+        code, summary = classify_technical_error(str(exc.message))
+        return f"HTTP {exc.status_code}: {summary}"
     if isinstance(exc, APITimeoutError):
         return "Online LLM probe timed out."
     if isinstance(exc, APIConnectionError):
-        reason = str(exc)
+        causes: list[str] = []
+        seen: set[int] = set()
+        cause: BaseException | None = exc
+        while cause is not None and id(cause) not in seen:
+            seen.add(id(cause))
+            causes.append(str(cause))
+            cause = cause.__cause__ or cause.__context__
+        reason = "\n".join(causes)
         lowered = reason.lower()
         if "certificate verify failed" in lowered:
             return "Online LLM TLS certificate verification failed."
@@ -310,7 +385,11 @@ def probe_online_llm(config: RuntimeConfig, *, cwd: Path) -> dict[str, str]:
                 if callable(close_client):
                     close_client()
     except Exception as exc:
-        raise PreflightError(classify_online_failure(exc)) from exc
+        summary = classify_online_failure(exc)
+        code, _ = classify_technical_error(
+            f"{getattr(exc, 'status_code', '')} {exc} {summary}"
+        )
+        raise PreflightError(summary, code=code) from exc
 
     try:
         if settings.wire_api == "chat_completions":

@@ -480,3 +480,22 @@ Markdown 默认只保留结构化工作事件，不会默认附带整段原始�
 
 当前默认不会。  
 当前阶段默认只会先发给你自己，由你自己决定后续是否修改或转发。
+
+## Windows 新安装与自检
+
+复制 Skill 不等于安装运行依赖。安装脚本检查 Python 3.11+ 和 pip
+退出码，直接依赖包含 httpx；使用 CODEX_HOME，保留已有 `.env`。
+详细步骤见 [Windows 使用说明](windows-guide.md)，包含中文空格路径、
+官方飞书 CLI 初始化与授权、PATH 更新和 PowerShell 5.1/7 编码说明。
+
+`python -m src.worktrace.cli import-codex-config` 默认只预览，
+`--apply` 仅填空缺，不覆盖已有 high；认证转换需要显式
+`--apply --import-auth`，通过 stdin 导入且保留已有凭据。
+`--preflight-full` 实际验证各配置后端的 Function Calling，普通
+自检的 online_fallback=available 仅表示配置存在。tls_verify 说明
+Online 实际证书校验开关，关闭状态不能认定为证书可信性已验收。
+
+正常运行的中文进度在 UTF-8 stderr，最终 JSON 在 stdout；新 warnings
+说明告警代码、阶段和影响，stage_timing_summary 提供普通耗时摘要。
+旧 error_summary 与 warning_messages 保留。success_with_warnings
+不表示整个任务失败；片段被跳过时报告可能遗漏事项，不能宣称完整。

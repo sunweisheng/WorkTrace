@@ -37,6 +37,7 @@ from .errors import (
 )
 from .factories import RuntimeDependencies, build_runtime_dependencies
 from .logging_utils import log_timing
+from .progress import report_stage, report_completed
 from .models import (
     AnalysisBatch,
     AnchorAnalysisResult,
@@ -280,7 +281,7 @@ class DailyTraceRunner:
         personal_fact_review_summary = PersonalFactReviewSummary()
         day_grouping_summary = DayGroupingSummary()
 
-        source_fetch_marker = self._start_personal_stage()
+        source_fetch_marker = self._start_personal_stage("source_fetch")
         try:
             stage_started_at = perf_counter()
             self_identity = self.dependencies.chat_source.get_self_identity()
@@ -338,7 +339,7 @@ class DailyTraceRunner:
             )
 
         stage_started_at = perf_counter()
-        message_preparation_marker = self._start_personal_stage()
+        message_preparation_marker = self._start_personal_stage("message_preparation")
         messages = enrich_message_reactions(messages, self.reaction_catalog)
         filtered_messages = filter_messages(messages)
         self._record_personal_stage(
@@ -357,7 +358,7 @@ class DailyTraceRunner:
         analyzed_batch_count = 0
         conversation_slices: list[ConversationSlice] = []
 
-        candidate_generation_marker = self._start_personal_stage()
+        candidate_generation_marker = self._start_personal_stage("candidate_generation")
         try:
             if _supports_segment_batches(self.dependencies.analyzer):
                 (
@@ -436,7 +437,7 @@ class DailyTraceRunner:
 
         merged_drafts: list[MergedEventDraft] = []
         if all_candidates:
-            candidate_review_marker = self._start_personal_stage()
+            candidate_review_marker = self._start_personal_stage("candidate_review")
             day_grouping_marker: tuple[float, float] | None = None
             try:
                 all_candidates, candidate_filter_warnings = (
@@ -510,7 +511,7 @@ class DailyTraceRunner:
                         ),
                     )
 
-                day_grouping_marker = self._start_personal_stage()
+                day_grouping_marker = self._start_personal_stage("day_grouping")
                 if len(all_candidates) == 1:
                     merge_started_at = perf_counter()
                     groups = [
@@ -770,7 +771,7 @@ class DailyTraceRunner:
             )
 
         active_stage = "event_build"
-        active_stage_marker = self._start_personal_stage()
+        active_stage_marker = self._start_personal_stage(active_stage)
         try:
             merged_drafts, merged_filter_warnings = filter_merged_drafts(
                 merged_drafts,
@@ -817,7 +818,7 @@ class DailyTraceRunner:
             warning_messages.extend(merge_warnings)
             self._record_personal_stage(active_stage, active_stage_marker)
             active_stage = "markdown_write"
-            active_stage_marker = self._start_personal_stage()
+            active_stage_marker = self._start_personal_stage(active_stage)
             write_started_at = perf_counter()
             write_result = self.dependencies.event_store.replace_day(
                 target_date,
@@ -836,7 +837,7 @@ class DailyTraceRunner:
             )
             self._record_personal_stage(active_stage, active_stage_marker)
             active_stage = "self_delivery"
-            active_stage_marker = self._start_personal_stage()
+            active_stage_marker = self._start_personal_stage(active_stage)
             delivery_status, delivery_target, delivery_error = _deliver_markdown_to_self(
                 self.dependencies.delivery_channel,
                 self_identity=self_identity,
@@ -874,6 +875,7 @@ class DailyTraceRunner:
                 status=status,
                 output_path=write_result.output_path,
                 error_summary="; ".join(warning_messages),
+                warning_messages=list(warning_messages),
                 self_delivery_status=delivery_status,
                 self_delivery_target=delivery_target,
                 self_delivery_error=delivery_error,
@@ -1079,6 +1081,7 @@ class DailyTraceRunner:
             len(batches),
             self.config.max_concurrent_personal_fact_review_requests,
         )
+        report_stage("personal_fact_review", total=len(batches))
         review_started_at = perf_counter()
         with ThreadPoolExecutor(max_workers=worker_count) as executor:
             futures = [
@@ -1089,7 +1092,10 @@ class DailyTraceRunner:
                 )
                 for batch in batches
             ]
-            outcomes = [future.result() for future in futures]
+            outcomes = []
+            for future in futures:
+                outcomes.append(future.result())
+                report_completed()
 
         reviewed: dict[str, PersonalFactReviewItemResult] = {}
         debug_batches: list[dict[str, object]] = []
@@ -1318,7 +1324,7 @@ class DailyTraceRunner:
         day_grouping_summary: DayGroupingSummary | None = None,
     ) -> DailyRunResult:
         warning_messages = warning_messages or []
-        markdown_write_marker = self._start_personal_stage()
+        markdown_write_marker = self._start_personal_stage("markdown_write")
         write_result = self.dependencies.event_store.replace_day(
             target_date,
             [],
@@ -1327,7 +1333,7 @@ class DailyTraceRunner:
         if self.checkpoint_store is not None:
             self.checkpoint_store.clear()
         self._record_personal_stage("markdown_write", markdown_write_marker)
-        self_delivery_marker = self._start_personal_stage()
+        self_delivery_marker = self._start_personal_stage("self_delivery")
         delivery_status, delivery_target, delivery_error = _deliver_markdown_to_self(
             self.dependencies.delivery_channel,
             self_identity=self_identity,
@@ -1354,6 +1360,7 @@ class DailyTraceRunner:
             status=status,
             output_path=write_result.output_path,
             error_summary="; ".join(warning_messages),
+            warning_messages=list(warning_messages),
             self_delivery_status=delivery_status,
             self_delivery_target=delivery_target,
             self_delivery_error=delivery_error,
@@ -1436,7 +1443,8 @@ class DailyTraceRunner:
         )
         return result
 
-    def _start_personal_stage(self) -> tuple[float, float]:
+    def _start_personal_stage(self, stage: str = "personal") -> tuple[float, float]:
+        report_stage(stage)
         return perf_counter(), self._personal_request_accumulated_ms()
 
     def _record_personal_stage(
@@ -1545,6 +1553,7 @@ class DailyTraceRunner:
                 after_limit=30,
                 reaction_catalog=self.reaction_catalog,
             )
+        report_stage("image_preparation")
         required_image_started_at = perf_counter()
         anchor_units = enrich_required_image_context(
             anchor_units,
@@ -1619,6 +1628,7 @@ class DailyTraceRunner:
             cached: bool,
         ) -> None:
             nonlocal model_call_count
+            report_completed()
             if not cached:
                 model_call_count += outcome.model_call_count
             if not outcome.units:
@@ -1674,6 +1684,9 @@ class DailyTraceRunner:
             )
 
         segmentation_started_at = perf_counter()
+        report_stage("conversation_segmentation", total=sum(
+            len(state.anchors) for state in segmentation_states
+        ))
         with ThreadPoolExecutor(
             max_workers=self.config.max_concurrent_llm_requests
         ) as executor:
@@ -1791,6 +1804,7 @@ class DailyTraceRunner:
             self.config.max_concurrent_event_extraction_requests
             or self.config.max_concurrent_llm_requests
         )
+        report_stage("segment_analysis", total=len(analysis_jobs) + len(fallback_jobs))
         analysis_started_at = perf_counter()
         analysis_call_count_before = model_call_count
         with ThreadPoolExecutor(max_workers=event_extraction_workers) as executor:
@@ -1813,6 +1827,7 @@ class DailyTraceRunner:
                 warnings.extend(batch_warnings)
                 skipped_segment_count += batch_skipped_count
                 model_call_count += batch_call_count
+                report_completed()
 
         for conversation_anchors in fallback_jobs:
             (
@@ -1829,6 +1844,7 @@ class DailyTraceRunner:
             warnings.extend(fallback_warnings)
             skipped_segment_count += fallback_skipped_count
             model_call_count += fallback_call_count
+            report_completed()
 
         log_timing(
             logger,
@@ -4385,6 +4401,7 @@ class DailyTraceRunner:
                 int,
             ]
         ] = []
+        report_stage("day_group_review", total=len(components))
         with ThreadPoolExecutor(max_workers=worker_count) as executor:
             futures = [
                 executor.submit(
@@ -4396,6 +4413,7 @@ class DailyTraceRunner:
             ]
             for future in futures:
                 results.append(future.result())
+                report_completed()
 
         replacements = {
             component_id: result.grouping_result
@@ -4528,6 +4546,7 @@ class DailyTraceRunner:
                 int,
             ]
         ] = []
+        report_stage("personal_group_render", total=len(final_groups))
         with ThreadPoolExecutor(max_workers=worker_count) as executor:
             futures = [
                 executor.submit(
@@ -4542,6 +4561,7 @@ class DailyTraceRunner:
             ]
             for future in futures:
                 results.append(future.result())
+                report_completed()
         rendered_groups = {
             group_id: item
             for group_id, item, _attempts, _warnings, _retries, _codex in results

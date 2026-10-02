@@ -234,3 +234,22 @@ python3 -m src.worktrace.cli --debug-output merge-collected --date YYYY-MM-DD
 改变这些设置后应普通重跑。独立锚点实验缓存另有指纹规则，见实验文档。
 后续平台接入由任务环境设置 `WORKTRACE_LLM_MODE=online_only` 并注入现有
 Online 连接配置；本次不修改 kube-agent-hub 或部署集群。
+
+## Windows 安装、导入和完整自检
+
+复制 Skill 不等于安装 Python 运行依赖、外部 CLI 和私有 `.env`。
+运行安装脚本，依赖包含直接使用的 httpx。Windows 脚本检查 Python
+版本与原生命令退出码，支持 CODEX_HOME 并保留已有 `.env`。
+
+`import-codex-config` 默认只预览非敏感个人配置，`--apply` 仅填写
+空缺值，不覆盖已有 high 或 provider；`--import-auth` 需要显式与
+`--apply` 一起使用，经 stdin 调用官方认证入口，不覆盖现有凭据。
+运行期仍隔离个人配置。不得为了排错自动执行认证转换。
+
+`--preflight-full` 分别实际验证主线路和备用 Function Calling，
+不读取聊天、不送达；普通自检的 online_fallback=available 只表明配置
+存在。tls_verify 展示 Online 实际状态，默认关闭不代表证书已验收。
+普通进度只写 UTF-8 stderr；stdout JSON 新增 warnings 与个人
+stage_timing_summary，旧 error_summary / warning_messages 保留。
+跳过片段属于数据缺失风险，不应把 success_with_warnings 说成失败
+或完整无遗漏。具体操作和 Windows CI 边界见 docs/windows-guide.md。

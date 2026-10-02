@@ -2,7 +2,7 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-SKILL_DIR="${1:-$HOME/.codex/skills}"
+SKILL_DIR="${1:-${CODEX_HOME:-$HOME/.codex}/skills}"
 
 echo "[1/5] 检查 Python..."
 if command -v python3 >/dev/null 2>&1; then
@@ -15,9 +15,14 @@ else
 fi
 
 "$PYTHON_CMD" --version
+if ! "$PYTHON_CMD" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else 2)'; then
+  echo "Python 版本检查失败，要求 3.11 或更高版本。安装已停止。"
+  exit 1
+fi
 
 echo "[2/5] 安装 Python 依赖..."
 "$PYTHON_CMD" -m pip install -r "$REPO_ROOT/requirements.txt"
+"$PYTHON_CMD" -m pip check
 
 echo "[3/5] 初始化 .env..."
 if [ ! -f "$REPO_ROOT/.env" ]; then
@@ -37,8 +42,13 @@ fi
 echo "[5/5] 安装 Skill..."
 mkdir -p "$SKILL_DIR"
 TARGET="$SKILL_DIR/worktrace"
-if [ -e "$TARGET" ]; then
-  echo "Skill 目录已存在：$TARGET"
+if [ -e "$TARGET" ] || [ -L "$TARGET" ]; then
+  if [ -L "$TARGET" ] && [ "$TARGET" -ef "$REPO_ROOT" ]; then
+    echo "Skill 已正确链接：$TARGET"
+  else
+    echo "Skill 目标已存在，但不是当前仓库的有效链接：$TARGET；原目录已保留。"
+    exit 1
+  fi
 else
   ln -s "$REPO_ROOT" "$TARGET"
   echo "已创建 Skill 链接：$TARGET"

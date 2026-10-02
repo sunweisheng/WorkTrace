@@ -7,6 +7,22 @@ from pathlib import Path
 LOCAL_MARKDOWN_LINK_RE = re.compile(r"\[[^\]]+\]\((?!https?://|mailto:)([^)#]+)(?:#[^)]+)?\)")
 
 
+def test_windows_docs_describe_explicit_import_probes_and_output_contract():
+    documents = [Path(name).read_text(encoding="utf-8") for name in (
+        "README.md", "SKILL.md", "docs/employee-guide.md", "docs/detailed-design.md",
+    )]
+    for content in documents:
+        for term in ("import-codex-config", "--import-auth", "--preflight-full",
+                     "UTF-8", "warnings", "stage_timing_summary", "CODEX_HOME"):
+            assert term in content
+    windows = Path("docs/windows-guide.md").read_text(encoding="utf-8")
+    assert "PowerShell 5.1" in windows
+    assert "复制 Skill" in windows
+    assert "not_run" in windows
+    assert "TLS" in windows
+    assert "片段已经跳过" in windows
+
+
 def test_env_example_contains_required_online_llm_keys() -> None:
     content = Path(".env.example").read_text(encoding="utf-8")
 

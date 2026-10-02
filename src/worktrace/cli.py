@@ -16,7 +16,7 @@ from .config import (
 )
 from .constants import DailyRunStatus
 from .errors import AnalyzerProtocolError, InvalidInputError
-from .logging_utils import configure_logging
+from .logging_utils import configure_logging, configure_utf8_output
 from .models import (
     CollectedMergeRunResult,
     DailyRunResult,
@@ -32,11 +32,17 @@ from .utils.filenames import parse_worktrace_markdown_filename
 from .utils.text import sanitize_filename_component
 from .utils.json_io import dump_json
 from .support_report import generate_support_report
+from .codex_config_import import CodexImportResult, import_codex_config
+from .progress import ProgressReporter
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(prog="python -m src.worktrace.cli", add_help=True)
     subparsers = parser.add_subparsers(dest="command")
+    import_parser = subparsers.add_parser("import-codex-config")
+    import_parser.add_argument("--apply", action="store_true")
+    import_parser.add_argument("--import-auth", action="store_true")
+    import_parser.add_argument("--profile")
     merge_parser = subparsers.add_parser("merge-collected")
     merge_parser.add_argument("--date", dest="target_date", required=True)
     merge_parser.add_argument(
@@ -53,6 +59,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     sync_parser.add_argument("--source", default="feishu")
     parser.add_argument("--date", dest="target_date", required=False)
     parser.add_argument("--preflight", dest="preflight_only", action="store_true")
+    parser.add_argument("--preflight-full", action="store_true")
     parser.add_argument(
         "--debug-output",
         dest="debug_output",
@@ -193,13 +200,28 @@ def execute(
     collected_run_func=run_collected_merge,
     sync_reaction_catalog_func: Callable[..., ReactionCatalogSyncResult] = run_sync_reaction_catalog,
     support_report_func=generate_support_report,
-) -> tuple[DailyRunResult | PreflightResult | CollectedMergeRunResult | ReactionCatalogSyncResult, int]:
+) -> tuple[DailyRunResult | PreflightResult | CollectedMergeRunResult | ReactionCatalogSyncResult | CodexImportResult, int]:
     logger = configure_logging()
 
     args = parse_args(argv)
-    file_config = load_runtime_config_overrides(config, cwd=Path.cwd())
-    blacklist_config = load_conversation_blacklist_overrides(file_config, cwd=Path.cwd())
-    effective_config = apply_cli_overrides(blacklist_config, args)
+    if args.command == "import-codex-config":
+        result = import_codex_config(
+            cwd=Path.cwd(), apply=args.apply, import_auth=args.import_auth,
+            profile=args.profile,
+        )
+        return result, 0 if result.status in {"preview", "applied"} else 1
+    try:
+        file_config = load_runtime_config_overrides(config, cwd=Path.cwd())
+        blacklist_config = load_conversation_blacklist_overrides(file_config, cwd=Path.cwd())
+        effective_config = apply_cli_overrides(blacklist_config, args)
+    except (OSError, ValueError):
+        if args.preflight_only or args.preflight_full:
+            return PreflightResult(
+                status="failed",
+                error_summary="Local runtime configuration is invalid. Check .env and config files.",
+                details={"error_code": "configuration"},
+            ), 1
+        raise
     logger.info("WorkTrace llm_mode=%s", effective_config.llm_mode)
     if args.command == "sync-reaction-catalog":
         try:
@@ -234,12 +256,13 @@ def execute(
             if args.debug_output:
                 result = replace(result, support_report=_blocked_support_report())
             return result, 2
-        result = collected_run_func(
-            target_date=target_date,
-            config=replace(effective_config),
-            merge_owner_name=merge_owner_name,
-            offline=args.offline,
-        )
+        with ProgressReporter("collected"):
+            result = collected_run_func(
+                target_date=target_date,
+                config=replace(effective_config),
+                merge_owner_name=merge_owner_name,
+                offline=args.offline,
+            )
         result = _attach_support_report(
             result,
             enabled=args.debug_output,
@@ -254,8 +277,10 @@ def execute(
             return result, 1
         return result, 0
 
-    if args.preflight_only:
-        report = preflight_func(effective_config, cwd=Path.cwd())
+    if args.preflight_only or args.preflight_full:
+        options = {"full_backend_checks": True} if args.preflight_full else {}
+        with ProgressReporter("model_request"):
+            report = preflight_func(effective_config, cwd=Path.cwd(), **options)
         result = PreflightResult(
             status="ok" if report.ok else "failed",
             error_summary=report.error_summary,
@@ -276,7 +301,8 @@ def execute(
     logger.info("Starting WorkTrace run", extra={"target_date": target_date, "stage": "cli"})
 
     run_started_at = perf_counter()
-    report = preflight_func(effective_config, cwd=Path.cwd())
+    with ProgressReporter("model_request"):
+        report = preflight_func(effective_config, cwd=Path.cwd())
     if not report.ok:
         result = _attach_support_report(
             build_failed_result(target_date, report.error_summary),
@@ -291,7 +317,8 @@ def execute(
     if not args.resume:
         _clear_previous_personal_run(effective_config, target_date)
 
-    result = run_func(target_date=target_date, config=replace(effective_config))
+    with ProgressReporter("personal"):
+        result = run_func(target_date=target_date, config=replace(effective_config))
     result = _attach_support_report(
         result,
         enabled=args.debug_output,
@@ -383,6 +410,7 @@ def main(
     sync_reaction_catalog_func: Callable[..., ReactionCatalogSyncResult] = run_sync_reaction_catalog,
     support_report_func=generate_support_report,
 ) -> int:
+    configure_utf8_output()
     result, exit_code = execute(
         argv,
         config=config,

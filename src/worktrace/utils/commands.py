@@ -6,6 +6,8 @@ import subprocess
 from pathlib import Path
 from typing import Callable, Mapping, Sequence
 
+import mslex
+
 
 _WINDOWS_LAUNCHER_COMMANDS = frozenset({"codex", "lark-cli"})
 _WINDOWS_SHELL_LAUNCHER_SUFFIXES = frozenset({".bat", ".cmd"})
@@ -17,7 +19,7 @@ def prepare_command_args(
     os_name: str | None = None,
     environ: Mapping[str, str] | None = None,
     which: Callable[[str], str | None] = shutil.which,
-) -> list[str]:
+) -> list[str] | str:
     command = list(args)
     platform_name = os.name if os_name is None else os_name
     if (
@@ -53,8 +55,10 @@ def prepare_command_args(
         ),
         "cmd.exe",
     )
-    command_line = subprocess.list2cmdline([launcher, *command[1:]])
-    return [comspec, "/d", "/s", "/c", command_line]
+    command_line = mslex.join([launcher, *command[1:]], for_cmd=True)
+    # CMD /s removes the outer quote pair. Pass the complete command line
+    # directly so subprocess does not escape its inner quotes a second time.
+    return f'{subprocess.list2cmdline([comspec])} /d /s /v:off /c "{command_line}"'
 
 
 def run_text_command(

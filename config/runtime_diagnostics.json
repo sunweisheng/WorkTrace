@@ -1,0 +1,218 @@
+{
+  "error_rules": [
+    {
+      "code": "cli_missing",
+      "markers": [
+        "required command not found",
+        "no such file or directory",
+        "could not find windows command launcher"
+      ],
+      "summary": "Required CLI is missing. Install the named CLI, add it to PATH and restart the terminal and Codex."
+    },
+    {
+      "code": "configuration_missing",
+      "markers": [
+        "missing codex configuration",
+        "missing online llm configuration",
+        "requires worktrace_llm_reasoning_effort=none"
+      ],
+      "summary": "Local model configuration is incomplete or invalid. Check repository-local .env; use import-codex-config to preview Codex settings and keep Online reasoning effort set to none."
+    },
+    {
+      "code": "tls",
+      "markers": [
+        "certificate verify failed",
+        "tls",
+        "ssl"
+      ],
+      "summary": "TLS certificate verification or handshake failed. Check the certificate chain and configured endpoint; do not disable verification to pass the check."
+    },
+    {
+      "code": "permission",
+      "markers": [
+        "403",
+        "permission denied",
+        "forbidden",
+        "insufficient_scope"
+      ],
+      "summary": "Permission denied. Check provider access or Feishu user scopes; authentication alone does not grant permission."
+    },
+    {
+      "code": "configuration",
+      "markers": [
+        "unsupported model",
+        "model not found",
+        "model_not_found",
+        "model_reasoning_effort",
+        "unsupported reasoning",
+        "unsupported parameter",
+        "error loading config"
+      ],
+      "summary": "Model or reasoning configuration is unsupported. Check the local model, provider and reasoning settings."
+    },
+    {
+      "code": "lark_not_configured",
+      "markers": [
+        "not initialized",
+        "not configured",
+        "missing app",
+        "app_id is required",
+        "app_secret is required",
+        "no configuration",
+        "please run lark-cli config",
+        "not_initialized",
+        "not_configured",
+        "missing_app_config"
+      ],
+      "summary": "Feishu CLI is not configured. Run lark-cli config init, then explicitly authorize a user with lark-cli auth login."
+    },
+    {
+      "code": "not_logged_in",
+      "markers": [
+        "not logged in",
+        "please login",
+        "please log in",
+        "login required",
+        "token expired"
+      ],
+      "summary": "User is not logged in or the login expired. Run the corresponding CLI auth/login command and retry."
+    },
+    {
+      "code": "authentication",
+      "markers": [
+        "401",
+        "unauthorized",
+        "invalid api key",
+        "api key",
+        "authentication",
+        "auth"
+      ],
+      "summary": "Authentication is unavailable or rejected. Check that credentials belong to the configured provider. WorkTrace ignores personal provider bearer tokens; preview import-codex-config before explicitly importing authentication."
+    },
+    {
+      "code": "rate_limited",
+      "markers": [
+        "429",
+        "rate limit"
+      ],
+      "summary": "The provider is rate limited. Retry later without changing concurrency or retries."
+    },
+    {
+      "code": "service_unavailable",
+      "markers": [
+        "503",
+        "service temporarily unavailable",
+        "service unavailable",
+        "stream disconnected",
+        "reconnecting...",
+        "status 500",
+        "status 502",
+        "status 504"
+      ],
+      "summary": "The provider or service is temporarily unavailable. Retry later."
+    },
+    {
+      "code": "network",
+      "markers": [
+        "network",
+        "unreachable",
+        "connection",
+        "timed out",
+        "timeout"
+      ],
+      "summary": "Network or service is unreachable. Check DNS, network access and the configured endpoint."
+    }
+  ],
+  "logged_out_markers": [
+    "not logged in"
+  ],
+  "builtin_providers": {
+    "openai": {
+      "name": "OpenAI",
+      "base_url": "https://api.openai.com/v1",
+      "wire_api": "responses",
+      "requires_openai_auth": true
+    }
+  },
+  "progress_interval_seconds": 30,
+  "stage_labels": {
+    "personal": "个人日报",
+    "collected": "多人汇总",
+    "source_fetch": "读取会话",
+    "message_preparation": "整理消息",
+    "candidate_generation": "提炼事件",
+    "candidate_review": "核对个人贡献与事实",
+    "day_grouping": "整理全日事件与正文",
+    "event_build": "整理最终事件",
+    "final_filter": "检查保留条件",
+    "retention_filter": "检查保留条件",
+    "markdown_write": "写入报告",
+    "self_delivery": "本人送达",
+    "source_parse": "读取来源报告",
+    "source_filter": "检查来源事件",
+    "candidate_grouping": "整理汇总事件",
+    "group_discovery": "检查关联事件",
+    "candidate_reconciliation": "整理汇总分组",
+    "high_risk_review": "复核关联事件",
+    "content_merge": "生成汇总正文",
+    "model_request": "等待模型响应",
+    "conversation_segmentation": "划分会话片段",
+    "segment_analysis": "提炼片段事件",
+    "image_preparation": "准备图片内容",
+    "personal_fact_review": "核对事实证据",
+    "day_group_review": "复核全日分组",
+    "personal_group_render": "生成个人事件正文"
+  },
+  "warning_rules": [
+    {
+      "code": "segmentation_fallback",
+      "stage": "conversation_segmentation",
+      "markers": [
+        "Skipped anchor after",
+        "Stopped remaining anchor segmentation",
+        "Anchor segmentation retries were exhausted"
+      ],
+      "summary": "会话片段划分失败，已改用回退提炼；完成情况以最终跳过数量为准。"
+    },
+    {
+      "code": "segment_context_missing",
+      "stage": "candidate_generation",
+      "markers": [
+        "Segment expansion produced no new context"
+      ],
+      "summary": "片段扩展未取得新增上下文；该片段已跳过，报告可能遗漏事项。"
+    },
+    {
+      "code": "image_skipped",
+      "stage": "message_preparation",
+      "markers": [
+        "image summary",
+        "image summarization"
+      ],
+      "summary": "部分图片未能处理，请结合跳过数量检查报告。"
+    },
+    {
+      "code": "segment_skipped",
+      "stage": "candidate_generation",
+      "markers": [
+        "Skipped segment",
+        "Skipped anchor fallback after repeated batch failures"
+      ],
+      "summary": "部分片段未能处理，报告可能遗漏事项。"
+    },
+    {
+      "code": "delivery_warning",
+      "stage": "self_delivery",
+      "markers": [
+        "delivery",
+        "send markdown"
+      ],
+      "summary": "本人送达存在告警，请检查送达状态。"
+    }
+  ],
+  "default_warning": {
+    "code": "processing_warning",
+    "stage": "processing",
+    "summary": "处理过程中出现告警，请检查报告；旧字段保留详细说明。"
+  }
+}

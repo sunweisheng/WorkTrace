@@ -697,3 +697,21 @@ git diff --check
 后续接入 kube-agent-hub 时，在任务环境注入 `WORKTRACE_LLM_MODE=online_only`
 并继续注入现有 Online 连接配置。本次只实现 WorkTrace，镜像移除 Codex、
 执行副本更新和平台真实验收另行处理。
+
+## Windows 运行改进
+
+复制 Skill 不等于安装运行依赖。`requirements.txt` 显式包含 `httpx`、
+`openai`、`mslex` 和 `tzdata`；安装脚本检查 Python 3.11+、pip 退出码、已有链接
+和 `CODEX_HOME`，保留 `.env`。CLI stdout/stderr 采用 UTF-8。
+
+`python -m src.worktrace.cli import-codex-config` 默认预览个人配置，
+`--apply` 只填空缺；认证转换需另加 `--import-auth`，不覆盖现有凭据。
+`--preflight-full` 实际探测各配置后端的 Function Calling，普通自检的
+`online_fallback=available` 仍仅表示配置存在。Online 的 `tls_verify`
+显示实际校验开关，默认内网兼容设置不等于证书可信性已验收。
+
+普通运行在 stderr 显示安全进度，JSON 新增结构化 `warnings` 和个人
+`stage_timing_summary`，保留旧告警字段；真实跳过片段仍明确提示。
+详细安装、PowerShell 5.1/7 捕获方式、认证边界和验收范围见
+[Windows 使用说明](docs/windows-guide.md)。实现顺序见
+[Windows 改进计划](docs/plans/2026-10-02-windows-runtime-improvements.md)。

@@ -28,6 +28,12 @@ _CODEX_PROVIDER_ENV = (
 )
 
 
+@pytest.fixture(autouse=True)
+def installed_cli_paths(monkeypatch):
+    # These tests use synthetic command runners, independent of host installs.
+    monkeypatch.setattr("src.worktrace.preflight.require_command", lambda name: name)
+
+
 def _success_runner_factory():
     def runner(args, *, cwd=None, timeout=None, input_text=None, env=None):
         command = tuple(args)
@@ -239,13 +245,15 @@ def test_preflight_fails_when_codex_config_is_missing(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     ("stdout", "stderr", "expected"),
     [
-        ("", "please login first", "Codex is not logged in or lacks permission."),
-        ("network unreachable", "", "Codex network or service is unreachable."),
-        ("other", "", "Codex probe failed."),
+        ("", "please login first", "not logged in"),
+        ("network unreachable", "", "Network or service is unreachable"),
+        ("other", "", "Probe failed"),
     ],
 )
 def test_classify_codex_failure(stdout: str, stderr: str, expected: str) -> None:
-    assert classify_codex_failure(CommandResult(returncode=1, stdout=stdout, stderr=stderr)) == expected
+    assert expected in classify_codex_failure(
+        CommandResult(returncode=1, stdout=stdout, stderr=stderr)
+    )
 
 
 def test_preflight_reports_safe_codex_authentication_failure(tmp_path: Path) -> None:
@@ -285,7 +293,8 @@ def test_preflight_reports_safe_codex_authentication_failure(tmp_path: Path) -> 
     )
 
     assert report.ok is False
-    assert report.error_summary == "Codex is not logged in or lacks permission."
+    assert "configured provider" in report.error_summary
+    assert "import-codex-config" in report.error_summary
     assert "sk-test-secret" not in report.error_summary
 
 

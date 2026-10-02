@@ -5,6 +5,7 @@ import ast
 from typing import Any
 
 from .constants import AnchorStatus
+from .runtime_diagnostics import structured_warnings
 
 
 def _string_list(value: Any) -> list[str]:
@@ -1900,6 +1901,10 @@ class DailyRunResult:
         repr=False,
         compare=False,
     )
+    warning_messages: list[str] = field(
+        default_factory=list, repr=False, compare=False,
+    )
+    warnings: list[dict[str, str]] = field(default_factory=list, compare=False)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> DailyRunResult:
@@ -1940,6 +1945,8 @@ class DailyRunResult:
                 if isinstance(data.get("support_report"), dict)
                 else None
             ),
+            warnings=_dict_list(data.get("warnings")),
+            stage_timing_summary=_stage_timing_summary(data.get("stage_timing_summary")),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -1955,6 +1962,12 @@ class DailyRunResult:
             "status": self.status,
             "output_path": self.output_path,
             "error_summary": self.error_summary,
+            "warnings": self.warnings or structured_warnings(
+                self.warning_messages, delivery_errors=(self.self_delivery_error,),
+            ),
+            "stage_timing_summary": {
+                stage: dict(metrics) for stage, metrics in self.stage_timing_summary.items()
+            },
             "self_delivery_status": self.self_delivery_status,
             "self_delivery_target": self.self_delivery_target,
             "self_delivery_error": self.self_delivery_error,
@@ -2394,6 +2407,9 @@ class CollectedMergeOutput:
             "partial_file_count": self.partial_file_count,
             "quality_summary": self.quality_summary.to_dict(),
             "warning_messages": list(self.warning_messages),
+            "warnings": structured_warnings(
+                self.warning_messages, delivery_errors=(self.self_delivery_error,),
+            ),
             "self_delivery_status": self.self_delivery_status,
             "self_delivery_target": self.self_delivery_target,
             "self_delivery_error": self.self_delivery_error,
@@ -2482,6 +2498,12 @@ class CollectedMergeRunResult:
             "partial_file_count": self.partial_file_count,
             "quality_summary": self.quality_summary.to_dict(),
             "warning_messages": list(self.warning_messages),
+            "warnings": structured_warnings(
+                self.warning_messages,
+                delivery_errors=(self.self_delivery_error, *(
+                    output.self_delivery_error for output in self.outputs
+                )),
+            ),
             "self_delivery_status": self.self_delivery_status,
             "self_delivery_target": self.self_delivery_target,
             "self_delivery_error": self.self_delivery_error,

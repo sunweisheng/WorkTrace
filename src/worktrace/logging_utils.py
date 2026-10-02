@@ -6,6 +6,18 @@ import sys
 from time import perf_counter
 
 
+def configure_utf8_output() -> None:
+    """Keep CLI pipes UTF-8 without changing the OS console code page."""
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if callable(reconfigure):
+            try:
+                reconfigure(encoding="utf-8", errors="backslashreplace")
+            except (OSError, ValueError):
+                # Embedding hosts own streams that may reject reconfiguration.
+                continue
+
+
 def configure_logging(level: int = logging.INFO) -> logging.Logger:
     logger = logging.getLogger("worktrace")
     logger.setLevel(level)

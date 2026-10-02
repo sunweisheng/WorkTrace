@@ -328,7 +328,8 @@ def test_runner_happy_path(tmp_path: Path) -> None:
         set(metrics) == {"wall_clock_ms", "request_accumulated_ms"}
         for metrics in result.stage_timing_summary.values()
     )
-    assert "stage_timing_summary" not in result.to_dict()
+    assert result.to_dict()["stage_timing_summary"] == result.stage_timing_summary
+    assert result.to_dict()["warnings"] == []
     assert not (tmp_path / "data" / "debug" / "conversations").exists()
 
 

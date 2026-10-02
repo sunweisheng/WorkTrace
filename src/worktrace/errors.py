@@ -9,6 +9,10 @@ class InvalidInputError(WorkTraceError):
 class PreflightError(WorkTraceError):
     """Raised when the runtime environment fails preflight checks."""
 
+    def __init__(self, message: str, *, code: str | None = None):
+        super().__init__(message)
+        self.code = code
+
 
 class ChatSourceError(WorkTraceError):
     """Raised when the chat source cannot provide valid data."""

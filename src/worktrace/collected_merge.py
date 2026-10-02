@@ -22,6 +22,7 @@ from .config import (
 )
 from .analyzers.failover import supports_current_request_fallback
 from .constants import DailyRunStatus
+from .progress import report_stage, report_completed
 from .delivery.feishu_cli import FeishuCliSelfDelivery
 from .utils.commands import run_text_command
 from .errors import (
@@ -602,6 +603,7 @@ class CollectedMergeRunner:
         self._start_collected_merge_trace(target_date, input_dir)
         directory_started_at = perf_counter()
         warning_messages: list[str] = []
+        report_stage("source_parse")
         source_parse_started_at = perf_counter()
         (
             source_events,
@@ -619,6 +621,7 @@ class CollectedMergeRunner:
         self._record_collected_stage_timing("source_parse", source_parse_started_at)
         warning_messages.extend(read_warnings)
         parsed_source_events = list(source_events)
+        report_stage("source_filter")
         source_filter_started_at = perf_counter()
         source_events, source_filter_warnings, source_filter_diagnostics = (
             self._filter_source_events(source_events)
@@ -721,6 +724,7 @@ class CollectedMergeRunner:
         )
 
         try:
+            report_stage("markdown_write")
             markdown_write_started_at = perf_counter()
             output_path.parent.mkdir(parents=True, exist_ok=True)
             day_doc = self.store.render_day_document(
@@ -770,6 +774,7 @@ class CollectedMergeRunner:
                 markdown_write_started_at,
             )
 
+        report_stage("self_delivery")
         self_delivery_started_at = perf_counter()
         if delivery_identity is None:
             self_delivery_status, self_delivery_target, self_delivery_error = (
@@ -839,6 +844,7 @@ class CollectedMergeRunner:
                 target_date,
                 source_events,
             )
+        report_stage("content_merge")
         content_merge_started_at = perf_counter()
         try:
             return self._merge_source_events_single_stage(
@@ -857,6 +863,7 @@ class CollectedMergeRunner:
         target_date: str,
         source_events: list[CollectedSourceEvent],
     ) -> tuple[list[WorkEvent], list[str]]:
+        report_stage("candidate_reconciliation")
         reconciliation_started_at = perf_counter()
         try:
             deterministic_groups, deterministic_warnings = self._build_deterministic_groups(
@@ -867,6 +874,7 @@ class CollectedMergeRunner:
                 "candidate_reconciliation",
                 reconciliation_started_at,
             )
+        report_stage("candidate_grouping")
         grouping_started_at = perf_counter()
         try:
             grouping_result, grouping_warnings = self._invoke_collected_grouping_with_retry(
@@ -879,6 +887,7 @@ class CollectedMergeRunner:
                 "candidate_grouping",
                 grouping_started_at,
             )
+        report_stage("candidate_reconciliation")
         reconciliation_started_at = perf_counter()
         try:
             grouping_result, repair_warnings = repair_collected_grouping_result(
@@ -895,6 +904,7 @@ class CollectedMergeRunner:
                 "candidate_reconciliation",
                 reconciliation_started_at,
             )
+        report_stage("group_discovery")
         discovery_started_at = perf_counter()
         try:
             discovery_outcome = self._discover_collected_group_review_candidates(
@@ -907,6 +917,7 @@ class CollectedMergeRunner:
                 "group_discovery",
                 discovery_started_at,
             )
+        report_stage("high_risk_review")
         review_started_at = perf_counter()
         try:
             grouping_result, review_warnings = self._review_high_risk_groups(
@@ -921,6 +932,7 @@ class CollectedMergeRunner:
                 "high_risk_review",
                 review_started_at,
             )
+        report_stage("content_merge")
         content_merge_started_at = perf_counter()
         try:
             rendered_groups, retry_warnings = self._render_collected_multi_groups(
@@ -2351,6 +2363,7 @@ class CollectedMergeRunner:
         )
         rendered_by_group_id: dict[str, CollectedMergeGroup] = {}
         warnings_by_group_id: dict[str, list[str]] = {}
+        report_stage("content_merge", total=len(groups))
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = {
                 executor.submit(render_group, index, group): group
@@ -2359,6 +2372,7 @@ class CollectedMergeRunner:
             for future in as_completed(futures):
                 group = futures[future]
                 rendered, group_warnings = future.result()
+                report_completed()
                 rendered_by_group_id[group.group_id] = rendered
                 warnings_by_group_id[group.group_id] = group_warnings
 

@@ -1,0 +1,144 @@
+# Windows 安装、配置与验收
+
+本次改进依据 Windows 11 AMD64、PowerShell 7.6.5、Python 3.12.10
+的真实反馈。新增代码在 macOS 上完成离线验证，仓库配置 Windows CI；
+这不代表所有 Windows 版本、ARM64 和真实在线业务已经验收。
+
+## 安装
+
+直接依赖 `mslex` 用于保护 CMD 参数中的特殊字符（如文件名里的 `&`）。
+需要 Python 3.11+。推荐 PowerShell 7，从仓库目录运行：
+
+```powershell
+pwsh -NoProfile -File .\scripts\install_worktrace.ps1
+```
+
+脚本安装 `requirements.txt` 并执行 `pip check`，保留已有 `.env`。
+Python 版本不足、pip 失败或 Skill 链接失败会停止。默认链接位置是
+`$env:CODEX_HOME\skills\worktrace`，未设置时使用当前用户 `.codex`。
+含中文、空格目录受支持；符号链接不可用时尝试目录联接。已有目标只有
+确实链接到当前仓库才复用，普通目录、其他安装和损坏链接均保留并提示。
+可以用 `-SkillDir <目录>` 另选位置，或明确用 `-SkipSkillInstall` 跳过链接。
+
+复制 Skill 文件只提供代码与操作说明，不会安装 Python 依赖、外部 CLI
+或私有模型配置。虚拟环境安装示例：
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+.\.venv\Scripts\python.exe -m pip check
+.\.venv\Scripts\python.exe -m src.worktrace.cli --help
+```
+
+飞书 CLI 的[官方安装说明与发行包](https://github.com/larksuite/cli)。
+选择匹配 AMD64/ARM64 的包，并按官方校验说明核验。安装后先阅读：
+
+```powershell
+lark-cli config init --help
+lark-cli auth login --help
+lark-cli auth status
+```
+
+按组织应用信息执行初始化，由本人选择并确认用户授权。安装脚本不授予
+飞书业务权限。默认双线路还需要 [Codex CLI](https://developers.openai.com/codex/cli)；
+`online_only` 无需 Codex。修改用户 PATH 后，重启终端和 Codex，已有进程
+不会自动获得新 PATH。临时测试也可以仅向当前 PowerShell 的 `$env:PATH`
+追加自己安装的目录，无需修改系统设置。
+
+## 显式导入 Codex 配置
+
+```powershell
+python -m src.worktrace.cli import-codex-config
+python -m src.worktrace.cli import-codex-config --apply
+```
+
+默认仅预览，读取实际 `CODEX_HOME/config.toml` 或用户默认目录。
+有默认 profile 时采用该 profile，也可用 `--profile <名称>` 选择。
+只读取个人顶层和 profile 的模型、推理强度与 provider；项目配置及会话
+命令行覆盖不在导入范围内。缺少必填字段时列出 `missing_keys`，不猜模型。
+
+`values` 是导入后的非敏感设置，`preserved_keys` 是保留的已有键。
+`--apply` 只填写 `.env` 空缺项，已有 `high`、模型、provider 均不覆盖。
+运行期仍只读取 WorkTrace 本地七项 Codex 设置，继续隔离个人配置和凭据环境。
+
+`auth_source` 显示 provider bearer token、provider 环境变量、Codex 存储或
+无需认证；它只说明来源，不表示凭据已经有效。个人 provider 的
+`experimental_bearer_token` 不会自动进入隔离运行，`env_key` 也不继承。
+需要转换 bearer token 时明确执行：
+
+```powershell
+python -m src.worktrace.cli import-codex-config --apply --import-auth
+```
+
+此命令调用官方 `codex login --with-api-key`，密钥只经 stdin 传入 Codex
+文件认证存储，不写入 WorkTrace `.env`、日志、命令参数或结果。现有认证
+文件或已登录/无法确认的认证状态会阻止转换，不会覆盖已有凭据。转换后
+`requires_openai_auth=true` 表示采用 Codex 认证存储；不需要认证的 provider
+仍可保持 false。若 `.env` 已有 false 或不同 provider，命令先阻止转换，
+列出保留值；需本人确认字段含义并手动调整，再重试。已有 CLI 认证无需
+再次导入。provider 环境变量认证目前只报告来源，不自动复制环境密钥。
+认证操作以 [OpenAI 官方认证文档](https://developers.openai.com/codex/auth)
+为依据；认证是否被目标 provider 接受，仍以实际探针为准。
+
+## 自检与错误提示
+
+```powershell
+python -m src.worktrace.cli --preflight
+python -m src.worktrace.cli --preflight-full
+```
+
+默认双线路自检实际探测 Codex，`online_fallback=available` 仅表示备用配置
+存在，`online_probe_status=not_run` 表示未探测。完整自检分别探测主线路和
+备用 Function Calling：一条失败仍检查另一条，任何必需检查失败则退出 1。
+`online_only` 只探测 Online。探针仅提交固定测试内容，不读取私人聊天、
+生成日报或发消息，也不改变正式业务的认证错误处理和主备顺序。
+
+完整自检提供各项状态和脱敏错误类别，区分 CLI 缺失、飞书未配置、未登录、
+认证被拒绝、权限、网络、TLS 和不支持的模型或推理参数。服务返回 401
+不能单凭状态码证明具体是哪份凭据不匹配，会提示检查 provider 与认证来源。
+匹配规则和提示维护在 `config/runtime_diagnostics.json`。
+
+Online 的 `tls_verify` / `certificate_verification` 展示实际校验开关。
+默认仍兼容原内网配置（关闭校验），不能据此宣称证书可信性已验收；
+按自己服务的证书链配置 `WORKTRACE_LLM_TLS_VERIFY=true` 后再检查。
+Codex TLS 行为由其 CLI/provider 决定，Online 的字段不代表 Codex 的校验状态。
+安装及自检不会修改 hosts、证书或系统网络。确有网络前提时，可由本人在
+Windows hosts 文件中添加仅针对指定域名的 `服务IP 自己指定的域名`，
+不要照抄其他机器的地址，也不要改变 HTTPS 原域名来绕过证书检查。
+
+## 中文输出、进度与告警
+
+CLI 主进程和外部命令输出按 UTF-8 处理，stdout 只有最终 JSON，日志和
+进度写 stderr。等待超过默认 30 秒会显示中文阶段与已耗时，有明确工作量
+时显示完成/总量；不显示聊天、prompt、凭据、内部 ID 或预计完成时间。
+无需打开原始 debug，即可从个人和多人 JSON 的 `stage_timing_summary`
+读取墙钟耗时及请求累计耗时。阶段可能包含其他阶段，不能直接相加；
+请求累计耗时表示并发负载，不是实际等待时间。
+
+PowerShell 7.4+ 原生命令直接重定向通常保留字节；管道经 PowerShell
+读取时仍受宿主解码设置影响。PowerShell 5.1 可能按旧代码页解码原生管道，
+`Out-File` 默认还会写 UTF-16。WorkTrace 不修改系统代码页；推荐升级到
+PowerShell 7，或在捕获端明确读取 UTF-8。下面方式由 Python 直接保存
+stdout 字节，避免 PowerShell 重新编码（它会执行所给命令，本例只自检）：
+
+```powershell
+python -c "import pathlib,subprocess,sys; p=subprocess.run([sys.executable,'-m','src.worktrace.cli','--preflight'],stdout=subprocess.PIPE); pathlib.Path('preflight.json').write_bytes(p.stdout); sys.exit(p.returncode)"
+Get-Content -Encoding UTF8 .\preflight.json
+```
+
+PowerShell 5.1 的实际管道显示与 ARM64 尚需各自实机复验。
+
+JSON 新增 `warnings` 数组（code、stage、summary），旧个人 `error_summary`
+和多人 `warning_messages` 保留以兼容已有消费者。`success_with_warnings`
+表示产物成功，但仍需检查送达及跳过数量；`segment_context_missing` 会明确
+说明片段已经跳过，不能把这份报告认定为数据完整。历史 JSON 缺少新字段
+仍可读取。结构化提示不复制原始错误或 ID，旧字段保持原有详细说明。
+
+## 自动检查范围
+
+`.github/workflows/windows.yml` 在干净 Windows AMD64 环境安装依赖，运行
+CLI 帮助、模块导入、`pip check` 和针对性离线测试。PowerShell 测试覆盖
+旧 Python、pip 失败、已存在目标、保留 `.env`、CODEX_HOME 与中文空格路径；真实 `.cmd/.bat` 进程还验证
+带 `&`、`%`、`!` 和引号的参数。
+认证、飞书和模型使用合成数据，不调用真实业务服务。CI 配置已提交不等于
+该次 Windows 任务已经运行通过，应查看远程 Actions 的实际结果。

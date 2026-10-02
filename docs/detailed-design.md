@@ -621,3 +621,39 @@ segmentation 和 segment batch 的模型失败轮次保存输入、prompt 与 `f
 4. `tests/unit/test_docs_contract.py` 的关键契约
 
 专题文档必须在开头标明它描述的是正式主链、回退路径、独立实验还是历史设计，避免再次把设计稿当成当前代码。
+
+## Windows 运行接口补充
+
+复制 Skill 不等于安装运行依赖；requirements.txt 显式声明 httpx 和
+mslex。Windows CMD 参数使用 mslex 保护特殊字符，以完整命令行传入，
+避免重复转义，exe 继续直接启动。
+安装器检查 Python 3.11+、pip 退出码、CODEX_HOME 和既有链接，保留
+.env。主 CLI 在解析参数之前配置 UTF-8 stdout/stderr，不修改系统
+代码页，并兼容没有 reconfigure 的嵌入流。stdout 保持最终 JSON。
+
+`codex_config_import.py` 提供 import-codex-config；默认预览个人
+顶层/profile 的非敏感七项，--apply 仅写空缺，保留 high 等已有值。
+--apply --import-auth 才经 stdin 调用官方认证入口；已有认证或不能
+确认登出时阻止转换，认证要求和 provider 冲突时先阻止，不静默覆盖。
+正式分析入口继续 --ignore-user-config 和既有环境白名单，不读取
+此导入模块的个人配置，也不传入 provider bearer token。
+
+--preflight-full 独立验证各配置后端的 Function Calling，主线路失败
+仍检测备用，返回逐项状态；不会改变正式请求的认证错误处理。默认
+自检的 online_fallback=available 是配置可用，不是备用实测成功。
+TLS 字段只反映 Online 的 tls_verify，保留原默认内网兼容策略。
+技术错误匹配、进度标签和告警提示维护在 config/runtime_diagnostics.json，
+不回显 SDK 原始错误。401 只证明认证被拒绝，不证明具体凭据来源。
+
+progress.py 使用当前 CLI 的进度上下文与定时等待提示，只接受阶段键
+和 Python 计数；个人和多人主线程更新阶段与完成量，stderr 输出安全
+中文，不改变模型参数、并发、重试或结果顺序。每次业务调用退出均停止
+进度线程。普通 JSON 新增 warnings（code/stage/summary）和个人
+stage_timing_summary，旧 error_summary / warning_messages 保留。
+个人原有内部计时直接序列化，历史结果缺少新增字段仍可读取；不把
+包含阶段相加或把 request_accumulated_ms 当墙钟时间。实际片段跳过
+继续累计 skipped_slice_count 并生成告警，不改变业务处理。
+
+平台验收与 .github/workflows/windows.yml 范围见
+[Windows 使用说明](windows-guide.md)，Windows CI 完成情况以远程运行
+结果为准；本地 macOS 离线测试不能代替真实 Windows 在线业务验收。
