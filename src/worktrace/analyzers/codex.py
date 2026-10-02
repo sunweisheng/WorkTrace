@@ -836,6 +836,8 @@ class CodexAnalyzer(Analyzer):
                     f"web_search={toml_string_literal('disabled')}",
                     "--disable",
                     "multi_agent",
+                    "--disable",
+                    "shell_tool",
                 ]
                 if isolated_image_path is not None:
                     args.extend(["--image", str(isolated_image_path)])

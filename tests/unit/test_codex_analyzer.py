@@ -634,6 +634,12 @@ def test_codex_analyzer_passes_output_schema_in_default_mode(tmp_path: Path) -> 
     assert "--strict-config" in captured["args"]
     assert "--disable" in captured["args"]
     assert captured["args"][captured["args"].index("--disable") + 1] == "multi_agent"
+    disabled_features = {
+        captured["args"][index + 1]
+        for index, arg in enumerate(captured["args"])
+        if arg == "--disable"
+    }
+    assert "shell_tool" in disabled_features
     assert "agents.enabled=false" not in captured["args"]
     assert "model_provider='test-relay'" in captured["args"]
     assert (

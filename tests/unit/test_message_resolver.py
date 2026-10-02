@@ -4,11 +4,88 @@ import json
 from pathlib import Path
 from subprocess import CompletedProcess
 
+import pytest
+
 from src.worktrace.config import RuntimeConfig
 from src.worktrace.errors import AnalyzerProtocolError, CodexProtocolViolationError
 from src.worktrace.models import AttachmentMeta, LinkMeta, NormalizedMessage
 from src.worktrace.resolvers.feishu_message import FeishuMessageContentResolver
 from src.worktrace.vision import CodexFirstImageSummarizer, ImageSummarySettings
+
+
+@pytest.mark.parametrize(
+    "attachment_type, file_name, mime_type, expected_text",
+    [
+        ("image", "image.png", "image/png", "图片内容摘要：图片摘要"),
+        ("file", "note.txt", "text/plain", "附件正文：附件内容"),
+    ],
+)
+def test_default_download_runner_uses_temporary_directory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    attachment_type: str,
+    file_name: str,
+    mime_type: str,
+    expected_text: str,
+) -> None:
+    download_dirs: list[Path] = []
+
+    def fake_command(args, *, cwd=None):
+        assert args[args.index("--type") + 1] == attachment_type
+        download_dir = Path(cwd)
+        download_dirs.append(download_dir)
+        (download_dir / file_name).write_bytes(b"downloaded-content")
+        return CompletedProcess(args, 0, stdout="", stderr="")
+
+    class ImageSummarizer:
+        def summarize(self, path, *, required=False):
+            assert required is True
+            assert path.read_bytes() == b"downloaded-content"
+            return "图片摘要"
+
+    class AttachmentExtractor:
+        def is_supported(self, name):
+            return True
+
+        def extract(self, path, *, file_name):
+            assert path.read_bytes() == b"downloaded-content"
+            return "附件内容"
+
+    monkeypatch.setattr(
+        "src.worktrace.resolvers.feishu_message.run_text_command",
+        fake_command,
+    )
+    resolver = FeishuMessageContentResolver(
+        config=RuntimeConfig(data_root=tmp_path / "data"),
+        image_summarizer=ImageSummarizer(),
+        text_attachment_extractor=AttachmentExtractor(),
+    )
+    message = NormalizedMessage(
+        conversation_id="oc_download",
+        conversation_name="项目群",
+        message_id="om_download",
+        sender_open_id="ou_self",
+        sender_name="本人",
+        send_time="2026-06-22T10:00:00+08:00",
+        message_type=attachment_type,
+        text="",
+        reply_to_message_id=None,
+        quote_message_id=None,
+        attachments=[AttachmentMeta("attachment", file_name, mime_type, 1)],
+    )
+
+    if attachment_type == "image":
+        blocks = resolver.load_required_image_summaries(message, ["attachment"])
+    else:
+        blocks = resolver.load_attachment_text_if_needed(
+            message, ["attachment"], "需要正文"
+        )
+
+    assert blocks is not None
+    assert blocks[0].text == expected_text
+    assert resolver.drain_warning_messages() == []
+    assert len(download_dirs) == 1
+    assert not download_dirs[0].exists()
 
 
 def test_message_resolver_extracts_text_and_links(tmp_path: Path) -> None:

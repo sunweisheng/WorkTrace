@@ -162,8 +162,10 @@ class FeishuMessageContentResolver(ContentResolver):
     def _run_command(
         self,
         args: Sequence[str],
+        *,
+        cwd: Path | None = None,
     ) -> subprocess.CompletedProcess[str]:
-        return run_text_command(args)
+        return run_text_command(args, cwd=cwd)
 
     def load_attachment_text_if_needed(
         self,
