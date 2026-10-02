@@ -2,6 +2,7 @@
 
 本次改进依据 Windows 11 AMD64、PowerShell 7.6.5、Python 3.12.10
 的真实反馈。新增代码在 macOS 上完成离线验证，仓库配置 Windows CI；
+Windows Server 2025 AMD64 的 Python 3.11/3.12 两组离线检查已通过。
 这不代表所有 Windows 版本、ARM64 和真实在线业务已经验收。
 
 ## 安装
@@ -138,7 +139,14 @@ JSON 新增 `warnings` 数组（code、stage、summary），旧个人 `error_sum
 
 `.github/workflows/windows.yml` 在干净 Windows AMD64 环境安装依赖，运行
 CLI 帮助、模块导入、`pip check` 和针对性离线测试。PowerShell 测试覆盖
-旧 Python、pip 失败、已存在目标、保留 `.env`、CODEX_HOME 与中文空格路径；真实 `.cmd/.bat` 进程还验证
-带 `&`、`%`、`!` 和引号的参数。
-认证、飞书和模型使用合成数据，不调用真实业务服务。CI 配置已提交不等于
-该次 Windows 任务已经运行通过，应查看远程 Actions 的实际结果。
+旧 Python、pip 失败、已存在目标、保留 `.env`、CODEX_HOME 与中文空格路径；
+真实 `.cmd/.bat` 进程还验证带 `&`、`%`、`!`、引号和 `^` 的参数，
+以及安装目录本身带 `&`、`%`、`!`、`^` 的情况。
+认证、飞书和模型使用合成数据，不调用真实业务服务。
+
+2026-10-02 的[Windows CI 复测](https://github.com/sunweisheng/WorkTrace/actions/runs/36974505094)
+已通过，代码提交为 `4510b15e0f18878e4bcdf87a2508e44d6325f885`。
+Windows Server 2025 AMD64、PowerShell 7、Python 3.11/3.12 两组各
+168 项通过、1 项 POSIX 安装检查跳过；macOS 全量测试为 954 项通过、
+24 项 Windows/PowerShell 检查跳过。更新代码后仍应查看对应提交的
+Actions 结果，不能把这次结果当作后续版本的验证。
