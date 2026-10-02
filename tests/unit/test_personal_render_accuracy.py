@@ -125,7 +125,7 @@ def test_final_render_rejects_primary_role_for_non_execution_action(kind):
     rendered = payload["groups"][0]
     rendered["self_actions"][0]["kind"] = kind
     rendered["self_relations"][0]["relation"] = "primary_execution"
-    with pytest.raises(AnalyzerProtocolError, match="action.*relation"):
+    with pytest.raises(AnalyzerProtocolError, match=r"self_relations\[0\]"):
         _parse(payload)
 
 
@@ -134,6 +134,98 @@ def test_final_render_rejects_self_claim_without_action():
     payload["groups"][0]["fact_items"][1]["self_action_indices"] = []
     with pytest.raises(AnalyzerProtocolError, match="self.*action"):
         _parse(payload)
+
+
+def test_final_render_identifies_action_with_invalid_self_evidence():
+    payload = _payload()
+    payload["groups"][0]["self_actions"][0]["evidence_message_ids"] = [
+        "m_other"
+    ]
+    with pytest.raises(
+        AnalyzerProtocolError,
+        match=r"self_actions\[0\].*self_evidence_message_ids",
+    ):
+        _parse(payload)
+
+
+def test_final_render_identifies_fact_missing_action_evidence():
+    payload = _payload()
+    payload["groups"][0]["fact_items"][1]["evidence_message_ids"] = [
+        "m_other"
+    ]
+    with pytest.raises(
+        AnalyzerProtocolError,
+        match=r"fact_items\[1\].*self_actions\[0\]",
+    ):
+        _parse(payload)
+
+
+def test_final_render_identifies_unsupported_relation():
+    payload = _payload()
+    payload["groups"][0]["self_relations"][0]["relation"] = (
+        "primary_execution"
+    )
+    with pytest.raises(
+        AnalyzerProtocolError,
+        match=r"self_relations\[0\].*primary_execution.*execution",
+    ):
+        _parse(payload)
+
+
+def test_final_render_identifies_action_missing_from_content():
+    payload = _payload()
+    payload["groups"][0]["self_actions"].append({
+        "kind": "execution", "evidence_message_ids": ["m_execute"],
+    })
+    payload["groups"][0]["self_relations"].append({
+        "relation": "primary_execution",
+        "evidence_message_ids": ["m_execute"],
+    })
+    candidate = replace(
+        _candidate(), self_evidence_message_ids=["m_self", "m_execute"],
+    )
+    with pytest.raises(
+        AnalyzerProtocolError,
+        match=r"content.*self_actions\[1\]",
+    ):
+        parse_personal_group_render_payload(
+            payload, group=GROUP, candidates=[candidate],
+            action_relation_support={
+                item.key: item.supported_relations
+                for item in CONFIG.retention_policy.contribution_actions
+            },
+            allowed_self_relations=tuple(
+                item.key for item in CONFIG.self_relation_types
+            ),
+        )
+
+
+def test_final_render_reports_independent_relation_and_content_errors():
+    payload = _payload()
+    item = payload["groups"][0]
+    item["self_actions"].append({
+        "kind": "execution", "evidence_message_ids": ["m_execute"],
+    })
+    item["self_relations"][0]["relation"] = "primary_execution"
+    candidate = replace(
+        _candidate(), self_evidence_message_ids=["m_self", "m_execute"],
+    )
+    with pytest.raises(AnalyzerProtocolError) as error:
+        parse_personal_group_render_payload(
+            payload, group=GROUP, candidates=[candidate],
+            action_relation_support={
+                action.key: action.supported_relations
+                for action in CONFIG.retention_policy.contribution_actions
+            },
+            allowed_self_relations=tuple(
+                relation.key for relation in CONFIG.self_relation_types
+            ),
+        )
+    feedback = str(error.value)
+    assert "self_relations[0]" in feedback
+    assert "self_actions[0]" in feedback
+    assert "self_actions[1]" in feedback
+    assert "content" in feedback
 
 
 @pytest.mark.parametrize("kind", ["execution", "commitment"])
@@ -303,6 +395,37 @@ def test_final_render_sends_source_messages_and_uses_reviewed_metadata(tmp_path)
     assert outcome.rendered_groups["g1"].retention_reason == (
         "deliverable_updated"
     )
+
+
+def test_final_render_retry_receives_specific_evidence_feedback(tmp_path):
+    class Analyzer:
+        def __init__(self):
+            self.prompts = []
+
+        def request_function(self, prompt, *, function_spec, **kwargs):
+            self.prompts.append(json.loads(prompt))
+            payload = _payload()
+            if len(self.prompts) == 1:
+                payload["groups"][0]["fact_items"][1][
+                    "evidence_message_ids"
+                ] = ["m_other"]
+            return payload
+
+    analyzer = Analyzer()
+    config = replace(CONFIG, data_root=tmp_path,
+                     day_group_validation_retry_limit=1)
+    runner = DailyTraceRunner(config, RuntimeDependencies(
+        chat_source=object(), content_resolver=object(), analyzer=analyzer,
+        delivery_channel=object(), event_store=MarkdownEventStore(config),
+    ))
+    outcome = runner._render_personal_multi_groups(
+        target_date="2026-07-15", groups=[GROUP], candidates=[_candidate()],
+    )
+
+    assert outcome.failure_count == 0
+    assert outcome.retry_count == 1
+    assert "fact_items[1]" in analyzer.prompts[1]["validation_feedback"]
+    assert "self_actions[0]" in analyzer.prompts[1]["validation_feedback"]
 
 
 def test_final_render_preserves_separate_self_evidence_in_event_sources():

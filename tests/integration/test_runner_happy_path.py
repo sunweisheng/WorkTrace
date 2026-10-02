@@ -243,6 +243,11 @@ def test_failed_final_review_keeps_existing_report_and_skips_delivery(
 
     assert result.status == DailyRunStatus.FAILED.value
     assert "final review" in result.error_summary
+    assert result.conversation_count == 1
+    assert result.message_count == 1
+    assert result.day_grouping_summary.candidate_count == 1
+    assert result.day_grouping_summary.content_render_failure_count == 1
+    assert result.event_count == 0
     assert Path(existing.output_path).read_bytes() == original_bytes
 
 

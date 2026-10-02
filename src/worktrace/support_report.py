@@ -326,6 +326,12 @@ def build_diagnostic_facts(
                 "slice_count": _safe_count(result.slice_count),
                 "batch_count": _safe_count(result.batch_count),
                 "event_count": _safe_count(result.event_count),
+                "candidate_count": _safe_count(
+                    result.day_grouping_summary.candidate_count
+                ),
+                "final_group_count": _safe_count(
+                    result.day_grouping_summary.final_group_count
+                ),
                 "warning_count": _safe_count(result.warning_count),
                 "skipped_count": _safe_count(result.skipped_slice_count),
             },
@@ -382,6 +388,13 @@ def build_diagnostic_facts(
         config=config,
         cwd=cwd,
     )
+    if isinstance(result, DailyRunResult):
+        usage["validation_retry_count"] = _safe_count(
+            result.day_grouping_summary.validation_retry_count
+        )
+        usage["content_render_failure_count"] = _safe_count(
+            result.day_grouping_summary.content_render_failure_count
+        )
     add("model_usage", usage)
 
     output_path = result.output_path
@@ -967,6 +980,14 @@ def _support_analysis_consistency_errors(
     retry_count = (
         _safe_count(model_fact.metrics.get("retry_count", 0)) if model_fact else 0
     )
+    validation_retry_count = (
+        _safe_count(model_fact.metrics.get("validation_retry_count", 0))
+        if model_fact else 0
+    )
+    content_render_failures = (
+        _safe_count(model_fact.metrics.get("content_render_failure_count", 0))
+        if model_fact else 0
+    )
     fallback_count = (
         _safe_count(model_fact.metrics.get("fallback_count", 0))
         if model_fact
@@ -995,9 +1016,11 @@ def _support_analysis_consistency_errors(
         "delivery_failed" in all_causes or "delivery" in categories
     ):
         errors.append("delivery_status_conflict")
-    if failed_requests == 0 and "model_failure" in all_causes:
+    if (failed_requests == 0 and content_render_failures == 0
+            and "model_failure" in all_causes):
         errors.append("model_failure_conflict")
-    if retry_count == 0 and "model_retry" in all_causes:
+    if (retry_count == 0 and validation_retry_count == 0
+            and "model_retry" in all_causes):
         errors.append("model_retry_conflict")
     if fallback_count == 0 and "model_fallback" in all_causes:
         errors.append("model_fallback_conflict")

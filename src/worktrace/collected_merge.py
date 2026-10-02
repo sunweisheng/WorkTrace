@@ -302,13 +302,6 @@ class CollectedMergeRunner:
         if step is None:
             return
         self._attach_collected_merge_llm_calls(step)
-        recorder = self._llm_usage_recorder()
-        if recorder is not None:
-            recorder.mark_request_validation(
-                str(step_index),
-                valid=not source_coverage_error,
-                errors=(source_coverage_error,) if source_coverage_error else (),
-            )
         self._write_collected_merge_trace_step(step)
 
     def run(

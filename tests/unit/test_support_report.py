@@ -135,6 +135,7 @@ def test_support_report_uses_only_safe_facts_and_writes_one_markdown(tmp_path: P
     assert not list(report_path.parent.glob("*.json"))
     assert not list(report_path.parent.glob("*.zip"))
 
+
     prompt = analyzer.prompts[0]
     report = report_path.read_text(encoding="utf-8")
     for private_value in (
@@ -154,6 +155,25 @@ def test_support_report_uses_only_safe_facts_and_writes_one_markdown(tmp_path: P
     assert "D001" in prompt
     assert "大模型问题分析" in report
     assert "结果送达" in report
+
+
+def test_personal_diagnostic_counts_validation_retries_separately(tmp_path):
+    result = replace(
+        _result(tmp_path, status=DailyRunStatus.FAILED.value),
+        day_grouping_summary=replace(
+            _result(tmp_path).day_grouping_summary,
+            validation_retry_count=3,
+        ),
+    )
+    facts = build_diagnostic_facts(
+        result=result, run_mode="personal",
+        config=RuntimeConfig(data_root=tmp_path / "data"),
+        cwd=REPO_ROOT, elapsed_ms=1000,
+        settings=load_support_report_settings(REPO_ROOT),
+    )
+    usage = next(fact.metrics for fact in facts if fact.kind == "model_usage")
+    assert usage["validation_retry_count"] == 3
+    assert usage["retry_count"] == 0
 
 
 def test_invalid_fact_ids_retry_online_then_use_codex(tmp_path: Path) -> None:

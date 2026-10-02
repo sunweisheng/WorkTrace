@@ -411,7 +411,18 @@ class DailyTraceRunner:
             )
             return self._finish_run(
                 run_started_at,
-                self._failed_result(target_date, str(exc)),
+                self._failed_result(
+                    target_date, str(exc),
+                    conversation_count=len(conversations),
+                    message_count=len(messages),
+                    slice_count=len(conversation_slices),
+                    batch_count=analyzed_batch_count,
+                    skipped_slice_count=skipped_slice_count,
+                    warning_messages=warning_messages,
+                    day_grouping_summary=DayGroupingSummary(
+                        candidate_count=len(all_candidates),
+                    ),
+                ),
             )
         self._record_personal_stage(
             "candidate_generation",
@@ -750,7 +761,21 @@ class DailyTraceRunner:
                     )
                 return self._finish_run(
                     run_started_at,
-                    self._failed_result(target_date, str(exc)),
+                    self._failed_result(
+                        target_date, str(exc),
+                        conversation_count=len(conversations),
+                        message_count=len(messages),
+                        slice_count=len(conversation_slices),
+                        batch_count=analyzed_batch_count,
+                        skipped_slice_count=skipped_slice_count,
+                        warning_messages=warning_messages,
+                        retention_review_summary=retention_review_summary,
+                        personal_fact_review_summary=personal_fact_review_summary,
+                        day_grouping_summary=replace(
+                            day_grouping_summary,
+                            candidate_count=len(all_candidates),
+                        ),
+                    ),
                 )
 
         if not merged_drafts:
@@ -854,7 +879,18 @@ class DailyTraceRunner:
                 self._record_personal_stage(active_stage, active_stage_marker)
             return self._finish_run(
                 run_started_at,
-                self._failed_result(target_date, str(exc)),
+                self._failed_result(
+                    target_date, str(exc),
+                    conversation_count=len(conversations),
+                    message_count=len(messages),
+                    slice_count=len(conversation_slices),
+                    batch_count=analyzed_batch_count,
+                    skipped_slice_count=skipped_slice_count,
+                    warning_messages=warning_messages,
+                    retention_review_summary=retention_review_summary,
+                    personal_fact_review_summary=personal_fact_review_summary,
+                    day_grouping_summary=day_grouping_summary,
+                ),
             )
 
         status = (
@@ -1374,25 +1410,45 @@ class DailyTraceRunner:
             day_grouping_summary=day_grouping_summary or DayGroupingSummary(),
         )
 
-    def _failed_result(self, target_date: str, error_summary: str) -> DailyRunResult:
+    def _failed_result(
+        self,
+        target_date: str,
+        error_summary: str,
+        *,
+        conversation_count: int = 0,
+        message_count: int = 0,
+        slice_count: int = 0,
+        batch_count: int = 0,
+        skipped_slice_count: int = 0,
+        warning_messages: list[str] | None = None,
+        retention_review_summary: RetentionReviewSummary | None = None,
+        personal_fact_review_summary: PersonalFactReviewSummary | None = None,
+        day_grouping_summary: DayGroupingSummary | None = None,
+    ) -> DailyRunResult:
+        warnings = list(warning_messages or [])
         return DailyRunResult(
             target_date=target_date,
-            conversation_count=0,
-            message_count=0,
-            slice_count=0,
-            batch_count=0,
+            conversation_count=conversation_count,
+            message_count=message_count,
+            slice_count=slice_count,
+            batch_count=batch_count,
             event_count=0,
-            skipped_slice_count=0,
-            warning_count=0,
+            skipped_slice_count=skipped_slice_count,
+            warning_count=len(warnings),
             status=DailyRunStatus.FAILED.value,
             output_path=None,
             error_summary=error_summary,
+            warning_messages=warnings,
             self_delivery_status="",
             self_delivery_target="",
             self_delivery_error="",
-            retention_review_summary=RetentionReviewSummary(),
-            personal_fact_review_summary=PersonalFactReviewSummary(),
-            day_grouping_summary=DayGroupingSummary(),
+            retention_review_summary=(
+                retention_review_summary or RetentionReviewSummary()
+            ),
+            personal_fact_review_summary=(
+                personal_fact_review_summary or PersonalFactReviewSummary()
+            ),
+            day_grouping_summary=day_grouping_summary or DayGroupingSummary(),
         )
 
     def _finish_run(

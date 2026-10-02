@@ -812,8 +812,9 @@ def test_function_arguments_repairs_one_duplicate_comma_outside_string() -> None
 
 
 def test_function_arguments_repairs_one_trailing_comma_outside_string() -> None:
+    arguments = '{"merged_groups": [], "singleton_draft_ids": ["d1"],\n}'
     parsed = _parse_function_arguments_with_diagnostics(
-        '{"merged_groups": [], "singleton_draft_ids": ["d1"],\n}'
+        arguments
     )
 
     assert parsed.payload == {
@@ -823,7 +824,9 @@ def test_function_arguments_repairs_one_trailing_comma_outside_string() -> None:
     assert parsed.repair is not None
     assert parsed.repair.kind == "single_trailing_comma_outside_string"
     assert parsed.repair.count == 1
-    assert parsed.repair.json_error_line == 1
+    with pytest.raises(json.JSONDecodeError) as error:
+        json.loads(arguments)
+    assert parsed.repair.json_error_line == error.value.lineno
     assert parsed.repair.json_error_column > 0
 
 

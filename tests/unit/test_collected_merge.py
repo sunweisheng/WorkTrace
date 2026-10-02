@@ -337,6 +337,34 @@ def _build_runner(
     )
 
 
+def test_refresh_collected_trace_after_fallback_preserves_validation(tmp_path):
+    class Analyzer:
+        def __init__(self):
+            self.usage_recorder = LLMUsageRecorder()
+
+    analyzer = Analyzer()
+    runner = _build_runner(tmp_path, analyzer=analyzer)
+    runner._collected_merge_trace_dir = tmp_path
+    runner._collected_merge_trace_steps = [{
+        "step_index": 1,
+        "input_estimated_tokens": 100,
+        "python_validation": {
+            "valid": False,
+            "errors": ["missing source"],
+        },
+    }]
+
+    runner._refresh_collected_merge_trace_step(1)
+
+    refreshed = json.loads((tmp_path / "step-001.json").read_text(
+        encoding="utf-8",
+    ))
+    assert refreshed["python_validation"] == {
+        "valid": False,
+        "errors": ["missing source"],
+    }
+
+
 def test_extract_person_name_from_date_first_filename() -> None:
     assert extract_person_name_from_filename("2026-06-29-张三.md") == "张三"
     assert extract_person_name_from_filename("张三-2026-06-29.md") == "张三"
