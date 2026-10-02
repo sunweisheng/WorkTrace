@@ -46,6 +46,7 @@ fi
 
 echo
 echo "下一步："
-echo "1. 打开 $REPO_ROOT/.env，填写 WORKTRACE_LLM_BASE_URL / MODEL / API_KEY"
-echo "2. 确认 WORKTRACE_LLM_REASONING_EFFORT=none"
+echo "1. 打开 $REPO_ROOT/.env，选择 WORKTRACE_LLM_MODE（默认 codex_with_fallback）"
+echo "2. 默认模式填写七项 WORKTRACE_CODEX_*；仅 Online 填写 WORKTRACE_LLM_BASE_URL / MODEL / API_KEY，无需 Codex"
+echo "   Online 保持 WORKTRACE_LLM_REASONING_EFFORT=none"
 echo "3. 执行自检命令：python3 -m src.worktrace.cli --preflight"

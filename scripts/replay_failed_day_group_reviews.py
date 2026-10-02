@@ -102,7 +102,6 @@ def main() -> int:
 
     config = load_runtime_config_overrides(DEFAULT_CONFIG, cwd=repo_root)
     config = load_conversation_blacklist_overrides(config, cwd=repo_root)
-    config = replace(config, analyzer_backend="online", codex_stdin_mode=False)
     usage_recorder = LLMUsageRecorder()
     analyzer = AnalyzerFactory.create_default(
         config,

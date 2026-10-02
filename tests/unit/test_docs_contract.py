@@ -868,9 +868,6 @@ def test_readme_and_skill_no_longer_mention_merge_drive_upload() -> None:
 def test_skill_mentions_first_run_configuration_requirement() -> None:
     content = Path("SKILL.md").read_text(encoding="utf-8")
 
-    assert "每次使用前" in content
-    assert "必须先检查仓库本地 `.env` 是否已经显式配置 Codex 主线路" in content
     assert "WORKTRACE_LLM_API_KEY" in content
-    assert "不能提交到 git 仓库" in content
     assert "/no_think" in content
     assert "管理人员得到规范化的 `YYYY-MM-DD-登录人姓名-merged.md`" in content

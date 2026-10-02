@@ -200,6 +200,7 @@ def execute(
     file_config = load_runtime_config_overrides(config, cwd=Path.cwd())
     blacklist_config = load_conversation_blacklist_overrides(file_config, cwd=Path.cwd())
     effective_config = apply_cli_overrides(blacklist_config, args)
+    logger.info("WorkTrace llm_mode=%s", effective_config.llm_mode)
     if args.command == "sync-reaction-catalog":
         try:
             result = sync_reaction_catalog_func(

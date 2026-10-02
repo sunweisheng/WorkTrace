@@ -15,8 +15,8 @@ function Write-NextSteps {
 
     Write-Host ""
     Write-Host "下一步："
-    Write-Host "1. 打开 $EnvFilePath，填写 WORKTRACE_CODEX_* 主线路配置"
-    Write-Host "2. 填写 WORKTRACE_LLM_* 备用线路配置；接口类型只能是 responses 或 chat_completions"
+    Write-Host "1. 打开 $EnvFilePath，选择 WORKTRACE_LLM_MODE（默认 codex_with_fallback）"
+    Write-Host "2. 默认模式填写七项 WORKTRACE_CODEX_*；仅 Online 填写 WORKTRACE_LLM_* 连接配置，无需 Codex"
     Write-Host "3. 确认 WORKTRACE_LLM_REASONING_EFFORT=none"
     Write-Host "4. 执行自检命令：python -m src.worktrace.cli --preflight"
 }
@@ -84,7 +84,7 @@ if (Get-Command lark-cli -ErrorAction SilentlyContinue) {
 if (Get-Command codex -ErrorAction SilentlyContinue) {
     Write-Host "已找到 codex。"
 } else {
-    Write-Host "未找到 codex。请先安装 Codex CLI，并确认 codex.cmd 或 codex.exe 已加入 PATH。"
+    Write-Host "未找到 codex。仅 online_only 模式无需安装；默认双线路模式请安装 Codex CLI 并加入 PATH。"
 }
 
 Write-Host "[5/5] 安装 Skill..."

@@ -85,7 +85,11 @@ class LLMCheckpointStore:
             return None
         except (OSError, json.JSONDecodeError):
             return None
-        if not isinstance(payload, dict) or payload.get("input") != input_payload:
+        if (
+            not isinstance(payload, dict)
+            or payload.get("llm_mode") != self.config.llm_mode
+            or payload.get("input") != input_payload
+        ):
             return None
         result = payload.get("result")
         return result if isinstance(result, dict) else None
@@ -95,13 +99,19 @@ class LLMCheckpointStore:
         path.parent.mkdir(parents=True, exist_ok=True)
         temp_path = path.with_suffix(".tmp")
         temp_path.write_text(
-            dump_json({"input": input_payload, "result": result}, pretty=True) + "\n",
+            dump_json({
+                "llm_mode": self.config.llm_mode,
+                "input": input_payload,
+                "result": result,
+            }, pretty=True) + "\n",
             encoding="utf-8",
         )
         temp_path.replace(path)
 
     def _path(self, stage: str, input_payload: dict[str, object]) -> Path:
-        fingerprint = sha256(dump_json(input_payload).encode("utf-8")).hexdigest()
+        fingerprint = sha256(dump_json({
+            "llm_mode": self.config.llm_mode, "input": input_payload,
+        }).encode("utf-8")).hexdigest()
         return _day_root(self.config, self.target_date) / stage / f"{fingerprint}.json"
 
 

@@ -529,10 +529,13 @@ def load_runtime_config_overrides(
     config: RuntimeConfig,
     *,
     cwd: Path | None = None,
+    environ: Mapping[str, str] | None = None,
 ) -> RuntimeConfig:
     base_dir = cwd or Path.cwd()
-    config = _apply_runtime_env_overrides(config, cwd=base_dir)
-    config = _load_model_input_budget_overrides(config, base_dir=base_dir)
+    config = _apply_runtime_env_overrides(config, cwd=base_dir, environ=environ)
+    config = _load_model_input_budget_overrides(
+        config, base_dir=base_dir, environ=environ,
+    )
     rules_path = base_dir / config.event_rules_file_name
     try:
         payload = json.loads(rules_path.read_text(encoding="utf-8"))
@@ -740,11 +743,12 @@ def _load_model_input_budget_overrides(
     config: RuntimeConfig,
     *,
     base_dir: Path,
+    environ: Mapping[str, str] | None = None,
 ) -> RuntimeConfig:
     budget = load_model_input_budget_config(
         base_dir / config.model_input_budget_file_name
     )
-    values = _read_local_env_values(config, cwd=base_dir)
+    values = _read_local_env_values(config, cwd=base_dir, environ=environ)
     primary_model = (
         values.get(config.codex_model_env_var, "").strip()
         if config.llm_mode == "codex_with_fallback" else ""
@@ -1966,8 +1970,9 @@ def _apply_runtime_env_overrides(
     config: RuntimeConfig,
     *,
     cwd: Path | None = None,
+    environ: Mapping[str, str] | None = None,
 ) -> RuntimeConfig:
-    values = _read_local_env_values(config, cwd=cwd)
+    values = _read_local_env_values(config, cwd=cwd, environ=environ)
     updates: dict[str, object] = {}
     if config.llm_mode_env_var in values:
         updates["llm_mode"] = values[config.llm_mode_env_var].strip()

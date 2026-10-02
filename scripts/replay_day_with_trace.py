@@ -11,7 +11,7 @@ from collections import Counter, defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 
-from src.worktrace.config import DEFAULT_CONFIG
+from src.worktrace.config import DEFAULT_CONFIG, load_runtime_config_overrides
 
 
 TIMING_RE = re.compile(
@@ -25,8 +25,9 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--analyzer-backend",
         choices=("online", "codex"),
-        default="online",
-        help="LLM analyzer backend used for this replay.",
+        default=None,
+        help="Legacy explicit override: online=online_only; codex=codex_with_fallback. "
+        "By default follow WORKTRACE_LLM_MODE.",
     )
     parser.add_argument(
         "--data-root",
@@ -623,10 +624,20 @@ def main(argv: list[str] | None = None) -> int:
     ):
         raise SystemExit("--model-input-batch-target-tokens must be positive.")
     repo_root = Path.cwd()
+    env = os.environ.copy()
+    if args.analyzer_backend is not None:
+        env[DEFAULT_CONFIG.llm_mode_env_var] = (
+            "online_only" if args.analyzer_backend == "online"
+            else "codex_with_fallback"
+        )
+    runtime_config = load_runtime_config_overrides(
+        DEFAULT_CONFIG, cwd=repo_root, environ=env,
+    )
+    backend = "online" if runtime_config.llm_mode == "online_only" else "codex"
     effective_model_input_batch_target_tokens = (
         args.model_input_batch_target_tokens
         if args.model_input_batch_target_tokens is not None
-        else DEFAULT_CONFIG.model_input_batch_target_tokens
+        else runtime_config.model_input_batch_target_tokens
     )
     trace_root = Path(args.trace_root) if args.trace_root else repo_root / "data" / "replay-trace" / args.date
     data_root = Path(args.data_root) if args.data_root else repo_root / "data"
@@ -654,7 +665,6 @@ def main(argv: list[str] | None = None) -> int:
     conversation_debug_root.mkdir(parents=True, exist_ok=True)
     counter_path.parent.mkdir(parents=True, exist_ok=True)
 
-    env = os.environ.copy()
     env["PYTHONPATH"] = str(repo_root)
     env["WORKTRACE_REPLAY_TRACE_ROOT"] = str(trace_root)
     env["WORKTRACE_REPLAY_TARGET_DATE"] = args.date
@@ -673,7 +683,6 @@ def main(argv: list[str] | None = None) -> int:
         "from src.worktrace.config import DEFAULT_CONFIG\n"
         "config = replace(\n"
         "    DEFAULT_CONFIG,\n"
-        f"    analyzer_backend={args.analyzer_backend!r},\n"
         f"    codex_stdin_mode={args.codex_stdin_mode!r},\n"
         f"    data_root=Path({str(data_root)!r}),\n"
         f"    conversation_debug_root=Path({str(conversation_debug_root)!r}),\n"
@@ -689,7 +698,8 @@ def main(argv: list[str] | None = None) -> int:
     started_at_utc = _now_utc_iso()
     running_status: dict[str, object] = {
         "target_date": args.date,
-        "analyzer_backend": args.analyzer_backend,
+        "analyzer_backend": backend,
+        "llm_mode": runtime_config.llm_mode,
         "status": "running",
         "started_at_utc": started_at_utc,
         "completed_at_utc": None,
@@ -700,7 +710,7 @@ def main(argv: list[str] | None = None) -> int:
     _emit_live_log(
         stderr_path,
         f'replay.run status="running" target_date="{args.date}" '
-        f'analyzer_backend="{args.analyzer_backend}"',
+        f'analyzer_backend="{backend}" llm_mode="{runtime_config.llm_mode}"',
     )
     try:
         completed = _run_with_live_stderr(
@@ -787,7 +797,8 @@ def main(argv: list[str] | None = None) -> int:
 
     summary = {
         "target_date": args.date,
-        "analyzer_backend": args.analyzer_backend,
+        "analyzer_backend": backend,
+        "llm_mode": runtime_config.llm_mode,
         "codex_stdin_mode": args.codex_stdin_mode,
         "data_root": str(data_root.resolve()),
         "resume_requested": args.resume,

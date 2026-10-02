@@ -61,6 +61,31 @@ WorkTrace 会读取你在指定日期里发过消息或做过 reaction 的飞书
 - 不会在最终 Markdown 里显示群名、open_id、消息 ID、会话 ID 或参与人名单
 - 事件正文只在责任分工、任务指派、确认沟通对象等确有必要时保留姓名
 
+## 模型调用模式
+
+在 `.env` 设置 `WORKTRACE_LLM_MODE`，进程环境变量优先于 `.env`。
+未配置时使用 `codex_with_fallback`；空值或其他值会明确报错。
+
+| 配置值 | 首次调用和重试 | 重试耗尽后 | 必需配置 |
+| --- | --- | --- | --- |
+| `codex_with_fallback`（默认） | Codex | 按现有规则调用 Online 一次 | Codex 命令、登录与七项 `WORKTRACE_CODEX_*`；Online 可选 |
+| `online_only` | Online | 不追加备用请求 | `WORKTRACE_LLM_BASE_URL`、`WORKTRACE_LLM_MODEL`、`WORKTRACE_LLM_API_KEY` |
+
+仅 Online 模式无需安装、登录或配置 Codex；已有 Codex 配置也不会参与检查。
+个人日报、多人汇总、事实复核、图片摘要、诊断报告和回放使用同一模式。
+Online 继续读取现有协议、流式、TLS 和超时配置，推理设置须为 `none`。
+启动检查会验证 Online 的 Function Calling 格式，跳过全部 Codex 检查。
+
+重试次数继续读取 `config/llm_retry.json`：技术请求默认重试 1 次，话题切分和
+事件提炼的结果质量各重试 3 次，全日分组校验重试 1 次。仅 Online 模式全部
+请求和重试使用同一 Online 线路，备用切换次数为 0；不增加 SDK 隐藏重试。
+鉴权、权限、TLS 和配置错误不重试。图片失败仍只跳过该图并告警；诊断模型
+失败时仍生成通过隐私检查的基础报告，报告显示 Codex“未启用”。
+
+仅 Online 使用 `config/model_input_budget.json` 的 `default_target_tokens`
+（当前 7000），不匹配 Codex 与 Online 组合的预算。临时模型结果按模式区分，
+切换模式或读取旧缓存时重新请求，`--resume` 不会跨模式复用模型结果。
+
 ## 3. 你需要提前准备什么
 
 首次使用前，你需要准备下面几样东西：
@@ -69,11 +94,11 @@ WorkTrace 会读取你在指定日期里发过消息或做过 reaction 的飞书
 - 已安装 Python 3.11 或更高版本
 - 已安装 `lark-cli`
 - 你的 `lark-cli` 已登录为飞书 `user` 身份
-- 已安装 `codex` 命令，作为文字分析主线路
+- 默认双线路模式：已安装并登录 `codex` 命令；仅 Online 模式无需 Codex
 - 飞书 CLI 配置的机器人可向你发送文件消息
 - 你自己可用的在线模型配置
 
-当前模型连接配置必须提供下面 3 项：
+仅 Online 模式必须提供下面 3 项；默认双线路模式使用它们配置可选备用：
 
 ```dotenv
 WORKTRACE_LLM_BASE_URL=
@@ -87,7 +112,7 @@ WORKTRACE_LLM_WIRE_API=responses
 - `WORKTRACE_LLM_BASE_URL` 是模型服务地址
 - `WORKTRACE_LLM_MODEL` 是模型名
 - `WORKTRACE_LLM_API_KEY` 是你的密钥
-- `WORKTRACE_LLM_WIRE_API` 是 Online 备用接口，默认 `responses`；服务明确要求 Chat Completions 时才改为 `chat_completions`
+- `WORKTRACE_LLM_WIRE_API` 是 Online 接口，默认 `responses`；服务明确要求 Chat Completions 时才改为 `chat_completions`
 
 `WORKTRACE_LLM_REASONING_EFFORT` 不属于缺一不可的连接配置；不填写时，代码默认使用 `none`。模板显式保留 `WORKTRACE_LLM_REASONING_EFFORT=none`，表示当前主流程关闭推理过程。如果把它改成其他值，首次自检会失败。
 
@@ -108,7 +133,7 @@ WORKTRACE_LLM_WIRE_API=responses
 请先明确知道当前系统会发生什么：
 
 - WorkTrace 会通过你本机上的 `lark-cli` 读取飞书聊天
-- WorkTrace 会把经过裁剪和压缩后的必要文本、会话名、发送者信息、消息和会话标识、链接 URL/标题、附件文件名发送到仓库本地 `.env` 配置的 Codex 主线路；当前请求的可重试技术失败时才会发送到 Online 备用服务
+- WorkTrace 会把经过裁剪和压缩后的必要文本、会话名、发送者信息、消息和会话标识、链接 URL/标题、附件文件名发送到配置选择的模型服务；默认先调用 Codex，失败后按规则调用 Online 备用，仅 Online 模式直接发送到 Online 服务
 - 为补齐 reply/quote 直接关系或模型请求的相邻上下文，系统可能临时读取并发送目标日期之外的直接关联消息，但生成的事件日期仍是目标日期
 - 如果图片摘要已启用，本人发送或本人 reply/quote 直接关联的图片会按大小限制处理；其他图片受数量和大小限制，并只在模型明确请求时处理
 - 模型明确请求时，指定文本附件或飞书文档正文也会进入上述模型线路输入
@@ -126,7 +151,7 @@ WORKTRACE_LLM_WIRE_API=responses
 - 只处理与你直接相关的工作事项
 - 默认过滤缺少具体对象、保留理由和保留依据的低价值事件
 - 默认过滤部分敏感内容
-- Online 备用强制 `/no_think`；Codex 主线路不追加该文本，而是使用完整严格契约
+- Online 强制 `/no_think`；Codex 主线路不追加该文本，而是使用完整严格契约
 - 消息正文中的裸链接会压缩成占位文本，但可引用链接的 URL、标题和临时引用 ID 仍会作为结构化元数据进入 prompt
 - 正式主流程默认不长期保存原始聊天
 
@@ -157,7 +182,7 @@ lark-cli --help
 
 如果能正常显示帮助信息，说明这一步完成。
 
-Windows 会自动从 `PATH` 定位 `lark-cli` 和 `codex`。`lark-cli.cmd`、`codex.cmd` 等命令脚本通过系统命令解释器启动，`codex.exe` 等原生程序直接启动；包含空格或中文的文件路径仍按原参数传递，输出统一按 UTF-8 读取。
+Windows 会自动从 `PATH` 定位 `lark-cli` 和启用时的 `codex`。`lark-cli.cmd`、`codex.cmd` 等命令脚本通过系统命令解释器启动，`codex.exe` 等原生程序直接启动；包含空格或中文的文件路径仍按原参数传递，输出统一按 UTF-8 读取。
 
 ### 5.3 登录飞书 CLI
 
@@ -258,10 +283,11 @@ cp .env.example .env
 - Python 版本是否满足要求
 - `lark-cli` 是否已安装
 - `lark-cli` 是否登录为 `user`
-- `codex` 命令是否可用
-- 仓库本地 `.env` 是否显式配置 `WORKTRACE_CODEX_MODEL`、`WORKTRACE_CODEX_REASONING_EFFORT` 和全部 `WORKTRACE_CODEX_PROVIDER_*` 项
-- 使用正式 Schema、临时目录和隔离参数的 Codex 小探针是否成功
-- Online 三项备用连接配置及接口开关是否合法；缺少时禁用备用但不阻止 Codex 主线路
+- 默认双线路模式：`codex` 命令是否可用
+- 默认双线路模式：仓库本地 `.env` 是否显式配置 `WORKTRACE_CODEX_MODEL`、`WORKTRACE_CODEX_REASONING_EFFORT` 和全部 `WORKTRACE_CODEX_PROVIDER_*` 项
+- 默认双线路模式：使用正式 Schema 的 Codex 小探针是否成功
+- 默认模式：Online 备用连接配置是否合法，缺少时只禁用备用
+- 仅 Online 模式：必需连接配置和 Function Calling 探针是否通过，不检查 Codex
 - `data/` 目录是否可写
 - `Asia/Shanghai` 时区是否可用
 
@@ -378,7 +404,7 @@ data/debug/conversations/2026-06-23/_merge_day_candidates/
 - `llm_calls.json` 中按调用编号记录的严格契约、最终提示词、线路、模型、推理强度、成功或失败、切换原因、原始结果和 Python 校验；不保存密钥、认证文件、个人 Codex 配置、完整环境变量、图片内容或 Codex JSONL
 - `llm_usage.json` 中按调用类型汇总耗时、输入字符数和 provider 返回的 token；确定性修复单个 Function 参数逗号时还会保存修复诊断
 
-从仓库根目录执行 `python3 -m scripts.replay_day_with_trace --date YYYY-MM-DD` 回放时，`summary.json` 的 `review_artifact_summary` 会汇总两类事实复核文件，`day_grouping_artifact_summary` 和 `day_grouping_summary` 会汇总全日初始分组、标题发现、完整内容复核、最终个人事件统一写作和失败范围重放，`llm_usage_summary` 会按调用类型汇总次数、token 和耗时。完整内容复核会分别显示 Python 处理过的结果尝试数和实际模型请求数，后者包含技术失败后的 Codex 重试与 Online 备用。调用输入报告会逐次列出标题发现、完整内容复核、最终个人事件统一写作、失败范围重放及其重试，并显示标题发现的输入字符、Online/Codex 估算、实际 token、超限状态和逐组检查覆盖。分析实际运行耗时时，标题发现看 `day_group_discovery_all`，事实复核看 `personal_fact_review_all`，完整内容复核看 `day_group_review_all`，最终个人事件统一写作看 `personal_group_render_all`，整个分组阶段看 `merge_day_candidates`；各候选或请求耗时之和只代表模型调用总负载。旧 trace 缺少标题发现文件时明确显示节点不可用；有旧标题发现文件但没有 `group_checks` 时显示逐组检查不可用，不补造数据。
+从仓库根目录执行 `python3 -m scripts.replay_day_with_trace --date YYYY-MM-DD` 回放时，`summary.json` 的 `review_artifact_summary` 会汇总两类事实复核文件，`day_grouping_artifact_summary` 和 `day_grouping_summary` 会汇总全日初始分组、标题发现、完整内容复核、最终个人事件统一写作和失败范围重放，`llm_usage_summary` 会按调用类型汇总次数、token 和耗时。完整内容复核会分别显示 Python 处理过的结果尝试数和实际模型请求数，后者包含所选主线路的技术重试及可用的备用请求。调用输入报告会逐次列出标题发现、完整内容复核、最终个人事件统一写作、失败范围重放及其重试，并显示标题发现的输入字符、Online/Codex 估算、实际 token、超限状态和逐组检查覆盖。分析实际运行耗时时，标题发现看 `day_group_discovery_all`，事实复核看 `personal_fact_review_all`，完整内容复核看 `day_group_review_all`，最终个人事件统一写作看 `personal_group_render_all`，整个分组阶段看 `merge_day_candidates`；各候选或请求耗时之和只代表模型调用总负载。旧 trace 缺少标题发现文件时明确显示节点不可用；有旧标题发现文件但没有 `group_checks` 时显示逐组检查不可用，不补造数据。
 
 如果整日回放已经完成，但 `day_group_review.json` 显示某个完整内容复核范围最终失败，可运行 `python3 -m scripts.replay_failed_day_group_reviews --date YYYY-MM-DD` 只重新请求失败范围。该脚本使用已有调试输入和最后一次具体错误，不重新拉取聊天，也不直接修改个人 MD；全部线路仍失败时写明放弃原因并结束，不阻碍已经完成的日报。随后重新运行调用输入报告时，失败范围重放会单独列出。
 
