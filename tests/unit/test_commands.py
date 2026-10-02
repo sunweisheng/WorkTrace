@@ -119,6 +119,51 @@ def test_windows_cmd_metacharacters_are_protected_without_double_escaping():
     assert "/v:off" in prepared
 
 
+@pytest.mark.parametrize("directory", [
+    "R&D", "percent%WT_SYNTHETIC%", "bang!WT_SYNTHETIC!", "caret^CLI",
+])
+def test_batch_launcher_path_has_only_one_cmd_escape_layer(directory):
+    import mslex
+
+    launcher = rf"C:\{directory}\codex.cmd"
+    prepared = prepare_command_args(
+        ["codex", "张&李.md"], os_name="nt", environ={"COMSPEC": "cmd.exe"},
+        which=lambda name: launcher if name == "codex" else None,
+    )
+    inner = prepared.partition(" /c ")[2][1:-1]
+    first_parse = mslex.strip_carets_like_cmd(inner)
+    assert mslex.split(first_parse, like_cmd=False)[0] == launcher
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows native launcher")
+@pytest.mark.parametrize("suffix", [".cmd", ".bat"])
+@pytest.mark.parametrize("directory_name", [
+    "R&D", "percent%WT_SYNTHETIC%", "bang!WT_SYNTHETIC!", "caret^CLI",
+])
+def test_windows_real_launcher_path_preserves_special_characters(
+    tmp_path, monkeypatch, suffix, directory_name,
+):
+    import json
+
+    directory = tmp_path / directory_name
+    directory.mkdir()
+    (directory / "argv.py").write_text(
+        "import json,sys; sys.stdout.buffer.write("
+        "json.dumps(sys.argv[1:],ensure_ascii=False).encode('utf-8'))",
+        encoding="utf-8",
+    )
+    (directory / ("codex" + suffix)).write_text(
+        f'@echo off\n"{sys.executable}" "%~dp0argv.py" %*\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("PATH", str(directory) + os.pathsep + os.environ["PATH"])
+    monkeypatch.setenv("WT_SYNTHETIC", "must-not-expand")
+
+    result = run_text_command(["codex", "张&李.md"])
+    assert result.returncode == 0
+    assert json.loads(result.stdout) == ["张&李.md"]
+
+
 @pytest.mark.parametrize("argument", [
     "张&李.md", "file%WT_SYNTHETIC%.md", "file!WT_SYNTHETIC!.md",
     'name="x&y"', "caret^file.md", "带 空格^文件.md", "C:\\目录\\",

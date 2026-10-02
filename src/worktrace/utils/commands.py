@@ -74,9 +74,13 @@ def prepare_command_args(
         ),
         "cmd.exe",
     )
-    command_line = _protect_batch_forwarding(
-        mslex.join([launcher, *command[1:]], for_cmd=True)
-    )
+    # The launcher runs in the first CMD; only its arguments are forwarded
+    # by the batch shim and need another escape layer.
+    command_line = mslex.quote(launcher, for_cmd=True)
+    if len(command) > 1:
+        command_line += " " + _protect_batch_forwarding(
+            mslex.join(command[1:], for_cmd=True)
+        )
     # CMD /s removes the outer quote pair. Pass the complete command line
     # directly so subprocess does not escape its inner quotes a second time.
     return f'{subprocess.list2cmdline([comspec])} /d /s /v:off /c "{command_line}"'
