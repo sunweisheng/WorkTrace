@@ -153,3 +153,7 @@ Windows Server 2025 AMD64、PowerShell 7、Python 3.11/3.12 两组各
 168 项通过、1 项 POSIX 安装检查跳过；macOS 全量测试为 954 项通过、
 24 项 Windows/PowerShell 检查跳过。更新代码后仍应查看对应提交的
 Actions 结果，不能把这次结果当作后续版本的验证。
+
+## 高优先级修复的新增 CI 验证
+
+[本轮 Windows CI](https://github.com/sunweisheng/WorkTrace/actions/runs/36992852328) 在源码提交 `97a5fe0b39e54fd77686c451c58459182e313e7e` 上通过。Python 3.11 和 3.12 各 358 项通过、1 项跳过；两组均设置 `PYTHONUTF8=0`。此前 Windows 11 完整日报结果仍对应已发布的 4.1.2，本轮没有重跑真实日报或飞书送达。
