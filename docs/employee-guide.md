@@ -362,7 +362,7 @@ python3 -m src.worktrace.cli --date 2026-06-23 --resume
 - `用调试模式重新跑 2026-06-23 的个人日报，并生成可以发给维护人员的诊断报告`
 - `2026-06-23 的多人汇总结果不对，帮我用调试模式排查并生成诊断报告`
 
-Codex 会自动执行正确命令并等待结束。自送达开启时，调试可能重新生成日报并再次发送给你自己，结束后还会增加一次独立的大模型调用，用来整理已经由 Python 脱敏和计算好的诊断事实。
+Codex 会自动执行正确命令并等待结束。自送达开启时，调试可能重新生成日报并再次发送给你自己，结束后还会进行独立的大模型诊断分析，用来整理已经由 Python 脱敏和计算好的诊断事实；分析可能按配置重试或使用备用，不保证只调用一次。
 
 开发者需要直接执行时，个人日报命令是：
 
@@ -391,6 +391,8 @@ python3 -m src.worktrace.cli --debug-output merge-collected --date YYYY-MM-DD
 
 基础报告中的“诊断整理执行情况”会说明分析是调用失败、返回格式无效，还是结论与已统计的事实冲突。诊断整理的调用数量和耗时单独记录，日报业务统计不包含这些后续调用；没有采集到请求记录时显示“未采集”。
 
+CLI 的 `support_report.failure_code` 用于区分诊断调用失败、返回无效、事实冲突、隐私检查阻止和报告生成失败。分析尝试次数不等于实际模型请求数；成功重试后失败码为空，但前次失败统计仍可能保留。这些字段说明的是诊断结果，日报是否成功仍看日报自身状态。完整字段说明见 [README 的调试与排障](../README.md#调试与排障)。
+
 安全报告是单个 `data/debug/support_reports/worktrace-support-<随机编号>.md`。WorkTrace 不会自动上传或发送它，也不会生成 ZIP。只把这一份 Markdown 发给维护人员，绝不能发送完整 `data/debug` 目录。
 
 开启后，系统会把调试文件写到本地：
@@ -416,7 +418,7 @@ data/debug/conversations/2026-06-23/_merge_day_candidates/
 - `_merge_day_candidates/input.json`、`prompt.txt` 和 `grouping_attempts.json` 中的全日分组输入、尝试和 Python 校验结果
 - `day_group_discovery.json` 中协议版本、全部标题输入、逐组检查、Python 形成的候选以及重试或放弃原因；旧记录没有逐组检查时显示不可用
 - `day_group_review.json` 中结构关系、同一基础文件名和标题发现形成的复核范围、必须覆盖的候选编号、解析前模型返回、局部复核尝试和保留决定
-- `personal_group_render.json` 中全部最终个人事件组的成员、内容重写尝试、失败回退和最终文字
+- `personal_group_render.json` 中全部最终个人事件组的成员、核对尝试、本人动作、事实证据、删除依据和失败原因
 - `day_group_review_replay.json` 中失败范围单独重放时的线路、耗时、上次校验错误、返回结果或放弃原因
 - `resolved_groups.json` 中的最终稳定分组、warning 和 `day_grouping_summary`
 - `retention_review.json` 中临时协作复核每次尝试的候选摘要、模型信号、证据校验结果和 Python 统计
@@ -447,6 +449,10 @@ Markdown 默认只保留结构化工作事件，不会默认附带整段原始�
 每条事件先以三级标题显示事件标题，下面依次显示日期、主要动作、内容、具体对象、本人参与方式、保留理由、保留依据和涉及文件。标题不会在字段列表中重复。重新生成的新日报会自然带上增强字段，历史文件不会被批量改写。
 
 ## 10. 常见问题
+
+### 升级后提示保留配置缺少字段
+
+更新代码时也要同步 `config/retention_policy.json` 中的 `contribution_actions` 和 `contribution_rules`，它们定义本人动作与允许的参与方式。旧文件缺少这些字段或字段为空时，程序会在加载配置时停止并提示更新；如果改过自己的业务规则，应合并新版字段后再运行。
 
 ### 10.1 提示缺少模型配置
 

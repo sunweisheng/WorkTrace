@@ -1,6 +1,6 @@
 # WorkTrace 跨会话事件分组与物化设计
 
-> 状态：当前 4.1.0 的正式个人日报主链。历史工作流归属方案已由 [取消工作流概念并改进事件分组](workstream-free-event-grouping-design.md) 替代；本文正文以当前代码为准，不再保留旧方案作为实现指引。
+> 状态：当前正式个人日报主链。历史工作流归属方案已由 [取消工作流概念并改进事件分组](workstream-free-event-grouping-design.md) 替代；本文正文以当前代码为准，不再保留旧方案作为实现指引。
 
 ## 1. 目标与边界
 
@@ -47,7 +47,7 @@ flowchart TD
     L --> M["范围内完整内容复核，可拆开和重新组合"]
     M --> N["锁定最终成员"]
     D --> N
-    N --> O["逐事件重写标题、正文和具体对象，含单成员组"]
+    N --> O["逐事件核对事实与本人贡献，含单成员组"]
     O --> P["Python 物化 MergedEventDraft"]
     P --> Q["过滤、构建 WorkEvent、文件聚合、最终过滤和排序"]
     Q --> R["Markdown 写入与本人送达"]
@@ -129,14 +129,16 @@ flowchart TD
 
 ## 8. 内容重写与 Python 物化
 
-最终成员锁定后，`_render_personal_multi_groups(...)` 虽保留旧方法名，实际对单成员和多成员组都逐事件调用 `personal_group_render`。模型只生成带 `fact_items` 的标题、正文和具体对象，必须覆盖全部锁定成员。按配置最多三路并行；技术或质量尝试最终失败时，仅当前事件使用确定性来源内容并告警。
+最终成员锁定后，`_render_personal_multi_groups(...)` 虽保留旧方法名，实际对单成员和多成员组都逐事件调用 `personal_group_render`。模型用 `fact_items` 核对标题、正文、主要动作、具体对象、保留理由和保留依据，同时返回 `self_actions`、`self_relations`、`supported` 和 `removed_claims`，必须覆盖全部锁定成员。事实项用 `actor` 说明主体，用 `self_action_indices` 引用本人动作；Python 校验正文、动作、角色和证据相互一致。业务规则读取 `config/retention_policy.json` 的贡献配置，具体边界见 [详细设计](detailed-design.md)。按配置最多三路并行；技术请求、质量重试与可用备用用尽后仍失败时，整次个人生成失败，不写入或送达未经核对的报告。
 
 `materialize_grouped_merged_drafts(...)` 随后：
 
-- 使用合法重写结果；没有结果时选 primary 标题并按来源顺序去重拼接正文。
-- 按来源消息顺序去重动作，按配置顺序去重本人参与方式。
-- 从来源候选派生保留理由和依据，合并来源消息与会话 ID。
+- 要求传入的核对结果覆盖全部锁定组，`supported=false` 的组不物化。
+- 采用核对后的标题、正文、主要动作、具体对象、保留理由、保留依据和本人参与方式。
+- 合并候选来源及实际引用的补充证据消息，保留来源会话 ID。
 - 合并链接、附件引用，不生成已取消的工作流字段。
+
+物化函数未传 `rendered_groups` 时仍支持确定性合并，属于兼容路径；正式主链不能将最终核对失败替换成这条路径。
 
 `validate_merged_event_drafts(...)` 检查来源 ID 与排序。合并草稿继续执行配置关键词过滤和结构化保留门槛，再由 `build_work_events(...)` 生成稳定事件 ID、每条消息的 SHA-256 证据指纹，以及目标日期和来源会话的 SHA-256 会话指纹。文件聚合仅附加有来源与文本依据的文件，随后执行最终过滤和输出排序。
 
@@ -148,7 +150,7 @@ flowchart TD
 - `grouping_attempts.json`：请求线路、返回、校验错误和拆单修补。
 - `day_group_discovery.json`：全量编号标题、估算、尝试和候选范围。
 - `day_group_review.json`：完整检查范围、关系处理、尝试与保留决定。
-- `personal_group_render.json`：锁定成员、重写结果与失败回退。
+- `personal_group_render.json`：锁定成员、核对尝试、本人动作与事实证据、删除依据及失败原因。
 - `resolved_groups.json`：最终合法分组、warning 和 `day_grouping_summary`。
 
 失败范围单独重放生成 `day_group_review_replay.json`，不直接修改正式 Markdown。新 trace 不生成已取消的工作流归属请求。

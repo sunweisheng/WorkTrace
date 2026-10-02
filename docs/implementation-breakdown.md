@@ -2,7 +2,7 @@
 
 ## 1. 文档定位
 
-本文档是当前 4.1.0 的“从业务步骤找到代码”模块索引。完整流程和数据边界见 [detailed-design.md](detailed-design.md)。
+本文档是当前代码的“从业务步骤找到代码”模块索引。完整流程和数据边界见 [detailed-design.md](detailed-design.md)。
 
 ## 2. 入口层
 
@@ -36,7 +36,7 @@ flowchart LR
     D --> E["片段组批、提炼并校验候选与请求"] --> F["按需补上下文、重新分段与提炼"] --> G["候选关键词与保留门槛"]
     G --> H["临时协作局部复核"] --> I["个人事实局部复核"] --> J["全日候选初步分组"]
     J --> K["Python 完整性校验"] --> L["全部组标题发现"] --> L1["完整内容复核"]
-    L1 --> L2["全部最终事件内容重写"] --> L3["增强事件物化"]
+    L1 --> L2["全部最终事件事实与本人贡献核对"] --> L3["增强事件物化"]
     L3 --> M["消息/会话指纹 + 文件标识"] --> N["Markdown + 自发送"]
 ```
 
@@ -53,7 +53,7 @@ flowchart LR
 - `_merge_day_candidates_with_batching(...)`：全日分组、覆盖校验、当前主线路质量重试、可用的 Online 当前请求备用和拆单修补
 - `_discover_day_group_review_candidates(...)`：一次提交全部初步组编号和组合标题，校验逐组检查并建立标题候选范围
 - `_review_strongly_related_day_groups(...)`：按标题、结构关系和附件基础名称形成的完整检查范围，按配置最多三路并行拆分或重组初步组；失败时保留复核前分组
-- `_render_personal_multi_groups(...)`：成员锁定后逐项重写全部最终组的标题、正文和具体对象；失败时只对当前组确定性拼接并告警
+- `_render_personal_multi_groups(...)`：成员锁定后逐项核对全部最终组的事实字段与本人贡献，剔除 `supported=false` 的事件；技术请求、质量重试及可用备用用尽后仍失败则终止生成，不写入或送达报告
 - `_attach_event_file_links(...)`：按显式引用或精确附件文件名证据附加文件
 
 ## 5. Pipeline 模块
@@ -74,7 +74,7 @@ flowchart LR
 | `pipeline/retention_review.py` | 临时协作边界候选选择、组批、模型结果校验和固定保留规则 |
 | `pipeline/personal_fact_review.py` | 个人事实风险选择、组批、事实证据校验和修订应用 |
 | `pipeline/day_event_grouping.py` | 关系编号、检查范围发现、范围内重新分组校验和复核结果替换 |
-| `pipeline/cross_conversation_merge.py` | 最终分组物化，以及动作、参与方式的 `MergedEventDraft` 合并 |
+| `pipeline/cross_conversation_merge.py` | 最终分组物化，采用核对后的事实字段和本人参与方式，补入实际引用的证据；无核对结果的确定性合并仅用于兼容路径 |
 | `pipeline/event_merge.py` | 最终 `WorkEvent` 构建、稳定 ID、消息证据和同日会话指纹 |
 
 `pipeline/conversation_first_pass.py` 仍用于不支持分段批处理的 analyzer 兼容路径；它不是当前默认 Codex 主线路的主入口。
@@ -90,7 +90,8 @@ flowchart LR
 | `analyzers/prompts.py` | 所有语义任务 prompt |
 | `analyzers/function_calls.py` | `FunctionCallSpec`、任务专用 Function、动态 ID 枚举、典型参数示例和多人证据编号合同 |
 | `analyzers/output_schemas.py` | Function 参数与 Codex output-schema 共用结构；动态限制候选、关系和合法证据 ID |
-| `analyzers/protocol.py` | 模型 JSON 到领域对象的解析与引用恢复；校验关系处理、成员覆盖和内容证据 |
+| `analyzers/protocol.py` | 模型 JSON 到领域对象的解析与引用恢复；校验关系处理、成员覆盖，以及最终事实的主体、本人动作、角色和证据对应 |
+| `analyzers/personal_render_evidence.py` | 最终核对的证据范围和相同正文背景；仅补候选来源切片及已选证据消息内的同会话较早完整相同正文，不直接判断贡献 |
 
 `llm_mode` 决定正式装配。默认 `codex_with_fallback` 的 `FailoverAnalyzer` 以 `CodexAnalyzer` 为主、配置合法的 `OnlineLLMAnalyzer` 为当前请求备用；`online_only` 使用 Online 主线路且没有备用。两者都实现分段、片段提炼、临时协作复核、个人事实复核、全日初步分组、标题发现、完整内容复核、全部最终事件内容重写和多人汇总接口，因此 `runner` 走完整的现行主链。是否支持具体能力由接口检查决定，不通过配置字符串猜测。
 
@@ -133,7 +134,7 @@ flowchart LR
 | `config/conversation_window.json` | 群聊锚点聚合、初始上下文和按需扩窗阈值 |
 | `config/llm_retry.json` | 当前主线路请求级重试、分段/提炼外层重试及全日分组结果质量重试、Online 流式首次返回超时、Codex 间隔，以及切分、提炼、个人事实复核、个人完整内容复核和多人完整复核并发数 |
 | `config/llm_function_contracts.json` | Function 名称、描述、`strict` 与 Codex 单次参数 JSON 提交规则 |
-| `config/retention_policy.json` | 个人事件保留提示、结构化业务词、临时协作复核、事实复核条件和模型信号定义 |
+| `config/retention_policy.json` | 个人事件保留提示、结构化业务词、临时协作复核、事实复核条件、模型信号，以及本人动作定义和允许角色 |
 | `config/event_generation.json` | 个人与团队共同写作规则、完整事项边界、字段模板和脱敏正反例 |
 | `config/event_grouping.json` | 个人与多人共同分组说明，以及合并原因的描述、`acceptance_rules` 和 `rejection_rules` |
 | `config/model_input_budget.json` | 默认模式按主模型和备用模型组合选择统一输入分批目标；纯在线模式或未匹配时使用 `default_target_tokens`（当前 7000） |
@@ -149,6 +150,7 @@ flowchart LR
 
 ## 10. 调试入口
 
+- `src/worktrace/support_report.py`：生成安全诊断 Markdown，分类报告失败原因，按本次独立分析上下文统计尝试与模型请求；主备共享账本去重，缺少账本不推算请求数。字段口径见 [README 的调试与排障](../README.md#调试与排障)
 - 个人日报：`--debug-output`，目录 `data/debug/conversations/<date>/`；`retention_review.json` 和 `personal_fact_review.json` 保存两类事实复核，`_merge_day_candidates/` 保存 `input.json`、`prompt.txt`、`grouping_attempts.json`、`day_group_discovery.json`、`day_group_review.json`、`personal_group_render.json`、`day_group_review_replay.json` 和 `resolved_groups.json`，`final_events.json` 保存最终事件
 - 回放报告：从仓库根目录执行 `python3 -m scripts.replay_day_with_trace --date YYYY-MM-DD`；脚本在执行前写入 `run_status.json`，实时显示并保存子进程阶段日志，结束后更新 `success/failed`，同时汇总 `llm_usage_summary`、`day_grouping_summary` 和 `day_grouping_artifact_summary`。`report_replay_timings.py` 分开输出事实复核、初始分组、标题发现、完整内容复核和全部最终事件内容重写的累计耗时与墙钟耗时；`report_replay_call_inputs.py` 展示这些调用及失败范围重放；`report_event_grouping_comparison.py` 输出新旧分组结构与关系差异
 - 多人汇总：`WORKTRACE_COLLECTED_MERGE_TRACE=true`，目录默认 `data/debug/collected_merge/<date>/`；新增 `collected_group_discovery.json` 和 `collected_group_review.json`，复核 step 写入初步组、关系、不可拆成员块、Function 与 Python 校验

@@ -526,7 +526,7 @@ CLI 会开启 `collected_merge_trace_enabled`，并保留环境配置的 trace �
 - `config/conversation_window.json`：初始窗口聚合和按需扩窗阈值
 - `config/llm_retry.json`：当前主线路请求级重试、分段/提炼外层重试及全日分组结果质量重试、Online 流式首次返回超时、Codex 间隔，以及切分、提炼、个人事实复核、个人完整内容复核和多人完整复核并发数
 - `config/llm_function_contracts.json`：Function 名称、描述、`strict` 和 Codex 单次参数 JSON 提交规则
-- `config/retention_policy.json`：个人保留提示、既有业务词、临时协作复核、个人事实复核条件和模型信号定义
+- `config/retention_policy.json`：个人保留提示、既有业务词、临时协作复核、个人事实复核条件、模型信号，以及本人动作定义和允许角色
 - `config/event_generation.json`：个人与团队共同写作规则、完整事项边界、字段模板和脱敏正反例
 - `config/event_grouping.json`：个人与多人共同分组说明，以及合并理由的描述、成立条件和排除条件
 - `config/model_input_budget.json`：主模型和备用模型组合对应的个人与团队共用输入分批目标及评测数据版本
@@ -578,7 +578,7 @@ CLI 会开启 `collected_merge_trace_enabled`，并保留环境配置的 trace �
 - `grouping_attempts.json`：每次线路、模型结果、Python 校验错误和拆单修补
 - `day_group_discovery.json`：全部初步组编号和标题、逐组检查、输入估算、超限状态、标题候选和放弃原因
 - `day_group_review.json`：标题与结构关系形成的完整检查范围、关系处理、各次复核、校验错误和保留决定
-- `personal_group_render.json`：锁定的全部最终个人事件组、核对尝试、失败原因、最终事实和参与方式，以及不保留事件的依据
+- `personal_group_render.json`：锁定的全部最终个人事件组、核对尝试、失败原因、`self_actions`、带主体和动作索引的最终事实、参与方式，以及不保留事件的依据
 - `day_group_review_replay.json`：只重放失败检查范围时的线路、耗时、校验反馈、结果或放弃原因；不直接修改正式个人 MD
 - `resolved_groups.json`：稳定最终分组、warning 和 Python 计算的 `day_grouping_summary`
 - `retention_review.json`：临时协作复核每次尝试的候选摘要、证据范围、模型信号、覆盖统计和协议错误，不额外复制原聊天正文
@@ -602,6 +602,8 @@ segmentation 和 segment batch 的模型失败轮次保存输入、prompt 与 `f
 安全诊断中的数量、输入估算、token、阶段耗时、重试、备用线路和送达状态均由 Python 计算。`success_with_warnings` 和普通 warning 不形成“运行过程失败”；只有运行未完成、输入无效或送达失败时才增加对应错误类别。token 全部未上报时显示“服务端未上报”，部分上报时同时记录已上报与未上报请求数。个人日报的来源获取、消息准备、候选生成、候选复核、全日分组、事件构建、Markdown 写入、本人送达和总耗时分别记录；阶段占比只使用墙钟耗时，请求累计耗时单独显示，没有细分阶段时不把总耗时本身标成慢阶段。诊断模型结论与 Python 事实冲突时只重试报告整理，仍冲突则输出 Python 基础报告；“无需产品改动”不能和具体改进建议同时出现。
 
 `SupportReportReference` 增加可选的 `failure_code` 与 `analysis_summary`，旧 JSON 缺失字段仍可读。诊断分析使用本次独有的请求上下文，按上下文从主备共享账本提取请求数和失败数，排除日报和其他诊断调用；分析尝试与模型请求分别统计。分类与安全显示标签在 `config/support_report.json`；没有采集账本时请求数为 `None`，不推算次数。调用异常只保留固定类别，报告写入失败仍保留已有诊断统计，不记录原始异常。
+
+完整字段口径见 [README 的调试与排障](../README.md#调试与排障)。分析成功后失败码为空，但已发生的失败次数和最近一次调用异常类别仍可能保留；不得据此把最终成功分析改写成失败。
 
 `scripts/replay_collected_review_failures.py` 可直接离线回放候选分组和完整复核 step。旧 trace 使用 `legacy_audit`，不补造初步组、关系或不可拆成员块；新 trace 使用 `current` 恢复 `initial_groups`、`strong_relations` 和 `atomic_groups` 并完整校验。脚本明确记录 `model_call_count: 0`，不调用模型，也不生成正式 Markdown。
 

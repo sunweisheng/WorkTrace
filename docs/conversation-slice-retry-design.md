@@ -4,7 +4,7 @@
 
 ## 1. 文档目标
 
-本文档说明当前 4.1.0 如何拆分和分析会话、执行 `context_requests`，以及分段失败时如何回退。两种模式 `codex_with_fallback` 与 `online_only` 共用该流程。
+本文档说明当前代码如何拆分和分析会话、执行 `context_requests`，以及分段失败时如何回退。两种模式 `codex_with_fallback` 与 `online_only` 共用该流程。
 
 完整日流程见 [detailed-design.md](detailed-design.md)。
 

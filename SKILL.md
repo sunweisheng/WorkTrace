@@ -46,7 +46,7 @@ WorkTrace 另有一个管理人员汇总模式：管理人员先收集多人已�
 5. 语义提取调用配置选择的主线路；默认使用 Codex 加 Online 备用，仅 Online 模式直接调用 Online。
 6. Online 提示词追加 `/no_think`；推理配置生效值为 `none` 时，Responses 使用 `reasoning.effort=none`，Chat Completions 使用 `thinking.type=disabled`。Codex 不追加 `/no_think`，而是在完整契约提示词中明确 `strict=true` 与单次参数 JSON 提交要求。
 7. 默认双线路模式每个新请求先走 Codex。网络、超时、429、5xx、空结果和无效 JSON 时，按 `config/llm_retry.json` 的 `primary_request_retry_limit=1` 只对当前请求再试 Codex 1 次，仍失败才交给 Online 一次；下一个新请求重新优先 Codex。登录、权限、模型、推理强度、TLS 和配置错误不切换。文字请求和 Codex 子进程以 `WORKTRACE_LLM_TIMEOUT_SECONDS`（未配置时 180 秒）作为本次执行时限，不含外层重试和排队；Online 图片按该值设置 HTTP 超时，没有文字请求额外的整次 deadline 检查；Codex 的全局同时调用上限为 3，文字、图片、表情补全和诊断报告共用。图片摘要也先走 Codex 普通文本任务，使用临时图片副本的 `--image`，不强制 Function Calling；Codex 返回工具调用等不合法图片结果，或命中 `config/image_summary.json` 配置的无法识别说法时，只把当前图片交给 Online 一次。正式流程和调试模式共用此线路，调试账本记录切换方向、原因和备用次数。
-8. 调试模式只为正式日报或多人汇总增加 trace 和日志，不改变正式模型线路。任务结束后另有一次独立的诊断报告模型调用；报告模型只读取 Python 已脱敏并计算好的编号事实。除非用户明确要求做单独的 Codex 后端诊断，否则不得通过临时配置、包装命令或代码参数把整次个人日报或多人汇总强制切到 Codex。
+8. 调试模式只为正式日报或多人汇总增加 trace 和日志，不改变正式模型线路。任务结束后另有独立的诊断分析阶段，可能按配置重试或使用备用，并非固定一次模型请求；报告模型只读取 Python 已脱敏并计算好的编号事实。除非用户明确要求做单独的 Codex 后端诊断，否则不得通过临时配置、包装命令或代码参数把整次个人日报或多人汇总强制切到 Codex。
 9. 技术请求重试和各阶段外层重试需要分别看待。仅 Online 模式下，请求层已完成重试并标记 `request_failed` 的错误在临时协作复核、事实复核、窗口切分、锚点提炼和片段批次提炼中直接传播，不再拆批或追加备用。默认双线路模式保留原行为：这些阶段仍可能在 `AnalyzerProtocolError` 后进入外层循环，下一轮重新从 Codex 开始。窗口切分和片段/锚点提炼通常复用同一输入，不附加上次校验错误；片段成员缺失或非法还可能被过滤并告警。临时协作和事实复核会反馈具体错误，重试用尽时整次失败。全日分组、标题发现、完整内容复核和最终内容重写按各自质量规则反馈错误，并在有备用时调用当前请求备用：全日分组的技术失败终止，非法返回可拆单修补；标题发现失败按没有候选继续，完整分组复核失败保留原组，这两项记录 warning；个人最终事实核对失败则终止生成，不写入或送达报告。多人最终正文失败仍使用该事件的确定性回退并记录 warning。上下文扩展后的重新分段请求失败在两种模式下均局部跳过并告警，不套用首轮切分的终止规则。不得擅自增加重试次数或重新运行整次流程。
 
 仅 Online 模式同样读取现有重试次数，技术请求默认重试 1 次，切分和提炼的
@@ -87,6 +87,8 @@ WorkTrace 另有一个管理人员汇总模式：管理人员先收集多人已�
 - 初步分组后，`day_group_discovery` 单次提交全部组且每组严格只有 `group_id` 和 `title`；不发送日期、正文或其他分组阶段的正反例，组合标题由 Python 按稳定顺序覆盖初步组全部成员标题。模型必须逐组比较全部标题并完整返回 `group_checks`，每组列出可能相关的零个、一个或多个其他编号和非空理由；Python 校验全量覆盖后把重叠关系形成 `candidate_groups`。协议不包含特定日期、人员、业务关键词或固定长度片段。超过当前预算 profile 时不拆批、不跳过，仍整体提交并记录超限；全部尝试失败时放弃该节点，不阻止个人 Markdown 和本人送达。
 - 同一来源片段、直接 reply/quote、共享来源消息、共享文件、按配置去除版本后缀后的同一非图片附件基础名称，以及标题发现候选建立复核范围；同一会话不单独触发。标题候选仍可包含任意多个组，重叠候选形成同一个完整范围，但模型实际指出的每条组间连接分别编号，允许同一范围内部分成立、部分分开。范围内每个原始候选都可脱离初步组重新组合。模型必须先逐条判断关系，再统一处理重叠关系并形成最终组，不得用初步组或预设的最终组反向解释关系。分开时可以返回关系两侧代表成员，必须分别说明两侧可独立汇报的目标或结果；Python 校验完整覆盖、关系逐条处理、成立成员真实同组、分开成员真实位于不同组、两侧证据和最终成员唯一性。每条关系只返回覆盖两侧判断所需的最少消息编号，Function 示例按关系两侧生成代表成员和代表证据，其中的决定只是字段结构占位，不代表当前关系结论。
 - 最终单成员组和多成员组锁定后都使用 `personal_group_render`，依据原消息和已经补读的附件、文档内容，统一复核标题、正文、主要动作、具体对象、保留理由、保留依据和本人参与方式；业务规则读取 `config/retention_policy.json`。Python 校验事实证据与本人证据，采用复核后的字段，`supported=false` 时剔除该事件。最多同时处理 3 项，当前重试与主备请求用尽后仍失败则整次生成失败，保留诊断记录，不写入或送达未经核对的报告。
+- 最终核对先声明 `self_actions`；事实项用 `actor` 区分本人、他人、共同执行、背景或不确定，用从 0 开始的 `self_action_indices` 引用本人动作。Python 校验正文覆盖全部动作、事实包含动作证据、主要动作与参与方式都有相应动作支持。接收或转发只支持回应，不能支持主责执行；明确承担任务可以支持主责，但不能写成已经完成。同事直接向本人交付的实质业务事实仍可保留，主要动作写本人接收或转发。动作定义与允许角色读取 `contribution_actions`，共同约束读取 `contribution_rules`；升级时同步新版保留配置，已有配置缺少这些字段或字段为空会在加载时报错。
+- 为判断原样再次发送的内容，最终核对仅从候选来源切片及已选证据消息内，补入同会话较早的非空完整相同正文；只规范换行和首尾空白，不扩展到切片外，也不按截断后的文本判断。`same_text_messages` 只提供核对背景，不证明原创者或自动降低贡献；有独立本人执行证据时仍可保留实际执行。结构校验不能保证发现全部自然语言误判。
 - 个人与多人分组语义说明统一读取 `config/event_grouping.json`；Python 不读取聊天文字判断业务含义。
 - `--debug-output` 在 `_merge_day_candidates/` 写入 `input.json`、`prompt.txt`、`grouping_attempts.json`、`day_group_discovery.json`、`day_group_review.json`、`personal_group_render.json` 和 `resolved_groups.json`。完整回放成功后可用 `scripts/replay_failed_day_group_reviews.py` 只重放失败复核范围，结果写入 `day_group_review_replay.json`，不直接修改正式个人 MD。CLI 与回放 `summary.json` 的 `day_grouping_summary` 由 Python 计算。
 - 旧 Markdown 和旧 trace 中的工作流字段允许读取但会丢弃；新 Markdown、缓存和 trace 不再生成这些字段。
@@ -106,7 +108,7 @@ python -m src.worktrace.cli --date YYYY-MM-DD
 
 ## 调试诊断执行规则
 
-开始执行前用一句自然语言告知用户：调试会重新运行任务；自送达开启时，个人日报可能再次发送给本人，结束后还会增加一次报告模型调用；不要增加确认循环。
+开始执行前用一句自然语言告知用户：调试会重新运行任务；自送达开启时，个人日报可能再次发送给本人，结束后还会进行独立诊断分析，可能重试或使用备用；不要增加确认循环。
 
 个人调试固定执行：
 
@@ -128,6 +130,19 @@ python3 -m src.worktrace.cli --debug-output merge-collected --date YYYY-MM-DD
 4. `generated_after_llm_failure` 且 `privacy_check=passed` 时，说明基础报告可以发送，但大模型分析部分未完成。
 5. `blocked` 或 `failed` 时，明确说明没有可发送的安全报告，绝不能把原始 trace 说成诊断报告或建议用户发送。
 6. 不自动上传或发送报告，只把本地路径交给当前用户。不开启 `--debug-output` 时不要寻找或生成报告。
+
+另外读取 `support_report.failure_code` 和 `analysis_summary`，解释诊断分析自身的结果，不能据此把成功的日报说成失败：
+
+| `failure_code` | 含义 |
+| --- | --- |
+| 空字符串 | 没有失败码；仍须核对状态、隐私检查和文件 |
+| `request_failed` | 诊断模型调用未完成 |
+| `invalid_response` | 返回格式或字段校验未通过 |
+| `fact_conflict` | 分析结论与 Python 编号事实冲突 |
+| `privacy_blocked` | 诊断输入、分析或报告被隐私检查阻止 |
+| `report_generation_failed` | 报告生成或写入失败 |
+
+`analysis_summary` 中，`attempt_count` 是分析调用尝试数，`model_request_count` 才是账本记录的实际模型请求数；两者可能不同，不相互替代。`request_failure_count`、`validation_failure_count` 分别记录尝试中的调用失败和返回校验失败，`fallback_attempt_count` 记录备用尝试；`model_failed_request_count` 是账本中失败的请求数，`duration_ms` 是本次诊断分析总耗时，`request_error_category` 是最近一次调用异常的安全类别。统计只包含本次诊断，排除日报和其他诊断调用；缺少请求账本时两个模型请求数字段为 `null`，显示“未采集”。成功重试后 `failure_code` 为空，但前次失败统计和错误类别仍可能保留；旧 JSON 缺少新增字段时按空值读取，不补造统计。
 
 外发材料必须由 WorkTrace 报告生成器产生并通过隐私检查。不得自行读取原始聊天、prompt、模型返回或完整 trace 后整理外发内容；不得发送完整 `data/debug` 目录。报告只允许是 `data/debug/support_reports/worktrace-support-<随机编号>.md` 指向的单个 Markdown，不生成或索要 ZIP。
 
