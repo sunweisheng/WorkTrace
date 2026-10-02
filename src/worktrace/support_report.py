@@ -19,7 +19,11 @@ from .config import (
     load_online_llm_settings,
     model_input_budget_debug_summary,
 )
-from .errors import AnalyzerProtocolError, RetryableAnalyzerProtocolError
+from .errors import (
+    AnalyzerProtocolError,
+    PERSONAL_RENDER_ERROR_CODES,
+    RetryableAnalyzerProtocolError,
+)
 from .models import (
     CollectedMergeRunResult,
     DailyRunResult,
@@ -396,6 +400,14 @@ def build_diagnostic_facts(
             result.day_grouping_summary.content_render_failure_count
         )
     add("model_usage", usage)
+    if isinstance(result, DailyRunResult):
+        for code, count in sorted(
+            result.day_grouping_summary.content_render_error_counts.items()
+        ):
+            if code in PERSONAL_RENDER_ERROR_CODES and count > 0:
+                add("content_render_error", {
+                    "code": code, "attempt_count": _safe_count(count),
+                })
 
     output_path = result.output_path
     add(
@@ -1086,7 +1098,7 @@ def render_support_report(
             },
         ),
         ("stages", {"stage_timing"}),
-        ("model_calls", {"model_usage"}),
+        ("model_calls", {"model_usage", "content_render_error"}),
         ("artifacts", {"artifact_status", "error_category"}),
     )
     for section_key, kinds in section_fact_kinds:

@@ -5,6 +5,7 @@ import ast
 from typing import Any
 
 from .constants import AnchorStatus
+from .errors import PERSONAL_RENDER_ERROR_CODES
 from .runtime_diagnostics import structured_warnings
 
 
@@ -1783,6 +1784,7 @@ class DayGroupingSummary:
     content_render_request_count: int = 0
     content_render_retry_count: int = 0
     content_render_failure_count: int = 0
+    content_render_error_counts: dict[str, int] = field(default_factory=dict)
     validation_retry_count: int = 0
     fallback_count: int = 0
     singleton_repair_candidate_count: int = 0
@@ -1790,6 +1792,9 @@ class DayGroupingSummary:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "DayGroupingSummary":
+        raw_error_counts = data.get("content_render_error_counts", {})
+        if not isinstance(raw_error_counts, dict):
+            raw_error_counts = {}
         return cls(
             candidate_count=int(data.get("candidate_count", 0)),
             initial_group_count=int(data.get("initial_group_count", 0)),
@@ -1825,6 +1830,13 @@ class DayGroupingSummary:
             content_render_failure_count=int(
                 data.get("content_render_failure_count", 0)
             ),
+            content_render_error_counts={
+                code: count
+                for code, count in raw_error_counts.items()
+                if code in PERSONAL_RENDER_ERROR_CODES
+                and isinstance(count, int) and not isinstance(count, bool)
+                and count >= 0
+            },
             validation_retry_count=int(data.get("validation_retry_count", 0)),
             fallback_count=int(
                 data.get("fallback_count", data.get("codex_fallback_count", 0))
@@ -1835,7 +1847,7 @@ class DayGroupingSummary:
             warning_count=int(data.get("warning_count", 0)),
         )
 
-    def to_dict(self) -> dict[str, int]:
+    def to_dict(self) -> dict[str, int | dict[str, int]]:
         return {
             "candidate_count": self.candidate_count,
             "initial_group_count": self.initial_group_count,
@@ -1859,6 +1871,7 @@ class DayGroupingSummary:
             "content_render_request_count": self.content_render_request_count,
             "content_render_retry_count": self.content_render_retry_count,
             "content_render_failure_count": self.content_render_failure_count,
+            "content_render_error_counts": dict(self.content_render_error_counts),
             "validation_retry_count": self.validation_retry_count,
             "fallback_count": self.fallback_count,
             "singleton_repair_candidate_count": self.singleton_repair_candidate_count,

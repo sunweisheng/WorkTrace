@@ -342,7 +342,7 @@ def test_replay_summary_counts_issues_by_stage() -> None:
             "group_count": 1,
             "issue_counts": {"duplicate_draft_id": 1},
             "review_trigger_reasons": ["broad_object"],
-            "new_rule_handling": "拒绝重复编号",
+            "new_rule_handling": "拒绝|重复编号",
             "needs_model_review": True,
         },
         {
@@ -374,3 +374,4 @@ def test_replay_summary_counts_issues_by_stage() -> None:
     assert "旧结果问题" in markdown
     assert "新规则处理" in markdown
     assert "是否仍需模型复核" in markdown
+    assert "拒绝\\|重复编号" in markdown

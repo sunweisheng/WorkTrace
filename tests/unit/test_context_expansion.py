@@ -4,16 +4,21 @@ from pathlib import Path
 
 from src.worktrace.config import RuntimeConfig
 from src.worktrace.constants import ContextDirection, ContextRequestType
+from src.worktrace.factories import RuntimeDependencies
 from src.worktrace.models import (
     AttachmentMeta,
+    ConversationSegmentUnit,
     ContextRequest,
     ConversationSlice,
     LinkMeta,
     LinkedFileTextBlock,
     NormalizedMessage,
+    SelfIdentity,
 )
 from src.worktrace.pipeline.context_expansion import expand_slice_context
 from src.worktrace.resolvers.feishu_message import FeishuMessageContentResolver
+from src.worktrace.runner import DailyTraceRunner
+from src.worktrace.runtime_diagnostics import structured_warnings
 
 
 class FakeChatSource:
@@ -322,3 +327,48 @@ def test_expand_slice_context_loads_linked_file_texts(tmp_path: Path) -> None:
 
     assert len(expanded.linked_file_texts) == 1
     assert expanded.linked_file_texts[0].link_id == "om_1#link1"
+
+
+def test_segment_retry_preserves_budget_warning_when_context_is_unchanged(
+    tmp_path: Path,
+) -> None:
+    config = RuntimeConfig(
+        data_root=tmp_path / "data", model_input_batch_target_tokens=1,
+    )
+    message = NormalizedMessage(
+        conversation_id="oc_1", conversation_name="项目群",
+        message_id="om_1", sender_open_id="ou_self", sender_name="Me",
+        send_time="2026-06-22T10:00:00+08:00", message_type="text",
+        text="请补充前文", reply_to_message_id=None,
+        quote_message_id=None,
+    )
+    unit = ConversationSegmentUnit(
+        segment_id="segment-1", conversation_id="oc_1",
+        conversation_name="项目群", primary_message_ids=["om_1"],
+        context_message_ids=[], self_evidence_message_ids=["om_1"],
+        response_signals=[], response_assessments=[], messages=[message],
+    )
+    runner = DailyTraceRunner(config, RuntimeDependencies(
+        chat_source=FakeChatSource(), content_resolver=object(),
+        analyzer=object(), delivery_channel=object(), event_store=object(),
+    ))
+
+    candidates, warnings, skipped, calls = runner._retry_segment_context(
+        target_date="2026-06-22", unit=unit,
+        requests=[ContextRequest(
+            slice_id=unit.segment_id,
+            request_type=ContextRequestType.EARLIER_MESSAGES.value,
+            target_message_ids=["om_1"], target_attachment_ids=[],
+            reason="需要前文", limit=1,
+        )],
+        self_identity=SelfIdentity("ou_self", "Me", "feishu"),
+        context_expansion_round=1,
+    )
+
+    assert candidates == []
+    assert skipped == 1
+    assert calls == 0
+    assert [item["code"] for item in structured_warnings(warnings)] == [
+        "segment_context_budget_exceeded", "segment_context_missing",
+    ]
+    assert all("om_2" not in item["summary"] for item in structured_warnings(warnings))

@@ -175,6 +175,14 @@
       "summary": "会话片段划分失败，已改用回退提炼；完成情况以最终跳过数量为准。"
     },
     {
+      "code": "segment_context_budget_exceeded",
+      "stage": "candidate_generation",
+      "markers": [
+        "Skipped expanded context message because it exceeds the model input batch target"
+      ],
+      "summary": "新增上下文超过输入预算，相关消息未加入片段；报告可能遗漏事项。"
+    },
+    {
       "code": "segment_context_missing",
       "stage": "candidate_generation",
       "markers": [

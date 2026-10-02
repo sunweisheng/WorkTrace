@@ -64,7 +64,7 @@ python3 -m src.worktrace.anchor_experiment --date 2026-06-23 --summary-table
 
 首轮按 `anchor_batch_size`（当前为 `3`）组批，不执行正式 runner 的按 token 预算拆窗和装批。底层 analyzer 仍会检查输入预算，超限不代表实验会自动拆分成功。批量返回的已知锚点立即写缓存并结束，`needs_more_context` 或 `needs_attachment_text` 不会单独触发后续轮次；批量协议异常或缺失项才回退逐锚点分析，最多执行 `anchor_retry_limit` 轮（当前为 `3`，来自 `segmentation_retry_limit`）。
 
-默认缓存路径为 `data/cache/anchors/YYYY/MM/YYYY-MM-DD/<anchor_unit_id>/<fingerprint>.json`；设置 `cache_root` 时使用对应根目录。`--ignore-cache` 只禁止读取，仍写新结果；`--refresh-cache` 删除当天全部实验缓存后禁止读取，删除范围不受 `--limit` 限制。
+默认缓存路径为 `data/cache/anchors/YYYY/MM/YYYY-MM-DD/<anchor_id_sha256>/<fingerprint>.json`，目录名由 `anchor_unit_id` 的 UTF-8 字节计算 SHA-256，兼容 Windows 文件名限制；设置 `cache_root` 时使用对应根目录。旧目录不会自动迁移，首次读取可能未命中，但文件不会被自动删除。`--ignore-cache` 只禁止读取，仍写新结果；`--refresh-cache` 删除当天全部实验缓存后禁止读取，删除范围不受 `--limit` 限制。
 
 实验指纹包含消息、锚点信号、直接关联 ID、附件/链接正文和固定协议版本标记，不包含 `llm_mode`、模型名称或完整规则配置。因此切模式、换模型或改规则不能保证缓存自动失效，对照时应使用 `--ignore-cache` 或 `--refresh-cache`。逐锚点扩窗后的结果按扩展输入指纹保存，下次启动按初始输入查找，也不保证命中。缓存命中仍需要自检和消息抓取，且不为该锚点重新写调试文件。
 

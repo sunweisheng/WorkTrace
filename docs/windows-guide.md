@@ -132,21 +132,24 @@ PowerShell 5.1 的实际管道显示与 ARM64 尚需各自实机复验。
 JSON 新增 `warnings` 数组（code、stage、summary），旧个人 `error_summary`
 和多人 `warning_messages` 保留以兼容已有消费者。`success_with_warnings`
 表示产物成功，但仍需检查送达及跳过数量；`segment_context_missing` 会明确
-说明片段已经跳过，不能把这份报告认定为数据完整。历史 JSON 缺少新字段
+说明片段已经跳过；若新增消息被输入预算挡住，另有
+`segment_context_budget_exceeded` 告警。不能把这份报告认定为数据完整。历史 JSON 缺少新字段
 仍可读取。结构化提示不复制原始错误或 ID，旧字段保持原有详细说明。
 
-4.1.4 起，真实日报在最终事件核对失败时，CLI 仍为 `failed`，不会写入或发送 Markdown；已完成阶段的会话、消息、候选和待核对组数会保留在结果中。`event_count=0` 仍只表示没有正式产物。安全诊断把业务校验重试和请求失败后的重试分开统计，证据校验失败应先核对最终组的动作、事实和角色，不应按网络故障处理。Windows 真实日报是否恢复成功仍需实机复测。
+4.1.4 起，真实日报在最终事件核对失败时，CLI 仍为 `failed`，不会写入或发送 Markdown；已完成阶段的会话、消息、候选和待核对组数会保留在结果中。`event_count=0` 仍只表示没有正式产物。4.1.5 起，`day_grouping_summary.content_render_error_counts` 和安全诊断按固定类别统计最终核对的失败尝试；同次尝试出现多个类别时分别计数，同类问题只计一次。CLI 失败摘要不显示未通过组的 ID，安全诊断不包含原消息或模型返回；业务校验重试与请求失败后的重试仍分别统计。证据校验失败应先核对最终组的动作、事实和角色，不应按网络故障处理。新代码仍需 Windows 实机复测。
 
 ## 自动检查范围
 
 `.github/workflows/windows.yml` 在干净 Windows AMD64 环境安装依赖，运行
-CLI 帮助、模块导入、`pip check` 和针对性离线测试。PowerShell 测试覆盖
+CLI 帮助、模块导入、`pip check` 和完整离线测试套件。PowerShell 测试覆盖
 旧 Python、pip 失败、已存在目标、保留 `.env`、CODEX_HOME 与中文空格路径；
 真实 `.cmd/.bat` 进程还验证带 `&`、`%`、`!`、引号和 `^` 的参数，
 以及安装目录本身带 `&`、`%`、`!`、`^` 的情况。
 认证、飞书和模型使用合成数据，不调用真实业务服务。
 
-Windows CI 显式设置 `PYTHONUTF8=0`，检验测试不依赖全局 UTF-8 模式。涉及报告和模型模式的测试读写文件显式指定 UTF-8，stdin 探针和比较脚本使用 `sys.executable`，避免命中商店的 `python3` 别名。覆盖增加模型模式、个人准确性、比较脚本及安全诊断报告测试。下面记录的是此前版本的验证，新增检查以对应提交的 CI 结果为准。
+Windows CI 显式设置 `PYTHONUTF8=0`，检验测试不依赖全局 UTF-8 模式。涉及报告和模型模式的测试读写文件显式指定 UTF-8，stdin 探针和比较脚本使用 `sys.executable`，避免命中商店的 `python3` 别名。完整套件覆盖锚点实验缓存和多人汇总。
+
+4.1.5 发布前的[完整 Windows CI](https://github.com/sunweisheng/WorkTrace/actions/runs/37038975768) 在提交 `edbe19435169bcea27d2be066475205622800c83` 上通过：Python 3.11 和 3.12 各 1041 项通过、1 项跳过、0 失败，两组均设置 `PYTHONUTF8=0`。这不替代 Windows 11 上的真实日报和跳过数量复测。
 
 
 2026-10-02 的[Windows CI 复测](https://github.com/sunweisheng/WorkTrace/actions/runs/36974505094)

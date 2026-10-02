@@ -970,10 +970,11 @@ def build_markdown(summary: dict[str, Any]) -> str:
         "|---|---|---|---|---|---|",
     ]
     for item in summary["results"]:
+        handling = str(item["new_rule_handling"]).replace("|", "\\|")
         lines.append(
             f"| {item['id']} | {item['stage']} | {item['mode']} | "
             f"{_markdown_problem_text(item)} | "
-            f"{str(item['new_rule_handling']).replace('|', '\\|')} | "
+            f"{handling} | "
             f"{'是' if item['needs_model_review'] else '否'} |"
         )
     return "\n".join(lines) + "\n"

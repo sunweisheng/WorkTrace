@@ -32,23 +32,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python -m pip install pytest
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - name: Offline runtime and installer regression tests
+      - name: Complete offline test suite
         run: >-
           python -m pytest -q
-          tests/integration/test_cli_contract.py
-          tests/integration/test_cli_utf8.py
-          tests/integration/test_cli_setup.py
-          tests/integration/test_install_scripts.py
-          tests/unit/test_commands.py
-          tests/unit/test_codex_analyzer.py
-          tests/unit/test_codex_config_import.py
-          tests/unit/test_config.py
-          tests/unit/test_preflight.py
-          tests/unit/test_full_preflight.py
-          tests/unit/test_runtime_progress.py
-          tests/unit/test_llm_modes.py
-          tests/unit/test_personal_render_accuracy.py
-          tests/unit/test_benchmark_hook_vs_codex.py
-          tests/unit/test_support_report.py
-          tests/unit/test_docs_contract.py
           --tb=short --show-capture=no
