@@ -2,7 +2,7 @@
 
 ## 1. 文档定位
 
-本文档以当前代码为准，描述 WorkTrace 的正式入口、个人日报主链、多人汇总主链、数据边界、失败回退、过滤层和产物。历史设计稿只用于解释演进，不应覆盖本文档中的当前行为。
+本文档以当前代码为准（4.1.0），描述 WorkTrace 的正式入口、个人日报主链、多人汇总主链、数据边界、失败回退、过滤层和产物。历史设计稿只用于解释演进，不应覆盖本文档中的当前行为。
 
 ## 2. 产品与信任边界
 
@@ -11,9 +11,9 @@ WorkTrace 解决的是员工对当天工作沟通的结构化回顾问题。个�
 明确边界：
 
 - 个人日报会通过本机 `lark-cli` 读取当前用户可见的聊天
-- 裁剪后的消息正文、会话名、发送者信息、消息和会话标识、链接 URL/标题、附件文件名、按需读取的附件/文档正文和启用范围内的图片会进入用户配置的在线模型服务
+- 裁剪后的消息正文、会话名、发送者信息、消息和会话标识、链接 URL/标题、附件文件名、按需读取的附件/文档正文和启用范围内的图片会进入所选模式对应的模型服务；默认由 Codex 主线路处理，当前请求可能交给 Online 备用，`online_only` 只使用 Online
 - 为补齐 reply/quote 直接关系或按需扩展相邻上下文，个人日报可能临时读取目标日期之外的直接关联消息；事件日期仍固定为目标日期
-- 正式模式默认不长期落盘原始聊天，但 `--debug-output` 会落盘裁剪后的上下文和模型结果
+- 正式模式会保存包含消息正文的序列化窗口/批次中间结果；成功写入 Markdown 后清理，失败后继续留存，当前没有自动过期清理。`--debug-output` 另会保存裁剪后的上下文和模型结果
 - 默认投递目标是当前用户本人，不是领导
 - 多人汇总只读取已收集 Markdown，不重新读取成员原始聊天
 - 系统不承诺“零数据外发”或“绝对安全”
@@ -23,12 +23,12 @@ WorkTrace 解决的是员工对当天工作沟通的结构化回顾问题。个�
 | 命令 | 入口 | 前置行为 | 主要产物 |
 | --- | --- | --- | --- |
 | `python3 -m src.worktrace.cli --date YYYY-MM-DD` | 个人日报 | 加载规则/黑名单并自动 preflight | `data/YYYY/MM/YYYY-MM-DD-姓名.md` |
-| `python3 -m src.worktrace.cli --date YYYY-MM-DD --resume` | 续跑个人日报 | 保留输入未变化的分段/提炼中间结果 | 同上 |
+| `python3 -m src.worktrace.cli --date YYYY-MM-DD --resume` | 续跑个人日报 | 保留模式及序列化窗口/批次输入未变化的分段/提炼中间结果 | 同上 |
 | `python3 -m src.worktrace.cli --preflight` | 仅自检 | 不生成日报 | JSON 检查结果 |
 | `python3 -m src.worktrace.cli merge-collected --date YYYY-MM-DD [--owner-name 姓名] [--offline]` | 多人汇总 | 独立执行，不走个人日报 preflight；离线时不依赖飞书 CLI | 每个 scope 的 `*-merged.md` |
 | `python3 -m src.worktrace.cli sync-reaction-catalog --source feishu` | reaction 同步 | 独立执行 | 本地目录 JSON 和 PNG |
 
-`cli.py` 统一负责日期校验、配置覆盖、JSON 输出和退出码。退出码约定：成功为 `0`，运行失败为 `1`，输入日期非法为 `2`。
+`cli.py` 统一负责日期校验、配置覆盖、JSON 输出和退出码。退出码约定：成功为 `0`，运行失败为 `1`，输入日期或离线合并负责人参数非法为 `2`。配置加载在这些分支之前执行，非法模型模式或规则 JSON 等启动错误可能直接抛异常，不保证生成结构化结果。
 
 ## 4. 架构与依赖装配
 
@@ -39,16 +39,17 @@ flowchart LR
     CLI --> RUN["runner.py"]
     RUN --> SRC["ChatSource\nFeishuCliChatSource"]
     RUN --> RES["ContentResolver\nFeishuMessageContentResolver"]
-    RUN --> ANA["Analyzer\nOnlineLLMAnalyzer"]
+    RUN --> ANA["FailoverAnalyzer\n由 llm_mode 选择线路"]
     RUN --> STORE["EventStore\nMarkdownEventStore"]
     RUN --> DEL["DeliveryChannel\nFeishuCliSelfDelivery"]
-    ANA --> API["OpenAI SDK\nResponses / Chat Completions"]
+    ANA --> CODEX["CodexAnalyzer\nCodex CLI"]
+    ANA --> API["OnlineLLMAnalyzer\nOpenAI SDK / 两种接口"]
     SRC --> LARK["lark-cli user"]
     RES --> LARK
     DEL --> BOT["lark-cli bot"]
 ```
 
-`factories.py` 建立五个主要依赖边界：聊天源、内容解析器、analyzer、store、delivery。当前默认实现为飞书 + Codex 主线路 + Online 当前请求备用，但抽象接口保留替换空间。
+`factories.py` 建立五个主要依赖边界：聊天源、内容解析器、analyzer、store、delivery。当前默认实现为飞书 + Codex 主线路 + Online 当前请求备用；`WORKTRACE_LLM_MODE=online_only` 改为仅 Online，文字和图片请求均不调用 Codex。线路选择以 `llm_mode` 为准，`analyzer_backend` 是兼容字段。抽象接口保留替换空间。
 
 ## 5. 个人日报主链
 
@@ -61,7 +62,7 @@ sequenceDiagram
     participant Source as Feishu Source
     participant Runner
     participant Resolver
-    participant LLM as Online Analyzer
+    participant LLM as 所选模式的 Analyzer
     participant Store
     participant Delivery
 
@@ -71,7 +72,7 @@ sequenceDiagram
     Runner->>Source: list_target_conversations()
     Runner->>Source: fetch_conversation_messages()
     Runner->>Runner: 构造窗口并摘要本人关联图片
-    loop 按输入内容大小排序的锚点窗口
+    loop 会话间优先处理较大待办窗口，同会话按窗口顺序
         Runner->>LLM: segment_conversation(...)
     end
     loop 按输入内容大小排序的分段批次
@@ -82,20 +83,30 @@ sequenceDiagram
             Runner->>LLM: retry segment batch
         end
     end
-    Runner->>LLM: merge_day_candidates(...)
+    Runner->>Runner: 候选关键词、本人关联与保留门槛
+    opt 临时协作候选命中配置
+        Runner->>LLM: review_retention_candidates(...)
+    end
+    opt 个人事实风险命中配置
+        Runner->>LLM: review_personal_event_facts(...)
+    end
+    opt 候选多于一条
+        Runner->>LLM: merge_day_candidates(...)
+    end
     Runner->>Runner: 校验分组完整性
     opt 至少有两个初步组
-        Runner->>LLM: discover_day_group_review_candidates(...)
+        Runner->>LLM: request_function(day group discovery)
         LLM-->>Runner: 全部组标题检查结果
     end
     opt 标题或结构关系形成检查范围
         Runner->>LLM: request_function(day group review)
         LLM-->>Runner: 完整内容复核结果
     end
-    opt 最终组包含多个成员
+    opt 存在最终事件组（含单成员组）
         Runner->>LLM: request_function(personal group render)
         LLM-->>Runner: 覆盖锁定成员的标题、正文和对象
     end
+    Runner->>Runner: 物化、过滤、文件证据聚合与排序
     Runner->>Store: replace_day(...)
     opt config/self_delivery.json enabled=true
         Runner->>Delivery: deliver_to_self(...)
@@ -108,11 +119,11 @@ sequenceDiagram
 `FeishuCliChatSource.list_target_conversations(...)` 使用两次搜索：
 
 1. 按当前用户 `open_id` 搜索本人当天发送的消息
-2. 搜索当天消息，识别当前用户当天做过的 reaction
+2. 搜索当天消息，在 `reaction_discovery_page_limit` 限制内识别当前用户当天做过的 reaction（当前最多 3 页）
 
 二者任一命中的会话都会进入候选，`excluded_conversation_ids` 在此阶段直接排除。随后 `fetch_conversation_messages(...)` 按会话、按时间升序分页读取当天消息。
 
-这意味着当前范围不是简单的“本人当天发过消息的会话”；本人当天只做 reaction 的会话也可能进入分析。
+本人当天只做 reaction 的会话也可能进入分析，但 reaction 发现只搜索当天发送的消息且有分页上限，不保证找齐对历史消息做出的 reaction 或上限之外的会话。
 
 ### 5.3 消息标准化与基础过滤
 
@@ -132,14 +143,14 @@ sequenceDiagram
 
 ### 5.4 图片摘要
 
-默认内容解析器装配 `CodexFirstImageSummarizer`，必要时才使用 `OnlineImageSummarizer` 备用。`config/image_summary.json` 启用时：
+默认 `codex_with_fallback` 模式装配 `CodexFirstImageSummarizer`，必要时才使用 `OnlineImageSummarizer` 备用；`online_only` 直接装配 `OnlineImageSummarizer`。`config/image_summary.json` 启用时：
 
 1. 首轮前先摘要本人发送的图片，以及本人直接回复或引用目标消息中的图片
 2. 这些图片摘要直接进入话题切分与事件提炼输入；目标消息在当天窗口外时一并补入
 3. 其他图片仅在模型判断依赖图片内容时返回 `attachment_text` 请求
 4. 临时下载图片，并按字节上限筛选；按需图片另受数量上限限制
-5. 先用 Codex 生成工作内容摘要；主线路重试后仍为空、产生工具调用等不合法结果，或命中 `config/image_summary.json` 配置的无法识别说法时，只把当前图片交给 Online 备用一次
-6. Online 备用使用 `detail=low`，成功摘要作为 `AttachmentTextBlock` 补回当前片段；备用不可用或仍失败时跳过该图
+5. 默认模式先用 Codex 生成工作内容摘要；主线路重试后仍为空、产生工具调用等不合法结果，或命中 `config/image_summary.json` 配置的无法识别说法时，只把当前图片交给 Online 备用一次
+6. Online 使用 `detail=low`；纯在线模式对可重试技术错误按 `primary_request_retry_limit` 额外重试，默认模式中的 Online 图片备用只执行一次。成功摘要作为 `AttachmentTextBlock` 补回当前片段；备用不可用或仍失败时跳过该图
 
 同一消息图片在单次运行内复用摘要，最终失败也会在本次运行内记住，避免后续阶段重复调用。每张图最终失败只产生一次 warning，临时目录结束后删除，不阻断日报。正式流程和 `--debug-output` 使用同一摘要线路；调试账本额外记录触发切换的 `codex -> online`、原因和按请求类型计算的 `fallback_count`。
 
@@ -168,14 +179,14 @@ sequenceDiagram
 
 ### 5.7 分段组批与候选提炼
 
-同一会话的多个片段由 `pack_segment_units(...)` 按完整模型输入估算打包成 `SegmentAnalysisBatch`。估算包含最终提示词、合法参数示例、重试反馈、`/no_think` 和动态 ID 枚举，并取 Online Function 定义与 `tool_choice`、Codex 完整 output-schema 两种输入估算的较大值。组合输入超过 `model_input_batch_target_tokens` 时继续拆分；单个片段仍超过目标时标记为 `oversized_singleton` 后发送。该估算覆盖调用前客户端已知输入；服务端精确 `usage.input_tokens` 只用于事后核对。每个结果必须按 `segment_id` 返回：
+同一会话的多个片段由 `pack_segment_units(...)` 按完整模型输入估算打包成 `SegmentAnalysisBatch`。估算包含最终提示词、合法参数示例、`/no_think` 和动态 ID 枚举；片段提炼的外层重试复用同一批次，不附加前次错误反馈，并取 Online Function 定义与 `tool_choice`、Codex 完整 output-schema 两种输入估算的较大值。组合输入超过 `model_input_batch_target_tokens` 时继续拆分；单个片段仍超过目标时标记为 `oversized_singleton` 后发送。该估算覆盖调用前客户端已知输入；服务端精确 `usage.input_tokens` 只用于事后核对。协议要求每个结果按 `segment_id` 返回以下字段。已解析结果中重复、未知和缺失片段会被过滤或跳过并告警，不统一重跑批次；调用或解析异常才进入当前批次的外层重试。外层耗尽后逐片段备用提炼，每项只调用一次 analyzer（仍可能含请求级重试），最终失败则跳过。
+
+- `candidate_events`
+- `context_requests`
 
 事件写作和事项边界统一来自 `config/event_generation.json`。`build_segment_batch_analysis_prompt`、旧批量入口、单锚点、锚点批量和扩展上下文入口都接收共同事实规则、个人事项边界、字段模板及脱敏正反例。事项最小单位是同一具体对象和共同目标下可以独立汇报的完整业务事项；具有直接承接关系的不同动作组成一条，只有对象或目标不同、事实互不承接且能够分别汇报时才拆分。Python 只严格读取并传递配置，不通过新增业务关键词判断事项边界。
 
 `build_personal_fact_review_prompt` 只接收共同事实规则和个人字段模板，不重复案例；局部事实缺少证据时删除或改写局部表述，其余有证据的动作链仍保留。所有个人提炼入口都要求 `source_message_ids` 覆盖输出实际使用的全部事实证据。最终分组确定后，`build_personal_group_render_prompt` 对单成员组和多成员组逐项使用完整模板和案例，将锁定成员改写为一条连贯事项，同时继续要求每个成员至少被一项正文事实证据覆盖。
-
-- `candidate_events`
-- `context_requests`
 
 候选 `SourceBackedEventDraft` 的核心字段：
 
@@ -192,7 +203,7 @@ sequenceDiagram
 
 附件文件名会作为消息元数据进入 prompt。候选已按个人保留规则确认可提炼后，若实质业务事实明确涉及发送、查看、审核、转交或处理附件，模型可以引用来源消息中的附件 ID，且事件标题和具体对象必须写明文件名；这不代表系统读取了附件正文。仅发送、查看或确认附件本身不能使候选成为事件，也不能据文件名推断正文事实。模型误把消息 ID 当附件 ID 且该消息只有一个附件时，Python 会修复引用；其他无效附件引用会被移除，但候选的其余有效事实仍保留。
 
-话题切分和事件提炼完成后分别写入 `data/cache/llm/YYYY/MM/YYYY-MM-DD/`。文件保存完整输入及其 SHA-256 指纹，只复用输入完全一致的结果。默认运行在 preflight 通过后先删除旧个人日报、当天中间结果和 `data/debug/conversations/<date>/` 当天个人调试目录；`--resume` 保留这三类产物，并只复用输入完全一致的中间结果。Markdown 成功写入后，中间结果会清理，因此该目录只用于未完成任务续跑，不是长期数据仓库。
+话题切分和事件提炼完成后分别写入 `data/cache/llm/YYYY/MM/YYYY-MM-DD/`。文件保存序列化窗口或批次输入和 `llm_mode`；两者共同生成 SHA-256 文件名，读取时再次检查模式和输入。最终 prompt、模型名与规则配置不单独进入缓存键，修改这些设置后应普通重跑以清理旧结果。默认运行在 preflight 通过后先删除旧个人日报、当天中间结果和 `data/debug/conversations/<date>/` 当天个人调试目录；`--resume` 保留这三类产物，并只复用模式与序列化输入完全一致的中间结果。Markdown 成功写入后，中间结果会清理，该目录用于未完成任务续跑；失败后的缓存包含聊天正文，当前没有自动 TTL，到普通重跑或成功写入后才清理。
 
 ### 5.8 上下文请求与重试
 
@@ -203,15 +214,15 @@ sequenceDiagram
 - `attachment_text`：下载并读取指定文本附件
 - `linked_file_text`：读取指定飞书 Docx/Wiki 正文
 
-扩展只作用于请求所属片段；新增内容合并去重后重新分段并分析相关片段。更早/更晚消息的读取以目标消息为边界，不额外限制在目标日期内，因此午夜附近的扩展可能包含跨日消息。默认分段主链按 `context_expansion_round_limit` 停止，当前最多扩展 2 轮；每个方向单轮最多取 7 条消息。旧 analyzer 的会话级兼容路径仍使用 `slice_retry_limit`。其他停止条件包括无新信息、签名未变化或协议无效。
+扩展只作用于请求所属片段；新增内容合并去重后重新分段并分析相关片段。更早/更晚消息的读取以目标消息为边界，不额外限制在目标日期内，因此午夜附近的扩展可能包含跨日消息。默认分段主链按 `context_expansion_round_limit` 停止，当前最多扩展 2 轮；每个方向单轮最多取 7 条消息。旧 analyzer 的会话级兼容路径仍使用 `slice_retry_limit`。其他停止条件包括无新信息、签名未变化或协议无效。扩窗后的重新分段调用失败时，两种模式都跳过该片段并告警；这一局部降级与纯在线首轮分段的技术失败直接传播不同。
 
 文本附件限制来自 `config/attachment_text.json`，当前只支持配置中的文本扩展名，不做通用二进制文档解析。
 
 ### 5.9 分段失败后直接提炼
 
-每个锚点分段最多尝试 `anchor_retry_limit + 1` 次。相同输入窗口使用内存缓存避免重复调用；同一会话中同类失败达到 `conversation_segmentation_failure_threshold` 后打开熔断，不再继续请求剩余锚点分段。
+每个锚点分段最多尝试 `anchor_retry_limit + 1` 次；这是 runner 外层尝试数，每次还可能包含请求级技术重试和备用。外层重试复用同一窗口，不把上一次校验错误加入分段 prompt。相同输入窗口使用内存缓存避免重复调用；同一会话中同类失败达到 `conversation_segmentation_failure_threshold` 后打开熔断，不再继续请求剩余锚点分段。
 
-只要某个聊天窗口最终无法完成分段，该会话还会执行 `_analyze_anchor_fallback(...)`：本人参与的聊天窗口先按锚点和消息尽量拆到分批目标内，再同时按 `anchor_batch_size` 和锚点提炼专用 Function 的完整输入估算组批，直接提炼事件，并继续支持补充上下文。最小窗口仍超过目标时允许单独发送。直接提炼的候选和正常分段得到的候选之后进入同一过滤链。
+默认模式中，只要某个聊天窗口最终无法完成分段，该会话还会执行 `_analyze_anchor_fallback(...)`：本人参与的聊天窗口先按锚点和消息尽量拆到分批目标内，再同时按 `anchor_batch_size` 和锚点提炼专用 Function 的完整输入估算组批，直接提炼事件，并继续支持补充上下文。最小窗口仍超过目标时允许单独发送。直接提炼覆盖该会话全部初始窗口，其候选和正常分段得到的候选之后进入同一过滤链。纯在线模式请求级技术重试耗尽后直接失败，不通过分段回退重新调用；结果质量问题仍可触发有限重试与上述回退。
 
 ### 5.10 候选过滤
 
@@ -225,7 +236,7 @@ sequenceDiagram
 
 ### 5.11 临时协作局部复核
 
-`pipeline/retention_review.py` 在候选过滤之后、全日分组之前运行。只有 `config/retention_policy.json` 配置命中的候选才进入复核；当前默认条件为：`retention_reason=follow_up_assigned` 且没有链接和附件。没有候选时不调用模型。
+`pipeline/retention_review.py` 在候选过滤之后、全日分组之前运行。只有 `config/retention_policy.json` 配置命中的候选才进入复核；当前默认条件为：`retention_reason=follow_up_assigned` 且没有显式链接和附件引用。没有候选时不调用模型。
 
 职责边界如下：
 
@@ -238,7 +249,7 @@ sequenceDiagram
 
 `config/retention_policy.json` 还定义了当前个人保留边界：会议时间、参会人和沟通渠道的确定不属于业务决策；单纯参会、调整日程、听取或查看附件、简单确认都不单独形成事件。同一段聊天中已经形成的业务结论、具体任务、问题风险或交付变化仍单独提炼。附件存在、文件名明确或确认已查看都不能单独作为保留理由；已明确要求提交总结、审核结论或修改结果等具体产出时，即使当天没有反馈结果，仍可作为后续业务动作。聊天已明确说明数据核查或问题排查已经完成，并给出排查对象和结论时，应记录排查事实；结论为正常且本人随后只回复收到，也不改变这一处理，不需要为了同消息中的配图或附件再读取正文。
 
-复核使用保留复核专用 Function，按统一完整输入估算以当前预算 profile 为目标分批。组合候选超过目标时继续拆分，单个候选仍超过目标时标记后发送。模型明确拒绝输入时直接失败且不重试；模型漏回、重复返回、字段不完整、信号类型非法或证据消息不属于当前候选时，只重试当前批次，并把具体错误反馈给模型。重试反馈导致超限时标记 `oversized_retry` 后发送。重试后仍错误或发生技术失败时，整次运行返回 `failed`，不写 Markdown。正常语义删除不产生 warning。
+复核使用保留复核专用 Function，按统一完整输入估算以当前预算 profile 为目标分批。组合候选超过目标时继续拆分，单个候选仍超过目标时标记后发送。模型明确拒绝输入时直接失败且不重试；模型漏回、重复返回、字段不完整、信号类型非法或证据消息不属于当前候选时，只重试当前批次，并把具体错误反馈给模型。重试反馈导致超限时标记 `oversized_retry` 后发送。默认模式中的技术或协议错误也会进入当前批次的外层有限重试；纯在线模式请求级技术重试耗尽后直接失败，不再消耗结果质量重试。外层重试耗尽后，整次运行返回 `failed`，不写 Markdown。正常语义删除不产生 warning。
 
 `DailyRunResult.retention_review_summary` 由 Python 计算 `selected_candidate_count`、`reviewed_candidate_count`、`kept_candidate_count`、`dropped_routine_count`、`dropped_uncertain_count`、`review_batch_count` 和 `review_retry_count`，并随 CLI stdout JSON 输出。Markdown 不增加字段。
 
@@ -263,7 +274,7 @@ sequenceDiagram
 - Python 派生的标题、正文、动作、对象和保留依据必须被事实项完整覆盖
 - `supported=false` 时事实文字和证据必须为空，并提供被删除表述
 
-Python 不阅读聊天文字判断对比案例、责任人或流程建议，只接收模型的结构化结果并执行 `unsupported_policy`。原聊天无法同时支持非空标题、正文、具体对象和保留依据时删除；复核技术失败、漏回、重复、字段不完整、非法消息 ID 或覆盖不完整时只重试当前候选，重试反馈明确列出错误字段和 ID，重试后仍错误则整次个人日报 `failed` 且不写文件。不同候选通过线程池最多同时处理 `config/llm_retry.json` 配置的 3 条，同一候选内部的重试仍然串行。每个请求使用个人事实复核专用 Function，并按统一完整输入估算以当前预算 profile 为分批目标；单个候选允许越过目标，模型明确拒绝输入时不重试。
+Python 不阅读聊天文字判断对比案例、责任人或流程建议，只接收模型的结构化结果并执行 `unsupported_policy`。原聊天无法同时支持非空标题、正文、具体对象和保留依据时删除；复核技术失败、漏回、重复、字段不完整、非法消息 ID 或覆盖不完整时只重试当前候选，重试反馈明确列出错误字段和 ID，重试后仍错误则整次个人日报 `failed` 且不写文件。不同候选通过线程池最多同时处理 `config/llm_retry.json` 配置的 3 条，同一候选内部的重试仍然串行。默认模式技术和协议错误均可能进入当前候选的外层重试；纯在线模式请求级技术重试耗尽后直接失败。每个请求使用个人事实复核专用 Function，并按统一完整输入估算以当前预算 profile 为分批目标；单个候选允许越过目标，模型明确拒绝输入时不重试。
 
 `DailyRunResult.personal_fact_review_summary` 由 Python 计算选择数、复核数、确认数、修订数、无依据删除数、批次数和重试数。统计进入 CLI stdout JSON 和调试文件 `personal_fact_review.json`，不增加 Markdown 可见字段。
 
@@ -277,10 +288,10 @@ Python 不阅读聊天文字判断对比案例、责任人或流程建议，只�
 
 结果非法时执行以下固定边界：
 
-1. Codex 带 Python 具体校验错误按该任务的质量重试次数重试当前请求。
-2. 仍非法时，把当前请求交给 Online 1 次，下一请求仍优先 Codex。
-3. Online 技术调用失败时终止生成。
-4. Online 返回但仍非法时，`normalize_cross_conversation_groups_with_fallback(...)` 保留完全合法组，其余候选拆成单例并记录 warning。
+1. 当前主线路带 Python 具体校验错误按 `day_group_validation_retry_limit` 重试当前请求，当前额外 1 次。
+2. 默认模式仍非法且备用可用时，把当前请求交给 Online 1 次，下一请求仍优先 Codex；纯在线模式没有备用切换。
+3. 初步分组的技术调用失败会直接终止生成。
+4. 结果质量重试及可用备用仍未得到合法结果时，`normalize_cross_conversation_groups_with_fallback(...)` 保留完全合法组，其余候选拆成单例并记录 warning。
 
 初始分组通过后，系统先用 `day_group_discovery` 单次提交全部稳定组编号和组合标题；组合标题由 Python 按稳定顺序覆盖初步组全部成员标题，请求字段仍只有 `group_id` 和 `title`，不发送日期、正文或其他分组阶段的正反例。模型必须逐组比较全部标题，并为每个输入组恰好返回一次 `group_checks`，列出其他可能相关组和非空理由；`parse_day_group_discovery_payload(...)` 校验全量覆盖、编号合法、无自关联和无重复后，将重叠的单向关系转换为 `candidate_groups`。这是一套与日期、人员和业务内容无关的协议，不使用 Python 关键词或固定长度片段判断。`pipeline/day_event_grouping.py` 再依据同一 `source_slice_id`、直接 reply/quote、共享来源消息、共享文件、同一附件基础名称和标题候选生成稳定关系编号；同一会话本身不触发。标题候选仍可形成不限组数的完整检查范围，但其中每条实际组间连接单独编号，允许同一范围内同时出现成立和分开的关系。重叠关系形成完整检查范围，最多按 `max_concurrent_day_group_review_requests=3` 并行复核。范围内原始候选可以拆开初步组并重新组合。模型先逐条判断每项 `relation_resolutions`，再统一处理重叠关系并形成最终组；不得先沿用初步组或预设最终组，再用组归属反向解释关系。分开时可返回两侧代表成员。每条关系只返回覆盖两侧判断所需的最少消息编号，Function 示例也由 Python 按关系两侧生成代表成员和代表证据，不按关系数重复整个范围的消息清单。`validate_day_group_review_result(...)` 校验候选完整唯一覆盖、关系逐条处理、成立成员确实同组、分开代表成员确实位于不同组和两侧证据完整。复核失败或持续非法时保留复核前分组并记录 warning。
 
@@ -398,9 +409,9 @@ flowchart TD
 
 本次内容质量优化不改变 CLI、Function schema、公开 Markdown 字段、原子 `fact_items`、证据归属或送达方式，也不建设跨日事项状态库、事项身份、状态流转和历史时间线。模板不要求固定输出“下一步”、责任人、目标时间、背景、范围、状态或风险字段；来源中明确存在的信息可以自然写入正文，缺少时直接省略，不强制填“待确认”。
 
-单条候选如果没有进入跨组关系，分组阶段可直接确定为单成员组，但仍会进入最终正文写作。多条候选在来源事件达到 10 条、来源文件达到 4 个、跨批、Python 修复、同一会话连接多个无共同消息或文件的部分、无完整共同证据且对象不一致，或模型标记 `broad_object` 时加入检查范围。完整复核不预设保留或拆分方向；协议错误反馈包含错误组、关系编号、不可拆成员块、证据端点和缺失成员。结果质量错误固定走 Codex 首次请求、Codex 局部重试 1 次、Online 当前请求备用 1 次；最后仍非法时保留复核前分组并写 warning，不影响其他范围或整次部门汇总。正式内容按最终组逐事件严格检查；某项失败时只回退该项，不影响其余团队事件和当前 scope 写入。
+单条候选如果没有进入跨组关系，分组阶段可直接确定为单成员组，但仍会进入最终正文写作。多条候选在来源事件达到 10 条、来源文件达到 4 个、跨批、Python 修复、同一会话连接多个无共同消息或文件的部分、无完整共同证据且对象不一致，或模型标记 `broad_object` 时加入检查范围。完整复核不预设保留或拆分方向；协议错误反馈包含错误组、关系编号、不可拆成员块、证据端点和缺失成员。解析后的结果质量错误由当前主线路局部重试，当前额外 1 次；默认模式可再交给可用 Online 备用 1 次，纯在线模式没有备用；最后仍非法时保留复核前分组并写 warning，不影响其他范围或整次部门汇总。正式内容按最终组逐事件严格检查；某项失败时只回退该项，在正常异常处理路径下继续其余团队事件和当前 scope 写入。开启多人 trace 并在质量重试后刷新显式备用记录时，`_refresh_collected_merge_trace_step(...)` 当前引用未定义的 `source_coverage_error`，可能抛出 `NameError`；这一已知代码限制可能中断上述降级流程，见 [多人汇总调试与已知限制](collected-people-merge-plan.md)。本次仅修正文档，未修复该代码。
 
-候选、复核和正式正文使用各自任务专用 Function，并调用同一生产估算函数：`prepared_prompt` 包含最终提示词、当前合法参数示例、证据编号、重试错误反馈和 `/no_think`；`online_estimate` 再加入完整 Function 定义与 `tool_choice`，`codex_estimate` 再加入完整 output-schema，最终取两者较大值。估算器区分 ASCII 和非 ASCII 字符，并为混合中文 JSON、动态编号及协议固定开销留出余量。`model_input_batch_target_tokens` 从当前模型预算 profile 读取，配置不存在或主备模型组合未匹配时回退 `7000`；它是输入估算目标，不是 HTTP 字节数或服务端上下文上限。每尝试加入一个候选都重新构建并估算；复核超过目标时按关系分批，单个最终事件正文仍过长时复用正文切片和分层摘要；不可继续拆分的最小输入允许发送。所有最终团队事件各自请求，最多并行 3 项。校验错误只重试当前请求，加入具体错误后重新估算，超限时标记 `oversized_retry` 后发送。正式内容必须返回完整 `covered_draft_ids` 和 `fact_items`；Python 检查当前组的 draft 分配、锁定成员和事实来源，最终失败时使用当前组的确定性来源内容回退并记录 warning。调试 step 在 Python 校验失败时标记 `validation_failed`，`failed_step_indexes` 同时包含调用失败和校验失败；候选分组还保存解析前的 `raw_function_payload`，用于检查被解析器丢弃的非法结构。
+候选、复核和正式正文使用各自任务专用 Function，并调用同一生产估算函数：`prepared_prompt` 包含最终提示词、当前合法参数示例、证据编号、重试错误反馈和 `/no_think`；`online_estimate` 再加入完整 Function 定义与 `tool_choice`，`codex_estimate` 再加入完整 output-schema，最终取两者较大值。估算器区分 ASCII 和非 ASCII 字符，并为混合中文 JSON、动态编号及协议固定开销留出余量。`model_input_batch_target_tokens` 在默认模式从当前模型预算 profile 读取；配置不存在、主备组合未匹配或使用纯在线模式时采用 `default_target_tokens`，当前回退 `7000`；它是输入估算目标，不是 HTTP 字节数或服务端上下文上限。每尝试加入一个候选都重新构建并估算；复核超过目标时按关系分批，单个最终事件正文仍过长时复用正文切片和分层摘要；不可继续拆分的最小输入允许发送。所有最终团队事件各自请求，最多并行 3 项。候选分组和完整复核的质量重试只作用于当前请求，携带具体 Python 错误后重新估算，超限时标记 `oversized_retry` 后发送。正式正文按自己的覆盖和缺字段规则重试当前组，现有接口不会把前次 Python 错误加入正文提示词。正式内容必须返回完整 `covered_draft_ids` 和 `fact_items`；Python 检查当前组的 draft 分配、锁定成员和事实来源，最终失败时使用当前组的确定性来源内容回退并记录 warning。调试 step 在 Python 校验失败时标记 `validation_failed`，`failed_step_indexes` 同时包含调用失败和校验失败；候选分组还保存解析前的 `raw_function_payload`，用于检查被解析器丢弃的非法结构。
 
 部门负责人和中心负责人复用同一个 `merge-collected` 命令，当前代码没有自动的层级编排。第一级由部门负责人收集本部门个人 MD 后运行；第二级由中心负责人收集各部门 `*-merged.md` 后再次运行。带会话证据的自动事件和带合法人工修订标记的事件都可参与，修订类型会逐级传递。个人 MD 和部门 MD 可以同时作为输入，程序不比较两者的 `source_event_ids`，不拦截，也不提示重复来源。输出名默认取当前飞书登录人姓名，显式传入 `--owner-name` 时才改为指定姓名；`--offline` 必须同时传入该姓名，并且不访问飞书 CLI。一级子目录是并列 scope，不会自动把子目录输出再送入根目录。上游汇总继续保留原始来源人员和事件 ID，并从 `*-merged.md` 文件名提取上一级负责人；中心公开输出显示 `来源负责人`，来源事件 ID 仅保存在隐藏信息中。
 
@@ -429,34 +440,39 @@ FailoverAnalyzer -> CodexAnalyzer -> Codex CLI
                        -> OnlineLLMAnalyzer -> Responses / Chat Completions（仅当前请求备用）
 ```
 
+纯在线链路：`FailoverAnalyzer -> OnlineLLMAnalyzer -> Responses / Chat Completions`，没有 Codex 或备用。
+
 固定结构的正式语义请求：
 
 - Codex 提示词完整展示 Function 契约、`strict=true`、典型参数、结构示例和最终自检，不追加 `/no_think`
-- Online 备用 prompt 追加 `/no_think`；Responses 发送 `reasoning.effort=none`，Chat Completions 改发 `thinking.type=disabled`
+- Online 主线路和备用 prompt 都追加 `/no_think`；有效推理配置为 `none` 时，Responses 发送 `reasoning.effort=none`，Chat Completions 改发 `thinking.type=disabled`
 - 会话分段、事件提炼、保留复核、事实复核、全日分组、个人标题发现、个人完整复核、个人内容重写、多人候选分组、部门标题发现、部门完整复核、正式内容生成和表情元数据补全分别构造 `FunctionCallSpec`
 - 参数完整声明必填字段、动态 ID 枚举、数组数量与去重约束和 `additionalProperties:false`，并在 prompt 中加入当前合法 ID 的典型参数示例
 - Online 两种接口都设置 `strict:true`、`tools`、强制 `tool_choice` 和 `parallel_tool_calls=false`，非流式必须且只能调用一次预期 Function；流式按调用编号拼接 Function 参数后执行相同检查
 - Codex 使用同一参数结构作为 `--output-schema`，只提交一次参数 JSON；CLI 没有 `--strict=true` 参数，`--strict-config` 不等同该参数
 - 普通文字总结和图片理解不要求固定结构时不强制 Function Calling
 
-`WORKTRACE_LLM_WIRE_API` 默认 `responses`，显式设为 `chat_completions` 时统一切换 Online 结构化请求、图片备用和独立探针；不按模型名或地址判断。`WORKTRACE_LLM_STREAM` 是 Online 备用的流式开关，默认 `false`。每个 Online 请求都会重新读取当前配置，创建并关闭独立 OpenAI 与 HTTP 客户端；不保留全局单例、配置指纹或锁。每次 Codex 调用在空临时目录执行，提示词经 stdin 输入，Schema、结果和图片副本随临时目录删除，解析 `--json` 事件；允许非执行型 `error` 提示，仍拒绝工具调用和未知项。`read-only` 是写保护，不等同操作系统级读取隔离。preflight 使用正式 `FunctionCallSpec`、正式 Schema 和隔离参数执行 Codex 探针；日常 preflight 对 Online 只检查配置。
+`WORKTRACE_LLM_WIRE_API` 默认 `responses`，显式设为 `chat_completions` 时统一切换 Online 结构化请求、图片备用和独立探针；不按模型名或地址判断。`WORKTRACE_LLM_STREAM` 是 Online 线路的流式开关，默认 `false`。每个 Online 请求都会重新读取当前配置，创建并关闭独立 OpenAI 与 HTTP 客户端；不保留全局单例、配置指纹或锁。每次 Codex 调用在空临时目录执行，提示词经 stdin 输入，Schema、结果和图片副本随临时目录删除，解析 `--json` 事件；允许非执行型 `error` 提示，仍拒绝工具调用和未知项。`read-only` 是写保护，不等同操作系统级读取隔离。默认模式 preflight 使用正式 `FunctionCallSpec`、正式 Schema 和隔离参数执行 Codex 探针，对 Online 备用只检查配置；纯在线模式执行真实 Online Function Calling 探针。
 
-`CodexAnalyzer` 是默认主线路。每个新请求先走 Codex，网络、超时、限流、服务端异常、空结果和无效 JSON 时最多额外重试一次，再将当前请求交给 Online 一次；下一请求再次优先 Codex。登录、权限、模型、推理强度、TLS 和配置错误不会切换。runner 根据 analyzer 是否提供分段能力决定主链；不支持时回退到会话级 `ConversationSlice` 兼容路径。
+`codex_with_fallback` 中 `CodexAnalyzer` 是主线路。每个新请求先走 Codex，网络、超时、限流、服务端异常、空结果和无效 JSON 时最多额外重试一次，再将当前请求交给可用的 Online 备用一次；下一请求再次优先 Codex。登录、权限、模型、推理强度、TLS 和配置错误不会切换。`online_only` 的文字请求使用 Online 主线路，对可重试技术错误同样最多额外重试一次，没有备用。请求级次数不等于整次运行总次数：默认模式的分段、片段提炼、锚点直接提炼和两类个人复核还可能进入 runner 外层重试，再次从 Codex 开始；标题发现、完整内容复核和最终正文重写在技术请求失败后直接采用各自降级策略。runner 根据 analyzer 是否提供分段能力决定主链；不支持时回退到会话级 `ConversationSlice` 兼容路径。
 
 ## 9. 配置分层
 
 ### 9.1 `RuntimeConfig`
 
-主要默认值：
+下列值来自 `RuntimeConfig` 默认值；正式 CLI 还会加载 JSON 覆盖。当前 `config/llm_retry.json` 将分段并发设为 3、提炼并发设为 5、个人事实复核并发设为 3，个人与多人完整复核并发均为 3。
 
 - `timezone = "Asia/Shanghai"`
-- `analyzer_backend = "codex"`
+- `llm_mode = "codex_with_fallback"`（`WORKTRACE_LLM_MODE` 可选 `codex_with_fallback` 或 `online_only`；决定线路装配）
+- `analyzer_backend = "codex"`（兼容字段，不决定当前正式装配）
 - `primary_request_retry_limit = 1`（兼容别名：`online_request_retry_limit`）
 - `anchor_retry_limit = 3`
+- `analysis_batch_retry_limit = 3`
+- `day_group_validation_retry_limit = 1`
 - `anchor_batch_retry_limit = 1`
 - `conversation_segmentation_failure_threshold = 2`
 - `reaction_discovery_page_limit = 3`
-- `model_input_batch_target_tokens`（从 `config/model_input_budget.json` 的当前主备模型 profile 读取；未匹配时回退 `7000`。统一取 Online 完整 Function 请求和 Codex 完整 output-schema 估算的较大值，最小输入可以越过目标，服务端精确 token 只用于事后核对）
+- `model_input_batch_target_tokens`（默认模式从 `config/model_input_budget.json` 的当前主备模型 profile 读取；纯在线模式及未匹配时使用 `default_target_tokens`，当前回退 `7000`。统一取 Online 完整 Function 请求和 Codex 完整 output-schema 估算的较大值，最小输入可以越过目标，服务端精确 token 只用于事后核对）
 - `max_anchor_gap_minutes = 10`
 - `max_unrelated_intervening_messages = 3`
 - `initial_context_messages_before = 2`
@@ -478,7 +494,11 @@ FailoverAnalyzer -> CodexAnalyzer -> Codex CLI
 
 ### 9.2 `.env` 与环境变量
 
-Codex 主线路必填项是仓库本地 `.env` 中的模型、推理强度和五项中转提供方设置：`WORKTRACE_CODEX_MODEL`、`WORKTRACE_CODEX_REASONING_EFFORT`、`WORKTRACE_CODEX_PROVIDER_ID`、`WORKTRACE_CODEX_PROVIDER_NAME`、`WORKTRACE_CODEX_PROVIDER_BASE_URL`、`WORKTRACE_CODEX_PROVIDER_WIRE_API`、`WORKTRACE_CODEX_PROVIDER_REQUIRES_OPENAI_AUTH`。它们不从进程环境变量或个人 Codex 配置继承；中转站 Key 继续由 Codex CLI 的认证存储提供，不写入 WorkTrace `.env`。Online 备用连接仍使用 `WORKTRACE_LLM_BASE_URL`、`WORKTRACE_LLM_MODEL`、`WORKTRACE_LLM_API_KEY` 三项，缺少或不合法时只禁用备用。`WORKTRACE_LLM_WIRE_API` 可选 `responses` 或 `chat_completions`，未配置时保持 Responses；Online 的 `WORKTRACE_LLM_REASONING_EFFORT` 必须为 `none`。timeout/stream/TLS 位于 `.env` 或进程环境变量，环境变量优先。两条线路共用 `WORKTRACE_LLM_TIMEOUT_SECONDS`（未配置时 180 秒）作为整次请求总时限；Codex 到点终止子进程，Online 到点关闭当前连接。可切换失败按 `primary_request_retry_limit=1` 只让当前请求再试 Codex 1 次，仍失败才由 Online 执行一次，下一请求继续 Codex 优先。图片摘要中的 Codex 工具调用等不合法结果和配置定义的无法识别回复直接触发当前图片的 Online 备用，不改变文字请求规则。请求级重试次数和 Codex 间隔都在 `config/llm_retry.json` 统一控制。`WORKTRACE_LLM_TLS_VERIFY` 进入 Online 的文本、图片和独立探针 HTTP client。
+`WORKTRACE_LLM_MODE` 由进程环境变量优先于仓库本地 `.env`，默认 `codex_with_fallback`。纯在线模式只要求 Online 配置，preflight 执行真实的严格 Function Calling 小探针，不检查 Codex 安装、登录或提供方设置。
+
+默认模式的 Codex 主线路必填项是仓库本地 `.env` 中的模型、推理强度和五项中转提供方设置：`WORKTRACE_CODEX_MODEL`、`WORKTRACE_CODEX_REASONING_EFFORT`、`WORKTRACE_CODEX_PROVIDER_ID`、`WORKTRACE_CODEX_PROVIDER_NAME`、`WORKTRACE_CODEX_PROVIDER_BASE_URL`、`WORKTRACE_CODEX_PROVIDER_WIRE_API`、`WORKTRACE_CODEX_PROVIDER_REQUIRES_OPENAI_AUTH`。它们不从进程环境变量或个人 Codex 配置继承；中转站 Key 继续由 Codex CLI 的认证存储提供，不写入 WorkTrace `.env`。Online 备用连接仍使用 `WORKTRACE_LLM_BASE_URL`、`WORKTRACE_LLM_MODEL`、`WORKTRACE_LLM_API_KEY` 三项，默认模式缺少或不合法时只禁用备用；纯在线模式缺少或不合法时自检失败。`WORKTRACE_LLM_WIRE_API` 可选 `responses` 或 `chat_completions`，未配置时保持 Responses；Online 的 `WORKTRACE_LLM_REASONING_EFFORT` 必须为 `none`。timeout/stream/TLS 位于 `.env` 或进程环境变量，环境变量优先。两条文字线路共用 `WORKTRACE_LLM_TIMEOUT_SECONDS`（未配置时 180 秒）作为整次请求总时限；Codex 到点终止子进程，Online 到点关闭当前连接。默认模式的可切换失败按 `primary_request_retry_limit=1` 让当前请求再试 Codex 1 次，仍失败才由可用 Online 备用执行一次；纯在线模式则让当前 Online 请求再试 1 次。图片摘要中的 Codex 工具调用等不合法结果和配置定义的无法识别回复直接触发当前图片的 Online 备用，不改变文字请求规则。请求级重试次数和 Codex 间隔都在 `config/llm_retry.json` 统一控制。`WORKTRACE_LLM_TLS_VERIFY` 进入 Online 的文本、图片和独立探针 HTTP client。
+
+当前有一项配置边界：默认 preflight 会把 Online 推理强度不是 `none` 的配置报告为 `online_fallback=disabled`，但这个报告状态不传入 factories；工厂仍只按 `load_online_llm_settings(...)` 能否成功加载决定装配备用，而该加载器没有拒绝其他推理值。使用者仍须按要求配置 `none`，不能把自检中的 disabled 视为对该错误配置的实际禁用。
 
 所有正式外部命令都通过同一执行入口。Windows 从 `PATH` 定位真实启动文件：`lark-cli.cmd`、`codex.cmd` 或其他 `.cmd/.bat` 经 `COMSPEC /d /s /c` 启动，`codex.exe` 等 `.exe/.com` 文件直接启动；两种方式都安全处理空格、中文和引号。其他系统保持参数列表调用。输出统一按 UTF-8 解码，异常字节替换为可见占位。Codex 隔离环境在 Windows 保留系统、用户和临时目录变量，同时继续排除 `WORKTRACE_*` 和其他凭据。`tzdata` 为缺少系统 IANA 时区库的 Windows 环境提供 `Asia/Shanghai` 后备。
 
@@ -500,7 +520,7 @@ CLI 会开启 `collected_merge_trace_enabled`，并保留环境配置的 trace �
 - `config/conversation_blacklist.example.json`：不含个人会话 ID 的黑名单示例
 - `config/conversation_blacklist.json`：仅保存在使用者本机的整会话排除配置，不纳入 Git 管理
 - `config/conversation_window.json`：初始窗口聚合和按需扩窗阈值
-- `config/llm_retry.json`：Codex 主线路请求级重试、分段/提炼/全日分组结果质量重试、Online 流式首次返回超时、Codex 间隔，以及切分、提炼、个人事实复核、个人完整内容复核和多人完整复核并发数
+- `config/llm_retry.json`：当前主线路请求级重试、分段/提炼外层重试及全日分组结果质量重试、Online 流式首次返回超时、Codex 间隔，以及切分、提炼、个人事实复核、个人完整内容复核和多人完整复核并发数
 - `config/llm_function_contracts.json`：Function 名称、描述、`strict` 和 Codex 单次参数 JSON 提交规则
 - `config/retention_policy.json`：个人保留提示、既有业务词、临时协作复核、个人事实复核条件和模型信号定义
 - `config/event_generation.json`：个人与团队共同写作规则、完整事项边界、字段模板和脱敏正反例
@@ -524,7 +544,7 @@ CLI 会开启 `collected_merge_trace_enabled`，并保留环境配置的 trace �
 
 团队汇总把“本人参与方式”显示为“协作方式”，公开保留来源人员，并把来源事件 ID 写入隐藏 `merge_meta`。存在上游负责人时额外显示“来源负责人”，并在 `merge_meta` 保存 `source_report_owners`。人工新增、人工修改和类型无法确认的修订会显示配置定义的“修订标记”，并通过 `source_manual_edit_types` 从部门继续传到中心；缺少可见业务字段时仍显示“未明确”。读取器兼容旧 Markdown 中重复的“事件标题”、可见的“来源事件 ID”和 v1/v2 隐藏信息；旧 Markdown 中的工作流字段允许读取但会丢弃。v2 空会话证据事件标记为类型无法确认，有效 v1 缺少会话证据且没有修订类型时仍不能参与多人合并。损坏的 `merge_meta` 写 warning；正文结构完整时标记为类型无法确认并继续读取。删除事件不保留事件 ID、内容、指纹、删除数量或数量差值。多人汇总遇到尾部残缺事件时保留此前完整事件并增加 `partial_file_count`，但不修改来源文件；没有完整事件或其他结构无效时整份跳过。
 
-LLM 中间缓存指纹使用 schema v3；旧缓存不复用、不迁移，避免旧字段进入新链路。新 Markdown、缓存和 trace 不生成工作流字段；旧 trace 只由调试工具兼容读取并标记为旧版。
+独立锚点实验的输入指纹使用 schema v3；旧实验指纹不命中，也不迁移。正式 LLM 临时中间结果没有该 schema 字段，按模式与序列化窗口/批次输入校验，缺少模式的旧结果不复用。新 Markdown、缓存和 trace 不生成工作流字段；旧 trace 只由调试工具兼容读取并标记为旧版。
 
 ## 11. 状态、warning 与错误
 
@@ -534,17 +554,17 @@ LLM 中间缓存指纹使用 schema v3；旧缓存不复用、不迁移，避免
 
 - 模型、聊天源或 store 的主错误返回 `failed`
 - 非关键窗口失败、图片摘要失败、模型分组修复、事件过滤和发送失败进入 warning
-- 临时协作复核的正常删除不进入 warning；技术失败或协议重试耗尽返回 `failed` 且不写文件
-- 个人事实复核的正常确认、修订或无依据删除不进入 warning；技术失败或协议重试耗尽返回 `failed` 且不写文件
+- 临时协作复核的正常删除不进入 warning；当前模式的请求级与外层尝试最终失败后返回 `failed` 且不写文件
+- 个人事实复核的正常确认、修订或无依据删除不进入 warning；当前模式的请求级与外层尝试最终失败后返回 `failed` 且不写文件
 - 全日初步分组结果持续非法时保留合法组并拆单修补其余候选；标题发现全部失败时按没有标题候选继续；完整内容复核失败时保留复核前分组；任一最终个人事件内容重写失败时仅回退该事件的确定性内容，以上降级都写 warning
 - 有 warning 或跳过片段时返回 `success_with_warnings`
 - 空日是成功结果，不是失败
 
 ## 12. 调试与可观测性
 
-`--debug-output` 将个人日报调试根目录设置为 `data/debug/conversations/<date>/`。落盘对象覆盖：
+`--debug-output` 将个人日报调试根目录设置为 `data/debug/conversations/<date>/`，并在个人运行或多人汇总返回结果后尝试生成脱敏诊断 Markdown；报告结果另存于 `support_report`，不改变业务运行状态。`--preflight` 分支不生成诊断报告；日期或离线负责人参数非法时报告为 `blocked`，配置加载直接失败时也不会生成报告。
 
-不带 `--resume` 的个人重跑会在新流程开始前删除当天旧目录，不影响其他日期和 `data/debug/collected_merge/`；带 `--resume` 时保留当天旧目录。
+不带 `--resume` 的个人重跑会在新流程开始前删除当天旧目录，不影响其他日期和 `data/debug/collected_merge/`；带 `--resume` 时保留当天旧目录。调试产物包括：
 
 - segmentation
 - segment batch
@@ -583,12 +603,12 @@ segmentation 和 segment batch 的模型失败轮次保存输入、prompt 与 `f
 
 ## 13. 已知边界
 
-- 图片摘要依赖至少一条已配置线路支持图片输入；主线路与单次备用都失败时只跳过该图
-- 图片摘要不复用文本 analyzer 的 HTTP client，因此不读取 `WORKTRACE_LLM_TLS_VERIFY` 的开关值
+- 图片摘要依赖所选线路支持图片输入；请求级重试和可用的当前图片备用最终都失败时只跳过该图
+- Online 图片摘要每次创建独立 HTTP client，并通过文字线路共用的客户端构造函数应用 `WORKTRACE_LLM_TLS_VERIFY`、timeout 和 stream 设置；图片请求没有文字请求的整次 deadline 计时器，HTTP 读取超时仍生效
 - 文本附件只支持配置中的小型文本扩展名
 - 飞书链接正文当前只处理可识别的 Docx/Wiki
 - 多人汇总的大输入采用关系优先分批，各批初步组由 Python 直接合并；全部组标题发现仍整体提交，单次请求仍受 provider 能力限制
-- 正式日报只临时持久化分段与提炼中间结果，成功写入 Markdown 后即清理；独立实验的锚点缓存是另一套机制
+- 正式日报只持久化分段与提炼中间结果，成功写入 Markdown 后即清理；失败缓存没有自动过期清理，可能持续保存聊天窗口。独立实验的锚点缓存是另一套机制
 - 正式流程不做跨日归并和自动调度
 
 ## 14. 文档维护规则

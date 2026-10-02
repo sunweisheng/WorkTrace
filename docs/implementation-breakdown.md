@@ -2,14 +2,14 @@
 
 ## 1. 文档定位
 
-本文档是“从业务步骤找到代码”的模块索引。完整流程和数据边界见 [detailed-design.md](detailed-design.md)。
+本文档是当前 4.1.0 的“从业务步骤找到代码”模块索引。完整流程和数据边界见 [detailed-design.md](detailed-design.md)。
 
 ## 2. 入口层
 
 | 文件 | 当前职责 |
 | --- | --- |
 | `src/worktrace/cli.py` | 解析个人日报、`merge-collected`、`sync-reaction-catalog`，加载配置，输出 JSON 和退出码 |
-| `src/worktrace/preflight.py` | 检查 Python、lark-cli user 身份、Codex 主线路及其严格 Schema 小探针、Online 备用配置、数据目录和时区 |
+| `src/worktrace/preflight.py` | 检查 Python、lark-cli user 身份、所选模式、数据目录和时区；默认模式执行 Codex 严格 Schema 探针并检查 Online 备用配置，纯在线模式执行 Online Function Calling 探针 |
 | `src/worktrace/config.py` | 合并 `RuntimeConfig`、`.env`、进程环境变量及各类 JSON 配置 |
 | `src/worktrace/factories.py` | 装配聊天源、内容解析器、analyzer、store 和投递通道 |
 
@@ -24,19 +24,19 @@
 | `reaction_catalogs/feishu.py` | 显式同步飞书 reaction 目录与图片资源 |
 | `resolvers/feishu_message.py` | 文本清洗、链接标题、飞书 Docx/Wiki 正文、文本附件和图片摘要接入 |
 | `attachments.py` | 按配置提取受支持的小型文本附件 |
-| `vision.py` | 通过当前 Responses API 模型生成图片工作内容摘要 |
+| `vision.py` | 按所选模式生成图片摘要：默认 Codex 主线路加 Online 当前图片备用，纯在线只用 Online；Online 支持 Responses / Chat Completions |
 
 ## 4. 个人日报编排
 
-`src/worktrace/runner.py` 是主编排器，当前默认在线链路依次执行：
+`src/worktrace/runner.py` 是主编排器，两种正式模型模式共用的主链依次执行：
 
 ```mermaid
 flowchart LR
     A["采集消息"] --> B["本地过滤"] --> C["确定性初始窗口"] --> D["LLM 分段并保存中间结果"]
-    D --> E["片段组批并提炼动作/参与方式"] --> F["上下文重试"] --> G["候选与证据校验"]
+    D --> E["片段组批、提炼并校验候选与请求"] --> F["按需补上下文、重新分段与提炼"] --> G["候选关键词与保留门槛"]
     G --> H["临时协作局部复核"] --> I["个人事实局部复核"] --> J["全日候选初步分组"]
     J --> K["Python 完整性校验"] --> L["全部组标题发现"] --> L1["完整内容复核"]
-    L1 --> L2["多成员内容重写"] --> L3["增强事件物化"]
+    L1 --> L2["全部最终事件内容重写"] --> L3["增强事件物化"]
     L3 --> M["消息/会话指纹 + 文件标识"] --> N["Markdown + 自发送"]
 ```
 
@@ -48,11 +48,11 @@ flowchart LR
 - `_retry_segment_context(...)`：按片段补消息、附件和链接正文
 - `_analyze_anchor_fallback(...)`：分段失败后，直接从本人参与的聊天窗口提炼
 - `_review_retention_candidates(...)`：复核配置命中的临时协作边界候选，并由 Python 应用固定保留规则
-- `_review_personal_event_facts(...)`：把高风险个人事件拆成单候选请求，最多 3 路并发复核事实证据；每个候选内部重试保持顺序
+- `_review_personal_event_facts(...)`：把高风险个人事件拆成单候选请求，按配置最多 3 路并发复核事实证据；每个候选内部重试保持顺序
 - `_review_personal_fact_batch_with_retry(...)`：执行单候选事实复核、协议校验和有限重试
-- `_merge_day_candidates_with_batching(...)`：全日分组、覆盖校验、Codex 质量重试、Online 当前请求备用和拆单修补
+- `_merge_day_candidates_with_batching(...)`：全日分组、覆盖校验、当前主线路质量重试、可用的 Online 当前请求备用和拆单修补
 - `_discover_day_group_review_candidates(...)`：一次提交全部初步组编号和组合标题，校验逐组检查并建立标题候选范围
-- `_review_strongly_related_day_groups(...)`：按标题、结构关系和附件基础名称形成的完整检查范围，最多三路并行拆分或重组初步组；失败时保留复核前分组
+- `_review_strongly_related_day_groups(...)`：按标题、结构关系和附件基础名称形成的完整检查范围，按配置最多三路并行拆分或重组初步组；失败时保留复核前分组
 - `_render_personal_multi_groups(...)`：成员锁定后逐项重写全部最终组的标题、正文和具体对象；失败时只对当前组确定性拼接并告警
 - `_attach_event_file_links(...)`：按显式引用或精确附件文件名证据附加文件
 
@@ -63,19 +63,19 @@ flowchart LR
 | `pipeline/filtering.py` | 系统消息、撤回、群事件和空消息过滤 |
 | `pipeline/initial_windows.py` | 正式主链的群聊锚点聚合、私聊整日窗口和直接关系上下文 |
 | `pipeline/anchors.py` | 固定前后条数的兼容/实验锚点窗口 |
-| `pipeline/conversation_segments.py` | response signal、硬边界、分段校验、主消息去重、片段组批 |
+| `pipeline/conversation_segments.py` | response signal、硬边界、分段和批次结果校验、片段组批；重叠主消息去重由 runner 执行 |
 | `pipeline/context_expansion.py` | earlier/later、附件和链接正文扩窗 |
 | `pipeline/required_image_context.py` | 首轮前补本人发送或本人 reply/quote 关联的图片摘要 |
-| `pipeline/llm_checkpoints.py` | 按精确输入指纹临时保存分段与事件提炼结果 |
+| `pipeline/llm_checkpoints.py` | 按 `llm_mode` 与序列化窗口/批次指纹临时保存分段与事件提炼结果 |
 | `pipeline/validation.py` | analyzer 返回 ID、参与类型、本人证据和分组覆盖校验/修复 |
-| `pipeline/direct_relation_filter.py` | 旧 analyzer 和分段失败后直接提炼路径的本人关联检查 |
+| `pipeline/direct_relation_filter.py` | 旧 analyzer 的直接关联检查，以及分段/直接提炼候选的合法本人参与项门槛 |
 | `pipeline/sensitive_filter.py` | 三阶段配置关键词过滤 |
 | `pipeline/retention_filter.py` | 具体对象、保留理由、保留依据和低价值类型门槛 |
 | `pipeline/retention_review.py` | 临时协作边界候选选择、组批、模型结果校验和固定保留规则 |
 | `pipeline/personal_fact_review.py` | 个人事实风险选择、组批、事实证据校验和修订应用 |
 | `pipeline/day_event_grouping.py` | 关系编号、检查范围发现、范围内重新分组校验和复核结果替换 |
 | `pipeline/cross_conversation_merge.py` | 最终分组物化，以及动作、参与方式的 `MergedEventDraft` 合并 |
-| `pipeline/event_merge.py` | 最终 `WorkEvent` 构建、稳定 ID 和消息证据指纹 |
+| `pipeline/event_merge.py` | 最终 `WorkEvent` 构建、稳定 ID、消息证据和同日会话指纹 |
 
 `pipeline/conversation_first_pass.py` 仍用于不支持分段批处理的 analyzer 兼容路径；它不是当前默认 Codex 主线路的主入口。
 
@@ -84,15 +84,15 @@ flowchart LR
 | 文件 | 当前职责 |
 | --- | --- |
 | `analyzers/base.py` | 分段、片段批处理、临时协作复核、个人事实复核、日级分组、标题发现、完整复核、内容重写和多人合并接口 |
-| `analyzers/online.py` | OpenAI Python SDK + Responses API 在线文字实现；固定结构使用任务专用 Function Calling，每次请求独立创建和关闭客户端 |
+| `analyzers/online.py` | OpenAI Python SDK + Responses / Chat Completions 在线文字实现；固定结构使用任务专用 Function Calling，每次请求独立创建和关闭客户端 |
 | `analyzers/codex.py` | Codex CLI 文字实现，使用线程安全的 0-1 秒调用间隔 |
-| `analyzers/failover.py` | 后端无关的当前请求路由器：Codex 可切换技术错误先重试一次，仍失败才改由 Online 执行一次 |
+| `analyzers/failover.py` | 当前请求路由器：主线路的可重试技术错误最多额外重试一次；默认模式仍失败时由可用 Online 备用执行一次，纯在线模式不切换 |
 | `analyzers/prompts.py` | 所有语义任务 prompt |
 | `analyzers/function_calls.py` | `FunctionCallSpec`、任务专用 Function、动态 ID 枚举、典型参数示例和多人证据编号合同 |
 | `analyzers/output_schemas.py` | Function 参数与 Codex output-schema 共用结构；动态限制候选、关系和合法证据 ID |
 | `analyzers/protocol.py` | 模型 JSON 到领域对象的解析与引用恢复；校验关系处理、成员覆盖和内容证据 |
 
-当前默认 `FailoverAnalyzer` 以 `CodexAnalyzer` 为主、`OnlineLLMAnalyzer` 为当前请求备用，实现分段、片段提炼、临时协作复核、个人事实复核、全日初步分组、标题发现、完整内容复核、多成员内容重写和多人汇总接口，因此 `runner` 走完整的现行主链。是否支持具体能力由接口检查决定，不通过配置字符串猜测。
+`llm_mode` 决定正式装配。默认 `codex_with_fallback` 的 `FailoverAnalyzer` 以 `CodexAnalyzer` 为主、配置合法的 `OnlineLLMAnalyzer` 为当前请求备用；`online_only` 使用 Online 主线路且没有备用。两者都实现分段、片段提炼、临时协作复核、个人事实复核、全日初步分组、标题发现、完整内容复核、全部最终事件内容重写和多人汇总接口，因此 `runner` 走完整的现行主链。是否支持具体能力由接口检查决定，不通过配置字符串猜测。
 
 ## 7. 输出与投递
 
@@ -109,34 +109,34 @@ flowchart LR
 1. 根目录和一级子目录分别建立 merge scope
 2. 当前层 Markdown 解析、来源姓名识别、尾部残缺事件部分恢复和坏文件跳过
 3. 来源事件配置关键词过滤与保留门槛
-4. 全 scope 校验 v2 同日会话指纹，相同 `event_id` 建立确定性组
+4. 全 scope 校验同日会话指纹及人工修订资格，相同 `event_id` 且内容相似时建立确定性组
 5. Python 按共同消息、文件和同日会话建立关系集合，模型使用完整事件正文形成初步组
 6. `collected_group_discovery` 单次提交全部初步组编号和标题，模型逐组完整检查，Python 校验并形成重叠候选；标题候选与结构关系和高风险条件共同建立检查范围
 7. 完整复核在范围内拆开初步组并跨组重新组合；标题发现的多组候选保持为完整范围，但实际组间连接分别编号；相同 `event_id` 的相似来源块不可拆，全部关系用 `relation_resolutions` 逐条处理，分开时允许返回两侧代表成员并校验其确实位于不同最终组
 8. Python 校验完整覆盖、不可拆成员块、关系处理和合并依据，再按最终锁定组逐事件生成正式内容及带来源的 `fact_items`
-9. 可切换 Codex 技术错误只让当前请求额外再试 Codex 1 次，仍失败才由 Online 执行一次；结果质量错误按各任务的 Codex 局部重试、带具体 Python 错误的 Online 当前请求备用执行。标题发现全部失败时按没有标题候选继续，完整复核持续失败时保留复核前分组并告警；初步分组到达关键失败边界时当前 scope 终止且不写新文件，正式正文失败时只回退当前事件并告警
+9. 请求级技术重试由 `FailoverAnalyzer` 按模式处理：默认主线路 Codex 额外重试 1 次后可用 Online 备用执行一次，纯在线为 Online 额外重试 1 次且不切换；各阶段结果质量重试再按各自循环处理，不能把请求级次数当作整次运行上限。标题发现全部失败时按没有标题候选继续，完整复核持续失败时保留复核前分组并告警；初步分组到达关键失败边界时当前 scope 终止且不写新文件，正式正文失败时只回退当前事件并告警
 10. 聚合动作、协作方式、消息指纹、会话指纹、文件标识、来源人员、事件 ID 和上一级负责人
 11. Python 计算 scope 和整次运行的 `quality_summary`，团队 `WorkEvent` 最终过滤、写入和自发送
 
-相关专题见 [collected-people-merge-plan.md](collected-people-merge-plan.md)。
+当前多人 trace 的显式备用刷新存在已知未定义变量错误，可能打断正常降级；见 [collected-people-merge-plan.md](collected-people-merge-plan.md) 的调试限制。以上流程描述正常处理路径，不把该分支视为已验证可继续。
 
 ## 9. 配置来源
 
 | 来源 | 内容 |
 | --- | --- |
-| `RuntimeConfig` | 流程阈值、目录、analyzer backend 和默认运行参数；`model_input_batch_target_tokens` 统一控制个人日报和多人合并的分批目标，并由当前模型预算 profile 覆盖 |
-| `.env` / 环境变量 | 在线模型和多人汇总 trace/retry 覆盖项 |
+| `RuntimeConfig` | 流程阈值、目录、`llm_mode`、兼容 analyzer backend 和默认运行参数；`model_input_batch_target_tokens` 统一控制个人日报和多人合并的分批目标，并由当前模型预算 profile 覆盖 |
+| `.env` / 环境变量 | 模型模式、Online 设置、Codex 本地提供方设置及多人汇总 trace/retry；Codex 模型和提供方只从本地 `.env` 读取 |
 | `config/event_rules.json` | 敏感、排除和本人指派关键词 |
 | `config/event_metadata.json` | 本人参与方式英文键、中文显示名和排序 |
 | `config/conversation_blacklist.example.json` | 不含个人会话 ID 的黑名单示例 |
 | `config/conversation_blacklist.json` | 仅保存在使用者本机的整会话排除配置，不纳入 Git 管理 |
 | `config/conversation_window.json` | 群聊锚点聚合、初始上下文和按需扩窗阈值 |
-| `config/llm_retry.json` | Codex 主线路请求级重试、分段/提炼/全日分组结果质量重试、Online 流式首次返回超时、Codex 间隔，以及切分、提炼、个人事实复核、个人完整内容复核和多人完整复核并发数 |
+| `config/llm_retry.json` | 当前主线路请求级重试、分段/提炼外层重试及全日分组结果质量重试、Online 流式首次返回超时、Codex 间隔，以及切分、提炼、个人事实复核、个人完整内容复核和多人完整复核并发数 |
 | `config/llm_function_contracts.json` | Function 名称、描述、`strict` 与 Codex 单次参数 JSON 提交规则 |
 | `config/retention_policy.json` | 个人事件保留提示、结构化业务词、临时协作复核、事实复核条件和模型信号定义 |
 | `config/event_generation.json` | 个人与团队共同写作规则、完整事项边界、字段模板和脱敏正反例 |
 | `config/event_grouping.json` | 个人与多人共同分组说明，以及合并原因的描述、`acceptance_rules` 和 `rejection_rules` |
-| `config/model_input_budget.json` | 按主模型和备用模型组合选择统一输入分批目标；未匹配时回退 7000 |
+| `config/model_input_budget.json` | 默认模式按主模型和备用模型组合选择统一输入分批目标；纯在线模式或未匹配时使用 `default_target_tokens`（当前 7000） |
 | `config/collected_merge.json` | 多人汇总高风险复核开关、事件数/文件数阈值、对象冲突与宽泛对象复核条件 |
 | `config/attachment_text.json` | 文本附件提取限制 |
 | `config/image_summary.json` | 图片摘要限制和提示词 |
@@ -150,9 +150,9 @@ flowchart LR
 ## 10. 调试入口
 
 - 个人日报：`--debug-output`，目录 `data/debug/conversations/<date>/`；`retention_review.json` 和 `personal_fact_review.json` 保存两类事实复核，`_merge_day_candidates/` 保存 `input.json`、`prompt.txt`、`grouping_attempts.json`、`day_group_discovery.json`、`day_group_review.json`、`personal_group_render.json`、`day_group_review_replay.json` 和 `resolved_groups.json`，`final_events.json` 保存最终事件
-- 回放报告：从仓库根目录执行 `python3 -m scripts.replay_day_with_trace --date YYYY-MM-DD`；脚本在执行前写入 `run_status.json`，实时显示并保存子进程阶段日志，结束后更新 `success/failed`，同时汇总 `llm_usage_summary`、`day_grouping_summary` 和 `day_grouping_artifact_summary`。`report_replay_timings.py` 分开输出事实复核、初始分组、标题发现、完整内容复核和多成员内容重写的累计耗时与墙钟耗时；`report_replay_call_inputs.py` 展示这些调用及失败范围重放；`report_event_grouping_comparison.py` 输出新旧分组结构与关系差异
+- 回放报告：从仓库根目录执行 `python3 -m scripts.replay_day_with_trace --date YYYY-MM-DD`；脚本在执行前写入 `run_status.json`，实时显示并保存子进程阶段日志，结束后更新 `success/failed`，同时汇总 `llm_usage_summary`、`day_grouping_summary` 和 `day_grouping_artifact_summary`。`report_replay_timings.py` 分开输出事实复核、初始分组、标题发现、完整内容复核和全部最终事件内容重写的累计耗时与墙钟耗时；`report_replay_call_inputs.py` 展示这些调用及失败范围重放；`report_event_grouping_comparison.py` 输出新旧分组结构与关系差异
 - 多人汇总：`WORKTRACE_COLLECTED_MERGE_TRACE=true`，目录默认 `data/debug/collected_merge/<date>/`；新增 `collected_group_discovery.json` 和 `collected_group_review.json`，复核 step 写入初步组、关系、不可拆成员块、Function 与 Python 校验
 - 候选/复核离线回放：`scripts/replay_collected_review_failures.py --trace-root <trace目录> --steps <编号列表> --output-dir <输出目录>`；新 trace 恢复关系与不可拆成员块完整校验，旧 trace 不补造这些字段，脚本不调用模型、不生成正式 Markdown
 - 锚点独立实验：`python3 -m src.worktrace.anchor_experiment ...`
 
-独立锚点实验用于对比协议和缓存行为，不等同于正式日报；正式日报虽然已经使用本人参与的聊天窗口，并在分段失败后直接从这些窗口提炼，但不使用实验入口生成最终 Markdown。正式 `--resume` 只读取 `pipeline/llm_checkpoints.py` 保存的临时分段/提炼结果，不读取实验锚点缓存。
+独立锚点实验用于对比协议和缓存行为，不等同于正式日报；正式日报虽然已经使用本人参与的聊天窗口，并在分段失败后直接从这些窗口提炼，但不使用实验入口生成最终 Markdown。正式 `--resume` 只读取 `pipeline/llm_checkpoints.py` 保存的临时分段/提炼结果，不读取实验锚点缓存；缓存键只覆盖 `llm_mode` 与序列化窗口/批次输入，不覆盖最终 prompt、模型名和规则配置。失败中间结果包含聊天正文且没有自动过期清理。

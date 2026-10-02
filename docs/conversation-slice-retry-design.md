@@ -4,7 +4,7 @@
 
 ## 1. 文档目标
 
-本文档说明当前代码怎样把一个会话拆成可分析片段、怎样批量分析片段、怎样执行 `context_requests`，以及分段失败时怎样回退。
+本文档说明当前 4.1.0 如何拆分和分析会话、执行 `context_requests`，以及分段失败时如何回退。两种模式 `codex_with_fallback` 与 `online_only` 共用该流程。
 
 完整日流程见 [detailed-design.md](detailed-design.md)。
 
@@ -33,11 +33,11 @@ flowchart TD
     G --> H["同会话片段按 token 上限组批"]
     H --> I["LLM 返回每个 segment 的候选与请求"]
     I --> J{"context_requests"}
-    J -->|"有新信息"| K["补上下文并只重跑对应片段"]
+    J -->|"有新信息"| K["补上下文、重新分段并重跑相关片段"]
     K --> I
     J -->|"无/已满足停止条件"| L["候选进入全日过滤与合并"]
 
-    E -. "连续失败" .-> M["会话分段熔断"]
+    E -. "同类失败达到阈值" .-> M["会话分段熔断"]
     M --> N["直接从本人参与的聊天窗口提炼"]
     N --> L
 ```
@@ -62,7 +62,7 @@ flowchart TD
 - 已生成的图片摘要
 - reaction 的本地中文说明和语义
 
-进入分段模型前，Python 会生成任务专用 Function、当前合法消息 ID 参数示例和最终分段 prompt。统一估算器分别计算“最终 prompt 与 `/no_think` 加完整 Function 定义和 `tool_choice`”以及“相同 prompt 加 Codex 完整 output-schema”，并取较大值。`model_input_batch_target_tokens` 从 `config/model_input_budget.json` 中与当前主模型、备用模型精确匹配的预算 profile 读取；配置不存在或没有匹配项时回退 `7000`。超出当前目标时先按锚点拆分，再按连续消息拆分，并保留拆分窗口需要的直接 reply/quote 上下文；单条消息和必要协议字段组成的最小窗口仍超过目标时标记为 `oversized_singleton` 后发送，由模型服务决定是否接受。该值是模型输入估算目标，不是 HTTP 字节数或服务端上下文上限。
+进入分段模型前，Python 会生成任务专用 Function、当前合法消息 ID 参数示例和最终分段 prompt。统一估算器分别计算“最终 prompt 与 `/no_think` 加完整 Function 定义和 `tool_choice`”以及“相同 prompt 加 Codex 完整 output-schema”，并取较大值。`model_input_batch_target_tokens` 在默认模式从 `config/model_input_budget.json` 中与当前主模型、备用模型精确匹配的预算 profile 读取；纯在线模式不匹配主备 profile，和未匹配时一样使用 `default_target_tokens`，当前回退 `7000`。超出当前目标时先按锚点拆分，再按连续消息拆分，并保留拆分窗口需要的直接 reply/quote 上下文；单条消息和必要协议字段组成的最小窗口仍超过目标时标记为 `oversized_singleton` 后发送，由模型服务决定是否接受。该值是模型输入估算目标，不是 HTTP 字节数或服务端上下文上限。
 
 ## 5. 会话分段
 
@@ -85,21 +85,25 @@ flowchart TD
 - 验证 start ID 存在于输入窗口
 - 结合 hard boundary 扩展连续片段
 - 建立 `primary_message_ids` 和 `context_message_ids`
-- 计算本人证据与 response assessment
+- 计算本人证据并保留当前片段的 response signals；正式校验不生成 response assessment
 - 丢弃没有本人直接关联的片段
 - 返回 warning，而不是信任模型任意引用
+
+正式配置允许跨会话最多 3 路分段；每个会话内部按窗口顺序处理，并优先调度当前输入较大的待办窗口。全部会话分段和中间结果保存完成后，再按输入大小安排片段提炼，当前最多 5 路并发。并发数来自 `config/llm_retry.json`。
 
 多个锚点窗口可能覆盖相同消息。`_dedupe_segment_primary_ownership(...)` 保证每条 primary message 只归一个片段，避免重复提炼。
 
 ## 6. 分段重试与熔断
 
-每个锚点窗口最多尝试 `anchor_retry_limit + 1` 次。正式配置来自 `config/llm_retry.json`，当前首次分段之外最多额外重试 3 次；事件提炼也采用独立的 3 次额外重试限制。
+每个锚点窗口的 runner 外层最多尝试 `anchor_retry_limit + 1` 次；每次 analyzer 调用还可能包含请求级重试和备用。正式配置来自 `config/llm_retry.json`，当前首次分段之外最多额外重试 3 次；事件提炼也采用独立的 3 次额外重试限制。
 
-单次运行内，相同窗口签名会复用内存中的分段结果。正式 CLI 还会把成功的话题切分和事件提炼结果临时写到 `data/cache/llm/YYYY/MM/YYYY-MM-DD/`；只有使用 `--resume` 时才复用输入完全一致的中间结果，正常重跑会先清理。Markdown 写入成功后该目录删除。
+单次运行内，相同窗口签名会复用内存中的分段结果。正式 CLI 还会把成功的话题切分和事件提炼结果临时写到 `data/cache/llm/YYYY/MM/YYYY-MM-DD/`；CLI 只有使用 `--resume` 时才保留并复用 `llm_mode` 与序列化窗口/批次输入完全一致的中间结果，正常重跑会先清理。模型名、最终 prompt 和规则配置不单独进入缓存键；修改它们后应普通重跑。Markdown 写入成功后该目录删除；失败时包含聊天正文的中间结果继续留存，当前没有自动过期清理。
 
 失败分为 analyzer 协议失败和分段校验失败；同一会话中同类失败达到 `conversation_segmentation_failure_threshold` 后打开熔断，剩余窗口不再重复请求。
 
-熔断只停止该会话后续分段，不会直接终止整天。
+默认模式中，窗口调用的技术或协议错误可能进入上述外层重试，耗尽后触发会话熔断和直接提炼。纯在线模式由 Online 请求级处理可重试技术错误，耗尽后带 `request_failed` 的错误直接终止当天运行，不进入这套质量重试或分段回退；不带该标记的结果质量问题仍有限重试。输入明确被模型拒绝时，两种模式都直接失败。外层分段重试复用原窗口，不把上轮 Python 错误反馈加入提示词。
+
+熔断只停止该会话后续分段；默认模式会继续直接提炼与当天后续处理。
 
 ## 7. 片段组批
 
@@ -110,9 +114,9 @@ flowchart TD
 - 单个片段在本阶段仍超过目标时，`pack_segment_units(...)` 创建带 `oversized_singleton` 标记的单片段批次；analyzer 只允许带该标记的请求越过目标
 - 每个批次都携带当前用户身份和 conversation 元数据
 
-analyzer 返回 `BatchSegmentAnalysisResult`，必须对每个输入 `segment_id` 给出一项结果。Python 校验缺失、重复和未知 `segment_id`。
+analyzer 返回 `BatchSegmentAnalysisResult`，协议要求每个输入 `segment_id` 有一项结果。Python 对重复和未知编号过滤并告警，对未得到合法结果的片段计入跳过数；已解析结果中的这些覆盖问题不会统一重试整个批次。跨片段来源、无效本人证据和响应信号也按当前校验规则过滤。
 
-结果质量校验失败时只重试当前窗口或片段批次，并把错误码、字段位置和相关 ID 放入当前请求。错误反馈加入后重新估算；如果当前重试因此超过目标，标记 `oversized_retry` 后继续发送，其他已完成批次不重跑。
+调用或协议解析抛出异常时，runner 对同一批次最多额外重试 `analysis_batch_retry_limit=3` 次，不追加前次错误反馈。默认模式每轮都可能重新走 Codex 请求级重试与 Online 备用；纯在线模式请求级技术重试耗尽后直接失败。普通批次外层耗尽后，逐片段调用一次 analyzer；该调用仍可能有请求级重试，最终失败的片段写 warning 并跳过。
 
 ## 8. `context_requests`
 
@@ -129,7 +133,7 @@ analyzer 返回 `BatchSegmentAnalysisResult`，必须对每个输入 `segment_id
 
 请求只扩展其 `segment_id` 对应的片段。一个批次内其他已完成片段不会因为某个片段缺上下文而一起重跑。
 
-新增消息、附件正文和链接正文分别去重；扩展后的片段重新构造为单片段批次再请求。
+新增消息、附件正文和链接正文分别去重；扩展后的时间线会再次请求分段，只保留与原片段 primary message 相交的新片段，再按预算重新组批提炼。因此一次扩窗不保证只产生一个单片段批次。扩窗后的重新分段调用失败时，两种模式都只跳过当前片段并告警，不直接终止整天。
 
 ### 8.3 停止条件
 
@@ -163,7 +167,9 @@ analyzer 返回 `BatchSegmentAnalysisResult`，必须对每个输入 `segment_id
 4. 需要时执行锚点扩窗
 5. 把有效候选并入正常分段得到的候选
 
-这条备用路径继续使用 `ConversationSlice` 兼容模型做本人关联过滤和上下文扩展。
+只要某个窗口失败，就对该会话全部初始窗口执行直接提炼，并与正常分段候选共同进入后续过滤。每批先按 `anchor_batch_retry_limit=1` 额外重试；部分结果有效时仅重跑缺失锚点，全部持续失败的多锚点批次再递归拆半，单锚点最终失败才跳过。扩窗仅重跑提出请求的锚点，并按请求类型组合重新组批，最多扩展 `anchor_retry_limit=3` 轮。
+
+这条备用路径用 `ConversationSlice` 做引用、本人证据及上下文校验；候选随后还必须有合法 `self_relations`。它不再次执行旧会话路径专用的 `filter_self_related_candidate_drafts(...)`。
 
 ## 11. 调试产物
 
@@ -192,4 +198,4 @@ analyzer 返回 `BatchSegmentAnalysisResult`，必须对每个输入 `segment_id
 
 ## 13. 当前与独立实验的区别
 
-正式日报已经使用本人参与的聊天窗口，并在分段失败后直接从这些窗口提炼。它不读取 `anchor_experiment.py` 的锚点缓存，也不输出实验统计；正式 CLI 的 `--resume` 使用的是另一套按精确输入指纹保存的临时分段/提炼中间结果。独立实验的命令、缓存命中率和 `completion_mode_counts` 只用于实验评估，不能用来描述正式日报产物。
+正式日报已经使用本人参与的聊天窗口，并在分段失败后直接从这些窗口提炼。它不读取 `anchor_experiment.py` 的锚点缓存，也不输出实验统计；正式 CLI 的 `--resume` 使用的是另一套按模式和序列化窗口/批次指纹保存的临时分段/提炼中间结果。独立实验的命令、缓存命中率和 `completion_mode_counts` 只用于实验评估，不能用来描述正式日报产物。

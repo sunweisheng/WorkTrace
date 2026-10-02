@@ -1,10 +1,10 @@
 # WorkTrace 多人事件 Markdown 汇总设计
 
-> 状态：正式 `merge-collected` 实现说明，不是未来计划。
+> 状态：4.1.0 的 `merge-collected` 实现说明；2026-10-02 按代码、配置和测试核对。
 
 ## 1. 目标与边界
 
-该链路面向已经收集到多人个人日报的管理人员。它只读取 WorkTrace Markdown 事件块，不重新读取员工聊天，也不做跨天合并。
+该链路面向已经收集到多人个人日报的管理人员。它只读取 WorkTrace Markdown 事件块，不重新读取员工聊天。命令按一个目标日期发现文件，不主动收集其他日期；文件名日期必须匹配，但文件内日期不一致时当前代码只告警并继续读取，因此放入前仍需核对日期。
 
 正式命令：
 
@@ -12,7 +12,7 @@
 python3 -m src.worktrace.cli merge-collected --date YYYY-MM-DD [--owner-name 姓名] [--offline]
 ```
 
-该子命令独立执行，不复用个人日报的整套 preflight。默认模式需要当前飞书 user 身份、Codex 主线路配置、输入目录写权限和 bot 自发送能力；Online 仅作为当前请求备用。显式传入 `--offline` 时必须同时传入 `--owner-name`，不需要安装飞书 CLI。
+该子命令独立执行，不复用个人日报的整套 preflight。普通运行先解析当前飞书 user 身份；模型配置由 `WORKTRACE_LLM_MODE` 决定：默认 `codex_with_fallback` 使用 Codex，并在已配置 Online 时提供当前请求备用；`online_only` 只使用 Online，不要求安装、登录或探测 Codex。输入目录需要可写，自送达启用时需要 bot 发文件能力。显式传入 `--offline` 时必须同时传入 `--owner-name`，跳过飞书身份和送达，但仍按所选模式调用模型，不代表不联网。
 
 ## 2. 输入目录与 scope
 
@@ -32,7 +32,7 @@ scope 规则：
 - 每个非隐藏一级子目录单独合并
 - scope 只读取当前层 `.md`
 - 二级及更深目录不读取
-- 隐藏文件、本次输出同名文件和旧 `_merged.md` 跳过
+- 隐藏文件、本次输出同名文件、旧 `_merged.md` 和 `*-merge-omitted-events.md` 跳过
 - 其他规范的上游 `*-merged.md` 可继续作为来源
 
 每个 scope 在本目录生成：
@@ -69,7 +69,7 @@ merge_inbox/YYYY/MM/DD/
 
 ```mermaid
 flowchart TD
-    A["发现 merge scopes"] --> B["解析当前 user 身份"]
+    A["解析当前 user 身份；offline 使用指定姓名"] --> B["发现 merge scopes"]
     B --> C["逐 scope 读取 Markdown"]
     C --> D["解析姓名、正文和隐藏合并信息"]
     D --> E{"有会话证据或合法人工修订标记?"}
@@ -92,7 +92,7 @@ flowchart TD
     P --> Q["物化团队 WorkEvent 和增强信息"]
     Q --> Z["最终关键词过滤 + 保留门槛"]
     Z --> S["覆盖写 merged Markdown"]
-    S --> T["飞书 bot 自发送"]
+    S --> T["按配置飞书 bot 自发送；offline 跳过"]
 ```
 
 ## 4. 来源文件解析
@@ -104,13 +104,15 @@ flowchart TD
 - `姓名_YYYY-MM-DD.md`
 - 规范化 `*-merged.md`
 
-每个文件通过 `MarkdownEventStore.parse_day_document(...)` 回读。front matter 的事件数不用于推断删除行为，来源审计只记录当前解析数量。事件被删除后不保留事件 ID、正文、指纹、删除数量或数量差值。多人汇总允许尾部部分恢复：若最后一个事件块损坏但前面已有完整事件，保留完整事件、跳过残缺事件并记录文件名、损坏事件 ID 和当前解析数量，将该文件标记为 `partial` 并写 warning，且不修改来源文件。没有完整事件、文件名无姓名、front matter 非法或读取失败时仍整份跳过，不影响同 scope 其他有效文件。
+每个文件通过 `MarkdownEventStore.parse_day_document(...)` 回读。front matter 的事件数不用于推断删除行为，来源审计只记录当前解析数量。从本次来源文件删除的事件不会进入本次解析和后续输出，不产生删除数量或数量差值；已有其他文件、旧 trace 和此前送达副本不会被追溯清理。
+
+多人汇总允许尾部部分恢复：若最后一个事件块缺少可识别的结束边界、且前面已有完整事件，保留完整事件、跳过残缺事件并记录文件名、损坏事件 ID 和当前解析数量，将该文件标记为 `partial` 并写 warning，且不修改来源文件。下一个事件起始标记或底部生成说明也可以作为隐式结束边界。首个事件块无法解析、文件名无姓名、front matter 缺少必需的 `date`/`generated_at` 或读取失败时整份跳过；合法空文件仍可读取，不影响其他有效文件。当前解析器不是完整的 YAML 或逐字段业务校验器，后续来源过滤负责保留门槛。
 
 ## 5. 来源过滤
 
 每条来源 `WorkEvent` 在进入 LLM 前执行：
 
-1. `filter_work_events(...)`：敏感词和排除词匹配，包含文件标题与 URL
+1. `filter_work_events_with_diagnostics(...)`：敏感词和排除词匹配，包含文件标题与 URL
 2. `filter_retained_work_events(...)`：具体对象、保留理由和保留依据门槛
 
 被过滤来源不会进入 prompt。
@@ -119,7 +121,7 @@ flowchart TD
 
 ## 6. 合并人来源
 
-当前 `lark-cli auth status` 的用户名是 merge owner。来源文件名解析出的姓名与其精确匹配时，该来源事件标记为 `is_merge_owner_source=true`。
+默认使用当前 `lark-cli auth status` 的用户名作为 merge owner；`--owner-name` 可覆盖该姓名。来源文件名解析出的姓名与选定姓名精确匹配时，该来源事件标记为 `is_merge_owner_source=true`，不按事件正文中的来源人员匹配。
 
 同一真实事项包含 merge-owner source 时：
 
@@ -128,7 +130,7 @@ flowchart TD
 - 模型返回 `merge_owner_conflict` 和冲突说明，Python 写入运行 warning
 - 最终正文只显示整合结果，不按人员逐条展示贡献
 
-scope 有来源事件但没有匹配到 merge owner 时，直接执行普通多人合并，不写 warning。输出文件仍以当前飞书登录人命名。
+scope 有来源事件但没有匹配到 merge owner 时，直接执行普通多人合并，不写这类 warning。输出文件以选定的合并人姓名命名。普通运行的接收人始终是当前登录用户；送达组件可能临时复制成登录人姓名文件名，发送后删除临时副本。
 
 ## 7. 增强合并信息与边界
 
@@ -153,13 +155,15 @@ scope 有来源事件但没有匹配到 merge owner 时，直接执行普通多�
 - 文件、版本、时期、状态、地区、项目归属、标题、格式、部门和来源负责人都只是参考信息，任何单项都不能直接决定合并或拆分
 - 名称或格式相似不能单独决定合并，不同文件、版本、时期、地区或项目归属也不能单独决定拆分
 
-模型 prompt 不包含原始长指纹数组；原始指纹继续保留在 Markdown 和调试 trace 的 `input_events` 中用于追溯。隐藏信息升级为 v3，并保存内容指纹、人工修订类型和非空来源事件 ID。普通读取仍兼容旧文件中可见的来源事件 ID、v1/v2 隐藏信息和旧工作流字段；旧字段读取后丢弃，不参与分组。事件有合法会话证据、`manual_edit_type` 或 `source_manual_edit_types` 任一项即可参与。人工新增事件没有消息或会话关系，但仍以标题、正文和具体对象进入语义判断；人工修改继续使用原有合法证据。只有有效 v1 事件既缺少会话证据又没有修订标记时才在全部模型调用前停止。隐藏信息损坏但正文完整时写 warning，并标记为类型无法确认。
+模型 prompt 不包含原始长指纹数组；原始指纹继续保留在 Markdown 和调试 trace 的 `input_events` 中用于追溯。隐藏信息升级为 v3，并保存内容指纹、人工修订类型和非空来源事件 ID。普通读取仍兼容旧文件中可见的来源事件 ID、v1/v2 隐藏信息和旧工作流字段；旧字段读取后丢弃，不参与分组。事件有合法会话证据、`manual_edit_type` 或 `source_manual_edit_types` 任一项即可参与。无标记或重复 ID 的新增事件首次读取时不继承隐藏证据，仍以标题、正文和具体对象进入语义判断；已有合法人工类型和证据的事件继续使用这些证据。有效文件 URL 在重新输出时生成文件指纹，供后续汇总发现关系。只有有效 v1 事件既缺少会话证据又没有修订标记时才在全部模型调用前停止。隐藏信息损坏但正文完整时写 warning，并标记为类型无法确认。
 
-因此，仓库中现有 v1 收集文件只能用于解析规模、旧输出和旧 trace 复盘，不能通过补空字段或伪造指纹进入当前多人合并。旧 v2 文件保留兼容；新生成和重新输出的个人、部门、中心 Markdown 使用 v3。
+因此，缺少会话证据和合法修订标记的有效 v1 文件只能用于解析规模、旧输出和旧 trace 复盘，不能通过补空字段或伪造指纹进入当前多人合并。旧 v2 文件保留兼容；新生成和重新输出的个人、部门、中心 Markdown 使用 v3。此处是格式和来源完整性检查，不是对人工编辑内容真实性的认证。
+
+无标记的完整标准事件或重复 ID 的后续事件按“人工新增”读取；未带当前人工类型的有效 V3 事件，解析业务字段与原内容指纹不一致时按“人工修改”读取。识别条件及隐藏字段优先级见 [日报手工编辑支持设计](manual-report-editing-design.md)。
 
 ## 8. 确定性预分组
 
-Python 按稳定 `event_id` 聚合来源。相同 ID 的事件只有在标题/内容满足相似性规则时才锁定为确定性组；同 ID 但内容明显分歧时写 warning，并交给 LLM 判断。
+Python 按稳定 `event_id` 聚合来源。相同 ID 的事件只有在压缩空白后的标题相同、正文相同或一方正文包含另一方时才锁定为确定性组；组内每对来源都需满足该规则。同 ID 但不满足时写 warning，并交给 LLM 判断。
 
 相同 `event_id` 且内容相似的确定性组在完整复核中是不可拆成员块，不代表跳过后续验证；整个成员块仍可与其他直接相关事件合并。
 
@@ -175,11 +179,11 @@ codex_estimate = estimate(codex_prepared_prompt + 同一 parameters output-schem
 input_estimated_tokens = max(online_estimate, codex_estimate)
 ```
 
-Python 从 `config/model_input_budget.json` 按仓库本地 `.env` 的主模型和备用模型组合读取 `model_input_batch_target_tokens`；没有匹配项或配置文件不存在时保守回退 `7000`。个人日报和多人汇总共用该目标，备用线路不重新分批。每尝试加入一个候选都会重建拟提交批次的 prompt、Function 和编号清单后重新估算；组批和实际调用前使用同一个生产函数。不可继续拆分的最小输入仍超过目标时标记后发送；校验反馈导致当前重试超限时标记 `oversized_retry` 后发送。该值是模型输入估算目标，不是 HTTP 字节数或服务端上下文上限，服务端精确 token 只用于事后核对。
+Python 从 `config/model_input_budget.json` 读取 `model_input_batch_target_tokens`。`codex_with_fallback` 按仓库本地模型配置的主模型和备用模型精确匹配模型预算 profile；当前文件为 `gpt-5.6-terra` + `qwen3.7-max` 配置 `20000`。没有匹配项或使用 `online_only` 时采用该 JSON 的 `default_target_tokens`（当前 `7000`）；配置文件不存在时默认也是 `7000`。这里列出的是仓库配置，不表示已核对本机实际模型设置。个人日报和多人汇总共用该目标，备用线路不重新分批。每尝试加入一个候选都会重建拟提交批次的 prompt、Function 和编号清单后重新估算；组批和实际调用前使用同一个生产函数。不可继续拆分的最小输入仍超过目标时标记后发送；校验反馈导致当前重试超限时标记 `oversized_retry` 后发送。该值是模型输入估算目标，不是 HTTP 字节数或服务端上下文上限，服务端精确 token 只用于事后核对。
 
 `config/event_generation.json` 提供团队汇总的共同事实规则、完整事项边界、摘要模板、正式正文模板和脱敏正反例。案例只用于学习边界和表达结构，不得复制其中的人员、对象、数字或结论。模板和案例随最终 prompt 一起进入上述完整输入估算，不新增字符阈值；调用次数、输入长度、重试和耗时继续由 Python 统计。
 
-第一阶段发送内部草稿 ID、来源人员、来源负责人、标题、具体对象、动作、完整事件正文和当前证据编号清单。新模型输出只返回 `semantic_reasons`、`reason_detail`、逐条覆盖全部组员的 `member_connections` 和 `risk_flags`，不再返回 `evidence_relation_ids`，也不能直接返回 `shared_message`、`shared_file` 或内部 `group_reason`。`member_connections` 必须与组内 `draft_ids` 完全一致，不能遗漏、重复、引用组外编号或留空。多成员组在同一次调用中返回候选标题、候选内容和候选对象；单成员组在分组阶段保持原事件，随后与多成员组一样进入正式正文写作。
+第一阶段发送内部草稿 ID、来源人员、来源负责人、标题、具体对象、动作、完整事件正文和当前证据编号清单。新模型输出除组编号、成员和候选摘要外，还返回 `semantic_reasons`、`reason_detail`、逐条覆盖全部组员的 `member_connections` 和 `risk_flags`，不再返回 `evidence_relation_ids`，也不能直接返回 `shared_message`、`shared_file` 或内部 `group_reason`。`member_connections` 必须与组内 `draft_ids` 完全一致，不能遗漏、重复、引用组外编号或留空。多成员组在同一次调用中返回候选标题、候选内容和候选对象；单成员组在分组阶段保持原事件，随后与多成员组一样进入正式正文写作。
 
 初步分组和完整复核只接收团队事项边界和 `summary_title`、`summary_content`、`summary_object_hint` 简短模板，不发送完整案例。每个重新组合后的摘要必须覆盖新组全部成员，围绕共同对象和整体进展表达，不按来源人员逐条罗列。不同动作类型不能单独证明应拆分；人员、部门、地区、文件或阶段相同或不同也不能直接决定边界。决定拆分时必须分别说明两侧可以独立汇报的目标或结果，拿不准时仍保持分开。
 
@@ -187,7 +191,7 @@ Python 从 `config/model_input_budget.json` 按仓库本地 `.env` 的主模型�
 
 `config/event_grouping.json` 是个人与多人分组语义说明的共同来源。每个 `group_reason_definitions` 项除描述和关系类型外，还配置 `acceptance_rules` 与 `rejection_rules`：`same_object` 要求唯一共同对象和逐事件直接关系；`continuous_action` 要求前一结果明确成为后一动作的输入、条件或后续动作；`same_deliverable_batch` 覆盖同一批配套产物、同一交付物的多个版本，以及不同时间、状态、地区或阶段形成但需要统一汇报或交付的连续产物，并说明每项在整体中的角色。共同消息或共同文件必须由 Python 计算并连接全组；同一会话不能单独支持合并。具体中文判断规则不复制到 Python。`config/collected_merge.json` 只保留多人高风险复核开关和阈值。
 
-初步分组后，`collected_group_discovery` 把当前 scope 全部组的 `group_id` 和组合标题作为一个请求提交。组合标题由 Python 按稳定顺序覆盖初步组全部来源事件标题，避免候选摘要的主标题掩盖其他成员；请求不发送日期、正文、对象、附件、人员、来源信息或其他分组阶段的业务正反例，字段仍严格只有 `group_id` 和 `title`。模型必须逐组比较全部标题，并按输入顺序为每个组恰好返回一次 `group_checks`，列出可能相关的其他编号和非空理由；Python 校验全量覆盖、编号、自关联和重复后，将重叠关系形成可包含两个或更多组的候选。协议不包含特定日期、人员、业务关键词或固定长度片段。超过当前预算 profile 仍整体提交。Codex 重试和当前请求 Online 备用后仍失败时，按没有标题候选继续并记录 warning。
+初步分组后，至少有两个组时，`collected_group_discovery` 把当前 scope 全部组的 `group_id` 和组合标题作为一个请求提交；不足两个组时跳过标题发现。组合标题由 Python 按稳定顺序覆盖初步组全部来源事件标题，避免候选摘要的主标题掩盖其他成员；请求不发送日期、正文、对象、附件、人员、来源信息或其他分组阶段的业务正反例，字段仍严格只有 `group_id` 和 `title`。模型必须逐组比较全部标题，并按输入顺序为每个组恰好返回一次 `group_checks`，列出可能相关的其他编号和非空理由；Python 校验全量覆盖、编号、自关联和重复后，将重叠关系形成可包含两个或更多组的候选。协议不包含特定日期、人员、业务关键词或固定长度片段。超过当前输入预算目标仍整体提交。所选模式的请求和质量重试（以及配置可用时的备用请求）全部失败时，按没有标题候选继续并记录 warning。
 
 标题候选、共同消息、共同文件、同一附件基础名称、同日会话候选和下列高风险条件共同建立检查范围。配置文件 `config/collected_merge.json` 的默认高风险条件是：
 
@@ -199,9 +203,9 @@ Python 从 `config/model_input_budget.json` 按仓库本地 `.env` 的主模型�
 - 没有完整共同证据，且标准化后的非空 `object_hint` 存在两个以上不同值
 - 模型返回 `broad_object` 风险
 
-完整复核不预设方向，可以拆开初步组并跨组重新组合。标题发现的候选范围可以包含任意多个组，但其中每条实际组间连接单独编号，使同一范围能够分别确认或否定不同关系。每个保留的多事件子组必须有合法语义理由或 Python 自动确定的完整共同证据，并分别提供自己的 `reason_detail` 和 `member_connections`；单条组不要求这些字段。模型先逐条判断 `relation_resolutions`，再统一处理重叠关系并形成最终分组，不得用初步组或预设最终组反向解释关系：成立时 `connected_draft_ids` 只填写证明关系成立所需的最少成员，直接两端关系必须包含左右两端，且所有关联成员必须真实进入同一最终组；决定分开时 `connected_draft_ids` 可以为空，也可以填写关系两侧代表成员，填写后代表成员必须位于不同最终组，并必须给出具体业务差异和关系各侧的 `evidence_draft_ids`。相同 `event_id` 的不可拆成员块若被拆开、关系遗漏或重复、来源覆盖错误、缺少合并依据或拆分证据时，只重试当前检查范围，并把具体错误反馈给模型。Codex 局部重试和当前请求 Online 备用后仍非法时，保留复核前分组并记录 warning，不影响其他检查范围或整次部门汇总。
+完整复核不预设方向，可以拆开初步组并跨组重新组合。标题发现的候选范围可以包含任意多个组，但其中每条实际组间连接单独编号，使同一范围能够分别确认或否定不同关系。每个保留的多事件子组必须有合法语义理由或 Python 自动确定的完整共同证据，并分别提供自己的 `reason_detail` 和 `member_connections`；单条组不要求这些字段。模型先逐条判断 `relation_resolutions`，再统一处理重叠关系并形成最终分组，不得用初步组或预设最终组反向解释关系：成立时 `connected_draft_ids` 只填写证明关系成立所需的最少成员，直接两端关系必须包含左右两端，且所有关联成员必须真实进入同一最终组；决定分开时 `connected_draft_ids` 可以为空，也可以填写关系两侧代表成员，填写后代表成员必须位于不同最终组，并必须给出具体业务差异和关系各侧的 `evidence_draft_ids`。相同 `event_id` 的不可拆成员块若被拆开、关系遗漏或重复、来源覆盖错误、缺少合并依据或拆分证据时，只重试当前检查范围，并把具体错误反馈给模型。所选模式的局部重试（以及配置可用时的备用请求）后仍非法时，保留复核前分组并记录 warning，不影响其他检查范围或整次部门汇总。
 
-第二阶段展开回原始事件，单成员组和多成员组都按最终锁定组逐事件发送完整内容并生成正式汇总，最多并行 3 个请求。模型必须返回与锁定组完全一致的 `covered_draft_ids`，并用 `fact_items.source_draft_ids` 标明关键事实来源。Python 检查当前组的 draft 分配、锁定成员、正文覆盖和事实来源；失败时只重试当前内容组，调用失败或重试后仍不完整时只用该组已脱敏的来源内容回退并写 warning，其他团队事件继续生成。
+第二阶段展开回原始事件，单成员组和多成员组都按最终锁定组逐事件发送完整内容并生成正式汇总，并发数由 `max_concurrent_collected_merge_review_requests` 控制，当前默认 3。模型必须返回与锁定组完全一致的 `covered_draft_ids`，并用 `fact_items.source_draft_ids` 标明关键事实来源。Python 检查当前组的 draft 分配、锁定成员、覆盖声明和事实来源编号；失败时只重试当前内容组，调用失败或重试后仍不完整时只用该组已脱敏的来源内容回退并写 warning，其他团队事件继续生成。
 
 正式正文阶段接收团队完整模板、两类脱敏正例和两类反例。标题围绕共同业务对象和整体结果，正文按触发、范围、协作动作、决定、结果和风险组织。责任分工确有业务价值时可以保留姓名或角色，但不能退化为逐人员工作清单。负责人来源优先、明确冲突标记、敏感过滤、人工修改来源和来源覆盖校验保持不变。
 
@@ -212,7 +216,7 @@ Python 从 `config/model_input_budget.json` 按仓库本地 `.env` 的主模型�
 - 跨批可能漏掉的关系交给随后面向全部组的标题发现，以及由结构关系建立范围的完整内容复核
 - 不可继续拆开的候选输入按来源文件平均分配内容空间，短内容完整保留，长内容同时保留开头和结尾
 - 完整复核超限时同样按关系分批，单条正文仍过长时复用正文切片和分层摘要
-- 正式内容按最终锁定组逐事件生成，最多并行 3 项，不把多个最终事件装入同一次请求
+- 正式内容按最终锁定组逐事件生成，按 `max_concurrent_collected_merge_review_requests` 并行处理（当前默认 3），不把多个最终事件装入同一次请求
 - 单个正式组或单条来源事件超过分批目标时按完整句子拆分并分层汇总；无法继续拆分的最小输入允许发送
 
 所有中间结果持续保留：
@@ -227,13 +231,13 @@ Python 从 `config/model_input_budget.json` 按仓库本地 `.env` 的主模型�
 - 消息证据指纹、同日会话指纹和文件标识
 - 当前人工修订类型和下级修订类型
 
-中间结果只在内存中存在，最终只写一次规范化汇总文件。
+正常合并的中间状态在内存中传递；开启 trace 后也会写入调试文件。每个 scope 最后写一份规范化汇总文件，采用直接覆盖写入，不复用个人日报临时文件校验后的原子替换路径。
 
-429、HTTP 5xx、连接、超时、空返回和无效 JSON 时，当前文字请求立即再试 Codex 1 次，仍失败才切到 Online 一次，下一请求仍优先 Codex。Codex 登录、权限、模型、推理强度、TLS 和配置错误不会重试或切换。字段缺失、来源覆盖、事实覆盖和分组协议错误属于结果质量校验，先按当前任务次数用带具体 Python 错误的 Codex 请求重试，用尽后才走 Online 一次。正式正文结果仍不合法时仅回退当前团队事件并告警；完整复核全部尝试失败或结果仍不合法时保留复核前分组并告警，流程继续。调试模式只增加记录，不改变线路和次数。
+在默认 `codex_with_fallback` 模式，429、HTTP 5xx、连接、超时、空返回和无效 JSON 等被标记为可重试的技术错误，先重试当前 Codex 请求（默认 1 次）；仍失败且 Online 配置可用时才切换一次，下一请求仍优先 Codex。Codex 登录、权限、模型、推理强度、TLS 和配置错误不走这类重试或切换。`online_only` 由 Online 承担主请求和同样的技术重试，不创建 Codex 或备用线路。字段缺失、来源编号覆盖、事实来源编号覆盖和分组协议错误另按任务自己的质量重试次数处理。候选分组、标题发现和完整复核会把具体 Python 错误反馈到后续请求；正式正文阶段重复当前组请求，当前代码不传入该错误反馈。只有备用线路存在时才尝试当前请求备用。正式正文结果仍不合法时仅回退当前团队事件并告警；完整复核全部尝试失败或结果仍不合法时保留复核前分组并告警，流程继续。调试模式只增加记录，不改变线路和次数。
 
 ## 10. 字段检查、重试与修复
 
-模型返回后先统计 group 缺少或泛化的字段：
+模型返回后先统计 group 的空字段和不在允许枚举中的保留理由：
 
 - title
 - content
@@ -241,9 +245,9 @@ Python 从 `config/model_input_budget.json` 按仓库本地 `.env` 的主模型�
 - retention_reason
 - retention_detail
 
-缺失比例达到 `collected_merge_missing_field_retry_ratio` 且未超过 `collected_merge_missing_field_retry_limit` 时，重新请求。环境变量可覆盖比例和次数。
+缺失比例严格超过 `collected_merge_missing_field_retry_ratio`（默认 `0.2`） 且未超过 `collected_merge_missing_field_retry_limit`（默认 `1`）时，重新请求。环境变量可覆盖比例和次数。
 
-候选阶段保留既有的 draft 修复能力，并把修复后的组标记为高风险后复核。正式正文阶段不接受模型返回中未覆盖的事实，并为持续失败的当前组保留确定性回退：
+候选阶段保留既有的 draft 修复能力，并把修复后的组标记为高风险后复核。正式正文阶段校验模型返回的来源覆盖声明，并为持续失败的当前组保留确定性回退：
 
 - `covered_draft_ids` 必须与锁定组完全一致
 - `fact_items.source_draft_ids` 只能引用当前组成员，并覆盖当前组全部来源
@@ -251,6 +255,8 @@ Python 从 `config/model_input_budget.json` 按仓库本地 `.env` 的主模型�
 - 标题、具体对象、保留理由和保留依据缺失时仍可从来源补齐
 - 模型成功返回时不再把全部来源原文追加到模型正文；只有当前组失败回退时才确定性保留其来源内容
 - 明确冲突仍只采用合并人来源，并记录冲突说明
+
+这些检查验证编号、数组覆盖、字段非空和允许值，不能逐句证明正文真实、完整，也不证明每个公开字段都对应独立证据。`fact_items` 与最终正文之间没有逐句核对，输出仍需人工审阅。
 
 ## 11. 输出与追溯
 
@@ -268,7 +274,7 @@ Python 从 `config/model_input_budget.json` 按仓库本地 `.env` 的主模型�
 
 输入文件是规范 `*-merged.md` 时，Python 从文件名提取上一级负责人，并与事件中已有的 `source_report_owners` 合并去重。中心结果公开显示 `来源负责人`；个人输入生成的第一级部门结果没有上游负责人时不显示该字段。来源事件 ID 只写入隐藏 `merge_meta`，不作为公开字段重复展示。
 
-最终事件再次执行关键词过滤和保留门槛，再通过 `MarkdownEventStore` 写入当前 scope。默认模式按自送达配置由飞书 bot 发给当前登录用户自己；显式传入 `--offline` 时不查询飞书身份也不自送达。
+最终事件再次执行关键词过滤和保留门槛，使用 `MarkdownEventStore` 渲染并由合并 runner 覆盖写入当前 scope。普通运行按自送达配置由飞书 bot 发给当前登录用户自己；显式传入 `--offline` 时不查询飞书身份也不自送达。送达失败记录 warning，已生成的 Markdown 仍保留。
 
 空目录、无有效文件或所有事件被过滤时，scope 可以生成空汇总并以 warning 说明原因。
 
@@ -287,7 +293,7 @@ WORKTRACE_COLLECTED_MERGE_TRACE=true
 WORKTRACE_COLLECTED_MERGE_TRACE_ROOT=data/debug/collected_merge
 ```
 
-每个 scope 会记录 `source-audit.json`、`collected_group_discovery.json`、`collected_group_review.json`、step JSON、对应 prompt、`summary.json` 和 `summary.md`。新运行先清理当前 scope 的旧 trace 文件，不影响其他子 scope。模型调用前先写 step，失败也会生成 summary。内容包括：
+每个 scope 会记录 `source-audit.json`、`collected_group_discovery.json`、`collected_group_review.json`、step JSON、对应 prompt、`summary.json` 和 `summary.md`。新运行先清理当前 scope 的旧 step、prompt、来源审计、分组发现、复核和 summary 文件，不影响其他子 scope；代码未在这一清理列表中包含 `llm_calls.json`。模型调用前先写 step，失败也会生成 summary。内容包括：
 
 - `prompt_estimated_tokens`、`online_input_estimated_tokens`、`codex_input_estimated_tokens`、最终 `input_estimated_tokens`、分批目标、超限原因、`actual_input_tokens` 和估算差值
 - 每个来源的完整/实际发送字符数、是否缩短及候选摘要来源
@@ -312,9 +318,11 @@ WORKTRACE_COLLECTED_MERGE_TRACE_ROOT=data/debug/collected_merge
 
 `summary.json` 和 `summary.md` 还包含 `event_generation_summary`、Python 计算的 `quality_summary` 与 `stage_timing_summary`。事件生成摘要只记录配置是否加载、版本以及规则/模板/案例数量；质量摘要记录输入/过滤后/输出事件数、来源覆盖、标题发现请求、逐组检查与候选、跨组合并、初步组拆分、关系成立、证据分开、复核失败、内容重写失败、正文重试和提示缩短；耗时摘要记录各阶段墙钟耗时和请求累计耗时。比例只用于人工检查，不作为强制减少门槛；一个人部门或当天没有重复事项时，输出事件数允许等于输入事件数。并发请求耗时不能相加后当作实际运行耗时。
 
+已知代码限制：`_refresh_collected_merge_trace_step(...)` 引用了未定义的 `source_coverage_error`。开启 trace、使用调用账本，并在分组或复核质量重试耗尽后进入显式备用刷新分支时，可能触发 `NameError`；该分支不能视为已全面验证。本次文档核对不修改代码。
+
 输入阈值通过 `scripts/benchmark_model_input_budget.py` 评测 `7000、12000、16000、20000、24000`。主线路每档重复两次；备用线路只验证 `7000` 旧基线和 `20000` 重点候选，各一次，不测试中间档位。脱敏数据仍同时覆盖个人和团队，使用唯一且明确不是事项事实的占位上下文模拟长输入，因此低频备用线路的兼容性、固定格式、来源覆盖和事项边界仍有检查。脚本默认不读飞书、不送达、不上传、不生成诊断报告；已有完整主线路结果时可用 `--reuse-primary-existing` 只运行备用线路。盲审完成后必须用 `--reuse-existing` 读取原结果，不能重新调用模型后套用旧评分。两条线路的固定格式、来源覆盖、边界错误和人工盲审均不低于 7000 基线后，必须先完成只使用临时数据和缓存目录的日期隔离验证；隔离验证成功后才可把结果写入当前模型 profile，正式 Markdown 不会被覆盖。
 
-每个 scope 写入 Markdown 后，默认由飞书 CLI 发送给当前登录用户。把 `config/self_delivery.json` 的 `enabled` 改为 `false` 可同时关闭个人日报和多人汇总的这一步；此时不会调用飞书 CLI，`self_delivery_status` 返回 `disabled`，不影响 Markdown、统计或其他合并流程。显式使用 `merge-collected --owner-name 姓名 --offline` 时，会同时跳过飞书身份查询和自送达，适用于未安装飞书 CLI 的服务器；离线模式仍请求在线模型完成事件合并。
+每个 scope 写入 Markdown 后，普通运行默认由飞书 CLI 发送给当前登录用户。把 `config/self_delivery.json` 的 `enabled` 改为 `false` 可同时关闭个人日报和多人汇总的这一步；此时不会调用飞书发送命令，但普通运行仍会查询飞书身份，`self_delivery_status` 返回 `disabled`，不影响 Markdown、统计或其他合并流程。显式使用 `merge-collected --owner-name 姓名 --offline` 时，会同时跳过飞书身份查询和自送达，适用于未安装飞书 CLI 的服务器；该选项仍按 `WORKTRACE_LLM_MODE` 选择 Codex 或 Online 请求完成事件合并。
 
 `python3 scripts/replay_collected_review_failures.py --trace-root <trace目录> --steps <编号列表> --output-dir <输出目录>` 可以直接离线回放候选分组和完整复核 step；原有 `--inventory`、`--ids`、`--result-dir` 和 `--output-dir` 继续可用。旧 trace 使用 `legacy_audit`，不补造初步组、关系处理或不可拆成员块；新 trace 使用 `current` 恢复 `initial_groups`、`strong_relations` 和 `atomic_groups`，并完整执行关系覆盖与成员块校验。脚本明确记录 `model_call_count: 0`，不调用模型，也不生成正式 Markdown。
 
@@ -322,6 +330,7 @@ WORKTRACE_COLLECTED_MERGE_TRACE_ROOT=data/debug/collected_merge
 
 `CollectedMergeRunResult` 主要包含：
 
+- `status`
 - `target_date`
 - `input_dir`
 - `output_path`
@@ -336,8 +345,10 @@ WORKTRACE_COLLECTED_MERGE_TRACE_ROOT=data/debug/collected_merge
 - `self_delivery_status`
 - `self_delivery_target`
 - `self_delivery_error`
+- `outputs`：包含根目录和每个一级子目录的独立结果
+- 开启调试时的 `support_report`
 
-有一级子目录时，根 scope 和子 scope 的结果会统一反映在本次运行摘要中。
+顶层 `output_path` 只指向根 scope，不代表全部输出路径；数量、质量和耗时按 scope 汇总，所有文件路径需要查看 `outputs`。`source_file_count` 是待解析 `.md` 文件数，可能包含随后跳过的无效文件；`source_event_count` 是过滤后模型输入数，过滤前解析量在 `quality_summary.input_event_count`。任一 scope 未生成文件则整次状态为 `failed`；只有 warning 或送达失败时为 `success_with_warnings`。
 
 ## 14. 当前代码落点
 

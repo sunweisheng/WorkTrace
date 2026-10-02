@@ -1,10 +1,17 @@
 # WorkTrace Codex 与 Online 调用说明
 
-> 状态：Codex 是正式主线路；Online 是当前请求的备用线路。
+> 状态：当前正式流程支持 `codex_with_fallback` 和 `online_only`，默认使用前者。
 
 ## 1. 路由规则
 
-每个新请求都从 Codex 开始，不会因为上一个请求切到 Online 而改变下一请求的起点：
+`WORKTRACE_LLM_MODE` 从进程环境和仓库本地 `.env` 读取，进程环境优先。未配置时为 `codex_with_fallback`；空值或其他值会明确报错，不会静默切换。
+
+| 模式 | 首选线路 | 备用线路 | Codex 依赖 |
+| --- | --- | --- | --- |
+| `codex_with_fallback` | Codex | 配置有效时仅当前请求使用 Online | 要求命令、认证和本地七项配置 |
+| `online_only` | Online | 无 | 正式流程不检查或调用 Codex |
+
+默认双线路模式下，每个新请求都从 Codex 开始，不会因为上一个请求切到 Online 而改变下一请求的起点：
 
 ```text
 Codex 首次调用
@@ -13,9 +20,17 @@ Codex 首次调用
   -> 下一个新请求重新优先 Codex
 ```
 
-网络、超时、限流、服务端异常、空结果和无效 JSON 可以重试或切换。登录、权限、模型不存在、推理强度不支持、TLS 与请求配置错误不会切换线路。Python 结构、编号、证据或覆盖率校验失败时，沿用各任务既有的质量重试次数，将具体错误反馈给 Codex；用尽后才把当前请求交给 Online 一次。
+网络、超时、限流、服务端异常、空结果和不可解析 JSON 可以进入请求级重试或切换。登录、权限、模型不存在、推理强度不支持、TLS 与请求配置错误不会进入请求级切换。
 
-`config/llm_retry.json` 的 `primary_request_retry_limit` 是 Codex 技术失败后的额外重试次数，当前为 `1`。旧键 `online_request_retry_limit` 仍能读取，但仅为兼容旧配置。Online 没有独立的请求级重试；它是当前请求的最后一次备用调用。两条线路共用 `WORKTRACE_LLM_TIMEOUT_SECONDS`。Codex 的全局同时调用上限固定为 3，文字、图片、表情补全和诊断报告共用这个限制。
+`config/llm_retry.json` 的 `primary_request_retry_limit` 是首选线路技术失败后的额外重试次数，当前为 `1`。旧键 `online_request_retry_limit` 仍能读取，但仅为兼容旧配置。在默认双线路模式中，Online 没有独立的请求级重试；它是该次底层请求的最后一次备用调用。仅 Online 模式由同一配置控制 Online 的请求级重试，最后不追加备用请求，调试记录 `backend=online`、备用次数为 `0`。
+
+各任务还有独立的外层重试和失败处理，不能把底层线路图理解为所有阶段的总调用次数：
+
+- 会话切分、片段提炼、锚点回退、临时协作复核和个人事实复核在默认模式下仍可能捕获请求异常并进入各自外层重试，下一轮再次优先 Codex；仅 Online 的终止请求错误会直接传播。
+- 临时协作与个人事实复核会把具体验证错误放入局部重试提示词；切分、片段提炼和锚点批量重试沿用原输入，部分非法来源或缺失成员也会被过滤、跳过并记 warning，不能承诺每次校验失败都会反馈或重试。
+- 全日分组、标题发现、完整内容复核和最终正文重写各自携带质量反馈，质量重试用尽后，在默认模式且尚未用过备用时可将当前请求交给 Online 一次。全日分组技术调用失败会终止；返回结果持续非法时保留合法组并把其余候选拆单。标题发现失败按没有标题候选继续，局部复核失败保留原分组，正文失败使用当前组的确定性结果并写 warning。
+
+两条线路都读取 `WORKTRACE_LLM_TIMEOUT_SECONDS`，未配置时为 `180` 秒；该值约束每次 Online 请求或 Codex 子进程执行，不是包括外层重试和 Codex 排队等待的整天总时限。Codex 的全局同时调用上限固定为 `3`，文字、图片、表情补全和诊断报告共用；启动间隔由 `codex_request_interval_min_seconds` / `codex_request_interval_max_seconds` 控制，当前为 `0` 到 `1` 秒。
 
 ## 2. 本地配置
 
@@ -25,7 +40,15 @@ Codex 首次调用
 cp .env.example .env
 ```
 
-Codex 主线路必须在这个仓库本地 `.env` 显式写入模型、推理强度和中转提供方设置；不读取进程环境变量，也不继承个人 Codex 的模型或提供方配置：
+先选择模式：
+
+```dotenv
+WORKTRACE_LLM_MODE=codex_with_fallback
+```
+
+仅使用 Online 时把该值改为 `online_only`，只需配置下方三项 Online 连接值，不要求安装、登录或配置 Codex。
+
+默认模式的 Codex 主线路必须在这个仓库本地 `.env` 显式写入模型、推理强度和中转提供方设置；这七项不读取进程环境变量，也不继承个人 Codex 的模型或提供方配置：
 
 ```dotenv
 WORKTRACE_CODEX_MODEL=your-codex-model-name
@@ -37,9 +60,9 @@ WORKTRACE_CODEX_PROVIDER_WIRE_API=responses
 WORKTRACE_CODEX_PROVIDER_REQUIRES_OPENAI_AUTH=true
 ```
 
-中转站 Key 不写入 WorkTrace `.env`，继续由 Codex CLI 自己的认证存储提供。没有内置模型名或推理强度列表。`--preflight` 用正式严格 Schema 发起一次小探针，验证这个实际组合。正常启动只检查配置，不发送收费的 Online 探针。
+中转站 Key 不写入 WorkTrace `.env`，继续由 Codex CLI 自己的认证存储提供。没有内置模型名或推理强度列表。默认模式自检用正式严格 Schema 发起 Codex 小探针，验证这个实际组合；仅 Online 自检改用 Online Function Calling 探针。正式个人日报启动和独立锚点实验启动也会执行自检，不能把它们描述为只检查配置。
 
-Online 备用在需要时使用以下三项连接配置；缺少或不合法时会给出警告并禁用备用，但不阻止 Codex 主线路运行：
+Online 使用以下三项连接配置：默认模式中可作为备用，缺少或不合法时自检详情记录警告并禁用备用，不阻止 Codex 主线路；仅 Online 模式中三项必填，缺失会停止生成：
 
 ```dotenv
 WORKTRACE_LLM_BASE_URL=https://your-openai-compatible-endpoint.example/v1
@@ -48,7 +71,9 @@ WORKTRACE_LLM_API_KEY=your-api-key
 WORKTRACE_LLM_WIRE_API=responses
 ```
 
-`WORKTRACE_LLM_WIRE_API` 只允许 `responses` 或 `chat_completions`，不配置时保持原有 Responses 行为，也不会根据模型名或服务地址自动切换。Online 保持 `WORKTRACE_LLM_REASONING_EFFORT=none`、`WORKTRACE_LLM_STREAM=false`，并可设置 `WORKTRACE_LLM_TLS_VERIFY`。环境变量可以覆盖 Online 连接配置；真实密钥不能提交到 git。`WORKTRACE_LLM_TIMEOUT_SECONDS=1200` 是两条线路的共同总时限。
+`WORKTRACE_LLM_WIRE_API` 只允许 `responses` 或 `chat_completions`，不配置时默认 Responses，也不会根据模型名或服务地址自动切换。Online 的生效值必须保持 `WORKTRACE_LLM_REASONING_EFFORT=none`，未填写时默认也是 `none`。`WORKTRACE_LLM_STREAM=false` 是默认值，可按服务能力显式开启流式；文字和图片共用该开关，Online 自检探针固定非流式。`WORKTRACE_LLM_TLS_VERIFY` 可控制证书验证。进程环境可以覆盖 Online、模式及共享超时配置；真实密钥不能提交到 git。模板的 `WORKTRACE_LLM_TIMEOUT_SECONDS=1200` 为示例设置，未配置时仍使用代码默认 `180` 秒。
+
+非 `none` 的推理配置会令仅 Online 自检失败。默认模式自检会显示 `online_fallback=disabled`，但当前工厂没有使用该状态：配置加载器允许其他推理值，后续仍可能装配 Online 备用。此时请求体也不发送关闭思考的字段。因此必须保持 `none`，不能将这项报告状态当作实际禁用。
 
 ## 3. 同一任务契约
 
@@ -58,12 +83,12 @@ WORKTRACE_LLM_WIRE_API=responses
 
 | 线路 | 传输方式 | 严格保证 |
 | --- | --- | --- |
-| Online 备用 | Responses 或 Chat Completions 原生 Function Calling：`tools`、强制 `tool_choice`、`parallel_tool_calls=false` | `strict:true`；非流式和流式都只接受一次预期 Function 调用 |
-| Codex 主线路 | 完整契约提示词加 `--output-schema` | 同一 `parameters`；模型只能提交一次参数 JSON 对象，Python 继续校验 |
+| Online（仅 Online 或默认模式备用） | Responses 或 Chat Completions 原生 Function Calling：`tools`、强制 `tool_choice`、`parallel_tool_calls=false` | `strict:true`；非流式和流式都只接受一次预期 Function 调用 |
+| Codex（默认模式主线路） | 完整契约提示词加 `--output-schema` | 同一 `parameters`；提示词要求只提交一次参数 JSON 对象，Python 继续按任务校验 |
 
-Codex CLI 没有 `--strict=true` 参数，项目不会伪造该参数。Codex 提示词会明确展示 Function 名称、描述和 `strict=true`，要求不输出 Function 外壳、Markdown、解释或额外字段；同一份动态 `parameters` 写入 `--output-schema`。所有对象 Schema 继续使用 `additionalProperties:false`，所有字段进入 `required`。Python 仍拒绝缺少字段、额外字段、非法枚举、错误证据编号和不完整覆盖。
+Codex CLI 没有 `--strict=true` 参数，项目不会伪造该参数。Codex 提示词会明确展示 Function 名称、描述和 `strict=true`，要求不输出 Function 外壳、Markdown、解释或额外字段；同一份动态 `parameters` 写入 `--output-schema`。对象 Schema 使用 `additionalProperties:false` 并列出必填字段。Schema 是请求契约，Python 的实际字段、证据和覆盖校验由各任务执行；旧领域解析器和部分候选过滤仍有兼容处理，不能把服务端严格 Schema 当作本地每种字段错误都必然拒绝的保证。
 
-Online 提示词才追加 `/no_think`。Responses 模式发送 `reasoning={"effort":"none"}`；Chat Completions 模式不发送不兼容的 reasoning 字段，改为发送 `thinking.type=disabled`。Codex 实际提示词不追加 `/no_think`。
+Online 提示词才追加 `/no_think`。有效推理配置为 `none` 时，Responses 模式发送 `reasoning={"effort":"none"}`；Chat Completions 模式不发送不兼容的 reasoning 字段，改为发送 `thinking.type=disabled`。Codex 实际提示词不追加 `/no_think`。
 
 个人事实复核每次只处理一个候选；其 `draft_id` 与允许引用的证据消息 ID 都由同一份动态参数 Schema 限制。事实字段不在外层重复，统一由 `fact_items` 返回；不同候选最多 3 路并发处理。证据不足以支持必填事实时必须返回 `supported=false`，不返回半完整事件。Python 在两条线路返回后都执行字段完整、枚举、证据归属和覆盖率校验。
 
@@ -79,13 +104,13 @@ online_estimate = max(responses_estimate, chat_estimate)
 input_estimated_tokens = max(online_estimate, codex_estimate)
 ```
 
-`model_input_batch_target_tokens` 从 `config/model_input_budget.json` 中与当前主模型、备用模型精确匹配的预算 profile 读取；配置不存在或没有匹配项时回退 `7000`。它是输入估算目标，不是 HTTP 字节数或服务端上下文上限。局部重试加入校验错误后若超限，会标记为 `oversized_retry` 后发送。
+默认模式的 `model_input_batch_target_tokens` 从 `config/model_input_budget.json` 中与主模型、备用模型名称精确匹配的预算 profile 读取；没有匹配项时使用配置默认预算（当前为 `7000`），配置文件不存在时回退 `7000`。仅 Online 直接使用配置默认预算，不套用 Codex 模型组合 profile；仍用同一个三种请求结构的最大值估算函数，但不会因此读取 Codex 配置或调用 Codex。它是输入估算目标，不是 HTTP 字节数或服务端上下文上限。最小必要输入仍超限时按任务标记 `oversized_singleton`，局部重试反馈造成超限时标记 `oversized_retry` 后发送。
 
 ## 4. Codex 应用级隔离
 
 每次 Codex 调用都在独立的空临时目录执行：提示词通过 stdin 输入，Schema、结果和图片副本只写入该目录，结束即删除。图片摘要仍是普通文本任务，使用 `--image` 传入临时图片副本，不强制改为 Function Calling。
 
-实际命令固定包含：
+固定结构任务的命令结构如下，尖括号表示 Python 生成的占位值，并非可直接执行的 Shell 命令；普通图片摘要省略 `--output-schema` 并增加 `--image`：
 
 ```bash
 codex exec --skip-git-repo-check --ephemeral --ignore-user-config --ignore-rules \
@@ -97,7 +122,8 @@ codex exec --skip-git-repo-check --ephemeral --ignore-user-config --ignore-rules
   -c 'model_providers.<id>.requires_openai_auth=<WORKTRACE_CODEX_PROVIDER_REQUIRES_OPENAI_AUTH>' \
   -c 'model_reasoning_effort="<WORKTRACE_CODEX_REASONING_EFFORT>"' \
   -c 'shell_environment_policy.inherit="none"' -c 'web_search="disabled"' \
-  --disable multi_agent --output-schema <parameters.schema.json> \
+  --disable multi_agent --disable shell_tool \
+  --output-schema <parameters.schema.json> \
   --output-last-message <result.json> -
 ```
 
@@ -113,9 +139,15 @@ codex exec --skip-git-repo-check --ephemeral --ignore-user-config --ignore-rules
 python3 -m src.worktrace.cli --preflight
 ```
 
-preflight 检查 Python、`lark-cli` 用户身份、Codex 命令和仓库本地 Codex 配置，并使用正式 `FunctionCallSpec`、正式 Schema 和正式隔离参数执行 Codex 小探针。Online 仅校验配置，不发送请求。
+默认双线路模式的 preflight 检查 Python、`lark-cli` 用户身份、Codex 命令和仓库本地 Codex 配置，并使用正式 `FunctionCallSpec`、正式 Schema 和正式隔离参数执行 Codex 小探针。该模式的 Online 备用仅校验配置，不发送请求。
+
+仅 Online 时检查 Python、`lark-cli` 用户身份和 Online 配置，以当前 `responses` / `chat_completions` 执行一个非流式 Function Calling 探针；不检查 Codex 命令、配置、认证或版本。Online 探针超时取共享配置与 `45` 秒中的较小值，Codex 探针使用正式子进程请求时限。两种模式还检查数据目录可写和时区可用，自检不发送测试文件。
 
 Online 每次请求重新读取配置，创建独立的 OpenAI 与 HTTP 客户端，并在本次请求结束后关闭。图片 Online 备用和独立 Online 探针都使用相同的接口开关；图片仍是普通文字/图片理解请求，不强制 Function Calling。
+
+默认模式图片摘要先走 Codex 普通文本任务和 `--image`；可重试技术错误按配置重试，工具调用等协议违规或配置定义的无法识别回复可直接触发当前图片 Online 备用一次。仅 Online 的图片摘要由 Online 执行并读取相同请求级重试配置，不追加备用。图片处理异常由调用位置处理并写 warning，不应推断为所有结构化任务都会继续。
+
+正式的仅 Online 模式不依赖 Codex，限于遵循运行时工厂的入口。`scripts/benchmark_model_input_budget.py` 是显式双线路评测工具，直接构造 Codex 与 Online analyzer，不随 `online_only` 自动改成单线路评测。`scripts/replay_day_with_trace.py` 默认遵循配置，保留的显式 `--analyzer-backend online/codex` 分别映射为 `online_only` / `codex_with_fallback`；诊断时不应擅自传入覆盖值。
 
 ## 6. 调试账本
 

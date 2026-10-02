@@ -39,7 +39,7 @@
 }
 ```
 
-每个输入锚点必须按 `anchor_unit_id` 对应一项结果。Python 负责检查未知、缺失和重复锚点 ID。
+每个输入锚点必须按 `anchor_unit_id` 对应一项结果。正式 runner 会检查未知、缺失和重复锚点 ID；独立实验只按已知 ID 建立结果映射，未知项忽略、重复项以后项覆盖，缺失项转入逐锚点调用。两条入口的验证强度不同。
 
 ## 3. `anchor_status`
 
@@ -71,7 +71,7 @@ Python 领域模型还包含 `pending`、`failed`、`skipped`，用于运行状�
 - `fact_items`（`field`、`text`、`evidence_message_ids`）
 - `fact_risk_flags`
 
-模型不负责生成可信的 `draft_id`、日期、会话 ID、slice ID 或 confidence；这些运行字段由 Python 根据当前锚点重建。
+输出 Schema 不包含 `draft_id`、日期、会话 ID、slice ID 或 confidence。正式回退会补齐当前锚点的会话和片段来源，并按合法来源消息生成缺失的日期、编号；confidence 使用领域模型默认值。独立实验只保存解析结果，不执行正式候选物化，不能要求其 JSON 已补齐这些运行字段。
 
 约束：
 
@@ -100,7 +100,7 @@ Python 领域模型还包含 `pending`、`failed`、`skipped`，用于运行状�
 - `attachment_text`
 - `linked_file_text`
 
-Python 会校验请求类型与三类目标 ID 的组合，再决定是否扩展。
+正式 runner 会校验请求类型与三类目标 ID 的组合，再决定是否扩展：每种请求都必须引用当前窗口中的消息；正文请求还必须引用这些消息实际附带的附件或链接，前后消息请求不能夹带附件或链接 ID。独立实验逐锚点路径直接把解析后的请求交给扩窗函数，不执行正式 runner 的这一层过滤。
 
 ## 6. `needs_cross_anchor_merge`
 
@@ -110,17 +110,15 @@ Python 会校验请求类型与三类目标 ID 的组合，再决定是否扩展
 
 ## 7. Python 验证与回退
 
-Python 会验证：
+请求 Schema 约束模型状态、候选字段和上下文请求的结构；解析器将返回值转换为领域对象。正式 runner 进一步检查锚点 ID 覆盖，再过滤非法来源、本人证据、附件/链接引用、参与方式和事实风险类型。候选必须包含当天来源消息，不能仅凭扩窗得到的上下文产生当天事件。这里包含过滤和规范化，不等同于所有非法引用都触发重试。
 
-- 顶层和每项结构
-- 锚点 ID 覆盖
-- status 合法性
-- candidate/context 数组
-- 所有来源引用
-- 本人直接关联证据
-- 扩窗后是否获得新信息
+正式锚点回退按 `anchor_batch_retry_limit`（当前为 `1`）额外尝试同一批；仍有部分缺失时只处理缺失项，整批失败时继续拆小，最终单锚点仍失败才跳过并写 warning。当前同批重试不把具体验证错误追加到提示词。仅 Online 的终止请求错误会直接传播，不进入这一层循环；默认双线路的请求错误仍可能进入外层重试。
 
-协议失败由调用方按 `anchor_batch_retry_limit` 重试；最终失败的锚点会跳过并写 warning，不允许模型输出绕过引用校验。
+正式回退的合法上下文请求最多扩展 `anchor_retry_limit` 轮（由 `config/llm_retry.json` 的 `segmentation_retry_limit` 载入，当前为 `3`）；达到上限或没有新增上下文时跳过该锚点并写 warning。
+
+独立实验采用另一套控制：缓存未命中后先批量调用一次，批量失败或缺少结果才逐锚点处理；正常批量返回即使仍请求上下文，也直接保存并返回。逐锚点路径总轮数最多为 `anchor_retry_limit`，在 `completed`、`not_work_related` 或无上下文请求时结束，不执行正式引用过滤及“没有新增信息”判断。逐锚点协议异常由实验入口返回失败 JSON，不按正式 runner 的规则逐项跳过。
+
+两条入口的底层调用都遵循 `WORKTRACE_LLM_MODE`；模式和请求级重试见 [调用说明](online-analyzer-usage.md)。
 
 ## 8. 代码落点
 

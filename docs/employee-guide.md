@@ -56,7 +56,7 @@ WorkTrace 会读取你在指定日期里发过消息或做过 reaction 的飞书
 
 - 不会默认直接把结果发给领导
 - 不会默认自动上传到公司统一数据库
-- 不会长期保存完整原始聊天记录
+- 正式任务成功写入后清理模型临时缓存；失败或中断时会保留聊天上下文供续跑，原始调试目录也需在不再需要时清理
 - 不会把所有聊天都抓进来，只处理你在当天发过消息或做过 reaction 的会话
 - 不会在最终 Markdown 里显示群名、open_id、消息 ID、会话 ID 或参与人名单
 - 事件正文只在责任分工、任务指派、确认沟通对象等确有必要时保留姓名
@@ -77,9 +77,11 @@ Online 继续读取现有协议、流式、TLS 和超时配置，推理设置须
 启动检查会验证 Online 的 Function Calling 格式，跳过全部 Codex 检查。
 
 重试次数继续读取 `config/llm_retry.json`：技术请求默认重试 1 次，话题切分和
-事件提炼的结果质量各重试 3 次，全日分组校验重试 1 次。仅 Online 模式全部
+事件提炼的阶段重试各 3 次，全日分组校验重试 1 次。仅 Online 模式全部
 请求和重试使用同一 Online 线路，备用切换次数为 0；不增加 SDK 隐藏重试。
-鉴权、权限、TLS 和配置错误不重试。图片失败仍只跳过该图并告警；诊断模型
+仅 Online 的鉴权、权限、TLS 和配置错误不重试。默认模式请求层也不重试
+这些错误，但部分个人阶段仍可能按原有规则重试；具体说明见 README。
+图片失败仍只跳过该图并告警；诊断模型
 失败时仍生成通过隐私检查的基础报告，报告显示 Codex“未启用”。
 
 仅 Online 使用 `config/model_input_budget.json` 的 `default_target_tokens`
@@ -98,7 +100,20 @@ Online 继续读取现有协议、流式、TLS 和超时配置，推理设置须
 - 飞书 CLI 配置的机器人可向你发送文件消息
 - 你自己可用的在线模型配置
 
-仅 Online 模式必须提供下面 3 项；默认双线路模式使用它们配置可选备用：
+默认双线路模式必须在仓库本地 `.env` 填写下面七项，认证由已登录的
+Codex CLI 保存；这些值不从进程环境或个人 Codex 模型配置继承：
+
+```dotenv
+WORKTRACE_CODEX_MODEL=your-codex-model-name
+WORKTRACE_CODEX_REASONING_EFFORT=your-model-supported-effort
+WORKTRACE_CODEX_PROVIDER_ID=your-relay-id
+WORKTRACE_CODEX_PROVIDER_NAME=your-relay-name
+WORKTRACE_CODEX_PROVIDER_BASE_URL=https://your-relay.example/v1
+WORKTRACE_CODEX_PROVIDER_WIRE_API=responses
+WORKTRACE_CODEX_PROVIDER_REQUIRES_OPENAI_AUTH=true
+```
+
+仅 Online 模式跳过上述配置，必须提供下面 3 项；默认双线路模式使用它们配置可选备用：
 
 ```dotenv
 WORKTRACE_LLM_BASE_URL=
@@ -114,7 +129,7 @@ WORKTRACE_LLM_WIRE_API=responses
 - `WORKTRACE_LLM_API_KEY` 是你的密钥
 - `WORKTRACE_LLM_WIRE_API` 是 Online 接口，默认 `responses`；服务明确要求 Chat Completions 时才改为 `chat_completions`
 
-`WORKTRACE_LLM_REASONING_EFFORT` 不属于缺一不可的连接配置；不填写时，代码默认使用 `none`。模板显式保留 `WORKTRACE_LLM_REASONING_EFFORT=none`，表示当前主流程关闭推理过程。如果把它改成其他值，首次自检会失败。
+`WORKTRACE_LLM_REASONING_EFFORT` 不属于缺一不可的连接配置；不填写时，代码默认使用 `none`。模板显式保留 `WORKTRACE_LLM_REASONING_EFFORT=none`，此时请求会发送关闭思考的字段。改成其他值时，仅 Online 自检失败；默认双线路自检显示 Online 备用已禁用并提示原因，但当前后续代码仍可能创建该备用，也不会发送关闭思考的字段。请保持 `none`，不能把这项自检状态理解为运行中已经禁用备用。
 
 如需只生成本地文件、不发送给自己，把 `config/self_delivery.json` 改为：
 
@@ -137,6 +152,8 @@ WORKTRACE_LLM_WIRE_API=responses
 - 为补齐 reply/quote 直接关系或模型请求的相邻上下文，系统可能临时读取并发送目标日期之外的直接关联消息，但生成的事件日期仍是目标日期
 - 如果图片摘要已启用，本人发送或本人 reply/quote 直接关联的图片会按大小限制处理；其他图片受数量和大小限制，并只在模型明确请求时处理
 - 模型明确请求时，指定文本附件或飞书文档正文也会进入上述模型线路输入
+- 自动补全文档标题也可能在本机读取完整文档，正文只有在补读请求中才提供给提炼模型
+- 会话黑名单会过滤搜索命中，阻止后续拉取和模型处理；飞书搜索服务仍可能先返回该会话的命中
 - WorkTrace 会在你本地生成 Markdown 文件
 - WorkTrace 默认通过飞书机器人把生成的 Markdown 文件发给你自己
 
@@ -330,13 +347,13 @@ python -m src.worktrace.cli --date 2026-06-23
 
 如果你只是正常使用，到这里就够了。
 
-如果上一次运行在模型调用阶段中断，且聊天输入和配置没有变化，可以续跑：
+如果上一次运行在模型调用阶段中断，且聊天输入、模式、模型和规则没有变化，可以续跑：
 
 ```bash
 python3 -m src.worktrace.cli --date 2026-06-23 --resume
 ```
 
-未完成任务的分段和提炼结果临时保存在 `data/cache/llm/YYYY/MM/YYYY-MM-DD/`。普通重跑会先删除旧日报、当天中间结果和当天个人调试目录，从头生成；`--resume` 保留这些内容，并只复用输入完全一致的中间结果。Markdown 成功写入后，中间结果自动清理。
+未完成任务的分段和提炼结果临时保存在 `data/cache/llm/YYYY/MM/YYYY-MM-DD/`。普通重跑在自检通过后先删除旧日报、当天中间结果和当天个人调试目录，从头生成；`--resume` 保留这些内容，只核对序列化窗口/批次和模式是否一致。它不会自动识别模型名、完整提示词或全部规则的变化，改过这些设置后应普通重跑。Markdown 成功写入后中间结果自动清理；失败或中断留下的缓存可能含裁剪后的聊天，不再续跑时应清理。
 
 如果遇到无法启动、运行失败、速度太慢、模型反复重试、事件遗漏、错误合并、文件未生成或结果未送达，直接在 Codex 中说：
 
@@ -412,7 +429,7 @@ data/debug/conversations/2026-06-23/_merge_day_candidates/
 
 管理人员汇总时，最终单来源组和多来源组都会逐事件重新生成标题、正文和具体对象，最多同时处理 3 项。某项正文生成失败时只回退该项已经脱敏的来源内容并显示 warning，不影响其他团队事件和汇总文件写入。开启多人汇总 trace 后，`source-audit.json` 会记录新旧来源文件、部分读取和过滤数量；`collected_group_discovery.json` 记录全部初步组标题和标题候选，`collected_group_review.json` 记录不可拆重复来源块、检查范围、关系处理、跨组合并和初步组拆分。每个 step JSON 与 prompt 在候选、复核和正文请求前保存，失败时也会生成 summary。`summary.json` 和 `summary.md` 还会记录 Python 计算的输入/输出数量、来源覆盖、标题发现、完整复核和内容重写统计，便于定位失败批次、重试过程以及“哪些共同证据支持合并”或“为什么被拆开”。
 
-请注意：这些原始调试文件可能包含裁剪后的聊天上下文、附件正文、图片摘要、prompt 和模型输出，只建议在排障时临时开启，不能外发。报告模型不会读取这些原始内容；它只读取 Python 生成的编号状态、数量、耗时、token、重试、备用线路和送达结果。最终安全报告还会扫描姓名、路径、内部 ID、网址、联系方式、日期、文件名和密钥样式，未通过时不会保留文件。
+请注意：这些原始调试文件可能包含裁剪后的聊天上下文、附件正文、图片摘要、prompt 和模型输出，只建议在排障时临时开启，不能外发。报告模型不会读取这些原始内容；它只读取 Python 生成的编号状态、数量、耗时、token、重试、备用线路和送达结果。最终报告通过配置正则扫描路径、内部 ID、网址、联系方式、日期、文件名和密钥样式，未通过时不会保留文件。扫描器不识别人名语义；隐私保护还依赖不把原始业务信息交给报告模型，并将模型返回限制为编号事实和允许值。
 
 ## 9. 你会看到什么结果
 
@@ -429,8 +446,10 @@ Markdown 默认只保留结构化工作事件，不会默认附带整段原始�
 
 ### 10.1 提示缺少模型配置
 
-说明 `.env` 里没有填完整。  
-请补齐：
+先看当前使用的模式和错误提示中的配置名：
+
+- 默认 `codex_with_fallback`：补齐第 3 节的七项 `WORKTRACE_CODEX_*`，并确认 Codex 已登录。缺少 Online 配置只会禁用备用。
+- `online_only`：补齐下面三项，可以用进程环境覆盖 `.env`：
 
 - `WORKTRACE_LLM_BASE_URL`
 - `WORKTRACE_LLM_MODEL`
@@ -445,8 +464,9 @@ Markdown 默认只保留结构化工作事件，不会默认附带整段原始�
 
 ### 10.3 成功生成了本地文件，但没发到自己
 
-这通常说明“生成成功，发送失败”。  
-这时本地文件应当还在，你可以先打开本地 Markdown 检查内容，再排查飞书机器人发消息权限、应用可见范围或 CLI 配置。
+先查看 CLI JSON 的 `self_delivery_status`。`disabled` 表示自送达已关闭；
+`failed` 才表示发送失败。这两种情况都会保留本地 Markdown，可以先打开
+检查内容。发送失败时再排查飞书机器人权限、应用可见范围或 CLI 配置。
 
 ### 10.4 我担心会不会把私人聊天都读走
 
