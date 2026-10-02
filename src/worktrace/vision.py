@@ -10,6 +10,8 @@ from pathlib import Path
 from time import perf_counter
 from uuid import uuid4
 
+import httpx
+
 from openai import APIConnectionError, APIStatusError, APITimeoutError, OpenAI
 
 from .config import RuntimeConfig, load_online_llm_settings
@@ -246,7 +248,7 @@ class OnlineImageSummarizer:
             retryable = isinstance(exc, (APITimeoutError, json.JSONDecodeError))
             if isinstance(exc, APIStatusError):
                 retryable = exc.status_code in {408, 429} or exc.status_code >= 500
-            if isinstance(exc, APIConnectionError):
+            if isinstance(exc, (APIConnectionError, httpx.TransportError)):
                 from .analyzers.online import _is_tls_error
 
                 retryable = not _is_tls_error(exc)

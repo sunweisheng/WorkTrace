@@ -1360,6 +1360,12 @@ class OnlineLLMAnalyzer(Analyzer):
             if _is_tls_error(exc):
                 raise AnalyzerProtocolError(f"TLS certificate verification failed: {reason}") from exc
             raise RetryableAnalyzerProtocolError(f"Network error: {reason}") from exc
+        except httpx.TransportError as exc:
+            if _is_tls_error(exc):
+                raise AnalyzerProtocolError("TLS transport failed.") from exc
+            raise RetryableAnalyzerProtocolError(
+                "Online transport failed while reading the response."
+            ) from exc
         except _FirstStreamEventTimeoutError as exc:
             raise RetryableAnalyzerProtocolError(
                 "Request timed out before the first stream event."

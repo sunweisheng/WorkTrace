@@ -239,7 +239,6 @@ def build_support_report_analyzers(
     if config.llm_mode == "online_only":
         from .analyzers.online import OnlineLLMAnalyzer
 
-        load_online_llm_settings(config, cwd=cwd)
         return AnalyzerBundle(
             primary=OnlineLLMAnalyzer(
                 config=config, cwd=cwd, usage_recorder=recorder,

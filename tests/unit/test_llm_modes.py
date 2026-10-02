@@ -668,3 +668,117 @@ def test_team_pipeline_runs_without_codex(tmp_path, monkeypatch):
     assert result.source_event_count == 2
     assert result.self_delivery_status == "disabled"
     assert Path(result.output_path).is_file()
+
+
+@pytest.mark.parametrize("kind", ["text", "image"])
+def test_online_stream_transport_timeout_retries_without_fallback(
+    tmp_path, monkeypatch, kind
+):
+    import httpx
+    from types import SimpleNamespace
+    from src.worktrace.vision import (
+        OnlineImageSummarizer,
+        ImageSummarySettings,
+    )
+
+    online_env(tmp_path)
+    monkeypatch.setenv("WORKTRACE_LLM_STREAM", "true")
+    requests = []
+    closed_streams = []
+
+    class Stream:
+        def __iter__(self):
+            event = {"type": "response.output_text.delta", "delta": "蓝色"}
+            yield SimpleNamespace(model_dump=lambda: event)
+            raise httpx.ReadTimeout("stream read timed out")
+
+        def close(self):
+            closed_streams.append(1)
+
+    class Client:
+        def __init__(self, **kwargs):
+            assert kwargs["max_retries"] == 0
+            self.http = kwargs["http_client"]
+            self.responses = SimpleNamespace(create=self.create)
+
+        def create(self, **kwargs):
+            requests.append(kwargs)
+            return Stream()
+
+        def close(self):
+            self.http.close()
+
+    monkeypatch.setattr("src.worktrace.analyzers.online.OpenAI", Client)
+    monkeypatch.setattr("src.worktrace.vision.OpenAI", Client)
+    config = RuntimeConfig(llm_mode="online_only")
+    recorder = LLMUsageRecorder()
+    with pytest.raises(RetryableAnalyzerProtocolError):
+        if kind == "text":
+            analyzer = AnalyzerFactory.create_default(
+                config, cwd=tmp_path, usage_recorder=recorder
+            )
+            spec = function_call_spec(
+                "preflight",
+                {
+                    "type": "object",
+                    "properties": {"probe": {"type": "string"}},
+                    "required": ["probe"],
+                    "additionalProperties": False,
+                },
+            )
+            analyzer.request_function("测试", function_spec=spec)
+        else:
+            image = tmp_path / "sample.png"
+            image.write_bytes(b"image")
+            OnlineImageSummarizer(
+                config=config,
+                cwd=tmp_path,
+                settings=ImageSummarySettings(True, "摘要", 1, 1024),
+                usage_recorder=recorder,
+            ).summarize(image, required=True)
+    assert len(requests) == 2
+    assert len(closed_streams) == 2
+    assert len(recorder.records()) == 2
+    assert recorder.summary()["fallback_count"] == 0
+
+
+def test_online_missing_credentials_still_generates_basic_diagnostic(
+    tmp_path, monkeypatch
+):
+    from tests.unit.test_support_report import _result, REPO_ROOT
+    from src.worktrace.support_report import generate_support_report
+    from src.worktrace.config import load_online_llm_settings
+
+    for key in (
+        "WORKTRACE_LLM_BASE_URL",
+        "WORKTRACE_LLM_MODEL",
+        "WORKTRACE_LLM_API_KEY",
+    ):
+        monkeypatch.delenv(key, raising=False)
+    import shutil
+
+    (tmp_path / "config").mkdir()
+    shutil.copy(
+        REPO_ROOT / "config/support_report.json",
+        tmp_path / "config/support_report.json",
+    )
+    config = RuntimeConfig(llm_mode="online_only", data_root=tmp_path / "data")
+    with pytest.raises(ValueError):
+        load_online_llm_settings(config, cwd=tmp_path)
+    monkeypatch.setattr(
+        "src.worktrace.analyzers.codex.CodexAnalyzer", forbid_codex
+    )
+    monkeypatch.setattr(
+        "src.worktrace.support_report._command_version",
+        lambda *a, **k: "1.2.3",
+    )
+    reference = generate_support_report(
+        result=_result(tmp_path),
+        run_mode="personal",
+        config=config,
+        cwd=tmp_path,
+        elapsed_ms=10,
+    )
+    assert reference.status == "generated_after_llm_failure"
+    assert reference.privacy_check == "passed"
+    assert Path(tmp_path / reference.path).is_file()
