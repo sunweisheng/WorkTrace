@@ -806,7 +806,7 @@ def test_runner_merges_multiple_events_without_losing_member_documents(tmp_path:
                         fact["text"] = {
                             "topic": "确认整体安排", "content": "已确认安排并完成核对。",
                             "object_hint": "整体安排",
-                        }[fact["field"]]
+                        }.get(fact["field"], fact["text"])
             return result
 
     config = RuntimeConfig(data_root=tmp_path / "data")
@@ -910,7 +910,7 @@ def test_shared_document_in_expanded_context_triggers_cross_conversation_review(
                         fact["text"] = {
                             "topic": "确认整体安排", "content": "已确认安排并完成核对。",
                             "object_hint": "整体安排",
-                        }[fact["field"]]
+                        }.get(fact["field"], fact["text"])
             return result
 
     config = RuntimeConfig(data_root=tmp_path / "data")

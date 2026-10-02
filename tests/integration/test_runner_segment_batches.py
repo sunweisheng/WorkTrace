@@ -6,6 +6,8 @@ from pathlib import Path
 from threading import Lock
 from time import sleep
 
+import pytest
+
 from src.worktrace.config import (
     EventMetadataItem,
     RuntimeConfig,
@@ -818,7 +820,10 @@ def test_runner_prioritizes_larger_inputs_for_segmentation_and_event_extraction(
     assert analyzer.event_extraction_order == ["om_large", "om_small"]
 
 
-def test_runner_resegments_only_the_context_requesting_turn(tmp_path: Path) -> None:
+@pytest.mark.parametrize("resume", [False, True])
+def test_runner_resegments_only_the_context_requesting_turn(
+    tmp_path: Path, resume: bool,
+) -> None:
     class ExpansionSource(SegmentSource):
         def fetch_conversation_messages(self, target_date, conversation_ids):
             message = _message(
@@ -863,6 +868,18 @@ def test_runner_resegments_only_the_context_requesting_turn(tmp_path: Path) -> N
         def __init__(self) -> None:
             self.segmentation_calls = 0
             self.batch_calls = 0
+            self.fail_final = resume
+
+        def request_function(self, prompt, *, function_spec,
+                             allow_oversized_input=False):
+            if self.fail_final:
+                raise AnalyzerProtocolError("temporary final review failure")
+            data = json.loads(prompt)
+            assert data["attachment_texts"][0]["text"] == "发布范围已确认。"
+            return super().request_function(
+                prompt, function_spec=function_spec,
+                allow_oversized_input=allow_oversized_input,
+            )
 
         def segment_conversation(self, **kwargs):
             self.segmentation_calls += 1
@@ -926,11 +943,17 @@ def test_runner_resegments_only_the_context_requesting_turn(tmp_path: Path) -> N
 
     result = runner.run("2026-07-10")
 
+    if resume:
+        assert result.status == DailyRunStatus.FAILED.value
+        analyzer.fail_final = False
+        runner = DailyTraceRunner(config=config, dependencies=runner.dependencies)
+        result = runner.run("2026-07-10")
+
     assert result.status == DailyRunStatus.SUCCESS.value
     assert result.event_count == 1
     assert analyzer.segmentation_calls == 2
     assert analyzer.batch_calls == 2
-    assert result.batch_count == 4
+    assert result.batch_count == (0 if resume else 4)
 
 
 def test_runner_splits_segment_batches_in_timeline_order_when_token_limit_is_hit(
@@ -1953,7 +1976,7 @@ def test_anchor_fallback_retries_only_context_requesting_anchor(tmp_path: Path) 
                 )
             ]
 
-    class AttachmentFallbackAnalyzer:
+    class AttachmentFallbackAnalyzer(FunctionRequestStub):
         def __init__(self) -> None:
             self.anchor_calls = 0
             self.expanded = False

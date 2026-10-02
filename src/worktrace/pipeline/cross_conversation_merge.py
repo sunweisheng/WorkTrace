@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from ..errors import AnalyzerProtocolError
 from ..models import (
     CrossConversationGroup,
     MergedEventDraft,
@@ -20,6 +21,16 @@ def materialize_grouped_merged_drafts(
     self_relation_order: tuple[str, ...] = (),
     rendered_groups: dict[str, PersonalGroupRenderItem] | None = None,
 ) -> list[MergedEventDraft]:
+    if rendered_groups is not None:
+        missing_groups = [
+            group.group_id for group in groups
+            if group.group_id not in rendered_groups
+        ]
+        if missing_groups:
+            raise AnalyzerProtocolError(
+                "Personal event final review is incomplete for groups: "
+                f"{missing_groups}."
+            )
     draft_map = {candidate.draft_id: candidate for candidate in candidates}
     candidate_order = {candidate.draft_id: index for index, candidate in enumerate(candidates)}
     message_positions = {message_id: index for index, message_id in enumerate(message_order)}
@@ -46,8 +57,20 @@ def materialize_grouped_merged_drafts(
         object_hint, retention_reason, retention_detail = (
             derive_retention_metadata_from_sources(items)
         )
-        source_message_ids = _ordered_source_message_ids(items, message_order)
         rendered = (rendered_groups or {}).get(group.group_id)
+        if rendered is not None and not rendered.supported:
+            continue
+        reviewed_evidence_ids = [
+            message_id
+            for fact in [*rendered.fact_items, *rendered.self_relations]
+            for message_id in fact.evidence_message_ids
+        ] if rendered is not None else []
+        source_message_ids = _ordered_source_message_ids(
+            items, message_order, extra_message_ids=reviewed_evidence_ids,
+        )
+        if rendered is not None:
+            retention_reason = rendered.retention_reason
+            retention_detail = rendered.retention_detail
         merged_drafts.append(
             MergedEventDraft(
                 date=target_date,
@@ -69,14 +92,16 @@ def materialize_grouped_merged_drafts(
                 ),
                 retention_reason=retention_reason,
                 retention_detail=retention_detail,
-                action_labels=list(
+                action_labels=[rendered.action_label] if rendered else list(
                     dict.fromkeys(
                         item.action_label.strip()
                         for item in items
                         if item.action_label.strip()
                     )
                 ),
-                self_relations=_merge_self_relations(
+                self_relations=[
+                    item.relation for item in rendered.self_relations
+                ] if rendered else _merge_self_relations(
                     items,
                     relation_order=self_relation_order,
                 ),
@@ -148,12 +173,15 @@ def _candidate_sort_key(
 def _ordered_source_message_ids(
     items: list[SourceBackedEventDraft],
     message_order: list[str],
+    *,
+    extra_message_ids: list[str] | None = None,
 ) -> list[str]:
     source_ids = {
         message_id
         for item in items
         for message_id in item.source_message_ids
     }
+    source_ids.update(extra_message_ids or [])
     ordered = [message_id for message_id in message_order if message_id in source_ids]
     remaining = sorted(source_ids - set(ordered))
     return [*ordered, *remaining]

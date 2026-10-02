@@ -19,6 +19,7 @@ from .config import (
 )
 from .analyzers.base import Analyzer
 from .analyzers.function_calls import (
+    function_call_spec,
     message_reference_ids,
     personal_grouping_call_contract,
     task_function_call_spec,
@@ -525,6 +526,8 @@ class DailyTraceRunner:
                         target_date=target_date,
                         groups=groups,
                         candidates=all_candidates,
+                        messages=evidence_messages,
+                        conversation_slices=conversation_slices,
                     )
                     warning_messages.extend(render_outcome.warnings)
                     day_grouping_summary = DayGroupingSummary(
@@ -622,6 +625,8 @@ class DailyTraceRunner:
                         target_date=target_date,
                         groups=group_result.groups,
                         candidates=all_candidates,
+                        messages=evidence_messages,
+                        conversation_slices=conversation_slices,
                     )
                     warning_messages.extend(render_outcome.warnings)
                     day_grouping_warnings = [
@@ -2295,7 +2300,10 @@ class DailyTraceRunner:
             else None
         )
         if checkpoint is not None:
-            candidates, warnings, skipped_count = checkpoint
+            candidates, warnings, skipped_count, evidence_slices = checkpoint
+            self._analyzed_slices.update(
+                (item.slice_id, item) for item in evidence_slices
+            )
             return candidates, warnings, skipped_count, 0
 
         warnings: list[str] = []
@@ -2333,7 +2341,13 @@ class DailyTraceRunner:
                 )
                 if self.checkpoint_store is not None:
                     self.checkpoint_store.save_analysis(
-                        batch, candidates, warnings, skipped_count
+                        batch, candidates, warnings, skipped_count,
+                        evidence_slices=[
+                            self._analyzed_slices[slice_id]
+                            for slice_id in dict.fromkeys(
+                                item.source_slice_id for item in candidates
+                            )
+                        ],
                     )
                 log_timing(
                     logger,
@@ -4456,6 +4470,8 @@ class DailyTraceRunner:
         target_date: str,
         groups: list[CrossConversationGroup],
         candidates: list[SourceBackedEventDraft],
+        messages: list[NormalizedMessage] | None = None,
+        conversation_slices: list[ConversationSlice] | None = None,
     ) -> _PersonalGroupRenderOutcome:
         final_groups = list(groups)
         artifact: dict[str, object] = {
@@ -4468,7 +4484,7 @@ class DailyTraceRunner:
         request_function = getattr(self.dependencies.analyzer, "request_function", None)
         if not callable(request_function):
             warning = (
-                "Kept deterministic personal group content because the analyzer has "
+                "Personal event final review failed because the analyzer has "
                 "no personal group render capability."
             )
             artifact.update(
@@ -4479,7 +4495,7 @@ class DailyTraceRunner:
                         {
                             "group_id": group.group_id,
                             "draft_ids": list(group.draft_ids),
-                            "status": "fallback",
+                            "status": "failed",
                             "result": {},
                         }
                         for group in final_groups
@@ -4519,6 +4535,8 @@ class DailyTraceRunner:
                     target_date=target_date,
                     group=group,
                     candidates=candidates,
+                    messages=messages,
+                    conversation_slices=conversation_slices,
                 )
                 for group in final_groups
             ]
@@ -4558,7 +4576,7 @@ class DailyTraceRunner:
         request_count = len(usage_attempts) if usage_attempts else len(attempts)
         artifact.update(
             {
-                "status": "success_with_warnings" if warnings else "success",
+                "status": "failed" if failure_count else "success",
                 "groups": [
                     {
                         "group_id": group.group_id,
@@ -4566,7 +4584,7 @@ class DailyTraceRunner:
                         "status": (
                             "success"
                             if group.group_id in rendered_groups
-                            else "fallback"
+                            else "failed"
                         ),
                         "result": (
                             rendered_groups[group.group_id].to_dict()
@@ -4614,6 +4632,8 @@ class DailyTraceRunner:
         target_date: str,
         group: CrossConversationGroup,
         candidates: list[SourceBackedEventDraft],
+        messages: list[NormalizedMessage] | None = None,
+        conversation_slices: list[ConversationSlice] | None = None,
     ) -> tuple[
         str,
         PersonalGroupRenderItem | None,
@@ -4630,7 +4650,10 @@ class DailyTraceRunner:
             dict.fromkeys(
                 message_id
                 for item in group_candidates
-                for message_id in item.source_message_ids
+                for message_id in [
+                    *item.source_message_ids,
+                    *item.self_evidence_message_ids,
+                ]
             )
         )
         attempts: list[dict[str, object]] = []
@@ -4646,6 +4669,8 @@ class DailyTraceRunner:
                 candidates=group_candidates,
                 config=self.config,
                 validation_feedback=feedback,
+                messages=messages,
+                conversation_slices=conversation_slices,
             )
             primary = group_candidates[0]
             typical_content = [
@@ -4656,20 +4681,27 @@ class DailyTraceRunner:
                 }
                 for item in group_candidates
             ]
-            function_spec = task_function_call_spec(
+            function_spec = function_call_spec(
                 "personal_group_render",
                 personal_group_render_output_schema(
                     group_id=group.group_id,
                     draft_ids=list(group.draft_ids),
                     message_ids=message_ids,
+                    self_message_ids=[
+                        message_id
+                        for item in group_candidates
+                        for message_id in item.self_evidence_message_ids
+                    ],
+                    config=self.config,
                 ),
-                draft_ids=group.draft_ids,
-                message_ids=message_ids,
                 typical_arguments={
                     "groups": [
                         {
                             "group_id": group.group_id,
                             "covered_draft_ids": list(group.draft_ids),
+                            "supported": True,
+                            "self_relations": [],
+                            "removed_claims": [],
                             "fact_items": [
                                 {
                                     "field": "topic",
@@ -4682,6 +4714,17 @@ class DailyTraceRunner:
                                     "text": primary.object_hint or "具体事项",
                                     "evidence_message_ids": primary.source_message_ids[:1],
                                 },
+                                *[
+                                    {
+                                        "field": field,
+                                        "text": getattr(primary, field),
+                                        "evidence_message_ids": primary.source_message_ids,
+                                    }
+                                    for field in (
+                                        "action_label", "retention_reason",
+                                        "retention_detail",
+                                    )
+                                ],
                             ],
                         }
                     ]
@@ -4700,8 +4743,8 @@ class DailyTraceRunner:
                 None,
                 attempts,
                 [
-                    "Kept deterministic personal group content because content render "
-                    f"failed: group={group.group_id}: {exc}"
+                    "Personal event final review failed: "
+                    f"group={group.group_id}: {exc}"
                 ],
                 retry_count,
                 fallback_count,
@@ -4739,6 +4782,9 @@ class DailyTraceRunner:
                     payload,
                     group=group,
                     candidates=group_candidates,
+                    allowed_self_relations=tuple(
+                        item.key for item in self.config.self_relation_types
+                    ),
                 )
             except (AnalyzerProtocolError, TypeError, ValueError) as exc:
                 used_fallback = self._last_analyzer_request_used_fallback()
@@ -4832,6 +4878,9 @@ class DailyTraceRunner:
                     payload,
                     group=group,
                     candidates=group_candidates,
+                    allowed_self_relations=tuple(
+                        item.key for item in self.config.self_relation_types
+                    ),
                 )
             except (AnalyzerProtocolError, TypeError, ValueError) as exc:
                 attempts.append(

@@ -393,8 +393,8 @@ def test_checkpoint_isolated_by_mode_and_old_format_misses(tmp_path):
     codex.save_analysis(batch, [], ["codex"], 0)
     assert online.load_analysis(batch) is None
     online.save_analysis(batch, [], ["online"], 0)
-    assert codex.load_analysis(batch) == ([], ["codex"], 0)
-    assert online.load_analysis(batch) == ([], ["online"], 0)
+    assert codex.load_analysis(batch) == ([], ["codex"], 0, [])
+    assert online.load_analysis(batch) == ([], ["online"], 0, [])
     for path in config.data_root.rglob("*.json"):
         payload = json.loads(path.read_text())
         payload.pop("llm_mode", None)

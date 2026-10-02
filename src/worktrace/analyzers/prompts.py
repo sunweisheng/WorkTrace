@@ -7,6 +7,7 @@ import re
 from ..config import RuntimeConfig
 from ..constants import AnchorStatus
 from ..constants import LinkType
+from ..pipeline.retention_filter import RETENTION_REASONS
 from ..models import (
     AnalysisBatch,
     AnchorAnalysisResult,
@@ -769,18 +770,38 @@ def build_personal_group_render_prompt(
     candidates: list[SourceBackedEventDraft],
     config: RuntimeConfig,
     validation_feedback: str = "",
+    messages: list[NormalizedMessage] | None = None,
+    conversation_slices: list[ConversationSlice] | None = None,
 ) -> str:
     candidate_by_id = {item.draft_id: item for item in candidates}
+    source_ids = {
+        message_id
+        for draft_id in group.draft_ids
+        for message_id in candidate_by_id[draft_id].source_message_ids
+    }
+    self_ids = list(dict.fromkeys(
+        message_id
+        for draft_id in group.draft_ids
+        for message_id in candidate_by_id[draft_id].self_evidence_message_ids
+    ))
+    source_ids.update(self_ids)
     return dump_json(
         {
             "instruction": (
-                "为成员已经锁定的最终个人事件组重新生成与成员范围一致的标题、正文和具体对象。"
+                "根据原消息复核最终个人事件的事实、保留资格和本人参与方式，再生成一致的事件字段。"
                 "只调用指定 Function 一次提交 groups，不重新分组，不展示推理过程。"
             ),
             "rules": [
                 *config.personal_grouping_rules,
+                *config.retention_policy.prompt_rules,
+                *config.retention_policy.fact_review_rules,
+                _build_self_relation_rule(config),
                 "locked_group 的成员已经确定，covered_draft_ids 必须原样返回。",
-                "fact_items 只返回 topic、content 和 object_hint；topic 和 object_hint 各一项，content 可以有一项或多项并按正文顺序排列。",
+                "原消息优先于 members 中的候选文字和元数据；必须重新判断，不能直接沿用候选的保留理由或参与方式。",
+                "supported=true 时，fact_items 必须覆盖 topic、content、object_hint、action_label、retention_reason 和 retention_detail；除 content 可有多项外，其余字段各一项。",
+                "retention_reason 的 text 必须是 retention_reason_values 中的合法键，并引用支持该工作性质的原消息；其余 fact_items 返回对应文字。",
+                "self_relations 的每项证据只能引用 self_evidence_message_ids，必须直接支持该参与方式。",
+                "不符合保留规则时返回 supported=false，fact_items 和 self_relations 均为空数组，removed_claims 说明无依据的工作判断；不要强行选择保留理由。",
                 "标题和具体对象必须准确覆盖全部成员；范围较宽的完整过程使用能够概括全部成员的标题，具体交付过程使用具体标题。",
                 "每个 fact_item 必须引用支持其文字的合法消息证据，所有成员至少由一项 content 证据覆盖。",
             ],
@@ -791,6 +812,35 @@ def build_personal_group_render_prompt(
             "negative_examples": list(config.personal_grouping_negative_examples),
             "target_date": target_date,
             "validation_feedback": validation_feedback,
+            "retention_reason_values": sorted(RETENTION_REASONS),
+            "substantive_signal_definitions": {
+                item.key: item.description
+                for item in config.retention_policy.substantive_signals
+            },
+            "self_evidence_message_ids": self_ids,
+            "messages": [
+                serialize_message_for_prompt(message, config)
+                for message in messages or []
+                if message.message_id in source_ids
+            ],
+            "attachment_texts": [
+                serialize_attachment_for_prompt(block, config)
+                for block in dict.fromkeys(
+                    block
+                    for item in conversation_slices or []
+                    for block in item.attachment_texts
+                    if block.message_id in source_ids
+                )
+            ],
+            "linked_file_texts": [
+                serialize_linked_file_text_for_prompt(block, config)
+                for block in dict.fromkeys(
+                    block
+                    for item in conversation_slices or []
+                    for block in item.linked_file_texts
+                    if block.message_id in source_ids
+                )
+            ],
             "locked_group": {
                 "group_id": group.group_id,
                 "draft_ids": list(group.draft_ids),
@@ -801,6 +851,13 @@ def build_personal_group_render_prompt(
                         "topic": candidate_by_id[draft_id].topic,
                         "content": candidate_by_id[draft_id].content,
                         "object_hint": candidate_by_id[draft_id].object_hint,
+                        "action_label": candidate_by_id[draft_id].action_label,
+                        "retention_reason": candidate_by_id[draft_id].retention_reason,
+                        "retention_detail": candidate_by_id[draft_id].retention_detail,
+                        "self_relations": [
+                            item.to_dict()
+                            for item in candidate_by_id[draft_id].self_relations
+                        ],
                         "source_message_ids": candidate_by_id[
                             draft_id
                         ].source_message_ids,

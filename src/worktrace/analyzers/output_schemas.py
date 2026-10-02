@@ -779,9 +779,21 @@ def personal_group_render_output_schema(
     group_id: str,
     draft_ids: list[str],
     message_ids: list[str],
+    self_message_ids: list[str] | None = None,
+    config: RuntimeConfig | None = None,
 ) -> dict[str, object]:
     unique_draft_ids = list(dict.fromkeys(draft_ids))
     unique_message_ids = list(dict.fromkeys(message_ids))
+    relation_schema = _self_relations_schema(config or RuntimeConfig())
+    self_ids = list(dict.fromkeys(self_message_ids or []))
+    if self_ids:
+        relation_schema["items"]["properties"]["evidence_message_ids"].update({
+            "minItems": 1,
+            "uniqueItems": True,
+            "items": {"type": "string", "enum": self_ids},
+        })
+    else:
+        relation_schema["maxItems"] = 0
     return {
         "type": "object",
         "properties": {
@@ -793,6 +805,12 @@ def personal_group_render_output_schema(
                     "type": "object",
                     "properties": {
                         "group_id": {"type": "string", "enum": [group_id]},
+                        "supported": {"type": "boolean"},
+                        "self_relations": relation_schema,
+                        "removed_claims": {
+                            "type": "array",
+                            "items": {"type": "string", "minLength": 1},
+                        },
                         "covered_draft_ids": {
                             "type": "array",
                             "minItems": len(unique_draft_ids),
@@ -805,13 +823,16 @@ def personal_group_render_output_schema(
                         },
                         "fact_items": {
                             "type": "array",
-                            "minItems": 3,
                             "items": {
                                 "type": "object",
                                 "properties": {
                                     "field": {
                                         "type": "string",
-                                        "enum": ["topic", "content", "object_hint"],
+                                        "enum": [
+                                            "topic", "content", "object_hint",
+                                            "action_label", "retention_reason",
+                                            "retention_detail",
+                                        ],
                                     },
                                     "text": {"type": "string", "minLength": 1},
                                     "evidence_message_ids": {
@@ -837,6 +858,9 @@ def personal_group_render_output_schema(
                         "group_id",
                         "covered_draft_ids",
                         "fact_items",
+                        "supported",
+                        "self_relations",
+                        "removed_claims",
                     ],
                     "additionalProperties": False,
                 },

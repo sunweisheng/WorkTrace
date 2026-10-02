@@ -332,12 +332,22 @@ class MarkdownEventStore(EventStore):
             f"{'、'.join(labels)}\n"
         )
 
-    def _event_content_fingerprint(self, event: WorkEvent) -> str:
-        files: list[dict[str, str]] = []
-        for link in event.file_links:
-            safe_url = self._redact_sensitive_query_params(link.url)
-            label = self._normalize_public_text(link.title.strip() or safe_url)
-            files.append({"title": label, "url": safe_url})
+    def _event_content_fingerprint(
+        self, event: WorkEvent, *, legacy_files: bool = False,
+    ) -> str:
+        if legacy_files:
+            files = [
+                {
+                    "title": self._normalize_public_text(
+                        link.title.strip()
+                        or self._redact_sensitive_query_params(link.url)
+                    ),
+                    "url": self._redact_sensitive_query_params(link.url),
+                }
+                for link in event.file_links
+            ]
+        else:
+            files = self._public_file_links(event.file_links)
         return event_content_fingerprint(
             {
                 "date": event.date.strip(),
@@ -383,16 +393,31 @@ class MarkdownEventStore(EventStore):
             return "  - 无"
 
         lines: list[str] = []
-        for link in file_links:
-            safe_url = self._redact_sensitive_query_params(link.url)
-            label = link.title.strip() or safe_url
+        for link in self._public_file_links(file_links):
+            safe_url = link["url"]
+            label = link["title"]
             if not safe_url:
                 lines.append(f"  - {self._quote_plain_file_name(label)}")
                 continue
-            if label == link.url:
-                label = safe_url
             lines.append(f"  - [{label}]({safe_url})")
         return "\n".join(lines)
+
+    def _public_file_links(
+        self, file_links: list[EventFileLink],
+    ) -> list[dict[str, str]]:
+        result: list[dict[str, str]] = []
+        seen: set[tuple[str, str]] = set()
+        for link in file_links:
+            url = self._redact_sensitive_query_params(link.url)
+            title = link.title.strip()
+            if not title or title == link.url:
+                title = url
+            title = self._normalize_public_text(title)
+            key = (title, url)
+            if key not in seen:
+                seen.add(key)
+                result.append({"title": title, "url": url})
+        return result
 
     def _quote_plain_file_name(self, value: str) -> str:
         stripped = value.strip()
@@ -668,13 +693,24 @@ class MarkdownEventStore(EventStore):
                 and event.content_fingerprint
                 and event.content_fingerprint != actual_fingerprint
             ):
-                event = WorkEvent.from_dict(
-                    {**event.to_dict(), "manual_edit_type": "manual_modified"}
+                if event.content_fingerprint == self._event_content_fingerprint(
+                    event, legacy_files=True,
+                ):
+                    event = WorkEvent.from_dict({
+                        **event.to_dict(),
+                        "content_fingerprint": actual_fingerprint,
+                    })
+                else:
+                    event = WorkEvent.from_dict({
+                        **event.to_dict(),
+                        "manual_edit_type": "manual_modified",
+                    })
+            if not event.manual_edit_type and (
+                merge_meta_version == 0 or (
+                    merge_meta_version in {2, 3}
+                    and not event.conversation_fingerprints
+                    and not event.source_manual_edit_types
                 )
-            elif merge_meta_version == 0 or (
-                merge_meta_version in {2, 3}
-                and not event.conversation_fingerprints
-                and not event.source_manual_edit_types
             ):
                 event = WorkEvent.from_dict(
                     {**event.to_dict(), "manual_edit_type": "manual_unknown"}

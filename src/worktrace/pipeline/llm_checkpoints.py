@@ -7,8 +7,15 @@ from hashlib import sha256
 from pathlib import Path
 
 from ..config import RuntimeConfig
-from ..models import AnchorUnit, ConversationSegmentUnit, SegmentAnalysisBatch, SourceBackedEventDraft
+from ..models import (
+    AnchorUnit,
+    ConversationSegmentUnit,
+    ConversationSlice,
+    SegmentAnalysisBatch,
+    SourceBackedEventDraft,
+)
 from ..utils.json_io import dump_json
+from .conversation_segments import segment_unit_to_slice
 
 
 def clear_day_llm_checkpoints(config: RuntimeConfig, target_date: str) -> None:
@@ -47,14 +54,37 @@ class LLMCheckpointStore:
 
     def load_analysis(
         self, batch: SegmentAnalysisBatch
-    ) -> tuple[list[SourceBackedEventDraft], list[str], int] | None:
+    ) -> tuple[
+        list[SourceBackedEventDraft], list[str], int, list[ConversationSlice],
+    ] | None:
         payload = self._load("analysis", batch.to_dict())
-        if payload is None:
+        if payload is None or not isinstance(payload.get("evidence_slices"), list):
+            return None
+        candidates = [
+            SourceBackedEventDraft.from_dict(item)
+            for item in payload["candidates"]
+        ]
+        evidence_slices = [
+            ConversationSlice.from_dict(item)
+            for item in payload["evidence_slices"]
+        ]
+        messages_by_slice = {
+            item.slice_id: {message.message_id for message in item.messages}
+            for item in evidence_slices
+        }
+        if any(
+            item.source_slice_id not in messages_by_slice
+            or not set([
+                *item.source_message_ids, *item.self_evidence_message_ids,
+            ]).issubset(messages_by_slice[item.source_slice_id])
+            for item in candidates
+        ):
             return None
         return (
-            [SourceBackedEventDraft.from_dict(item) for item in payload["candidates"]],
+            candidates,
             [str(item) for item in payload.get("warnings", [])],
             int(payload.get("skipped_count", 0)),
+            evidence_slices,
         )
 
     def save_analysis(
@@ -63,7 +93,13 @@ class LLMCheckpointStore:
         candidates: list[SourceBackedEventDraft],
         warnings: list[str],
         skipped_count: int,
+        *,
+        evidence_slices: list[ConversationSlice] | None = None,
     ) -> None:
+        if evidence_slices is None:
+            evidence_slices = [
+                segment_unit_to_slice(unit) for unit in batch.segments
+            ]
         self._save(
             "analysis",
             batch.to_dict(),
@@ -71,6 +107,7 @@ class LLMCheckpointStore:
                 "candidates": [item.to_dict() for item in candidates],
                 "warnings": list(warnings),
                 "skipped_count": skipped_count,
+                "evidence_slices": [item.to_dict() for item in evidence_slices],
             },
         )
 

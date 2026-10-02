@@ -20,7 +20,7 @@ def test_analysis_checkpoint_round_trips_and_clears(tmp_path) -> None:
 
     assert store.load_analysis(batch) is None
     store.save_analysis(batch, [], ["已完成"], 2)
-    assert store.load_analysis(batch) == ([], ["已完成"], 2)
+    assert store.load_analysis(batch) == ([], ["已完成"], 2, [])
 
     store.clear()
     assert store.load_analysis(batch) is None

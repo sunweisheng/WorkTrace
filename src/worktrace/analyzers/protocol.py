@@ -31,8 +31,10 @@ from ..models import (
     PersonalGroupRenderItem,
     PersonalGroupRenderResult,
     RetentionReviewResult,
+    SelfRelationEvidence,
     SourceBackedEventDraft,
 )
+from ..pipeline.retention_filter import RETENTION_REASONS
 from ..pipeline.validation import expect_json_object
 
 
@@ -532,6 +534,7 @@ def parse_personal_group_render_payload(
     *,
     group: CrossConversationGroup,
     candidates: Sequence[SourceBackedEventDraft],
+    allowed_self_relations: Sequence[str] = (),
 ) -> PersonalGroupRenderResult:
     data = expect_json_object(payload, "Personal group render Function result")
     if set(data) != {"groups"} or not isinstance(data["groups"], list):
@@ -544,7 +547,10 @@ def parse_personal_group_render_payload(
             "Personal group render result must return exactly one group."
         )
     raw_group = raw_groups[0]
-    expected_group_fields = {"group_id", "covered_draft_ids", "fact_items"}
+    expected_group_fields = {
+        "group_id", "covered_draft_ids", "fact_items", "supported",
+        "self_relations", "removed_claims",
+    }
     if set(raw_group) != expected_group_fields:
         raise AnalyzerProtocolError(
             "Personal group render result has unexpected group fields."
@@ -573,6 +579,54 @@ def parse_personal_group_render_payload(
         for draft_id in group.draft_ids
         for message_id in candidate_by_id[draft_id].source_message_ids
     }
+    self_evidence_ids = {
+        message_id
+        for draft_id in group.draft_ids
+        for message_id in candidate_by_id[draft_id].self_evidence_message_ids
+    }
+    allowed_message_ids.update(self_evidence_ids)
+    supported = raw_group["supported"]
+    removed_claims = raw_group["removed_claims"]
+    if not isinstance(supported, bool) or not isinstance(removed_claims, list):
+        raise AnalyzerProtocolError("Invalid personal render review fields.")
+    if any(not isinstance(value, str) or not value.strip()
+           for value in removed_claims):
+        raise AnalyzerProtocolError("Personal render removed_claims must be text.")
+    if not supported:
+        if (raw_group["fact_items"] != []
+                or raw_group["self_relations"] != [] or not removed_claims):
+            raise AnalyzerProtocolError(
+                "Unsupported personal render must return removed claims only."
+            )
+        return PersonalGroupRenderResult(groups=[PersonalGroupRenderItem(
+            group_id=group_id, covered_draft_ids=list(group.draft_ids),
+            topic="", content="", object_hint="", supported=False,
+            removed_claims=removed_claims,
+        )])
+
+    raw_relations = raw_group["self_relations"]
+    if not isinstance(raw_relations, list):
+        raise AnalyzerProtocolError("Personal render self_relations must be an array.")
+    relations: list[SelfRelationEvidence] = []
+    seen_relations: set[str] = set()
+    for raw_relation in raw_relations:
+        if not isinstance(raw_relation, dict) or set(raw_relation) != {
+            "relation", "evidence_message_ids",
+        }:
+            raise AnalyzerProtocolError("Invalid personal render self relation.")
+        relation = raw_relation["relation"]
+        evidence = raw_relation["evidence_message_ids"]
+        if relation not in allowed_self_relations or relation in seen_relations:
+            raise AnalyzerProtocolError("Invalid or duplicate personal self relation.")
+        if (not isinstance(evidence, list) or not evidence
+                or any(not isinstance(value, str) for value in evidence)
+                or len(evidence) != len(set(evidence))
+                or not set(evidence).issubset(self_evidence_ids)):
+            raise AnalyzerProtocolError("Invalid personal self relation evidence.")
+        seen_relations.add(relation)
+        relations.append(SelfRelationEvidence(relation, list(evidence)))
+    relation_order = {key: index for index, key in enumerate(allowed_self_relations)}
+    relations.sort(key=lambda item: relation_order[item.relation])
     raw_fact_items = raw_group["fact_items"]
     if not isinstance(raw_fact_items, list):
         raise AnalyzerProtocolError(
@@ -590,7 +644,10 @@ def parse_personal_group_render_payload(
                 f"Personal group render fact_items[{index}] has invalid fields."
             )
         field_name = str(raw_fact["field"]).strip()
-        if field_name not in {"topic", "content", "object_hint"}:
+        if field_name not in {
+            "topic", "content", "object_hint", "action_label",
+            "retention_reason", "retention_detail",
+        }:
             raise AnalyzerProtocolError(
                 f"Personal group render fact_items[{index}] has an invalid field."
             )
@@ -626,6 +683,13 @@ def parse_personal_group_render_payload(
         raise AnalyzerProtocolError(
             "Personal group render result must return exactly one object_hint fact."
         )
+    for field_name in ("action_label", "retention_reason", "retention_detail"):
+        if len(by_field.get(field_name, [])) != 1:
+            raise AnalyzerProtocolError(
+                f"Personal group render must return exactly one {field_name} fact."
+            )
+    if by_field["retention_reason"][0].text not in RETENTION_REASONS:
+        raise AnalyzerProtocolError("Invalid personal render retention_reason.")
     content_items = by_field.get("content", [])
     if not content_items:
         raise AnalyzerProtocolError(
@@ -657,6 +721,11 @@ def parse_personal_group_render_payload(
                 content="".join(item.text for item in content_items),
                 object_hint=by_field["object_hint"][0].text,
                 fact_items=fact_items,
+                action_label=by_field["action_label"][0].text,
+                retention_reason=by_field["retention_reason"][0].text,
+                retention_detail=by_field["retention_detail"][0].text,
+                self_relations=relations,
+                removed_claims=removed_claims,
             )
         ]
     )

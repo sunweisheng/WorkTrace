@@ -1387,6 +1387,12 @@ class PersonalGroupRenderItem:
     content: str
     object_hint: str
     fact_items: list[PersonalFactItem] = field(default_factory=list)
+    supported: bool = True
+    action_label: str = ""
+    retention_reason: str = ""
+    retention_detail: str = ""
+    self_relations: list[SelfRelationEvidence] = field(default_factory=list)
+    removed_claims: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -1396,6 +1402,12 @@ class PersonalGroupRenderItem:
             "content": self.content,
             "object_hint": self.object_hint,
             "fact_items": [item.to_dict() for item in self.fact_items],
+            "supported": self.supported,
+            "action_label": self.action_label,
+            "retention_reason": self.retention_reason,
+            "retention_detail": self.retention_detail,
+            "self_relations": [item.to_dict() for item in self.self_relations],
+            "removed_claims": list(self.removed_claims),
         }
 
 

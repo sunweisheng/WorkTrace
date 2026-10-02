@@ -631,6 +631,9 @@ def test_personal_group_render_rewrites_locked_multi_group_content(
             return {
                 "groups": [
                     {
+                        "supported": True,
+                        "self_relations": [],
+                        "removed_claims": [],
                         "group_id": "group-001",
                         "covered_draft_ids": ["d1", "d2"],
                         "fact_items": [
@@ -654,6 +657,9 @@ def test_personal_group_render_rewrites_locked_multi_group_content(
                                 "text": "事项需求及交付成果",
                                 "evidence_message_ids": ["m1", "m2"],
                             },
+                            *function_spec.typical_arguments["groups"][0][
+                                "fact_items"
+                            ][-3:],
                         ],
                     }
                 ]
@@ -704,6 +710,9 @@ def test_personal_group_render_rewrites_locked_singleton_content(
             return {
                 "groups": [
                     {
+                        "supported": True,
+                        "self_relations": [],
+                        "removed_claims": [],
                         "group_id": "group-001",
                         "covered_draft_ids": ["d1"],
                         "fact_items": [
@@ -722,6 +731,9 @@ def test_personal_group_render_rewrites_locked_singleton_content(
                                 "text": "事项需求及后续安排",
                                 "evidence_message_ids": ["m1"],
                             },
+                            *function_spec.typical_arguments["groups"][0][
+                                "fact_items"
+                            ][-3:],
                         ],
                     }
                 ]
@@ -780,6 +792,9 @@ def test_personal_group_render_rewrites_singleton_and_multi_groups(
             return {
                 "groups": [
                     {
+                        "supported": True,
+                        "self_relations": [],
+                        "removed_claims": [],
                         "group_id": group_id,
                         "covered_draft_ids": locked_group["draft_ids"],
                         "fact_items": [
@@ -803,6 +818,9 @@ def test_personal_group_render_rewrites_singleton_and_multi_groups(
                                 "text": f"完整对象 {group_id}",
                                 "evidence_message_ids": evidence_ids,
                             },
+                            *function_spec.typical_arguments["groups"][0][
+                                "fact_items"
+                            ][-3:],
                         ],
                     }
                 ]
@@ -839,7 +857,7 @@ def test_personal_group_render_rewrites_singleton_and_multi_groups(
     assert outcome.failure_count == 0
 
 
-def test_personal_group_render_failure_uses_deterministic_content(
+def test_personal_group_render_failure_blocks_unreviewed_content(
     tmp_path: Path,
 ) -> None:
     class InvalidRenderAnalyzer:
@@ -851,6 +869,9 @@ def test_personal_group_render_failure_uses_deterministic_content(
             return {
                 "groups": [
                     {
+                        "supported": True,
+                        "self_relations": [],
+                        "removed_claims": [],
                         "group_id": "group-001",
                         "covered_draft_ids": ["d1", "d2"],
                         "fact_items": [
@@ -869,6 +890,9 @@ def test_personal_group_render_failure_uses_deterministic_content(
                                 "text": "不完整对象",
                                 "evidence_message_ids": ["m1"],
                             },
+                            *function_spec.typical_arguments["groups"][0][
+                                "fact_items"
+                            ][-3:],
                         ],
                     }
                 ]
@@ -890,22 +914,21 @@ def test_personal_group_render_failure_uses_deterministic_content(
         groups=[group],
         candidates=candidates,
     )
-    drafts = materialize_grouped_merged_drafts(
-        candidates,
-        [group],
-        target_date="2026-07-22",
-        message_order=["m1", "m2"],
-        rendered_groups=outcome.rendered_groups,
-    )
+    with pytest.raises(AnalyzerProtocolError, match="final review"):
+        materialize_grouped_merged_drafts(
+            candidates,
+            [group],
+            target_date="2026-07-22",
+            message_order=["m1", "m2"],
+            rendered_groups=outcome.rendered_groups,
+        )
 
     assert analyzer.calls == 2
     assert outcome.failure_count == 1
     assert outcome.rendered_groups == {}
-    assert drafts[0].topic == candidates[0].topic
-    assert drafts[0].content == "\n\n".join(
-        candidate.content for candidate in candidates
-    )
-    assert any("Kept deterministic personal group content" in item for item in outcome.warnings)
+    assert outcome.artifact["status"] == "failed"
+    assert outcome.artifact["groups"][0]["status"] == "failed"
+    assert any("final review failed" in item for item in outcome.warnings)
 
 
 def test_personal_singleton_render_rejects_unknown_message_evidence(
@@ -920,6 +943,9 @@ def test_personal_singleton_render_rejects_unknown_message_evidence(
             return {
                 "groups": [
                     {
+                        "supported": True,
+                        "self_relations": [],
+                        "removed_claims": [],
                         "group_id": "group-001",
                         "covered_draft_ids": ["d1"],
                         "fact_items": [
@@ -938,6 +964,9 @@ def test_personal_singleton_render_rejects_unknown_message_evidence(
                                 "text": "具体事项",
                                 "evidence_message_ids": ["unknown-message"],
                             },
+                            *function_spec.typical_arguments["groups"][0][
+                                "fact_items"
+                            ][-3:],
                         ],
                     }
                 ]
@@ -966,7 +995,7 @@ def test_personal_singleton_render_rejects_unknown_message_evidence(
     assert any("invalid evidence" in item for item in outcome.warnings)
 
 
-def test_personal_render_failure_only_falls_back_current_event(
+def test_personal_render_failure_preserves_other_review_results(
     tmp_path: Path,
 ) -> None:
     class PartiallyFailingAnalyzer:
@@ -979,6 +1008,9 @@ def test_personal_render_failure_only_falls_back_current_event(
             return {
                 "groups": [
                     {
+                        "supported": True,
+                        "self_relations": [],
+                        "removed_claims": [],
                         "group_id": locked_group["group_id"],
                         "covered_draft_ids": locked_group["draft_ids"],
                         "fact_items": [
@@ -997,6 +1029,9 @@ def test_personal_render_failure_only_falls_back_current_event(
                                 "text": "第二项具体对象",
                                 "evidence_message_ids": member["source_message_ids"],
                             },
+                            *function_spec.typical_arguments["groups"][0][
+                                "fact_items"
+                            ][-3:],
                         ],
                     }
                 ]
@@ -1024,19 +1059,19 @@ def test_personal_render_failure_only_falls_back_current_event(
         groups=groups,
         candidates=candidates,
     )
-    drafts = materialize_grouped_merged_drafts(
-        candidates,
-        groups,
-        target_date="2026-07-22",
-        message_order=["m1", "m2"],
-        rendered_groups=outcome.rendered_groups,
-    )
+    with pytest.raises(AnalyzerProtocolError, match="final review"):
+        materialize_grouped_merged_drafts(
+            candidates,
+            groups,
+            target_date="2026-07-22",
+            message_order=["m1", "m2"],
+            rendered_groups=outcome.rendered_groups,
+        )
 
     assert outcome.failure_count == 1
     assert outcome.request_count == 2
     assert set(outcome.rendered_groups) == {"group-002"}
-    assert drafts[0].content == candidates[0].content
-    assert drafts[1].content == "第二项完整正文。"
+    assert outcome.rendered_groups["group-002"].content == "第二项完整正文。"
     assert len(outcome.warnings) == 1
 
 

@@ -3,8 +3,11 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from src.worktrace.config import RuntimeConfig
 from src.worktrace.constants import DailyRunStatus
+from src.worktrace.errors import AnalyzerProtocolError
 from src.worktrace.factories import RuntimeDependencies
 from src.worktrace.llm_usage import LLMUsageRecorder
 from src.worktrace.models import (
@@ -167,6 +170,9 @@ class FakeAnalyzer:
         return {
             "groups": [
                 {
+                    "supported": True,
+                    "self_relations": [],
+                    "removed_claims": [],
                     "group_id": locked_group["group_id"],
                     "covered_draft_ids": locked_group["draft_ids"],
                     "fact_items": [
@@ -190,6 +196,9 @@ class FakeAnalyzer:
                             "text": primary["object_hint"],
                             "evidence_message_ids": primary["source_message_ids"],
                         },
+                        *function_spec.typical_arguments["groups"][0][
+                            "fact_items"
+                        ][-3:],
                     ],
                 }
             ]
@@ -199,6 +208,38 @@ class FakeAnalyzer:
 class FakeDelivery:
     def deliver_to_self(self, *, self_identity, markdown_path):
         return ("success", self_identity.open_id)
+
+
+@pytest.mark.parametrize("invalid_payload", [False, True])
+def test_failed_final_review_keeps_existing_report_and_skips_delivery(
+    tmp_path: Path, invalid_payload: bool,
+) -> None:
+    class FailingFinalAnalyzer(FakeAnalyzer):
+        def request_function(self, prompt, *, function_spec,
+                             allow_oversized_input=False):
+            if invalid_payload:
+                return {"groups": []}
+            raise AnalyzerProtocolError("temporary final review failure")
+
+    class UnexpectedDelivery:
+        def deliver_to_self(self, *, self_identity, markdown_path):
+            raise AssertionError("Failed review must not deliver a report")
+
+    config = RuntimeConfig(data_root=tmp_path / "data")
+    store = MarkdownEventStore(config)
+    existing = store.replace_day("2026-06-22", [], owner_display_name="Me")
+    original_bytes = Path(existing.output_path).read_bytes()
+    runner = DailyTraceRunner(config, RuntimeDependencies(
+        chat_source=FakeSource(), content_resolver=FakeResolver(),
+        analyzer=FailingFinalAnalyzer(), delivery_channel=UnexpectedDelivery(),
+        event_store=store,
+    ))
+
+    result = runner.run("2026-06-22")
+
+    assert result.status == DailyRunStatus.FAILED.value
+    assert "final review" in result.error_summary
+    assert Path(existing.output_path).read_bytes() == original_bytes
 
 
 def test_runner_happy_path(tmp_path: Path) -> None:
@@ -215,6 +256,9 @@ def test_runner_happy_path(tmp_path: Path) -> None:
             return {
                 "groups": [
                     {
+                        "supported": True,
+                        "self_relations": [],
+                        "removed_claims": [],
                         "group_id": locked_group["group_id"],
                         "covered_draft_ids": locked_group["draft_ids"],
                         "fact_items": [
@@ -233,6 +277,9 @@ def test_runner_happy_path(tmp_path: Path) -> None:
                                 "text": "发布目标及上线窗口",
                                 "evidence_message_ids": ["om_1"],
                             },
+                            *function_spec.typical_arguments["groups"][0][
+                                "fact_items"
+                            ][-3:],
                         ],
                     }
                 ]
