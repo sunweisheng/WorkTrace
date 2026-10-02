@@ -9,13 +9,18 @@ from src.worktrace.analyzers.function_calls import FunctionCallSpec
 from src.worktrace.config import RuntimeConfig, load_runtime_config_overrides
 from src.worktrace.constants import DailyRunStatus
 from src.worktrace.errors import AnalyzerProtocolError, RetryableAnalyzerProtocolError
-from src.worktrace.models import CollectedMergeRunResult, DailyRunResult
+from src.worktrace.models import (
+    CollectedMergeRunResult,
+    DailyRunResult,
+    DayGroupingSummary,
+)
 from src.worktrace.support_report import (
     AnalyzerBundle,
     build_diagnostic_facts,
     build_support_report_analyzers,
     generate_support_report,
     load_support_report_settings,
+    render_support_report,
 )
 
 
@@ -174,6 +179,58 @@ def test_personal_diagnostic_counts_validation_retries_separately(tmp_path):
     usage = next(fact.metrics for fact in facts if fact.kind == "model_usage")
     assert usage["validation_retry_count"] == 3
     assert usage["retry_count"] == 0
+
+
+def test_personal_diagnostic_reports_only_safe_final_error_counts(tmp_path):
+    result = replace(
+        _result(tmp_path, status=DailyRunStatus.FAILED.value),
+        error_summary="group-003 failed on om_private and secret details",
+        day_grouping_summary=DayGroupingSummary(
+            content_render_failure_count=1,
+            content_render_error_counts={
+                "render_role": 2, "render_evidence": 1,
+            },
+        ),
+    )
+    settings = load_support_report_settings(REPO_ROOT)
+
+    facts = build_diagnostic_facts(
+        result=result, run_mode="personal",
+        config=RuntimeConfig(data_root=tmp_path / "data"),
+        cwd=REPO_ROOT, elapsed_ms=1000, settings=settings,
+    )
+    error_facts = {
+        fact.metrics["code"]: fact.metrics["attempt_count"]
+        for fact in facts if fact.kind == "content_render_error"
+    }
+    assert error_facts == {"render_role": 2, "render_evidence": 1}
+    report = render_support_report(
+        facts=facts, analysis=None, llm_status="failed",
+        settings=settings, environment=SAFE_ENVIRONMENT,
+    )
+    assert "本人参与方式检查" in report
+    assert "事实或动作证据检查" in report
+    assert "om_private" not in report
+    assert "secret details" not in report
+
+
+def test_personal_error_counts_reader_drops_unknown_codes():
+    summary = DayGroupingSummary.from_dict({
+        "content_render_error_counts": {
+            "render_role": 2, "om_private": 1, "render_schema": -1,
+        },
+    })
+
+    assert summary.content_render_error_counts == {"render_role": 2}
+
+
+@pytest.mark.parametrize("invalid_counts", [None, [], "raw error"])
+def test_personal_error_counts_reader_ignores_invalid_shape(invalid_counts):
+    summary = DayGroupingSummary.from_dict({
+        "content_render_error_counts": invalid_counts,
+    })
+
+    assert summary.content_render_error_counts == {}
 
 
 def test_invalid_fact_ids_retry_online_then_use_codex(tmp_path: Path) -> None:

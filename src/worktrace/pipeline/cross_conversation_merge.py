@@ -28,8 +28,7 @@ def materialize_grouped_merged_drafts(
         ]
         if missing_groups:
             raise AnalyzerProtocolError(
-                "Personal event final review is incomplete for groups: "
-                f"{missing_groups}."
+                "Personal event final review is incomplete."
             )
     draft_map = {candidate.draft_id: candidate for candidate in candidates}
     candidate_order = {candidate.draft_id: index for index, candidate in enumerate(candidates)}

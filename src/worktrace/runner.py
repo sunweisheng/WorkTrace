@@ -32,7 +32,9 @@ from .errors import (
     DayGroupDiscoveryValidationError,
     DeliveryError,
     ModelInputLimitError,
+    PERSONAL_RENDER_ERROR_CODES,
     PersonalGroupingValidationError,
+    PersonalRenderValidationError,
     StoreWriteError,
 )
 from .factories import RuntimeDependencies, build_runtime_dependencies
@@ -218,6 +220,7 @@ class _PersonalGroupRenderOutcome:
     retry_count: int
     fallback_count: int
     failure_count: int
+    error_counts: dict[str, int] = field(default_factory=dict)
 
     @property
     def codex_fallback_count(self) -> int:
@@ -550,6 +553,7 @@ class DailyTraceRunner:
                         content_render_request_count=render_outcome.request_count,
                         content_render_retry_count=render_outcome.retry_count,
                         content_render_failure_count=render_outcome.failure_count,
+                        content_render_error_counts=render_outcome.error_counts,
                         validation_retry_count=render_outcome.retry_count,
                         fallback_count=render_outcome.fallback_count,
                         warning_count=len(render_outcome.warnings),
@@ -693,6 +697,7 @@ class DailyTraceRunner:
                         content_render_request_count=render_outcome.request_count,
                         content_render_retry_count=render_outcome.retry_count,
                         content_render_failure_count=render_outcome.failure_count,
+                        content_render_error_counts=render_outcome.error_counts,
                         validation_retry_count=(
                             validation_retry_count
                             + discovery_outcome.retry_count
@@ -2654,7 +2659,10 @@ class DailyTraceRunner:
         ):
             return (
                 [],
-                [f"Segment expansion produced no new context: {unit.segment_id}."],
+                [
+                    *warnings,
+                    f"Segment expansion produced no new context: {unit.segment_id}.",
+                ],
                 1,
                 0,
             )
@@ -4581,11 +4589,13 @@ class DailyTraceRunner:
                         "retry_count": 0,
                         "fallback_count": 0,
                         "failure_count": len(final_groups),
+                        "error_counts": {"render_request": len(final_groups)},
                     },
                 }
             )
             return _PersonalGroupRenderOutcome(
-                {}, [warning], artifact, 0, 0, 0, len(final_groups)
+                {}, [warning], artifact, 0, 0, 0, len(final_groups),
+                {"render_request": len(final_groups)},
             )
 
         all_started_at = perf_counter()
@@ -4637,6 +4647,13 @@ class DailyTraceRunner:
         retry_count = sum(item[4] for item in results)
         fallback_count = sum(item[5] for item in results)
         failure_count = len(final_groups) - len(rendered_groups)
+        error_counts: dict[str, int] = {}
+        for attempt in attempts:
+            codes = attempt.get("safe_error_codes", [])
+            if isinstance(codes, list):
+                for code in set(codes):
+                    if code in PERSONAL_RENDER_ERROR_CODES:
+                        error_counts[code] = error_counts.get(code, 0) + 1
         recorder = getattr(self.dependencies.analyzer, "usage_recorder", None)
         records = (
             recorder.records()
@@ -4679,6 +4696,7 @@ class DailyTraceRunner:
                     "retry_count": retry_count,
                     "fallback_count": fallback_count,
                     "failure_count": failure_count,
+                    "error_counts": error_counts,
                 },
             }
         )
@@ -4701,6 +4719,7 @@ class DailyTraceRunner:
             retry_count,
             fallback_count,
             failure_count,
+            error_counts,
         )
 
     def _render_one_personal_group(
@@ -4879,6 +4898,12 @@ class DailyTraceRunner:
                         "backend": self._last_analyzer_request_backend(),
                         "status": "failed",
                         "failure_kind": failure_kind,
+                        "safe_error_code": _personal_render_error_code(
+                            exc, payload=payload,
+                        ),
+                        "safe_error_codes": list(_personal_render_error_codes(
+                            exc, payload=payload,
+                        )),
                         "validation_error": validation_feedback,
                         "validation_feedback_input": feedback_input,
                         "prompt": prompt,
@@ -4974,6 +4999,12 @@ class DailyTraceRunner:
                         "failure_kind": (
                             "validation" if payload is not None else "request"
                         ),
+                        "safe_error_code": _personal_render_error_code(
+                            exc, payload=payload,
+                        ),
+                        "safe_error_codes": list(_personal_render_error_codes(
+                            exc, payload=payload,
+                        )),
                         "validation_error": str(exc),
                         "validation_feedback_input": validation_feedback,
                         "prompt": prompt,
@@ -6066,6 +6097,20 @@ def _conversation_slice_signature(
         tuple(block.attachment_id for block in conversation_slice.attachment_texts),
         tuple(block.link_id for block in conversation_slice.linked_file_texts),
     )
+
+
+def _personal_render_error_code(exc: Exception, *, payload: object) -> str:
+    return _personal_render_error_codes(exc, payload=payload)[0]
+
+
+def _personal_render_error_codes(
+    exc: Exception, *, payload: object,
+) -> tuple[str, ...]:
+    if isinstance(exc, PersonalRenderValidationError):
+        return exc.codes
+    if payload is None:
+        return ("render_request",)
+    return ("render_unknown",)
 
 
 def _deliver_markdown_to_self(

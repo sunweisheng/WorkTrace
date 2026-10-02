@@ -737,6 +737,9 @@ git diff --check
 
 普通运行在 stderr 显示安全进度，JSON 新增结构化 `warnings` 和个人
 `stage_timing_summary`，保留旧告警字段；真实跳过片段仍明确提示。
+片段扩展被输入预算挡住时会另列脱敏类别；最终事件核对的失败尝试按固定
+类别计数，写入 `day_grouping_summary.content_render_error_counts` 和安全诊断。
+锚点实验缓存目录改用锚点 ID 的 SHA-256，旧缓存首次可能未命中。
 详细安装、PowerShell 5.1/7 捕获方式、认证边界和验收范围见
 [Windows 使用说明](docs/windows-guide.md)。实现顺序见
 [Windows 改进计划](docs/plans/2026-10-02-windows-runtime-improvements.md)。

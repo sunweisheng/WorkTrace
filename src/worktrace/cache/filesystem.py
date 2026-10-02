@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import shutil
+from hashlib import sha256
 from pathlib import Path
 
 from ..models import AnchorCacheEntry
@@ -54,7 +55,8 @@ class FileSystemAnchorCacheStore(AnchorCacheStore):
         anchor_unit_id: str,
         input_fingerprint: str,
     ) -> Path:
-        return self._day_dir(target_date) / anchor_unit_id / f"{input_fingerprint}.json"
+        anchor_key = sha256(anchor_unit_id.encode("utf-8")).hexdigest()
+        return self._day_dir(target_date) / anchor_key / f"{input_fingerprint}.json"
 
     def _day_dir(self, target_date: str) -> Path:
         year, month, day = target_date.split("-")

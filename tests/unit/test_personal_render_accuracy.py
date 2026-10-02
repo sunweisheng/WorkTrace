@@ -119,6 +119,47 @@ def test_final_render_corrects_retention_role_and_action_together():
     assert drafts[0].action_labels == ["确认报告接收"]
 
 
+@pytest.mark.parametrize("change, expected_code", [
+    ("schema", "render_schema"),
+    ("evidence", "render_evidence"),
+    ("role", "render_role"),
+    ("coverage", "render_coverage"),
+    ("retention", "render_retention"),
+])
+def test_final_render_validation_has_stable_error_code(change, expected_code):
+    payload = _payload()
+    group = payload["groups"][0]
+    if change == "schema":
+        payload["groups"] = []
+    elif change == "evidence":
+        group["self_actions"][0]["evidence_message_ids"] = ["m_other"]
+    elif change == "role":
+        group["self_relations"][0]["relation"] = "primary_execution"
+    elif change == "coverage":
+        group["covered_draft_ids"] = []
+    else:
+        group["fact_items"][4]["text"] = "unknown_reason"
+
+    with pytest.raises(AnalyzerProtocolError) as error:
+        _parse(payload)
+
+    assert type(error.value).__name__ == "PersonalRenderValidationError"
+    assert error.value.code == expected_code
+    assert "m_other" not in error.value.code
+
+
+def test_final_render_validation_reports_each_failure_category():
+    payload = _payload()
+    group = payload["groups"][0]
+    group["self_relations"][0]["relation"] = "primary_execution"
+    group["fact_items"][1]["evidence_message_ids"] = ["m_other"]
+
+    with pytest.raises(AnalyzerProtocolError) as error:
+        _parse(payload)
+
+    assert set(error.value.codes) == {"render_role", "render_evidence"}
+
+
 @pytest.mark.parametrize("kind", ["receipt", "forwarding", "uncertain"])
 def test_final_render_rejects_primary_role_for_non_execution_action(kind):
     payload = _payload()
@@ -428,6 +469,102 @@ def test_final_render_retry_receives_specific_evidence_feedback(tmp_path):
     assert "self_actions[0]" in analyzer.prompts[1]["validation_feedback"]
 
 
+def test_final_render_counts_each_validation_failure_without_raw_evidence(
+    tmp_path: Path,
+) -> None:
+    class InvalidRoleAnalyzer:
+        def request_function(self, prompt, **kwargs):
+            payload = _payload()
+            payload["groups"][0]["self_relations"][0]["relation"] = (
+                "primary_execution"
+            )
+            return payload
+
+    config = replace(
+        CONFIG, data_root=tmp_path, day_group_validation_retry_limit=1,
+        llm_mode="online_only",
+    )
+    runner = DailyTraceRunner(config, RuntimeDependencies(
+        chat_source=object(), content_resolver=object(),
+        analyzer=InvalidRoleAnalyzer(), delivery_channel=object(),
+        event_store=MarkdownEventStore(config),
+    ))
+
+    outcome = runner._render_personal_multi_groups(
+        target_date="2026-07-15", groups=[GROUP], candidates=[_candidate()],
+    )
+
+    assert outcome.failure_count == 1
+    assert outcome.retry_count == 1
+    assert outcome.error_counts == {"render_role": 2}
+    assert all(
+        attempt["safe_error_code"] == "render_role"
+        for attempt in outcome.artifact["attempts"]
+    )
+
+
+def test_final_render_counts_each_category_once_per_attempt(tmp_path: Path) -> None:
+    class InvalidAnalyzer:
+        def request_function(self, prompt, **kwargs):
+            payload = _payload()
+            group = payload["groups"][0]
+            group["self_relations"][0]["relation"] = "primary_execution"
+            group["fact_items"][1]["evidence_message_ids"] = ["m_other"]
+            return payload
+
+    config = replace(
+        CONFIG, data_root=tmp_path, day_group_validation_retry_limit=0,
+        llm_mode="online_only",
+    )
+    runner = DailyTraceRunner(config, RuntimeDependencies(
+        chat_source=object(), content_resolver=object(),
+        analyzer=InvalidAnalyzer(), delivery_channel=object(),
+        event_store=MarkdownEventStore(config),
+    ))
+
+    outcome = runner._render_personal_multi_groups(
+        target_date="2026-07-15", groups=[GROUP], candidates=[_candidate()],
+    )
+
+    assert outcome.error_counts == {"render_role": 1, "render_evidence": 1}
+
+
+def test_final_render_missing_capability_has_request_category(tmp_path: Path) -> None:
+    config = replace(CONFIG, data_root=tmp_path)
+    runner = DailyTraceRunner(config, RuntimeDependencies(
+        chat_source=object(), content_resolver=object(),
+        analyzer=object(), delivery_channel=object(),
+        event_store=MarkdownEventStore(config),
+    ))
+
+    outcome = runner._render_personal_multi_groups(
+        target_date="2026-07-15", groups=[GROUP], candidates=[_candidate()],
+    )
+
+    assert outcome.failure_count == 1
+    assert outcome.error_counts == {"render_request": 1}
+    assert outcome.artifact["summary"]["error_counts"] == outcome.error_counts
+
+
+def test_empty_final_render_response_is_a_schema_failure(tmp_path: Path) -> None:
+    class EmptyAnalyzer:
+        def request_function(self, prompt, **kwargs):
+            return None
+
+    config = replace(CONFIG, data_root=tmp_path, llm_mode="online_only")
+    runner = DailyTraceRunner(config, RuntimeDependencies(
+        chat_source=object(), content_resolver=object(), analyzer=EmptyAnalyzer(),
+        delivery_channel=object(), event_store=MarkdownEventStore(config),
+    ))
+
+    outcome = runner._render_personal_multi_groups(
+        target_date="2026-07-15", groups=[GROUP], candidates=[_candidate()],
+    )
+
+    assert outcome.failure_count == 1
+    assert outcome.error_counts == {"render_schema": 1}
+
+
 def test_final_render_preserves_separate_self_evidence_in_event_sources():
     candidate = replace(_candidate(), source_message_ids=["m_other"])
     result = parse_personal_group_render_payload(
@@ -472,6 +609,9 @@ def test_final_review_checks_actions_on_primary_and_fallback(tmp_path, valid_fal
         target_date="2026-07-15", groups=[GROUP], candidates=[_candidate()],
     )
     assert outcome.failure_count == (0 if valid_fallback else 1)
+    assert outcome.error_counts == {
+        "render_role": 2 if valid_fallback else 3,
+    }
     if valid_fallback:
         assert outcome.rendered_groups["g1"].self_relations[0].relation == "response_only"
     else:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from hashlib import sha256
 from pathlib import Path
 
 from src.worktrace.cache import FileSystemAnchorCacheStore, build_anchor_input_fingerprint
@@ -154,3 +155,35 @@ def test_filesystem_anchor_cache_store_invalidate_day(tmp_path: Path) -> None:
         anchor_unit_id=anchor_unit.anchor_unit_id,
         input_fingerprint=fingerprint,
     ) is None
+
+
+def test_filesystem_anchor_cache_uses_windows_safe_anchor_directory(
+    tmp_path: Path,
+) -> None:
+    cache = FileSystemAnchorCacheStore(tmp_path / "cache")
+    anchor_unit_id = "oc_123:om_001"
+    entry = AnchorCacheEntry(
+        target_date="2026-06-23",
+        anchor_unit_id=anchor_unit_id,
+        input_fingerprint="fingerprint",
+        status="completed",
+        pass_index=1,
+        prompt_version="v1",
+        schema_version="v1",
+        analyzer_key="online:test",
+        created_at="2026-06-24T10:00:00+08:00",
+    )
+
+    cache.write(entry)
+
+    path = cache._entry_path(
+        entry.target_date, entry.anchor_unit_id, entry.input_fingerprint,
+    )
+    assert path.parent.name == sha256(anchor_unit_id.encode("utf-8")).hexdigest()
+    assert cache.read(
+        target_date=entry.target_date,
+        anchor_unit_id=entry.anchor_unit_id,
+        input_fingerprint=entry.input_fingerprint,
+    ) == entry
+    assert cache.invalidate_day(entry.target_date) == 1
+    assert not path.exists()

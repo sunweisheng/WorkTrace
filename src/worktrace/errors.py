@@ -24,6 +24,26 @@ class AnalyzerProtocolError(WorkTraceError):
     request_failed: bool = False
 
 
+PERSONAL_RENDER_ERROR_CODES = frozenset({
+    "render_schema", "render_evidence", "render_role", "render_coverage",
+    "render_retention", "render_request", "render_unknown",
+})
+
+
+class PersonalRenderValidationError(AnalyzerProtocolError):
+    """Final personal review failed with a safe, stable reason code."""
+
+    def __init__(
+        self, message: str, *, code: str, codes: tuple[str, ...] = (),
+    ) -> None:
+        all_codes = tuple(dict.fromkeys((code, *codes)))
+        if any(item not in PERSONAL_RENDER_ERROR_CODES for item in all_codes):
+            raise ValueError("Unknown personal render error code.")
+        super().__init__(message)
+        self.code = code
+        self.codes = all_codes
+
+
 class CodexProtocolViolationError(AnalyzerProtocolError):
     """Raised when Codex emits a tool or another unsupported protocol item."""
 
