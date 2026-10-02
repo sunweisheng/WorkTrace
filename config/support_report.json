@@ -125,6 +125,7 @@
     "not_written": "未写入",
     "not_attempted": "未尝试",
     "disabled": "已关闭",
+    "not_enabled": "未启用",
     "unknown": "unknown",
     "no_requests": "没有模型请求",
     "not_reported": "服务端未上报",

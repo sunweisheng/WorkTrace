@@ -112,6 +112,9 @@ class FailoverAnalyzer(Analyzer):
         self.online_request_retry_limit = retry_limit
         self._request_state = local()
 
+    def supports_current_request_fallback(self) -> bool:
+        return self.fallback is not None
+
     def last_request_used_fallback(self) -> bool:
         return bool(getattr(self._request_state, "used_fallback", False))
 
@@ -398,3 +401,11 @@ class FailoverAnalyzer(Analyzer):
             relation_reasons=relation_reasons,
             atomic_groups=atomic_groups,
         )
+
+
+def supports_current_request_fallback(analyzer: object) -> bool:
+    """Respect explicit availability, retaining legacy analyzer support."""
+    checker = getattr(analyzer, "supports_current_request_fallback", None)
+    if callable(checker):
+        return bool(checker())
+    return callable(getattr(analyzer, "fallback_current_request", None))

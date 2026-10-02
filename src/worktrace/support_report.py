@@ -190,7 +190,7 @@ def generate_support_report(
             analysis=analysis,
             llm_status=llm_status,
             settings=settings,
-            environment=dict(environment or collect_environment_versions()),
+            environment=dict(environment or collect_environment_versions(config=config)),
         )
         privacy_errors = scan_support_report_privacy(report_text, settings=settings)
         if privacy_errors:
@@ -236,6 +236,18 @@ def build_support_report_analyzers(
     from .llm_usage import LLMUsageRecorder
 
     recorder = LLMUsageRecorder()
+    if config.llm_mode == "online_only":
+        from .analyzers.online import OnlineLLMAnalyzer
+
+        load_online_llm_settings(config, cwd=cwd)
+        return AnalyzerBundle(
+            primary=OnlineLLMAnalyzer(
+                config=config, cwd=cwd, usage_recorder=recorder,
+            ),
+            fallback=None,
+            primary_kind="online",
+            online_request_retry_limit=config.primary_request_retry_limit,
+        )
     codex = CodexAnalyzer(config=config, cwd=cwd, usage_recorder=recorder)
     try:
         load_online_llm_settings(config, cwd=cwd)
@@ -934,7 +946,9 @@ def render_support_report(
         raw_value = str(environment.get(key, text["unknown"]))
         value = (
             settings.value_labels.get(raw_value, text["unknown"])
-            if key == "system_type"
+            if key == "system_type" or (
+                key == "codex_version" and raw_value == "not_enabled"
+            )
             else _safe_version(raw_value)
         )
         lines.append(f"| {fields[key]} | {_escape_markdown(value)} |")
@@ -1017,12 +1031,17 @@ def scan_support_report_privacy(
 
 def collect_environment_versions(
     command_runner: Callable[..., subprocess.CompletedProcess[str]] = run_text_command,
+    *,
+    config: RuntimeConfig | None = None,
 ) -> dict[str, str]:
     return {
         "worktrace_version": _safe_version(__version__),
         "python_version": _safe_version(platform.python_version()),
-        "codex_version": _command_version(
-            ("codex", "--version"), command_runner=command_runner
+        "codex_version": (
+            "not_enabled" if config is not None and config.llm_mode == "online_only"
+            else _command_version(
+                ("codex", "--version"), command_runner=command_runner
+            )
         ),
         "lark_cli_version": _command_version(
             ("lark-cli", "--version"), command_runner=command_runner

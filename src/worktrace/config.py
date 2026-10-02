@@ -745,13 +745,17 @@ def _load_model_input_budget_overrides(
         base_dir / config.model_input_budget_file_name
     )
     values = _read_local_env_values(config, cwd=base_dir)
-    primary_model = values.get(config.codex_model_env_var, "").strip()
+    primary_model = (
+        values.get(config.codex_model_env_var, "").strip()
+        if config.llm_mode == "codex_with_fallback" else ""
+    )
     fallback_model = values.get(config.llm_model_env_var, "").strip()
     profile = next(
         (
             item
             for item in budget.profiles
-            if item.primary_model == primary_model
+            if config.llm_mode == "codex_with_fallback"
+            and item.primary_model == primary_model
             and item.fallback_model == fallback_model
         ),
         None,
@@ -1965,6 +1969,8 @@ def _apply_runtime_env_overrides(
 ) -> RuntimeConfig:
     values = _read_local_env_values(config, cwd=cwd)
     updates: dict[str, object] = {}
+    if config.llm_mode_env_var in values:
+        updates["llm_mode"] = values[config.llm_mode_env_var].strip()
 
     trace_raw = values.get(config.collected_merge_trace_env_var, "").strip()
     if trace_raw:
@@ -2068,6 +2074,8 @@ def _read_string_list(
 class RuntimeConfig:
     timezone: str = "Asia/Shanghai"
     analyzer_backend: str = "codex"
+    llm_mode: str = "codex_with_fallback"
+    llm_mode_env_var: str = "WORKTRACE_LLM_MODE"
     primary_request_retry_limit: int = 1
     online_request_retry_limit: int = 1
     day_group_validation_retry_limit: int = 1
@@ -2190,6 +2198,11 @@ class RuntimeConfig:
     llm_wire_api: str = "responses"
 
     def __post_init__(self) -> None:
+        if self.llm_mode not in {"codex_with_fallback", "online_only"}:
+            raise ValueError(
+                f"{self.llm_mode_env_var} must be codex_with_fallback "
+                "or online_only."
+            )
         primary = self.primary_request_retry_limit
         legacy = self.online_request_retry_limit
         if primary == legacy:

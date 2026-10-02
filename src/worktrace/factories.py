@@ -54,6 +54,15 @@ class ContentResolverFactory:
 
         recorder = usage_recorder or LLMUsageRecorder()
         settings = ImageSummarySettings.load(config)
+        if config.llm_mode == "online_only":
+            load_online_llm_settings(config)
+            return FeishuMessageContentResolver(
+                config=config,
+                image_summarizer=OnlineImageSummarizer(
+                    config=config, settings=settings, usage_recorder=recorder,
+                ),
+                text_attachment_extractor=TextAttachmentExtractor(config=config),
+            )
         online_fallback = None
         try:
             load_online_llm_settings(config)
@@ -94,6 +103,20 @@ class AnalyzerFactory:
         base_dir = cwd or Path.cwd()
         from .analyzers.codex import CodexAnalyzer
         from .analyzers.failover import FailoverAnalyzer
+
+        if config.llm_mode == "online_only":
+            from .analyzers.online import OnlineLLMAnalyzer
+
+            load_online_llm_settings(config, cwd=base_dir)
+            return FailoverAnalyzer(
+                primary=OnlineLLMAnalyzer(
+                    config=config, cwd=base_dir, usage_recorder=recorder,
+                ),
+                fallback=None,
+                usage_recorder=recorder,
+                primary_backend="online",
+                primary_request_retry_limit=config.primary_request_retry_limit,
+            )
 
         fallback = None
         try:

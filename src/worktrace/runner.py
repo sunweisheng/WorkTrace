@@ -23,6 +23,7 @@ from .analyzers.function_calls import (
     personal_grouping_call_contract,
     task_function_call_spec,
 )
+from .analyzers.failover import supports_current_request_fallback
 from .constants import DailyRunStatus
 from .errors import (
     AnalyzerProtocolError,
@@ -3405,7 +3406,10 @@ class DailyTraceRunner:
             )
 
         fallback = getattr(analyzer, "fallback_current_request", None)
-        if callable(fallback) and not self._last_analyzer_request_used_fallback():
+        if (
+            supports_current_request_fallback(analyzer)
+            and not self._last_analyzer_request_used_fallback()
+        ):
             recorder = getattr(analyzer, "usage_recorder", None)
             context_id = f"day-group:{request_label}:fallback"
             context = (
@@ -3817,7 +3821,10 @@ class DailyTraceRunner:
             return finish(result)
 
         fallback = getattr(analyzer, "fallback_current_request", None)
-        if callable(fallback) and not self._last_analyzer_request_used_fallback():
+        if (
+            supports_current_request_fallback(analyzer)
+            and not self._last_analyzer_request_used_fallback()
+        ):
             last_prompt, last_function_spec, last_estimates = request_parts(
                 validation_feedback
             )
@@ -4151,7 +4158,10 @@ class DailyTraceRunner:
             )
 
         fallback = getattr(analyzer, "fallback_current_request", None)
-        if callable(fallback) and not self._last_analyzer_request_used_fallback():
+        if (
+            supports_current_request_fallback(analyzer)
+            and not self._last_analyzer_request_used_fallback()
+        ):
             prompt, function_spec, estimates = request_parts(validation_feedback)
             oversized = (
                 estimates["input_estimated_tokens"]
@@ -4774,7 +4784,10 @@ class DailyTraceRunner:
             )
 
         fallback = getattr(analyzer, "fallback_current_request", None)
-        if callable(fallback) and not self._last_analyzer_request_used_fallback():
+        if (
+            supports_current_request_fallback(analyzer)
+            and not self._last_analyzer_request_used_fallback()
+        ):
             prompt, function_spec, estimates = request_parts(validation_feedback)
             oversized = (
                 estimates["input_estimated_tokens"]

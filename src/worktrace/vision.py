@@ -10,7 +10,7 @@ from pathlib import Path
 from time import perf_counter
 from uuid import uuid4
 
-from openai import OpenAI
+from openai import APIConnectionError, APIStatusError, APITimeoutError, OpenAI
 
 from .config import RuntimeConfig, load_online_llm_settings
 from .errors import (
@@ -148,6 +148,19 @@ class OnlineImageSummarizer:
         self.usage_recorder = usage_recorder or LLMUsageRecorder()
 
     def summarize(self, image_path: Path, *, required: bool = False) -> str:
+        retry_limit = (
+            self.config.primary_request_retry_limit
+            if self.config.llm_mode == "online_only" else 0
+        )
+        for attempt in range(retry_limit + 1):
+            try:
+                return self._summarize_once(image_path, required=required)
+            except RetryableAnalyzerProtocolError:
+                if attempt == retry_limit:
+                    raise
+        raise AssertionError("Image retry loop ended unexpectedly.")
+
+    def _summarize_once(self, image_path: Path, *, required: bool) -> str:
         if not self.settings.enabled or (
             not required and self._count >= self.settings.max_images_per_run
         ):
@@ -230,7 +243,18 @@ class OnlineImageSummarizer:
                 status="failed",
                 error_category="request_failed",
             )
-            raise AnalyzerProtocolError(f"Image summary request failed: {exc}") from exc
+            retryable = isinstance(exc, (APITimeoutError, json.JSONDecodeError))
+            if isinstance(exc, APIStatusError):
+                retryable = exc.status_code in {408, 429} or exc.status_code >= 500
+            if isinstance(exc, APIConnectionError):
+                from .analyzers.online import _is_tls_error
+
+                retryable = not _is_tls_error(exc)
+            error_type = (
+                RetryableAnalyzerProtocolError if retryable
+                else AnalyzerProtocolError
+            )
+            raise error_type(f"Image summary request failed: {exc}") from exc
         finally:
             if self._client is None:
                 close_client = getattr(client, "close", None)
@@ -263,7 +287,9 @@ class OnlineImageSummarizer:
                 status="failed",
                 error_category="empty_response",
             )
-            raise AnalyzerProtocolError("Image summary response did not contain text output.")
+            raise RetryableAnalyzerProtocolError(
+                "Image summary response did not contain text output."
+            )
         self.usage_recorder.record(
             "image_summary",
             payload,

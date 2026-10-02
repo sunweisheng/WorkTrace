@@ -1357,7 +1357,7 @@ class OnlineLLMAnalyzer(Analyzer):
             raise RetryableAnalyzerProtocolError("Request timed out.") from exc
         except APIConnectionError as exc:
             reason = str(exc)
-            if "certificate verify failed" in reason.lower():
+            if _is_tls_error(exc):
                 raise AnalyzerProtocolError(f"TLS certificate verification failed: {reason}") from exc
             raise RetryableAnalyzerProtocolError(f"Network error: {reason}") from exc
         except _FirstStreamEventTimeoutError as exc:
@@ -1527,3 +1527,17 @@ class OnlineLLMAnalyzer(Analyzer):
                 close()
             else:
                 http_client.close()
+
+
+def _is_tls_error(error: BaseException) -> bool:
+    seen: set[int] = set()
+    current: BaseException | None = error
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        reason = str(current).lower()
+        if isinstance(current, ssl.SSLError) or any(
+            token in reason for token in ("certificate", "tls", "ssl")
+        ):
+            return True
+        current = current.__cause__ or current.__context__
+    return False

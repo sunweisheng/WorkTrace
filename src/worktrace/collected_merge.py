@@ -20,6 +20,7 @@ from .config import (
     event_generation_debug_summary,
     model_input_budget_debug_summary,
 )
+from .analyzers.failover import supports_current_request_fallback
 from .constants import DailyRunStatus
 from .delivery.feishu_cli import FeishuCliSelfDelivery
 from .utils.commands import run_text_command
@@ -264,7 +265,7 @@ class CollectedMergeRunner:
         return summary
 
     def _supports_current_request_fallback(self) -> bool:
-        return callable(getattr(self.analyzer, "fallback_current_request", None))
+        return supports_current_request_fallback(self.analyzer)
 
     def _last_analyzer_request_used_fallback(self) -> bool:
         checker = getattr(self.analyzer, "last_request_used_fallback", None)
@@ -1168,7 +1169,10 @@ class CollectedMergeRunner:
             )
 
         fallback = getattr(self.analyzer, "fallback_current_request", None)
-        if callable(fallback) and not self._last_analyzer_request_used_fallback():
+        if (
+            self._supports_current_request_fallback()
+            and not self._last_analyzer_request_used_fallback()
+        ):
             prompt, function_spec, estimates = request_parts(validation_feedback)
             oversized = (
                 estimates["input_estimated_tokens"]

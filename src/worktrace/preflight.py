@@ -89,26 +89,35 @@ def run_preflight_checks(
         check_lark_identity(command_runner)
         details["lark_identity"] = "ok"
 
-        details["codex_path"] = require_command("codex")
-        codex_settings = load_codex_llm_settings(config, cwd=cwd)
-        details["codex_config"] = "ok"
-        details["codex_model"] = codex_settings.model
-        details["codex_reasoning_effort"] = codex_settings.reasoning_effort
-        probe_codex(command_runner, config=config, cwd=cwd)
-        details["codex_probe"] = "ok"
-        details["analyzer_backend"] = "codex"
-
-        try:
+        details["llm_mode"] = config.llm_mode
+        if config.llm_mode == "online_only":
+            details["codex_probe"] = "disabled"
+            details["analyzer_backend"] = "online"
+            details["online_fallback"] = "disabled"
             online_settings = ensure_online_runtime_config(config, cwd=cwd)
             ensure_reasoning_disabled(online_settings.reasoning_effort)
-        except PreflightError as exc:
-            details["online_fallback"] = "disabled"
-            details["online_fallback_warning"] = str(exc)
-        else:
             details["online_llm_config"] = "ok"
-            details["online_fallback"] = "available"
-            details["online_reasoning_effort"] = online_settings.reasoning_effort or ""
-
+            details.update(probe_online_llm(config, cwd=cwd))
+        else:
+            details["codex_path"] = require_command("codex")
+            codex_settings = load_codex_llm_settings(config, cwd=cwd)
+            details["codex_config"] = "ok"
+            details["codex_model"] = codex_settings.model
+            details["codex_reasoning_effort"] = codex_settings.reasoning_effort
+            probe_codex(command_runner, config=config, cwd=cwd)
+            details["codex_probe"] = "ok"
+            details["analyzer_backend"] = "codex"
+    
+            try:
+                online_settings = ensure_online_runtime_config(config, cwd=cwd)
+                ensure_reasoning_disabled(online_settings.reasoning_effort)
+            except PreflightError as exc:
+                details["online_fallback"] = "disabled"
+                details["online_fallback_warning"] = str(exc)
+            else:
+                details["online_llm_config"] = "ok"
+                details["online_fallback"] = "available"
+                details["online_reasoning_effort"] = online_settings.reasoning_effort or ""
         ensure_data_root_writable(config.data_root)
         details["data_root"] = str(config.data_root.resolve())
 
