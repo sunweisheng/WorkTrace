@@ -782,3 +782,226 @@ def test_online_missing_credentials_still_generates_basic_diagnostic(
     assert reference.status == "generated_after_llm_failure"
     assert reference.privacy_check == "passed"
     assert Path(tmp_path / reference.path).is_file()
+
+
+@pytest.mark.parametrize(
+    "stage", ["segmentation", "extraction", "anchor", "facts", "retention"]
+)
+@pytest.mark.parametrize(
+    "failure, expected", [("auth", 1), ("timeout", 2), ("json", 2)]
+)
+def test_online_stage_does_not_repeat_failed_requests_as_quality_retries(
+    tmp_path, monkeypatch, stage, failure, expected
+):
+    import json
+    import httpx
+    from dataclasses import replace
+    from openai import APITimeoutError, AuthenticationError
+    from tests.integration.test_runner_cross_conversation_merge import (
+        _runner,
+        _draft,
+        _message,
+    )
+    from tests.integration.test_runner_segment_batches import _anchor_unit
+    from src.worktrace.models import (
+        SegmentAnalysisBatch,
+        PersonalFactReviewBatch,
+        PersonalFactReviewCandidate,
+        SelfIdentity,
+    )
+
+    online_env(tmp_path)
+    requests = []
+
+    def invoke(self, *args, **kwargs):
+        requests.append(1)
+        request = httpx.Request("POST", "https://example.invalid/v1")
+        if failure == "auth":
+            raise AuthenticationError(
+                "invalid",
+                response=httpx.Response(401, request=request),
+                body=None,
+            )
+        if failure == "json":
+            raise json.JSONDecodeError("invalid", "bad", 0)
+        raise APITimeoutError(request=request)
+
+    monkeypatch.setattr(
+        "src.worktrace.analyzers.online.OnlineLLMAnalyzer._invoke_via_sdk",
+        invoke,
+    )
+    loaded = load_runtime_config_overrides(RuntimeConfig(), cwd=Path.cwd())
+    config = RuntimeConfig(
+        llm_mode="online_only", model_input_batch_target_tokens=100000
+    )
+    recorder = LLMUsageRecorder()
+    analyzer = AnalyzerFactory.create_default(
+        config, cwd=tmp_path, usage_recorder=recorder
+    )
+    runner = _runner(
+        tmp_path,
+        analyzer,
+        llm_mode="online_only",
+        model_input_batch_target_tokens=100000,
+        retention_policy=loaded.retention_policy,
+    )
+    identity = SelfIdentity("ou_self", "本人", "test")
+    with pytest.raises(AnalyzerProtocolError):
+        if stage == "segmentation":
+            runner._segment_anchor_window_with_retry(
+                target_date="2026-07-22",
+                conversation_id="oc_1",
+                conversation_name="",
+                anchor_unit=_anchor_unit(1),
+                self_identity=identity,
+            )
+        elif stage == "extraction":
+            runner._analyze_segment_batch_with_retry(
+                batch=SegmentAnalysisBatch(
+                    "2026-07-22", "oc_1", "", "ou_self", "本人", []
+                ),
+                self_identity=identity,
+            )
+        elif stage == "anchor":
+            runner._resolve_anchor_batch(
+                target_date="2026-07-22",
+                anchor_units=[_anchor_unit(1), _anchor_unit(2)],
+            )
+        elif stage == "facts":
+            outcome = runner._review_personal_fact_batch_with_retry(
+                batch=PersonalFactReviewBatch(
+                    "2026-07-22",
+                    "test",
+                    [
+                        PersonalFactReviewCandidate(
+                            _draft("d1", "m1"),
+                            [_message("m1")],
+                            ["m1"],
+                        ),
+                    ],
+                ),
+                review_method=analyzer.review_personal_event_facts,
+            )
+            # This stage may preserve an explicit failure outcome rather than raise.
+            if outcome.error_summary:
+                raise AnalyzerProtocolError(outcome.error_summary)
+        else:
+            candidate = replace(
+                _draft("d1", "m1"),
+                retention_reason="follow_up_assigned",
+                self_evidence_message_ids=["m1"],
+            )
+            runner._review_retention_candidates(
+                target_date="2026-07-22",
+                candidates=[candidate],
+                conversation_slices=[],
+                messages=[_message("m1")],
+            )
+    assert len(requests) == expected
+    assert len(recorder.records()) == expected
+    assert recorder.summary()["fallback_count"] == 0
+
+
+def test_online_segmentation_quality_retries_remain_three(
+    tmp_path, monkeypatch
+):
+    from tests.integration.test_runner_cross_conversation_merge import _runner
+    from tests.integration.test_runner_segment_batches import _anchor_unit
+    from src.worktrace.models import SelfIdentity
+
+    online_env(tmp_path)
+    requests = []
+
+    def invoke(self, *args, **kwargs):
+        requests.append(1)
+        return {"segments": []}, {}, None
+
+    monkeypatch.setattr(
+        "src.worktrace.analyzers.online.OnlineLLMAnalyzer._invoke_via_sdk",
+        invoke,
+    )
+    analyzer = AnalyzerFactory.create_default(
+        RuntimeConfig(
+            llm_mode="online_only", model_input_batch_target_tokens=100000
+        ),
+        cwd=tmp_path,
+    )
+    runner = _runner(tmp_path, analyzer, llm_mode="online_only")
+    outcome = runner._segment_anchor_window_with_retry(
+        target_date="2026-07-22",
+        conversation_id="oc_1",
+        conversation_name="",
+        anchor_unit=_anchor_unit(1),
+        self_identity=SelfIdentity("ou_self", "本人", "test"),
+    )
+    assert not outcome.units
+    assert outcome.failure_category == "segmentation_validation_failure"
+    assert len(requests) == 4
+
+
+def test_online_fact_evidence_validation_still_uses_quality_retries(
+    tmp_path, monkeypatch
+):
+    from tests.integration.test_runner_cross_conversation_merge import (
+        _runner,
+        _draft,
+        _message,
+    )
+    from src.worktrace.models import (
+        PersonalFactReviewBatch,
+        PersonalFactReviewCandidate,
+    )
+
+    online_env(tmp_path)
+    requests = []
+
+    def invoke(self, *args, **kwargs):
+        requests.append(1)
+        fact = {"text": "测试事项", "evidence_message_ids": ["missing"]}
+        return (
+            {
+                "results": [
+                    {
+                        "draft_id": "d1",
+                        "supported": True,
+                        "fact_items": {
+                            "topic": fact,
+                            "content": [fact],
+                            "action_label": fact,
+                            "object_hint": fact,
+                            "retention_detail": fact,
+                        },
+                        "removed_claims": [],
+                    }
+                ]
+            },
+            {},
+            None,
+        )
+
+    monkeypatch.setattr(
+        "src.worktrace.analyzers.online.OnlineLLMAnalyzer._invoke_via_sdk",
+        invoke,
+    )
+    analyzer = AnalyzerFactory.create_default(
+        RuntimeConfig(
+            llm_mode="online_only", model_input_batch_target_tokens=100000
+        ),
+        cwd=tmp_path,
+    )
+    runner = _runner(tmp_path, analyzer, llm_mode="online_only")
+    batch = PersonalFactReviewBatch(
+        "2026-07-22",
+        "test",
+        [
+            PersonalFactReviewCandidate(
+                _draft("d1", "m1"), [_message("m1")], ["m1"]
+            )
+        ],
+    )
+    outcome = runner._review_personal_fact_batch_with_retry(
+        batch=batch, review_method=analyzer.review_personal_event_facts
+    )
+    assert outcome.error_summary
+    assert outcome.retry_count == 3
+    assert len(requests) == 4

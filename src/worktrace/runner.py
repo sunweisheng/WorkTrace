@@ -983,6 +983,8 @@ class DailyTraceRunner:
                 except ModelInputLimitError:
                     raise
                 except AnalyzerProtocolError as exc:
+                    if self._is_terminal_online_request_error(exc):
+                        raise
                     last_error = str(exc)
                     debug_batches.append(
                         _retention_review_debug_entry(
@@ -1207,6 +1209,8 @@ class DailyTraceRunner:
             except ModelInputLimitError:
                 raise
             except AnalyzerProtocolError as exc:
+                if self._is_terminal_online_request_error(exc):
+                    raise
                 last_error = str(exc)
                 error_kind = "protocol"
 
@@ -1922,6 +1926,8 @@ class DailyTraceRunner:
             except ModelInputLimitError:
                 raise
             except AnalyzerProtocolError as exc:
+                if self._is_terminal_online_request_error(exc):
+                    raise
                 model_call_count += 1
                 segmentation_error = str(exc)
                 self._dump_segmentation_failure_debug_artifacts(
@@ -2197,6 +2203,8 @@ class DailyTraceRunner:
             except ModelInputLimitError:
                 raise
             except AnalyzerProtocolError as exc:
+                if self._is_terminal_online_request_error(exc):
+                    raise
                 call_count += 1
                 self._dump_anchor_fallback_failure_debug_artifacts(
                     target_date=target_date,
@@ -2341,6 +2349,8 @@ class DailyTraceRunner:
             except ModelInputLimitError:
                 raise
             except AnalyzerProtocolError as exc:
+                if self._is_terminal_online_request_error(exc):
+                    raise
                 call_count += 1
                 self._dump_segment_batch_failure_debug_artifacts(
                     batch=batch,
@@ -3521,6 +3531,11 @@ class DailyTraceRunner:
             fallback_count,
             repair_count,
         )
+
+    def _is_terminal_online_request_error(
+        self, error: AnalyzerProtocolError,
+    ) -> bool:
+        return self.config.llm_mode == "online_only" and error.request_failed
 
     def _last_analyzer_request_used_fallback(self) -> bool:
         checker = getattr(

@@ -17,6 +17,8 @@ class ChatSourceError(WorkTraceError):
 class AnalyzerProtocolError(WorkTraceError):
     """Raised when analyzer input/output violates protocol constraints."""
 
+    request_failed: bool = False
+
 
 class CodexProtocolViolationError(AnalyzerProtocolError):
     """Raised when Codex emits a tool or another unsupported protocol item."""

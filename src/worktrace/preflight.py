@@ -107,7 +107,7 @@ def run_preflight_checks(
             probe_codex(command_runner, config=config, cwd=cwd)
             details["codex_probe"] = "ok"
             details["analyzer_backend"] = "codex"
-    
+
             try:
                 online_settings = ensure_online_runtime_config(config, cwd=cwd)
                 ensure_reasoning_disabled(online_settings.reasoning_effort)

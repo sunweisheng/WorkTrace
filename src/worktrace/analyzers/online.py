@@ -1283,6 +1283,7 @@ class OnlineLLMAnalyzer(Analyzer):
                 oversized_singleton=oversized_singleton,
             )
         except AnalyzerProtocolError as exc:
+            exc.request_failed = True
             final_prompt = _apply_soft_no_think(function_spec.prompt_with_example(prompt))
             if settings is not None:
                 body = _build_online_function_request_body(
