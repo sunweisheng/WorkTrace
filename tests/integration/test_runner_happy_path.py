@@ -170,6 +170,7 @@ class FakeAnalyzer:
         return {
             "groups": [
                 {
+                    "self_actions": [],
                     "supported": True,
                     "self_relations": [],
                     "removed_claims": [],
@@ -177,12 +178,14 @@ class FakeAnalyzer:
                     "covered_draft_ids": locked_group["draft_ids"],
                     "fact_items": [
                         {
+                            "actor": "context", "self_action_indices": [],
                             "field": "topic",
                             "text": primary["topic"],
                             "evidence_message_ids": primary["source_message_ids"],
                         },
                         *[
                             {
+                                "actor": "context", "self_action_indices": [],
                                 "field": "content",
                                 "text": member["content"],
                                 "evidence_message_ids": member[
@@ -192,6 +195,7 @@ class FakeAnalyzer:
                             for member in members
                         ],
                         {
+                            "actor": "context", "self_action_indices": [],
                             "field": "object_hint",
                             "text": primary["object_hint"],
                             "evidence_message_ids": primary["source_message_ids"],
@@ -256,6 +260,7 @@ def test_runner_happy_path(tmp_path: Path) -> None:
             return {
                 "groups": [
                     {
+                        "self_actions": [],
                         "supported": True,
                         "self_relations": [],
                         "removed_claims": [],
@@ -263,16 +268,19 @@ def test_runner_happy_path(tmp_path: Path) -> None:
                         "covered_draft_ids": locked_group["draft_ids"],
                         "fact_items": [
                             {
+                                "actor": "context", "self_action_indices": [],
                                 "field": "topic",
                                 "text": "发布目标确认、沟通完成及上线安排",
                                 "evidence_message_ids": ["om_1"],
                             },
                             {
+                                "actor": "context", "self_action_indices": [],
                                 "field": "content",
                                 "text": "围绕发布目标完成沟通，并确认后续上线窗口安排。",
                                 "evidence_message_ids": ["om_1"],
                             },
                             {
+                                "actor": "context", "self_action_indices": [],
                                 "field": "object_hint",
                                 "text": "发布目标及上线窗口",
                                 "evidence_message_ids": ["om_1"],

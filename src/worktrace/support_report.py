@@ -5,8 +5,10 @@ import platform
 import re
 import secrets
 import subprocess
+from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
+from time import perf_counter
 from typing import Any, Callable, Iterable, Mapping, Sequence
 
 from . import __version__
@@ -69,6 +71,13 @@ class AnalyzerBundle:
     fallback: object | None
     primary_kind: str
     online_request_retry_limit: int
+
+
+@dataclass(frozen=True)
+class SupportAnalysisOutcome:
+    analysis: SupportAnalysis | None
+    failure_code: str
+    summary: dict[str, object]
 
 
 @dataclass(frozen=True)
@@ -172,6 +181,8 @@ def generate_support_report(
     analyzer_bundle: AnalyzerBundle | None = None,
     environment: Mapping[str, str] | None = None,
 ) -> SupportReportReference:
+    outcome: SupportAnalysisOutcome | None = None
+    llm_status = "failed"
     try:
         settings = load_support_report_settings(cwd)
         facts = build_diagnostic_facts(
@@ -183,7 +194,10 @@ def generate_support_report(
             settings=settings,
         )
         bundle = analyzer_bundle or build_support_report_analyzers(config, cwd=cwd)
-        analysis = _request_support_analysis(bundle, facts=facts, settings=settings)
+        outcome = _request_support_analysis(
+            bundle, facts=facts, settings=settings,
+        )
+        analysis = outcome.analysis
         llm_status = "success" if analysis is not None else "failed"
         report_text = render_support_report(
             facts=facts,
@@ -191,6 +205,7 @@ def generate_support_report(
             llm_status=llm_status,
             settings=settings,
             environment=dict(environment or collect_environment_versions(config=config)),
+            analysis_outcome=outcome,
         )
         privacy_errors = scan_support_report_privacy(report_text, settings=settings)
         if privacy_errors:
@@ -200,6 +215,8 @@ def generate_support_report(
                 llm_status=llm_status,
                 privacy_check="failed",
                 schema_version=settings.schema_version,
+                failure_code="privacy_blocked",
+                analysis_summary=outcome.summary,
             )
         report_path = _write_support_report(
             report_text,
@@ -216,14 +233,18 @@ def generate_support_report(
             llm_status=llm_status,
             privacy_check="passed",
             schema_version=settings.schema_version,
+            failure_code=outcome.failure_code,
+            analysis_summary=outcome.summary,
         )
     except Exception:
         return SupportReportReference(
             status="failed",
             path=None,
-            llm_status="failed",
+            llm_status=llm_status,
             privacy_check="not_run",
             schema_version=SUPPORT_REPORT_SCHEMA_VERSION,
+            failure_code="report_generation_failed",
+            analysis_summary=outcome.summary if outcome is not None else {},
         )
 
 
@@ -590,34 +611,112 @@ def _request_support_analysis(
     *,
     facts: Sequence[DiagnosticFact],
     settings: SupportReportSettings,
-) -> SupportAnalysis | None:
+) -> SupportAnalysisOutcome:
+    started_at = perf_counter()
+    attempt_count = 0
+    request_failures = 0
+    validation_failures = 0
+    fallback_attempts = 0
+    failure_code = ""
+    request_error_category = ""
+    context_prefix = f"support-analysis:{secrets.token_hex(8)}:"
+    recorders: dict[int, object] = {}
+    usage_available = True
+
+    def finish(analysis: SupportAnalysis | None) -> SupportAnalysisOutcome:
+        records = [
+            record
+            for recorder in recorders.values()
+            for record in recorder.records()
+            if str(record.get("request_context_id", "")).startswith(
+                context_prefix
+            )
+        ]
+        summary = {
+            "attempt_count": attempt_count,
+            "request_failure_count": request_failures,
+            "validation_failure_count": validation_failures,
+            "fallback_attempt_count": fallback_attempts,
+            "model_request_count": len(records) if usage_available else None,
+            "model_failed_request_count": (
+                sum(record.get("status") == "failed" for record in records)
+                if usage_available else None
+            ),
+            "duration_ms": round((perf_counter() - started_at) * 1000, 3),
+            "request_error_category": request_error_category,
+        }
+        return SupportAnalysisOutcome(
+            analysis=analysis,
+            failure_code="" if analysis is not None else failure_code,
+            summary=summary,
+        )
+
+    def request(analyzer: object):
+        nonlocal attempt_count, usage_available
+        attempt_count += 1
+        recorder = getattr(analyzer, "usage_recorder", None)
+        has_recorder = (
+            callable(getattr(recorder, "records", None))
+            and callable(getattr(recorder, "request_context", None))
+        )
+        if has_recorder:
+            recorders[id(recorder)] = recorder
+        else:
+            usage_available = False
+        context = (
+            recorder.request_context(f"{context_prefix}{attempt_count}")
+            if has_recorder else nullcontext()
+        )
+        with context:
+            return _request_and_validate(
+                analyzer, prompt=prompt, spec=spec,
+                facts=facts, settings=settings,
+            )
+
+    def classify_validation(codes: Sequence[str]) -> str:
+        execution = settings.payload.get("analysis_execution", {})
+        conflicts = set(execution.get("fact_conflict_codes", []))
+        if "privacy_content_invalid" in codes:
+            return "privacy_blocked"
+        return "fact_conflict" if conflicts.intersection(codes) else "invalid_response"
+
+    def record_exception(exc: Exception) -> None:
+        nonlocal request_failures, validation_failures
+        nonlocal failure_code, request_error_category
+        request_error_category = classify_error_category(str(exc), settings=settings)
+        if request_error_category == "invalid_protocol":
+            validation_failures += 1
+            failure_code = "invalid_response"
+        else:
+            request_failures += 1
+            failure_code = "request_failed"
+
     spec = _support_function_spec(facts=facts, settings=settings)
     prompt = _support_prompt(facts=facts, settings=settings)
     if scan_support_report_privacy(prompt, settings=settings):
-        return None
+        failure_code = "privacy_blocked"
+        return finish(None)
     technical_failures = 0
-    validation_failures = 0
+    validation_retries = 0
     while True:
         try:
-            analysis, validation_codes = _request_and_validate(
-                bundle.primary,
-                prompt=prompt,
-                spec=spec,
-                facts=facts,
-                settings=settings,
-            )
-        except RetryableAnalyzerProtocolError:
+            analysis, validation_codes = request(bundle.primary)
+        except RetryableAnalyzerProtocolError as exc:
+            record_exception(exc)
             if technical_failures < bundle.online_request_retry_limit:
                 technical_failures += 1
                 continue
             break
-        except Exception:
+        except Exception as exc:
+            record_exception(exc)
             break
         if analysis is not None:
-            return analysis
-        if validation_failures >= settings.llm_validation_retry_limit:
-            break
+            return finish(analysis)
         validation_failures += 1
+        failure_code = classify_validation(validation_codes)
+        if validation_retries >= settings.llm_validation_retry_limit:
+            break
+        validation_retries += 1
         prompt = _support_prompt(
             facts=facts,
             settings=settings,
@@ -625,17 +724,17 @@ def _request_support_analysis(
         )
 
     if bundle.fallback is None:
-        return None
+        return finish(None)
+    fallback_attempts += 1
     try:
-        return _request_and_validate(
-            bundle.fallback,
-            prompt=prompt,
-            spec=spec,
-            facts=facts,
-            settings=settings,
-        )[0]
-    except Exception:
-        return None
+        analysis, validation_codes = request(bundle.fallback)
+        if analysis is None:
+            validation_failures += 1
+            failure_code = classify_validation(validation_codes)
+        return finish(analysis)
+    except Exception as exc:
+        record_exception(exc)
+        return finish(None)
 
 
 def _request_and_validate(
@@ -916,6 +1015,7 @@ def render_support_report(
     llm_status: str,
     settings: SupportReportSettings,
     environment: Mapping[str, str],
+    analysis_outcome: SupportAnalysisOutcome | None = None,
 ) -> str:
     sections = settings.section_labels
     fields = settings.field_labels
@@ -973,6 +1073,28 @@ def render_support_report(
             lines.append(text["no_stage_data"])
             continue
         lines.extend(_render_fact_table(selected, settings=settings))
+
+    if analysis_outcome is not None:
+        execution = settings.payload.get("analysis_execution", {})
+        labels = execution.get("labels", {})
+        failures = execution.get("failure_labels", {})
+        lines.extend([
+            "", f"## {labels.get('title', 'Diagnostic analysis')}", "",
+            labels.get("business_scope", ""), "",
+            f"- {labels.get('failure_code', 'Failure code')}："
+            f"{failures.get(analysis_outcome.failure_code, analysis_outcome.failure_code)}",
+        ])
+        for key, value in analysis_outcome.summary.items():
+            if key == "request_error_category":
+                if value:
+                    category_labels = execution.get("request_error_labels", {})
+                    category_label = category_labels.get(
+                        value, category_labels.get("runtime", "unknown"),
+                    )
+                    lines.append(f"- {labels.get(key, key)}：{category_label}")
+                continue
+            shown = labels.get("not_recorded", "not recorded") if value is None else value
+            lines.append(f"- {labels.get(key, key)}：{shown}")
 
     lines.extend(["", f"## {sections['analysis']}", ""])
     if analysis is None:

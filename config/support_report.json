@@ -14,6 +14,46 @@
   "slow_stage_min_share": 0.25,
   "slow_stage_limit": 5,
   "max_findings": 6,
+  "analysis_execution": {
+    "fact_conflict_codes": [
+      "overall_assessment_conflicts_with_findings",
+      "runtime_status_conflict",
+      "runtime_failure_conflicts_with_python_facts",
+      "delivery_status_conflict", "model_failure_conflict",
+      "model_retry_conflict", "model_fallback_conflict",
+      "slow_stage_conflict", "no_change_conflicts_with_product_suggestions"
+    ],
+    "failure_labels": {
+      "": "已完成",
+      "request_failed": "诊断整理调用未完成。",
+      "invalid_response": "诊断返回的格式、字段或引用未通过检查。",
+      "fact_conflict": "诊断结论与 Python 计算的业务事实不一致。",
+      "privacy_blocked": "诊断内容未通过隐私检查，已停止使用。",
+      "report_generation_failed": "诊断报告未能生成。"
+    },
+    "labels": {
+      "title": "诊断整理执行情况",
+      "business_scope": "上方日报业务调用统计不包含后续诊断整理调用。以下独立记录诊断分析的尝试和模型请求，尝试次数可能包含质量重试，不能当作网络请求次数。",
+      "failure_code": "诊断分析结果",
+      "attempt_count": "诊断分析尝试次数",
+      "request_failure_count": "诊断调用失败次数",
+      "validation_failure_count": "诊断返回检查失败次数",
+      "fallback_attempt_count": "诊断备用尝试次数",
+      "model_request_count": "诊断模型请求数量",
+      "model_failed_request_count": "诊断模型失败请求数量",
+      "duration_ms": "诊断整理墙钟耗时毫秒",
+      "request_error_category": "最近一次调用错误类别",
+      "not_recorded": "未采集"
+    },
+    "request_error_labels": {
+      "missing_config": "配置缺失", "command_missing": "必要工具缺失",
+      "authentication": "认证失败", "permission": "权限不足",
+      "timeout": "请求超时", "network": "网络或服务异常",
+      "rate_limited": "请求被限流", "invalid_protocol": "返回协议错误",
+      "storage": "文件处理错误", "delivery": "送达错误",
+      "runtime": "调用未完成，具体类别尚未确认"
+    }
+  },
   "safe_text": {
     "title": "WorkTrace 调试诊断报告",
     "privacy_summary": "已通过外发隐私检查。本报告只包含固定状态、版本号、编号诊断事实和 Python 计算结果。",
@@ -223,7 +263,7 @@
     {"key": "timeout", "patterns": ["timed out", "timeout"]},
     {"key": "network", "patterns": ["network", "connection", "unreachable", "service unavailable"]},
     {"key": "rate_limited", "patterns": ["rate limit", "http 429"]},
-    {"key": "invalid_protocol", "patterns": ["invalid json", "invalid protocol", "function calling"]},
+    {"key": "invalid_protocol", "patterns": ["invalid json", "did not return valid json", "invalid protocol", "codex json event stream", "codex output is empty", "function call", "function arguments", "called an unexpected function"]},
     {"key": "storage", "patterns": ["write", "output file is missing"]},
     {"key": "delivery", "patterns": ["deliver", "send", "送达"]}
   ],

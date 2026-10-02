@@ -1381,19 +1381,45 @@ class DayGroupReviewResult:
 
 
 @dataclass(frozen=True)
+class PersonalRenderFactItem(PersonalFactItem):
+    actor: str = "context"
+    self_action_indices: list[int] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            **super().to_dict(),
+            "actor": self.actor,
+            "self_action_indices": list(self.self_action_indices),
+        }
+
+
+@dataclass(frozen=True)
+class PersonalSelfAction:
+    kind: str
+    evidence_message_ids: list[str]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "kind": self.kind,
+            "evidence_message_ids": list(self.evidence_message_ids),
+        }
+
+
+@dataclass(frozen=True)
 class PersonalGroupRenderItem:
     group_id: str
     covered_draft_ids: list[str]
     topic: str
     content: str
     object_hint: str
-    fact_items: list[PersonalFactItem] = field(default_factory=list)
+    fact_items: list[PersonalRenderFactItem] = field(default_factory=list)
     supported: bool = True
     action_label: str = ""
     retention_reason: str = ""
     retention_detail: str = ""
     self_relations: list[SelfRelationEvidence] = field(default_factory=list)
     removed_claims: list[str] = field(default_factory=list)
+    self_actions: list[PersonalSelfAction] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -1409,6 +1435,7 @@ class PersonalGroupRenderItem:
             "retention_detail": self.retention_detail,
             "self_relations": [item.to_dict() for item in self.self_relations],
             "removed_claims": list(self.removed_claims),
+            "self_actions": [item.to_dict() for item in self.self_actions],
         }
 
 
@@ -1851,6 +1878,8 @@ class SupportReportReference:
     llm_status: str
     privacy_check: str
     schema_version: int = 1
+    failure_code: str = ""
+    analysis_summary: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> SupportReportReference:
@@ -1860,6 +1889,8 @@ class SupportReportReference:
             llm_status=str(data.get("llm_status", "")),
             privacy_check=str(data.get("privacy_check", "")),
             schema_version=int(data.get("schema_version", 1)),
+            failure_code=str(data.get("failure_code", "")),
+            analysis_summary=dict(data.get("analysis_summary") or {}),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -1869,6 +1900,8 @@ class SupportReportReference:
             "llm_status": self.llm_status,
             "privacy_check": self.privacy_check,
             "schema_version": self.schema_version,
+            "failure_code": self.failure_code,
+            "analysis_summary": dict(self.analysis_summary),
         }
 
 

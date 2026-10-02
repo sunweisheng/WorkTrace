@@ -328,7 +328,7 @@ def test_online_report_failure_keeps_private_safe_base_report(
     assert reference.status == "generated_after_llm_failure"
     assert reference.privacy_check == "passed"
     assert len(calls) == expected
-    text = Path(reference.path).read_text()
+    text = Path(reference.path).read_text(encoding="utf-8")
     assert "Codex 版本 | 未启用" in text
     assert "Alice" not in text
 
@@ -396,9 +396,9 @@ def test_checkpoint_isolated_by_mode_and_old_format_misses(tmp_path):
     assert codex.load_analysis(batch) == ([], ["codex"], 0, [])
     assert online.load_analysis(batch) == ([], ["online"], 0, [])
     for path in config.data_root.rglob("*.json"):
-        payload = json.loads(path.read_text())
+        payload = json.loads(path.read_text(encoding="utf-8"))
         payload.pop("llm_mode", None)
-        path.write_text(json.dumps(payload))
+        path.write_text(json.dumps(payload), encoding="utf-8")
     assert codex.load_analysis(batch) is None
     assert online.load_analysis(batch) is None
 
@@ -448,7 +448,9 @@ def test_replay_obeys_mode_and_legacy_explicit_override(
     assert replay.main(args) == 0
     assert observed == [expected]
     summary = json.loads(
-        (tmp_path / "data/replay-trace/2026-07-13/summary.json").read_text()
+        (tmp_path / "data/replay-trace/2026-07-13/summary.json").read_text(
+            encoding="utf-8"
+        )
     )
     assert summary["llm_mode"] == expected
 

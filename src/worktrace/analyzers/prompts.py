@@ -37,6 +37,7 @@ from .collected_evidence import (
     build_evidence_relation_catalog,
     derive_semantic_review_trigger_reasons,
 )
+from .personal_render_evidence import personal_render_evidence
 
 _AUDIO_TAG_RE = re.compile(r"<audio\b[^>]*duration=\"([^\"]+)\"[^>]*/?>", re.IGNORECASE)
 _VIDEO_TAG_RE = re.compile(r"<video\b[^>]*duration=\"([^\"]+)\"[^>]*/?>", re.IGNORECASE)
@@ -774,11 +775,12 @@ def build_personal_group_render_prompt(
     conversation_slices: list[ConversationSlice] | None = None,
 ) -> str:
     candidate_by_id = {item.draft_id: item for item in candidates}
-    source_ids = {
-        message_id
-        for draft_id in group.draft_ids
-        for message_id in candidate_by_id[draft_id].source_message_ids
-    }
+    evidence_ids, same_text_messages = personal_render_evidence(
+        [candidate_by_id[draft_id] for draft_id in group.draft_ids],
+        messages or [],
+        conversation_slices or [],
+    )
+    source_ids = set(evidence_ids)
     self_ids = list(dict.fromkeys(
         message_id
         for draft_id in group.draft_ids
@@ -795,13 +797,14 @@ def build_personal_group_render_prompt(
                 *config.personal_grouping_rules,
                 *config.retention_policy.prompt_rules,
                 *config.retention_policy.fact_review_rules,
+                *config.retention_policy.contribution_rules,
                 _build_self_relation_rule(config),
                 "locked_group 的成员已经确定，covered_draft_ids 必须原样返回。",
                 "原消息优先于 members 中的候选文字和元数据；必须重新判断，不能直接沿用候选的保留理由或参与方式。",
                 "supported=true 时，fact_items 必须覆盖 topic、content、object_hint、action_label、retention_reason 和 retention_detail；除 content 可有多项外，其余字段各一项。",
                 "retention_reason 的 text 必须是 retention_reason_values 中的合法键，并引用支持该工作性质的原消息；其余 fact_items 返回对应文字。",
                 "self_relations 的每项证据只能引用 self_evidence_message_ids，必须直接支持该参与方式。",
-                "不符合保留规则时返回 supported=false，fact_items 和 self_relations 均为空数组，removed_claims 说明无依据的工作判断；不要强行选择保留理由。",
+                "不符合保留规则时返回 supported=false，fact_items、self_actions 和 self_relations 均为空数组，removed_claims 说明无依据的工作判断；不要强行选择保留理由。",
                 "标题和具体对象必须准确覆盖全部成员；范围较宽的完整过程使用能够概括全部成员的标题，具体交付过程使用具体标题。",
                 "每个 fact_item 必须引用支持其文字的合法消息证据，所有成员至少由一项 content 证据覆盖。",
             ],
@@ -818,6 +821,12 @@ def build_personal_group_render_prompt(
                 for item in config.retention_policy.substantive_signals
             },
             "self_evidence_message_ids": self_ids,
+            "contribution_actions": [
+                {"kind": item.key, "description": item.description,
+                 "supported_relations": list(item.supported_relations)}
+                for item in config.retention_policy.contribution_actions
+            ],
+            "same_text_messages": same_text_messages,
             "messages": [
                 serialize_message_for_prompt(message, config)
                 for message in messages or []

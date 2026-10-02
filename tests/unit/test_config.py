@@ -948,6 +948,25 @@ def test_load_runtime_config_overrides_rejects_invalid_retention_policy(
         load_runtime_config_overrides(RuntimeConfig(), cwd=tmp_path)
 
 
+@pytest.mark.parametrize("field,value", [
+    ("contribution_actions", None),
+    ("contribution_actions", []),
+    ("contribution_rules", None),
+    ("contribution_rules", []),
+])
+def test_old_or_empty_contribution_config_is_rejected(tmp_path, field, value):
+    _write_minimal_runtime_files(tmp_path)
+    path = tmp_path / "config" / "retention_policy.json"
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if value is None:
+        del payload[field]
+    else:
+        payload[field] = value
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(ValueError, match="contribution"):
+        load_runtime_config_overrides(RuntimeConfig(), cwd=tmp_path)
+
+
 def test_load_runtime_config_overrides_rejects_legacy_rule_keys(tmp_path: Path) -> None:
     rules_dir = tmp_path / "config"
     rules_dir.mkdir()

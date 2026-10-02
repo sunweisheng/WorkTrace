@@ -144,6 +144,9 @@ CLI 帮助、模块导入、`pip check` 和针对性离线测试。PowerShell �
 以及安装目录本身带 `&`、`%`、`!`、`^` 的情况。
 认证、飞书和模型使用合成数据，不调用真实业务服务。
 
+Windows CI 显式设置 `PYTHONUTF8=0`，检验测试不依赖全局 UTF-8 模式。涉及报告和模型模式的测试读写文件显式指定 UTF-8，stdin 探针和比较脚本使用 `sys.executable`，避免命中商店的 `python3` 别名。覆盖增加模型模式、个人准确性、比较脚本及安全诊断报告测试。下面记录的是此前版本的验证，新增检查以对应提交的 CI 结果为准。
+
+
 2026-10-02 的[Windows CI 复测](https://github.com/sunweisheng/WorkTrace/actions/runs/36974505094)
 已通过，代码提交为 `4510b15e0f18878e4bcdf87a2508e44d6325f885`。
 Windows Server 2025 AMD64、PowerShell 7、Python 3.11/3.12 两组各

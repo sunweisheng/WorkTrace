@@ -78,6 +78,7 @@ from .analyzers.output_schemas import (
     day_group_review_output_schema,
     personal_group_render_output_schema,
 )
+from .analyzers.personal_render_evidence import personal_render_evidence
 from .analyzers.protocol import (
     parse_day_group_discovery_payload,
     parse_day_group_review_payload,
@@ -4666,16 +4667,13 @@ class DailyTraceRunner:
         request_function = getattr(analyzer, "request_function")
         candidate_by_id = {item.draft_id: item for item in candidates}
         group_candidates = [candidate_by_id[draft_id] for draft_id in group.draft_ids]
-        message_ids = list(
-            dict.fromkeys(
-                message_id
-                for item in group_candidates
-                for message_id in [
-                    *item.source_message_ids,
-                    *item.self_evidence_message_ids,
-                ]
-            )
+        message_ids, _ = personal_render_evidence(
+            group_candidates, messages or [], conversation_slices or [],
         )
+        action_support = {
+            item.key: item.supported_relations
+            for item in self.config.retention_policy.contribution_actions
+        }
         attempts: list[dict[str, object]] = []
         validation_feedback = ""
         retry_count = 0
@@ -4721,6 +4719,7 @@ class DailyTraceRunner:
                             "covered_draft_ids": list(group.draft_ids),
                             "supported": True,
                             "self_relations": [],
+                            "self_actions": [],
                             "removed_claims": [],
                             "fact_items": [
                                 {
@@ -4750,6 +4749,8 @@ class DailyTraceRunner:
                     ]
                 },
             )
+            for fact in function_spec.typical_arguments["groups"][0]["fact_items"]:
+                fact.update({"actor": "context", "self_action_indices": []})
             estimates = estimate_structured_input_tokens(
                 prompt,
                 function_spec=function_spec,
@@ -4802,6 +4803,8 @@ class DailyTraceRunner:
                     payload,
                     group=group,
                     candidates=group_candidates,
+                    action_relation_support=action_support,
+                    additional_message_ids=message_ids,
                     allowed_self_relations=tuple(
                         item.key for item in self.config.self_relation_types
                     ),
@@ -4898,6 +4901,8 @@ class DailyTraceRunner:
                     payload,
                     group=group,
                     candidates=group_candidates,
+                    action_relation_support=action_support,
+                    additional_message_ids=message_ids,
                     allowed_self_relations=tuple(
                         item.key for item in self.config.self_relation_types
                     ),

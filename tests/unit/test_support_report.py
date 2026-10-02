@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import json
+import pytest
 from dataclasses import replace
 from pathlib import Path
 
 from src.worktrace.analyzers.function_calls import FunctionCallSpec
 from src.worktrace.config import RuntimeConfig, load_runtime_config_overrides
 from src.worktrace.constants import DailyRunStatus
-from src.worktrace.errors import AnalyzerProtocolError
+from src.worktrace.errors import AnalyzerProtocolError, RetryableAnalyzerProtocolError
 from src.worktrace.models import CollectedMergeRunResult, DailyRunResult
 from src.worktrace.support_report import (
     AnalyzerBundle,
@@ -206,6 +207,165 @@ def test_all_model_routes_failed_still_write_basic_markdown(tmp_path: Path) -> N
     report = Path(reference.path).read_text(encoding="utf-8")
     assert "大模型整理失败" in report
     assert "D001" in report
+
+
+@pytest.mark.parametrize("responses, expected_code", [
+    ([AnalyzerProtocolError("sk_private_value /Users/alice secret")],
+     "request_failed"),
+    ([{}, {}], "invalid_response"),
+    ([{
+        "overall_assessment": "needs_attention",
+        "findings": [{
+            "category": "runtime", "severity": "medium",
+            "fact_ids": ["D001"], "cause_ids": ["runtime_failed"],
+            "user_check_ids": ["check_local_setup"],
+            "product_suggestion_ids": ["improve_preflight"],
+        }],
+    }] * 2, "fact_conflict"),
+])
+def test_report_failure_explains_safe_reason_and_separates_attempts(
+    tmp_path, responses, expected_code,
+):
+    reference = generate_support_report(
+        result=_result(tmp_path), run_mode="personal",
+        config=RuntimeConfig(data_root=tmp_path / "data"),
+        cwd=REPO_ROOT, elapsed_ms=100,
+        analyzer_bundle=AnalyzerBundle(
+            primary=QueueAnalyzer(responses), fallback=None,
+            primary_kind="codex", online_request_retry_limit=0,
+        ), environment=SAFE_ENVIRONMENT,
+    )
+    assert reference.status == "generated_after_llm_failure"
+    assert reference.failure_code == expected_code
+    assert reference.analysis_summary["attempt_count"] == len(responses)
+    assert reference.analysis_summary["model_request_count"] is None
+    report = Path(reference.path).read_text(encoding="utf-8")
+    assert "诊断整理执行情况" in report
+    assert "日报业务调用统计" in report
+    assert "不包含后续诊断整理调用" in report
+    assert "sk_private_value" not in report
+    assert "/Users/alice" not in report
+    assert reference.to_dict()["failure_code"] == expected_code
+
+
+def test_report_call_statistics_exclude_prior_business_calls(tmp_path):
+    from src.worktrace.llm_usage import LLMUsageRecorder
+
+    recorder = LLMUsageRecorder()
+    recorder.record(
+        request_kind="business", backend="codex", status="success",
+        payload=None, duration_ms=999,
+    )
+
+    class Analyzer:
+        usage_recorder = recorder
+
+        def request_function(self, prompt, *, function_spec):
+            recorder.record(
+                request_kind="support_report", backend="codex",
+                status="success", payload=None, duration_ms=5,
+            )
+            return _valid_analysis()
+
+    reference = generate_support_report(
+        result=_result(tmp_path), run_mode="personal",
+        config=RuntimeConfig(data_root=tmp_path / "data"),
+        cwd=REPO_ROOT, elapsed_ms=100,
+        analyzer_bundle=AnalyzerBundle(
+            primary=Analyzer(), fallback=None, primary_kind="codex",
+            online_request_retry_limit=0,
+        ), environment=SAFE_ENVIRONMENT,
+    )
+    assert reference.status == "generated_with_llm"
+    assert reference.analysis_summary["model_request_count"] == 1
+    assert reference.analysis_summary["model_failed_request_count"] == 0
+    assert reference.analysis_summary["attempt_count"] == 1
+    assert reference.failure_code == ""
+
+
+def test_shared_primary_fallback_recorder_counts_each_diagnostic_request_once(tmp_path):
+    from src.worktrace.llm_usage import LLMUsageRecorder
+
+    recorder = LLMUsageRecorder()
+    recorder.record("business", None, backend="codex", status="success")
+
+    class Analyzer(QueueAnalyzer):
+        usage_recorder = recorder
+
+        def request_function(self, prompt, *, function_spec):
+            status = "failed" if isinstance(self.responses[0], Exception) else "success"
+            recorder.record("support_report", None, backend="codex", status=status)
+            return super().request_function(prompt, function_spec=function_spec)
+
+    reference = generate_support_report(
+        result=_result(tmp_path), run_mode="personal", cwd=REPO_ROOT,
+        config=RuntimeConfig(data_root=tmp_path / "data"), elapsed_ms=100,
+        environment=SAFE_ENVIRONMENT,
+        analyzer_bundle=AnalyzerBundle(
+            primary=Analyzer([RetryableAnalyzerProtocolError("Request timed out.")]),
+            fallback=Analyzer([_valid_analysis()]), primary_kind="codex",
+            online_request_retry_limit=0,
+        ),
+    )
+    assert reference.status == "generated_with_llm"
+    assert reference.failure_code == ""
+    assert reference.analysis_summary["attempt_count"] == 2
+    assert reference.analysis_summary["fallback_attempt_count"] == 1
+    assert reference.analysis_summary["request_failure_count"] == 1
+    assert reference.analysis_summary["model_request_count"] == 2
+    assert reference.analysis_summary["model_failed_request_count"] == 1
+
+
+def test_report_write_failure_preserves_analysis_statistics(tmp_path, monkeypatch):
+    def fail_write(*args, **kwargs):
+        raise OSError("private /Users/alice sk_private_value")
+
+    monkeypatch.setattr("src.worktrace.support_report._write_support_report", fail_write)
+    reference = generate_support_report(
+        result=_result(tmp_path), run_mode="personal",
+        config=RuntimeConfig(data_root=tmp_path / "data"), cwd=REPO_ROOT,
+        elapsed_ms=100, environment=SAFE_ENVIRONMENT,
+        analyzer_bundle=AnalyzerBundle(
+            primary=QueueAnalyzer([_valid_analysis()]), fallback=None,
+            primary_kind="codex", online_request_retry_limit=0,
+        ),
+    )
+    assert reference.status == "failed"
+    assert reference.failure_code == "report_generation_failed"
+    assert reference.llm_status == "success"
+    assert reference.analysis_summary["attempt_count"] == 1
+    assert "sk_private_value" not in json.dumps(reference.to_dict())
+
+
+@pytest.mark.parametrize("error", [
+    RetryableAnalyzerProtocolError("Codex did not return valid JSON."),
+    RetryableAnalyzerProtocolError("Online LLM returned invalid JSON."),
+    AnalyzerProtocolError("Invalid Function Calling result."),
+    RetryableAnalyzerProtocolError("Codex JSON event stream is invalid at line 1."),
+    RetryableAnalyzerProtocolError("Codex JSON event stream has a non-object at line 1."),
+    RetryableAnalyzerProtocolError("Codex JSON event stream is empty."),
+    RetryableAnalyzerProtocolError("Codex output is empty."),
+    RetryableAnalyzerProtocolError("Online LLM Function call did not contain arguments."),
+    RetryableAnalyzerProtocolError("Online LLM Function arguments were not valid JSON."),
+    RetryableAnalyzerProtocolError("Online LLM response did not contain a Function call."),
+    RetryableAnalyzerProtocolError("Online LLM called an unexpected Function."),
+])
+def test_invalid_json_is_response_failure_without_changing_retry_policy(tmp_path, error):
+    retryable = isinstance(error, RetryableAnalyzerProtocolError)
+    responses = [error, error] if retryable else [error]
+    reference = generate_support_report(
+        result=_result(tmp_path), run_mode="personal",
+        config=RuntimeConfig(data_root=tmp_path / "data"), cwd=REPO_ROOT,
+        elapsed_ms=100, environment=SAFE_ENVIRONMENT,
+        analyzer_bundle=AnalyzerBundle(
+            primary=QueueAnalyzer(responses), fallback=None,
+            primary_kind="codex", online_request_retry_limit=1,
+        ),
+    )
+    assert reference.failure_code == "invalid_response"
+    assert reference.analysis_summary["attempt_count"] == len(responses)
+    assert reference.analysis_summary["request_failure_count"] == 0
+    assert reference.analysis_summary["validation_failure_count"] == len(responses)
 
 
 def test_support_report_marks_disabled_self_delivery_as_disabled(

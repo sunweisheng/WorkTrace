@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import sys
 from pathlib import Path
 from zoneinfo import ZoneInfo, reset_tzpath
 
@@ -329,7 +330,7 @@ def test_run_subprocess_supports_stdin_input(tmp_path: Path) -> None:
     )
 
     result = __import__("src.worktrace.preflight", fromlist=["run_subprocess"]).run_subprocess(
-        ("python3", str(script)),
+        (sys.executable, str(script)),
         input_text="hello",
     )
 

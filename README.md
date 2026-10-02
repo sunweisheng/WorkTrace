@@ -555,7 +555,7 @@ python3 -m src.worktrace.cli --preflight
 
 ## 调试与排障
 
-普通用户优先直接让 Codex 执行调试模式。个人日报和多人汇总都会在原有 trace 之外生成一个安全诊断 Markdown，路径由 CLI JSON 的 `support_report.path` 返回。CLI 还会返回 `support_report.status`、`llm_status`、`privacy_check` 和 `schema_version`：
+普通用户优先直接让 Codex 执行调试模式。个人日报和多人汇总都会在原有 trace 之外生成一个安全诊断 Markdown，路径由 CLI JSON 的 `support_report.path` 返回。CLI 还会返回 `support_report.status`、`llm_status`、`privacy_check`、`schema_version`、`failure_code` 和 `analysis_summary`：
 
 - `generated_with_llm`：Python 统计、大模型分析和隐私检查都已完成，可以只发送该 Markdown
 - `generated_after_llm_failure`：基础 Markdown 可以发送，但大模型分析未完成
@@ -563,6 +563,8 @@ python3 -m src.worktrace.cli --preflight
 - `failed`：报告没有生成成功；不能把这次结果说成已有安全报告，也不要发送原始 trace
 
 诊断报告只在有效参数和运行配置已成功加载后附加到个人或多人运行。非法日期会返回未执行报告的 `blocked` 状态；非法模式或配置文件加载异常可能在进入运行分支前退出，不能承诺已有安全报告。单独 `--preflight` 或 `sync-reaction-catalog` 不附加报告，即使同时传入 `--debug-output`。
+
+诊断整理会单独记录分析尝试、模型请求、失败、备用尝试和耗时；日报业务调用统计不包含这些后续调用。`failure_code` 区分调用未完成（`request_failed`）、返回无效（`invalid_response`）、结论与 Python 事实冲突（`fact_conflict`）、隐私检查阻止（`privacy_blocked`）和报告生成失败（`report_generation_failed`）。没有模型请求记录时显示“未采集”，不以分析尝试次数代替网络请求数。异常原文不进入安全报告。
 
 报告生成失败不会改变个人日报或多人汇总原本的退出状态。不开启 `--debug-output` 时不生成诊断报告；调试模式不生成 ZIP，也不生成报告 JSON 文件。
 

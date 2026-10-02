@@ -10,6 +10,8 @@ permissions:
 jobs:
   windows:
     runs-on: windows-latest
+    env:
+      PYTHONUTF8: '0'
     strategy:
       matrix:
         python-version: ['3.11', '3.12']
@@ -40,8 +42,13 @@ jobs:
           tests/unit/test_commands.py
           tests/unit/test_codex_analyzer.py
           tests/unit/test_codex_config_import.py
+          tests/unit/test_config.py
           tests/unit/test_preflight.py
           tests/unit/test_full_preflight.py
           tests/unit/test_runtime_progress.py
+          tests/unit/test_llm_modes.py
+          tests/unit/test_personal_render_accuracy.py
+          tests/unit/test_benchmark_hook_vs_codex.py
+          tests/unit/test_support_report.py
           tests/unit/test_docs_contract.py
           --tb=short --show-capture=no

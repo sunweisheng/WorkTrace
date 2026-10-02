@@ -359,6 +359,7 @@ def _attach_support_report(
             path=None,
             llm_status="failed",
             privacy_check="not_run",
+            failure_code="report_generation_failed",
         )
     return replace(result, support_report=reference)
 

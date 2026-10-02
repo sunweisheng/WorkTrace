@@ -534,6 +534,8 @@ def test_cli_support_report_failure_does_not_change_run_exit_status(
     assert exit_code == 0
     assert payload["status"] == DailyRunStatus.SUCCESS.value
     assert payload["support_report"] == {
+        "failure_code": "report_generation_failed",
+        "analysis_summary": {},
         "status": "failed",
         "path": None,
         "llm_status": "failed",

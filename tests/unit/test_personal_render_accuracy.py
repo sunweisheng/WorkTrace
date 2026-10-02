@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from src.worktrace.analyzers.protocol import parse_personal_group_render_payload
+from src.worktrace.analyzers.prompts import build_personal_group_render_prompt
 from src.worktrace.config import RuntimeConfig, load_runtime_config_overrides
 from src.worktrace.errors import AnalyzerProtocolError
 from src.worktrace.factories import RuntimeDependencies
@@ -73,12 +74,17 @@ def _payload(*, supported: bool = True) -> dict:
         "supported": supported,
         "fact_items": [
             {"field": field, "text": text,
-             "evidence_message_ids": evidence}
+             "evidence_message_ids": evidence,
+             "actor": "self" if "m_self" in evidence else "other",
+             "self_action_indices": [0] if "m_self" in evidence else []}
             for field, text, evidence in facts
         ] if supported else [],
         "self_relations": [{
             "relation": "response_only",
             "evidence_message_ids": ["m_self"],
+        }] if supported else [],
+        "self_actions": [{
+            "kind": "receipt", "evidence_message_ids": ["m_self"],
         }] if supported else [],
         "removed_claims": [] if supported else [
             "仅查询原则释义，没有明确业务动作或结果。",
@@ -92,6 +98,10 @@ def _parse(payload: dict):
         allowed_self_relations=tuple(
             item.key for item in CONFIG.self_relation_types
         ),
+        action_relation_support={
+            item.key: item.supported_relations
+            for item in CONFIG.retention_policy.contribution_actions
+        },
     )
 
 
@@ -107,6 +117,90 @@ def test_final_render_corrects_retention_role_and_action_together():
     assert drafts[0].retention_detail == "同事交付报告，本人确认接收。"
     assert drafts[0].self_relations == ["response_only"]
     assert drafts[0].action_labels == ["确认报告接收"]
+
+
+@pytest.mark.parametrize("kind", ["receipt", "forwarding", "uncertain"])
+def test_final_render_rejects_primary_role_for_non_execution_action(kind):
+    payload = _payload()
+    rendered = payload["groups"][0]
+    rendered["self_actions"][0]["kind"] = kind
+    rendered["self_relations"][0]["relation"] = "primary_execution"
+    with pytest.raises(AnalyzerProtocolError, match="action.*relation"):
+        _parse(payload)
+
+
+def test_final_render_rejects_self_claim_without_action():
+    payload = _payload()
+    payload["groups"][0]["fact_items"][1]["self_action_indices"] = []
+    with pytest.raises(AnalyzerProtocolError, match="self.*action"):
+        _parse(payload)
+
+
+@pytest.mark.parametrize("kind", ["execution", "commitment"])
+def test_final_render_keeps_primary_role_with_execution_evidence(kind):
+    payload = _payload()
+    payload["groups"][0]["self_actions"][0]["kind"] = kind
+    payload["groups"][0]["self_relations"][0]["relation"] = "primary_execution"
+    result = _parse(payload)
+    assert result.groups[0].self_relations[0].relation == "primary_execution"
+
+
+def _message(message_id, text, *, conversation="c1", minute=0):
+    return NormalizedMessage(
+        conversation_id=conversation, conversation_name="业务沟通",
+        message_id=message_id, sender_open_id=message_id,
+        sender_name=message_id, send_time=f"2026-07-15T10:{minute:02d}:00+08:00",
+        message_type="text", text=text,
+        reply_to_message_id=None, quote_message_id=None,
+    )
+
+
+def _slice(messages):
+    return ConversationSlice(
+        slice_id="s1", conversation_id="c1", conversation_name="业务沟通",
+        anchor_message_ids=["m_self"], in_day_message_ids=[m.message_id for m in messages],
+        messages=messages,
+    )
+
+
+@pytest.mark.parametrize("earlier, later, conversation, expected", [
+    ("本批核查数据\r\n已完成。", "本批核查数据\n已完成。", "c1", True),
+    ("", "", "c1", False),
+    ("本批核查数据已完成。", "本批核查数据已完成。", "c2", False),
+    ("很长的原文" * 3000 + "甲", "很长的原文" * 3000 + "乙", "c1", False),
+], ids=["same_full_body", "empty_attachments", "different_chat", "different_tail"])
+def test_final_review_adds_only_same_conversation_full_text_context(
+    earlier, later, conversation, expected,
+):
+    data = json.loads(build_personal_group_render_prompt(
+        "2026-07-15", group=GROUP, candidates=[_candidate()], config=CONFIG,
+        messages=[
+            _message("m_original", earlier, conversation=conversation),
+            _message("m_other", "数据交付"),
+            _message("m_self", later, minute=2),
+        ],
+        conversation_slices=[_slice([
+            _message("m_original", earlier, conversation=conversation),
+            _message("m_self", later, minute=2),
+        ])],
+    ))
+    ids = [item["id"] for item in data["messages"]]
+    assert ("m_original" in ids) == expected
+    assert data["same_text_messages"] == ([{
+        "earlier_message_id": "m_original", "later_message_id": "m_self",
+    }] if expected else [])
+
+
+def test_duplicate_context_does_not_include_unrelated_old_acknowledgements():
+    old = [_message(f"old-{i}", "收到") for i in range(100)]
+    messages = [*old, _message("m_other", "报告已交付", minute=1),
+                _message("m_self", "收到", minute=2)]
+    data = json.loads(build_personal_group_render_prompt(
+        "2026-07-15", group=GROUP, candidates=[_candidate()], config=CONFIG,
+        messages=messages, conversation_slices=[_slice(messages[-2:])],
+    ))
+    assert [item["id"] for item in data["messages"]] == ["m_other", "m_self"]
+    assert data["same_text_messages"] == []
 
 
 def test_final_render_can_drop_knowledge_query_without_forcing_a_reason():
@@ -215,6 +309,10 @@ def test_final_render_preserves_separate_self_evidence_in_event_sources():
     candidate = replace(_candidate(), source_message_ids=["m_other"])
     result = parse_personal_group_render_payload(
         _payload(), group=GROUP, candidates=[candidate],
+        action_relation_support={
+            item.key: item.supported_relations
+            for item in CONFIG.retention_policy.contribution_actions
+        },
         allowed_self_relations=tuple(
             item.key for item in CONFIG.self_relation_types
         ),
@@ -226,6 +324,142 @@ def test_final_render_preserves_separate_self_evidence_in_event_sources():
     )
     assert drafts[0].source_message_ids == ["m_other", "m_self"]
     assert drafts[0].self_relations == ["response_only"]
+
+
+@pytest.mark.parametrize("valid_fallback", [False, True])
+def test_final_review_checks_actions_on_primary_and_fallback(tmp_path, valid_fallback):
+    class Analyzer:
+        def request_function(self, prompt, **kwargs):
+            invalid = _payload()
+            invalid["groups"][0]["self_relations"][0]["relation"] = "primary_execution"
+            return invalid
+
+        def last_request_used_fallback(self):
+            return False
+
+        def fallback_current_request(self, method_name, prompt, **kwargs):
+            return _payload() if valid_fallback else self.request_function(prompt)
+
+    config = replace(CONFIG, data_root=tmp_path)
+    runner = DailyTraceRunner(config, RuntimeDependencies(
+        chat_source=object(), content_resolver=object(), analyzer=Analyzer(),
+        delivery_channel=object(), event_store=MarkdownEventStore(config),
+    ))
+    outcome = runner._render_personal_multi_groups(
+        target_date="2026-07-15", groups=[GROUP], candidates=[_candidate()],
+    )
+    assert outcome.failure_count == (0 if valid_fallback else 1)
+    if valid_fallback:
+        assert outcome.rendered_groups["g1"].self_relations[0].relation == "response_only"
+    else:
+        assert outcome.rendered_groups == {}
+
+
+def test_repeated_body_context_reaches_schema_parser_and_materialized_sources(tmp_path):
+    payload = _payload()
+    payload["groups"][0]["self_actions"][0]["kind"] = "forwarding"
+    payload["groups"][0]["fact_items"][1]["evidence_message_ids"].append("m_original")
+
+    class Analyzer:
+        def request_function(self, prompt, *, function_spec, **kwargs):
+            data = json.loads(prompt)
+            assert data["same_text_messages"] == [{
+                "earlier_message_id": "m_original", "later_message_id": "m_self",
+            }]
+            fields = function_spec.parameters["properties"]["groups"]["items"]["properties"]
+            fact_properties = fields["fact_items"]["items"]["properties"]
+            fact_ids = fact_properties["evidence_message_ids"]["items"]["enum"]
+            assert "m_original" in fact_ids
+            action_properties = fields["self_actions"]["items"]["properties"]
+            action_ids = action_properties["evidence_message_ids"]["items"]["enum"]
+            assert action_ids == ["m_self"]
+            return payload
+
+    config = replace(CONFIG, data_root=tmp_path)
+    runner = DailyTraceRunner(config, RuntimeDependencies(
+        chat_source=object(), content_resolver=object(), analyzer=Analyzer(),
+        delivery_channel=object(), event_store=MarkdownEventStore(config),
+    ))
+    candidate = _candidate()
+    outcome = runner._render_personal_multi_groups(
+        target_date="2026-07-15", groups=[GROUP], candidates=[candidate],
+        messages=[_message("m_original", "本批数据已核查"),
+                  _message("m_other", "附件已经交付", minute=1),
+                  _message("m_self", "本批数据已核查", minute=2)],
+        conversation_slices=[_slice([
+            _message("m_original", "本批数据已核查"),
+            _message("m_other", "附件已经交付", minute=1),
+            _message("m_self", "本批数据已核查", minute=2),
+        ])],
+    )
+    assert outcome.failure_count == 0
+    drafts = materialize_grouped_merged_drafts(
+        [candidate], [GROUP], target_date="2026-07-15",
+        message_order=["m_original", "m_other", "m_self"],
+        rendered_groups=outcome.rendered_groups,
+    )
+    assert drafts[0].source_message_ids == ["m_original", "m_other", "m_self"]
+    assert drafts[0].self_relations == ["response_only"]
+
+
+def test_forwarding_does_not_cancel_independent_execution_evidence():
+    payload = _payload()
+    item = payload["groups"][0]
+    item["self_actions"] = [
+        {"kind": "forwarding", "evidence_message_ids": ["m_self"]},
+        {"kind": "execution", "evidence_message_ids": ["m_execute"]},
+    ]
+    item["self_relations"] = [{
+        "relation": "primary_execution", "evidence_message_ids": ["m_execute"],
+    }, {
+        "relation": "response_only", "evidence_message_ids": ["m_self"],
+    }]
+    item["fact_items"][1].update({
+        "text": "同事提供数据，本人完成核查并再次发送数据。",
+        "actor": "shared", "self_action_indices": [0, 1],
+        "evidence_message_ids": ["m_other", "m_self", "m_execute"],
+    })
+    candidate = replace(_candidate(), self_evidence_message_ids=["m_self", "m_execute"])
+    result = parse_personal_group_render_payload(
+        payload, group=GROUP, candidates=[candidate],
+        allowed_self_relations=[item.key for item in CONFIG.self_relation_types],
+        action_relation_support={item.key: item.supported_relations
+                                 for item in CONFIG.retention_policy.contribution_actions},
+    )
+    assert result.groups[0].self_relations[0].relation == "primary_execution"
+
+
+def test_execution_claim_cannot_keep_only_a_receipt_role():
+    payload = _payload()
+    item = payload["groups"][0]
+    item["self_actions"].append({
+        "kind": "execution", "evidence_message_ids": ["m_self"],
+    })
+    item["fact_items"][1]["self_action_indices"] = [0, 1]
+    with pytest.raises(AnalyzerProtocolError, match="action.*relation"):
+        _parse(payload)
+
+
+def test_personal_action_label_cannot_only_describe_other_peoples_work():
+    payload = _payload()
+    payload["groups"][0]["fact_items"][3].update({
+        "text": "完成数据汇总及报告交付", "actor": "other",
+        "self_action_indices": [], "evidence_message_ids": ["m_other"],
+    })
+    with pytest.raises(AnalyzerProtocolError, match="action_label.*self action"):
+        _parse(payload)
+
+
+def test_personal_action_label_must_reference_a_known_action():
+    payload = _payload()
+    item = payload["groups"][0]
+    item["self_actions"].append({
+        "kind": "uncertain", "evidence_message_ids": ["m_self"],
+    })
+    item["fact_items"][1]["self_action_indices"] = [0, 1]
+    item["fact_items"][3]["self_action_indices"] = [1]
+    with pytest.raises(AnalyzerProtocolError, match="action_label.*self action"):
+        _parse(payload)
 
 
 def test_failed_final_review_cannot_materialize_unreviewed_metadata():
@@ -304,9 +538,9 @@ def test_legacy_analysis_checkpoint_without_evidence_is_not_reused(tmp_path):
     )
     store.save_analysis(batch, [], [], 0)
     path = next(tmp_path.rglob("analysis/*.json"))
-    payload = json.loads(path.read_text())
+    payload = json.loads(path.read_text(encoding="utf-8"))
     payload["result"].pop("evidence_slices", None)
-    path.write_text(json.dumps(payload))
+    path.write_text(json.dumps(payload), encoding="utf-8")
     assert store.load_analysis(batch) is None
 
 
@@ -319,7 +553,7 @@ def test_legacy_v3_duplicate_files_do_not_hide_actual_manual_edits(
     fixture = Path(__file__).parents[1] / "fixtures" / (
         "personal_duplicate_files_v3.md"
     )
-    markdown = fixture.read_text()
+    markdown = fixture.read_text(encoding="utf-8")
     if not has_provenance:
         markdown = markdown.replace('"sha256:' + "a" * 64 + '"', "")
     if changed:

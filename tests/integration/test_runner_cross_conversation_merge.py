@@ -631,6 +631,7 @@ def test_personal_group_render_rewrites_locked_multi_group_content(
             return {
                 "groups": [
                     {
+                        "self_actions": [],
                         "supported": True,
                         "self_relations": [],
                         "removed_claims": [],
@@ -638,21 +639,25 @@ def test_personal_group_render_rewrites_locked_multi_group_content(
                         "covered_draft_ids": ["d1", "d2"],
                         "fact_items": [
                             {
+                                "actor": "context", "self_action_indices": [],
                                 "field": "topic",
                                 "text": "事项需求推进与成果交付",
                                 "evidence_message_ids": ["m1", "m2"],
                             },
                             {
+                                "actor": "context", "self_action_indices": [],
                                 "field": "content",
                                 "text": "先确认事项需求。",
                                 "evidence_message_ids": ["m1"],
                             },
                             {
+                                "actor": "context", "self_action_indices": [],
                                 "field": "content",
                                 "text": "随后完成成果交付。",
                                 "evidence_message_ids": ["m2"],
                             },
                             {
+                                "actor": "context", "self_action_indices": [],
                                 "field": "object_hint",
                                 "text": "事项需求及交付成果",
                                 "evidence_message_ids": ["m1", "m2"],
@@ -710,6 +715,7 @@ def test_personal_group_render_rewrites_locked_singleton_content(
             return {
                 "groups": [
                     {
+                        "self_actions": [],
                         "supported": True,
                         "self_relations": [],
                         "removed_claims": [],
@@ -717,16 +723,19 @@ def test_personal_group_render_rewrites_locked_singleton_content(
                         "covered_draft_ids": ["d1"],
                         "fact_items": [
                             {
+                                "actor": "context", "self_action_indices": [],
                                 "field": "topic",
                                 "text": "事项背景、处理过程及后续安排",
                                 "evidence_message_ids": ["m1"],
                             },
                             {
+                                "actor": "context", "self_action_indices": [],
                                 "field": "content",
                                 "text": "事项由明确需求触发，已完成处理并形成后续安排。",
                                 "evidence_message_ids": ["m1"],
                             },
                             {
+                                "actor": "context", "self_action_indices": [],
                                 "field": "object_hint",
                                 "text": "事项需求及后续安排",
                                 "evidence_message_ids": ["m1"],
@@ -792,6 +801,7 @@ def test_personal_group_render_rewrites_singleton_and_multi_groups(
             return {
                 "groups": [
                     {
+                        "self_actions": [],
                         "supported": True,
                         "self_relations": [],
                         "removed_claims": [],
@@ -799,12 +809,14 @@ def test_personal_group_render_rewrites_singleton_and_multi_groups(
                         "covered_draft_ids": locked_group["draft_ids"],
                         "fact_items": [
                             {
+                                "actor": "context", "self_action_indices": [],
                                 "field": "topic",
                                 "text": f"完整标题 {group_id}",
                                 "evidence_message_ids": evidence_ids,
                             },
                             *[
                                 {
+                                    "actor": "context", "self_action_indices": [],
                                     "field": "content",
                                     "text": f"完整内容 {member['draft_id']}。",
                                     "evidence_message_ids": member[
@@ -814,6 +826,7 @@ def test_personal_group_render_rewrites_singleton_and_multi_groups(
                                 for member in members
                             ],
                             {
+                                "actor": "context", "self_action_indices": [],
                                 "field": "object_hint",
                                 "text": f"完整对象 {group_id}",
                                 "evidence_message_ids": evidence_ids,
@@ -869,6 +882,7 @@ def test_personal_group_render_failure_blocks_unreviewed_content(
             return {
                 "groups": [
                     {
+                        "self_actions": [],
                         "supported": True,
                         "self_relations": [],
                         "removed_claims": [],
@@ -876,16 +890,19 @@ def test_personal_group_render_failure_blocks_unreviewed_content(
                         "covered_draft_ids": ["d1", "d2"],
                         "fact_items": [
                             {
+                                "actor": "context", "self_action_indices": [],
                                 "field": "topic",
                                 "text": "不完整标题",
                                 "evidence_message_ids": ["m1"],
                             },
                             {
+                                "actor": "context", "self_action_indices": [],
                                 "field": "content",
                                 "text": "只覆盖第一个候选。",
                                 "evidence_message_ids": ["m1"],
                             },
                             {
+                                "actor": "context", "self_action_indices": [],
                                 "field": "object_hint",
                                 "text": "不完整对象",
                                 "evidence_message_ids": ["m1"],
@@ -943,6 +960,7 @@ def test_personal_singleton_render_rejects_unknown_message_evidence(
             return {
                 "groups": [
                     {
+                        "self_actions": [],
                         "supported": True,
                         "self_relations": [],
                         "removed_claims": [],
@@ -950,16 +968,19 @@ def test_personal_singleton_render_rejects_unknown_message_evidence(
                         "covered_draft_ids": ["d1"],
                         "fact_items": [
                             {
+                                "actor": "context", "self_action_indices": [],
                                 "field": "topic",
                                 "text": "完整事项",
                                 "evidence_message_ids": ["unknown-message"],
                             },
                             {
+                                "actor": "context", "self_action_indices": [],
                                 "field": "content",
                                 "text": "完整处理过程。",
                                 "evidence_message_ids": ["unknown-message"],
                             },
                             {
+                                "actor": "context", "self_action_indices": [],
                                 "field": "object_hint",
                                 "text": "具体事项",
                                 "evidence_message_ids": ["unknown-message"],
@@ -1008,6 +1029,7 @@ def test_personal_render_failure_preserves_other_review_results(
             return {
                 "groups": [
                     {
+                        "self_actions": [],
                         "supported": True,
                         "self_relations": [],
                         "removed_claims": [],
@@ -1015,16 +1037,19 @@ def test_personal_render_failure_preserves_other_review_results(
                         "covered_draft_ids": locked_group["draft_ids"],
                         "fact_items": [
                             {
+                                "actor": "context", "self_action_indices": [],
                                 "field": "topic",
                                 "text": "第二项完整标题",
                                 "evidence_message_ids": member["source_message_ids"],
                             },
                             {
+                                "actor": "context", "self_action_indices": [],
                                 "field": "content",
                                 "text": "第二项完整正文。",
                                 "evidence_message_ids": member["source_message_ids"],
                             },
                             {
+                                "actor": "context", "self_action_indices": [],
                                 "field": "object_hint",
                                 "text": "第二项具体对象",
                                 "evidence_message_ids": member["source_message_ids"],

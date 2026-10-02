@@ -241,5 +241,81 @@
     "任务",
     "相关工作",
     "相关事项"
+  ],
+  "contribution_actions": [
+    {
+      "key": "execution",
+      "description": "本人实际执行、制作或完成具体工作，有直接证据；收到、转发或原样再次发送他人成果不属于执行。",
+      "supported_relations": [
+        "primary_execution",
+        "collaboration"
+      ]
+    },
+    {
+      "key": "commitment",
+      "description": "本人明确承担具体任务；不能据此写成已经完成。",
+      "supported_relations": [
+        "primary_execution",
+        "assigned"
+      ]
+    },
+    {
+      "key": "collaboration",
+      "description": "本人提供具体协作、修改意见或工作讨论，不能据此声称独立完成。",
+      "supported_relations": [
+        "collaboration",
+        "response_only"
+      ]
+    },
+    {
+      "key": "initiation",
+      "description": "本人提出并发起具体工作事项。",
+      "supported_relations": [
+        "initiated"
+      ]
+    },
+    {
+      "key": "decision",
+      "description": "本人作出有具体对象和结论的决定。",
+      "supported_relations": [
+        "decision_confirmation"
+      ]
+    },
+    {
+      "key": "acceptance",
+      "description": "本人核查成果并提供有内容的验收反馈；简单回复收到不属于实质验收。",
+      "supported_relations": [
+        "feedback_acceptance"
+      ]
+    },
+    {
+      "key": "receipt",
+      "description": "本人确认收到信息、数据或附件，不能证明本人制作或完成交付。",
+      "supported_relations": [
+        "response_only"
+      ]
+    },
+    {
+      "key": "forwarding",
+      "description": "本人转发或原样再次发送他人成果，不能证明本人完成成果。",
+      "supported_relations": [
+        "response_only"
+      ]
+    },
+    {
+      "key": "uncertain",
+      "description": "原消息不能确认本人具体做了什么，不补写执行贡献。",
+      "supported_relations": []
+    }
+  ],
+  "contribution_rules": [
+    "先根据原消息填写 self_actions，再写 fact_items 和 self_relations；不要由候选摘要反推本人贡献。",
+    "本人只接收或转发，不等于整条事件没有业务价值。若同事直接向本人反馈已经完成的具体核查、明确结论或交付具体成果，保留同事完成的业务事实，action_label 写本人接收或转发，self_relations 使用 response_only；不能只因本人没有执行就返回 supported=false。",
+    "每个 fact_item 都填写 actor（self、other、shared、context 或 uncertain）和 self_action_indices（从 0 开始）；self 或 shared 必须引用动作，其余主体不引用本人动作。",
+    "正文、动作、保留依据涉及本人时必须引用同一份 self_actions，文字与动作含义一致；接收确认和转发不能写成本人制作、汇总或完成交付；action_label 必须概括本人实际动作并引用本人动作，不能仅写他人的执行成果。",
+    "self_relations 只能采用相应动作 supported_relations 允许的参与方式，并引用支持该动作的本人消息；每个有允许参与方式的动作至少应有一项对应角色，不能正文声明执行却只写接收回应；主责执行必须有实际执行或明确承担任务的直接证据。",
+    "same_text_messages 仅说明同会话原始非空完整正文相同，不能单独证明原创作者或机械降低贡献；结合较早消息、发送者及独立执行证据判断。",
+    "他人先发送数据，本人回复收到后再次发送相同数据：若无独立执行证据，应写他人提供数据、本人确认并再次发送，不写本人完成汇总或主责执行。",
+    "本人明确说明已经完成核查并列出具体修正结果，即使后来再次发送相同正文，也可据该独立证据保留实际执行；仅说我来处理只能写承担任务。"
   ]
 }

@@ -138,6 +138,13 @@ DEFAULT_COLLECTED_GROUP_REASON_DEFINITIONS = (
 
 
 @dataclass(frozen=True)
+class ContributionActionDefinition:
+    key: str
+    description: str
+    supported_relations: tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class RetentionPolicyConfig:
     review_enabled: bool = False
     review_retention_reasons: tuple[str, ...] = ()
@@ -163,6 +170,8 @@ class RetentionPolicyConfig:
     administrative_approval_keywords: tuple[str, ...] = ()
     substantive_work_keywords: tuple[str, ...] = ()
     repeated_low_information_suffixes: tuple[str, ...] = ()
+    contribution_actions: tuple[ContributionActionDefinition, ...] = ()
+    contribution_rules: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -618,8 +627,8 @@ def _load_supporting_config_overrides(
     *,
     base_dir: Path,
 ) -> RuntimeConfig:
-    config = _load_retention_policy_overrides(config, base_dir=base_dir)
     config = _load_event_metadata_overrides(config, base_dir=base_dir)
+    config = _load_retention_policy_overrides(config, base_dir=base_dir)
     config = _load_conversation_window_overrides(config, base_dir=base_dir)
     config = _load_llm_retry_overrides(config, base_dir=base_dir)
     config = _load_event_grouping_overrides(config, base_dir=base_dir)
@@ -846,6 +855,7 @@ def _load_retention_policy_overrides(
         "administrative_approval_keywords",
         "substantive_work_keywords",
         "repeated_low_information_suffixes",
+        "contribution_actions", "contribution_rules",
     }
     unexpected = sorted(set(payload).difference(expected_keys))
     missing = sorted(expected_keys.difference(payload))
@@ -856,7 +866,8 @@ def _load_retention_policy_overrides(
         if missing:
             details.append(f"missing keys {', '.join(missing)}")
         raise ValueError(
-            "Invalid retention policy config: " + "; ".join(details) + "."
+            "Invalid retention policy config: " + "; ".join(details)
+            + ". Update config/retention_policy.json from the installed release."
         )
 
     review = payload["review"]
@@ -929,6 +940,12 @@ def _load_retention_policy_overrides(
         )
 
     policy = RetentionPolicyConfig(
+        contribution_actions=_read_contribution_actions(
+            payload["contribution_actions"], config=config,
+        ),
+        contribution_rules=_read_retention_policy_list(
+            payload, "contribution_rules", config_path
+        ),
         review_enabled=review["enabled"],
         review_retention_reasons=_read_string_list(
             review,
@@ -1006,6 +1023,11 @@ def _load_retention_policy_overrides(
             payload, "repeated_low_information_suffixes", config_path
         ),
     )
+    if not policy.contribution_actions or not policy.contribution_rules:
+        raise ValueError(
+            "Invalid retention policy config: contribution actions and rules "
+            "cannot be empty. Update config/retention_policy.json."
+        )
     if not policy.review_retention_reasons:
         raise ValueError(
             "Invalid retention policy config: review retention_reasons cannot be empty."
@@ -1023,6 +1045,36 @@ def _load_retention_policy_overrides(
             "Invalid retention policy config: enabled fact review requires rules and risk signals."
         )
     return replace(config, retention_policy=policy)
+
+
+def _read_contribution_actions(
+    raw_value: object, *, config: RuntimeConfig,
+) -> tuple[ContributionActionDefinition, ...]:
+    if not isinstance(raw_value, list):
+        raise ValueError("Contribution actions must be a list.")
+    result: list[ContributionActionDefinition] = []
+    seen: set[str] = set()
+    relation_keys = {item.key for item in config.self_relation_types}
+    for item in raw_value:
+        if not isinstance(item, dict) or set(item) != {
+            "key", "description", "supported_relations",
+        }:
+            raise ValueError("Invalid contribution action fields.")
+        key = item["key"]
+        description = item["description"]
+        relations = item["supported_relations"]
+        if (not isinstance(key, str) or not key.strip() or key in seen
+                or not isinstance(description, str) or not description.strip()
+                or not isinstance(relations, list)
+                or any(not isinstance(value, str) for value in relations)
+                or len(relations) != len(set(relations))
+                or not set(relations).issubset(relation_keys)):
+            raise ValueError("Invalid contribution action definition.")
+        seen.add(key)
+        result.append(ContributionActionDefinition(
+            key, description, tuple(relations),
+        ))
+    return tuple(result)
 
 
 def _read_retention_policy_list(

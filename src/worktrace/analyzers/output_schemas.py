@@ -785,7 +785,28 @@ def personal_group_render_output_schema(
     unique_draft_ids = list(dict.fromkeys(draft_ids))
     unique_message_ids = list(dict.fromkeys(message_ids))
     relation_schema = _self_relations_schema(config or RuntimeConfig())
+    action_kinds = [
+        item.key
+        for item in (config or RuntimeConfig()).retention_policy.contribution_actions
+    ]
     self_ids = list(dict.fromkeys(self_message_ids or []))
+    action_schema = {
+        "type": "array",
+        "items": {
+            "type": "object",
+            "properties": {
+                "kind": {"type": "string", "enum": action_kinds},
+                "evidence_message_ids": {
+                    "type": "array", "minItems": 1, "uniqueItems": True,
+                    "items": {"type": "string", "enum": self_ids},
+                },
+            },
+            "required": ["kind", "evidence_message_ids"],
+            "additionalProperties": False,
+        },
+    }
+    if not self_ids or not action_kinds:
+        action_schema["maxItems"] = 0
     if self_ids:
         relation_schema["items"]["properties"]["evidence_message_ids"].update({
             "minItems": 1,
@@ -807,6 +828,7 @@ def personal_group_render_output_schema(
                         "group_id": {"type": "string", "enum": [group_id]},
                         "supported": {"type": "boolean"},
                         "self_relations": relation_schema,
+                        "self_actions": action_schema,
                         "removed_claims": {
                             "type": "array",
                             "items": {"type": "string", "minLength": 1},
@@ -835,6 +857,15 @@ def personal_group_render_output_schema(
                                         ],
                                     },
                                     "text": {"type": "string", "minLength": 1},
+                                    "actor": {
+                                        "type": "string",
+                                        "enum": ["self", "other", "shared",
+                                                 "context", "uncertain"],
+                                    },
+                                    "self_action_indices": {
+                                        "type": "array", "uniqueItems": True,
+                                        "items": {"type": "integer", "minimum": 0},
+                                    },
                                     "evidence_message_ids": {
                                         "type": "array",
                                         "minItems": 1,
@@ -849,6 +880,7 @@ def personal_group_render_output_schema(
                                     "field",
                                     "text",
                                     "evidence_message_ids",
+                                    "actor", "self_action_indices",
                                 ],
                                 "additionalProperties": False,
                             },
@@ -861,6 +893,7 @@ def personal_group_render_output_schema(
                         "supported",
                         "self_relations",
                         "removed_claims",
+                        "self_actions",
                     ],
                     "additionalProperties": False,
                 },
