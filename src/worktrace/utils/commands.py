@@ -13,6 +13,25 @@ _WINDOWS_LAUNCHER_COMMANDS = frozenset({"codex", "lark-cli"})
 _WINDOWS_SHELL_LAUNCHER_SUFFIXES = frozenset({".bat", ".cmd"})
 
 
+def _protect_batch_forwarding(command_line: str) -> str:
+    """Preserve mslex escapes through CMD before a batch shim forwards %*."""
+    result: list[str] = []
+    quoted = False
+    index = 0
+    while index < len(command_line):
+        char = command_line[index]
+        if char == '"':
+            quoted = not quoted
+        if not quoted and char == "^" and index + 1 < len(command_line):
+            next_char = command_line[index + 1]
+            result.append("^^^^" if next_char == "^" else "^^^" + next_char)
+            index += 2
+        else:
+            result.append(char)
+            index += 1
+    return "".join(result)
+
+
 def prepare_command_args(
     args: Sequence[str],
     *,
@@ -55,7 +74,9 @@ def prepare_command_args(
         ),
         "cmd.exe",
     )
-    command_line = mslex.join([launcher, *command[1:]], for_cmd=True)
+    command_line = _protect_batch_forwarding(
+        mslex.join([launcher, *command[1:]], for_cmd=True)
+    )
     # CMD /s removes the outer quote pair. Pass the complete command line
     # directly so subprocess does not escape its inner quotes a second time.
     return f'{subprocess.list2cmdline([comspec])} /d /s /v:off /c "{command_line}"'

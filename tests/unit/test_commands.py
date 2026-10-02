@@ -82,7 +82,7 @@ def test_run_text_command_decodes_utf8_and_replaces_invalid_bytes() -> None:
 @pytest.mark.parametrize("suffix", [".cmd", ".bat"])
 @pytest.mark.parametrize("argument", [
     "日报 文件.md", "张&李.md", "file%WT_SYNTHETIC%.md",
-    "file!WT_SYNTHETIC!.md", 'name="x&y"',
+    "file!WT_SYNTHETIC!.md", 'name="x&y"', "caret^file.md",
 ])
 def test_windows_real_script_launcher_preserves_chinese_arguments(
     tmp_path, monkeypatch, suffix, argument,
@@ -115,5 +115,21 @@ def test_windows_cmd_metacharacters_are_protected_without_double_escaping():
         os_name="nt", environ={"COMSPEC": "cmd.exe"},
         which=lambda name: r"C:\CLI\lark-cli.cmd" if name == "lark-cli" else None,
     )
-    assert '张^&李.md' in prepared
+    assert '张^^^&李.md' in prepared
     assert "/v:off" in prepared
+
+
+@pytest.mark.parametrize("argument", [
+    "张&李.md", "file%WT_SYNTHETIC%.md", "file!WT_SYNTHETIC!.md",
+    'name="x&y"', "caret^file.md", "带 空格^文件.md", "C:\\目录\\",
+])
+def test_batch_forwarding_keeps_the_next_cmd_escape_layer(argument):
+    import mslex
+
+    prepared = prepare_command_args(
+        ["codex", argument], os_name="nt", environ={"COMSPEC": "cmd.exe"},
+        which=lambda name: r"C:\中文 CLI\codex.cmd" if name == "codex" else None,
+    )
+    inner = prepared.partition(" /c ")[2][1:-1]
+    forwarded = mslex.strip_carets_like_cmd(inner)
+    assert mslex.split(forwarded, like_cmd=True) == [r"C:\中文 CLI\codex.cmd", argument]
