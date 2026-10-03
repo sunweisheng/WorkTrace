@@ -1,6 +1,6 @@
 # 个人最终核对与高推理改进验证
 
-本轮修改针对 WorkTrace 4.1.5 的个人动作、角色、证据对应失败。只修改
+本轮修改作为 WorkTrace 4.1.6 发布，针对 4.1.5 的个人动作、角色、证据对应失败。只修改
 WorkTrace；本轮记录不代表家庭或 Windows 的真实整日报已经通过。
 
 ## 行为
@@ -39,8 +39,10 @@ WorkTrace；本轮记录不代表家庭或 Windows 的真实整日报已经通�
 
 ## 待外部复测
 
-Windows CI 由远程分支推送触发。Windows 11 实机和家庭 online_only
-整日报由各自测试环境执行，分别核对跳过数量和内容准确性。
+功能提交 `be565e8` 的 [Windows CI](https://github.com/sunweisheng/WorkTrace/actions/runs/37090504579)
+已通过：Python 3.11 和 3.12 两组完整套件均无失败，使用 `PYTHONUTF8=0`。
+发布提交的 CI 记录以 Release 中的链接为准。Windows 11 实机和家庭
+`online_only` 整日报由各自测试环境执行，分别核对跳过数量和内容准确性。
 
 安装会保留旧 `.env`。现有 `.env` 或平台环境变量若显式写了 none，
 必须同步改为 `WORKTRACE_LLM_REASONING_EFFORT=high`；进程环境优先，
