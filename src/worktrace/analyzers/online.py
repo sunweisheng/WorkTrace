@@ -488,7 +488,11 @@ def _extract_stream_function_arguments_with_diagnostics(
                 expected_name=expected_name,
             )
         except RetryableAnalyzerProtocolError:
-            if not chunks_by_call:
+            response = completed_payload.get("response")
+            has_final_output = (
+                isinstance(response, dict) and "output" in response
+            ) or "output" in completed_payload
+            if has_final_output or not chunks_by_call:
                 raise
     if len(call_keys) != 1:
         raise RetryableAnalyzerProtocolError(
@@ -605,25 +609,42 @@ def _has_usage(payload: dict[str, object]) -> bool:
     return isinstance(response, dict) and isinstance(response.get("usage"), dict)
 
 
+def _online_reasoning_options(
+    effort: str | None, wire_api: str,
+) -> dict[str, object]:
+    if not effort:
+        return {}
+    if wire_api == "responses":
+        return {"reasoning": {"effort": effort}}
+    if effort == "none":
+        return {"extra_body": {"thinking": {"type": "disabled"}}}
+    return {"reasoning_effort": effort}
+
+
 def _build_responses_request_body(
     prompt: str,
     *,
     settings: OnlineLLMSettings,
     function_spec: FunctionCallSpec,
 ) -> dict[str, object]:
-    prompt = _apply_soft_no_think(function_spec.prompt_with_example(prompt))
+    prompt = prepare_model_prompt(
+        function_spec.prompt_with_example(prompt),
+        append_no_think=settings.reasoning_effort == "none",
+    )
     body: dict[str, object] = {
         "model": settings.model,
         "input": prompt,
         "stream": settings.stream_enabled,
         "tools": [function_spec.online_tool()],
-        "tool_choice": function_spec.tool_choice(),
+        "tool_choice": (
+            "auto" if settings.reasoning_effort not in {None, "none"}
+            else function_spec.tool_choice()
+        ),
         "parallel_tool_calls": False,
     }
     if settings.stream_enabled:
         body["stream_options"] = {"include_usage": True}
-    if settings.reasoning_effort == "none":
-        body["reasoning"] = {"effort": "none"}
+    body.update(_online_reasoning_options(settings.reasoning_effort, "responses"))
     return body
 
 
@@ -633,19 +654,26 @@ def _build_chat_completions_request_body(
     settings: OnlineLLMSettings,
     function_spec: FunctionCallSpec,
 ) -> dict[str, object]:
-    prompt = _apply_soft_no_think(function_spec.prompt_with_example(prompt))
+    prompt = prepare_model_prompt(
+        function_spec.prompt_with_example(prompt),
+        append_no_think=settings.reasoning_effort == "none",
+    )
     body: dict[str, object] = {
         "model": settings.model,
         "messages": [{"role": "user", "content": prompt}],
         "stream": settings.stream_enabled,
         "tools": [function_spec.chat_tool()],
-        "tool_choice": function_spec.chat_tool_choice(),
+        "tool_choice": (
+            "auto" if settings.reasoning_effort not in {None, "none"}
+            else function_spec.chat_tool_choice()
+        ),
         "parallel_tool_calls": False,
     }
     if settings.stream_enabled:
         body["stream_options"] = {"include_usage": True}
-    if settings.reasoning_effort == "none":
-        body["extra_body"] = {"thinking": {"type": "disabled"}}
+    body.update(_online_reasoning_options(
+        settings.reasoning_effort, "chat_completions",
+    ))
     return body
 
 
@@ -1284,7 +1312,7 @@ class OnlineLLMAnalyzer(Analyzer):
             )
         except AnalyzerProtocolError as exc:
             exc.request_failed = True
-            final_prompt = _apply_soft_no_think(function_spec.prompt_with_example(prompt))
+            final_prompt = function_spec.prompt_with_example(prompt)
             if settings is not None:
                 body = _build_online_function_request_body(
                     prompt,

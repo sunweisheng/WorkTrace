@@ -129,7 +129,7 @@ flowchart TD
 
 ## 8. 内容重写与 Python 物化
 
-最终成员锁定后，`_render_personal_multi_groups(...)` 虽保留旧方法名，实际对单成员和多成员组都逐事件调用 `personal_group_render`。模型用 `fact_items` 核对标题、正文、主要动作、具体对象、保留理由和保留依据，同时返回 `self_actions`、`self_relations`、`supported` 和 `removed_claims`，必须覆盖全部锁定成员。事实项用 `actor` 说明主体，用 `self_action_indices` 引用本人动作；Python 校验正文、动作、角色和证据相互一致。业务规则读取 `config/retention_policy.json` 的贡献配置，具体边界见 [详细设计](detailed-design.md)。按配置最多三路并行；技术请求、质量重试与可用备用用尽后仍失败时，整次个人生成失败，不写入或送达未经核对的报告。
+最终成员锁定后，`_render_personal_multi_groups(...)` 虽保留旧方法名，实际对单成员和多成员组都逐事件调用 `personal_group_render`。模型用 `fact_items` 核对标题、正文、主要动作、具体对象、保留理由和保留依据，同时返回 `self_actions`、`supported` 和 `removed_claims`，必须覆盖全部锁定成员。事实项用 `actor` 说明主体并引用相关证据，不再填写 `self_action_indices`。唯一角色由 Python 确定，多选角色在动作的 `relation` 内选择，直接沿用动作证据，不另填 `self_relations`。Python 合并同类角色并根据共同证据关联事实与动作；事实允许使用动作证据的相关子集。最终重试携带具体错误和上一份完整返回，Python 校验正文、动作、角色和证据相互一致。业务规则读取 `config/retention_policy.json` 的贡献配置，具体边界见 [详细设计](detailed-design.md)。按配置最多三路并行；技术请求、质量重试与可用备用用尽后仍失败时，整次个人生成失败，不写入或送达未经核对的报告。
 
 `materialize_grouped_merged_drafts(...)` 随后：
 

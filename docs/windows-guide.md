@@ -81,6 +81,32 @@ python -m src.worktrace.cli import-codex-config --apply --import-auth
 认证操作以 [OpenAI 官方认证文档](https://developers.openai.com/codex/auth)
 为依据；认证是否被目标 provider 接受，仍以实际探针为准。
 
+## 高推理设置与个人最终核对
+
+Online 默认 `high`，仅返回最终结果。安装脚本保留已有 `.env`，旧配置
+里的 `none` 会覆盖新默认值，需要在 `.env` 中改为：
+
+```dotenv
+WORKTRACE_LLM_REASONING_EFFORT=high
+```
+
+当前 PowerShell 会话若已有同名环境变量，也要同步设置：
+
+```powershell
+$env:WORKTRACE_LLM_REASONING_EFFORT = "high"
+python -m src.worktrace.cli --preflight-full
+```
+
+高推理请求不追加 `/no_think`，Responses 使用 `reasoning.effort`，
+Chat Completions 使用 `reasoning_effort`。内部推理强度与只展示最终结果
+分别控制。高推理时使用 `tool_choice=auto`，避免服务拒绝思考模式下强制
+指定函数；Python 仍只接受一次预期函数调用。探针成功不代替真实日报验收。
+
+个人最终核对不再让模型维护动作编号或重复填写角色证据。唯一角色由程序
+确定，多选角色在对应动作内选择，事实引用相关证据即可。重试携带上一份
+结果和具体错误。普通重跑保留旧日报，成功后才替换；仍未解决的事实或
+覆盖问题不会写入或发送新日报。安全诊断继续只输出类别和数量。
+
 ## 自检与错误提示
 
 ```powershell

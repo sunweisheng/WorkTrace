@@ -102,7 +102,6 @@ def run_preflight_checks(
             details["analyzer_backend"] = "online"
             details["online_fallback"] = "disabled"
             online_settings = ensure_online_runtime_config(config, cwd=cwd)
-            ensure_reasoning_disabled(online_settings.reasoning_effort)
             details["online_llm_config"] = "ok"
             details.update(probe_online_llm(config, cwd=cwd))
         else:
@@ -117,7 +116,6 @@ def run_preflight_checks(
 
             try:
                 online_settings = ensure_online_runtime_config(config, cwd=cwd)
-                ensure_reasoning_disabled(online_settings.reasoning_effort)
             except PreflightError as exc:
                 details["online_fallback"] = "disabled"
                 details["online_fallback_warning"] = str(exc)
@@ -183,7 +181,6 @@ def _run_full_preflight_checks(
 
     def online_check():
         settings = ensure_online_runtime_config(config, cwd=cwd)
-        ensure_reasoning_disabled(settings.reasoning_effort)
         details["tls_verify"] = str(settings.tls_verify).lower()
         details["certificate_verification"] = (
             "enabled" if settings.tls_verify else "disabled"
@@ -289,13 +286,6 @@ def ensure_online_runtime_config(config: RuntimeConfig, *, cwd: Path) -> OnlineL
         return load_online_llm_settings(config, cwd=cwd)
     except ValueError as exc:
         raise PreflightError(str(exc)) from exc
-
-
-def ensure_reasoning_disabled(reasoning_effort: str | None) -> None:
-    if reasoning_effort != "none":
-        raise PreflightError(
-            "WorkTrace requires WORKTRACE_LLM_REASONING_EFFORT=none in the main flow."
-        )
 
 
 def classify_codex_failure(result: CommandResult) -> str:

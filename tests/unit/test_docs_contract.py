@@ -29,7 +29,7 @@ def test_env_example_contains_required_online_llm_keys() -> None:
     assert "WORKTRACE_LLM_BASE_URL=" in content
     assert "WORKTRACE_LLM_MODEL=" in content
     assert "WORKTRACE_LLM_API_KEY=" in content
-    assert "WORKTRACE_LLM_REASONING_EFFORT=none" in content
+    assert "WORKTRACE_LLM_REASONING_EFFORT=high" in content
     assert "WORKTRACE_LLM_STREAM=false" in content
     assert "WORKTRACE_LLM_WIRE_API=responses" in content
 
@@ -450,7 +450,7 @@ def test_docs_describe_online_template_defaults_and_necessary_names() -> None:
     for content in (readme, online_usage, env_example):
         assert "WORKTRACE_LLM_TIMEOUT_SECONDS=1200" in content
         assert "WORKTRACE_LLM_STREAM=false" in content
-        assert "WORKTRACE_LLM_REASONING_EFFORT=none" in content
+        assert "WORKTRACE_LLM_REASONING_EFFORT=high" in content
     for content in (privacy, employee_guide):
         assert "参与人名单" in content
         assert "确有必要时保留姓名" in content

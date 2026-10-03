@@ -134,6 +134,7 @@ def test_final_render_validation_has_stable_error_code(change, expected_code):
     elif change == "evidence":
         group["self_actions"][0]["evidence_message_ids"] = ["m_other"]
     elif change == "role":
+        group["self_actions"][0]["kind"] = "uncertain"
         group["self_relations"][0]["relation"] = "primary_execution"
     elif change == "coverage":
         group["covered_draft_ids"] = []
@@ -161,18 +162,95 @@ def test_final_render_validation_reports_each_failure_category():
 
 
 @pytest.mark.parametrize("kind", ["receipt", "forwarding", "uncertain"])
-def test_final_render_rejects_primary_role_for_non_execution_action(kind):
+def test_final_render_never_assigns_primary_role_to_non_execution_action(kind):
     payload = _payload()
     rendered = payload["groups"][0]
     rendered["self_actions"][0]["kind"] = kind
     rendered["self_relations"][0]["relation"] = "primary_execution"
-    with pytest.raises(AnalyzerProtocolError, match=r"self_relations\[0\]"):
+    if kind == "uncertain":
+        with pytest.raises(AnalyzerProtocolError, match=r"self_relations\[0\]"):
+            _parse(payload)
+    else:
+        result = _parse(payload).groups[0]
+        assert result.self_relations == [
+            SelfRelationEvidence("response_only", ["m_self"]),
+        ]
+
+
+def test_final_render_combines_valid_evidence_for_repeated_role():
+    payload = _payload()
+    group = payload["groups"][0]
+    group["self_actions"].append({
+        "kind": "receipt", "evidence_message_ids": ["m_self_2"],
+    })
+    group["self_relations"].append({
+        "relation": "response_only", "evidence_message_ids": ["m_self_2"],
+    })
+    group["fact_items"].append({
+        "field": "content", "text": "本人再次确认接收。",
+        "evidence_message_ids": ["m_self_2"], "actor": "self",
+        "self_action_indices": [1],
+    })
+    candidate = replace(
+        _candidate(), self_evidence_message_ids=["m_self", "m_self_2"],
+    )
+
+    result = parse_personal_group_render_payload(
+        payload, group=GROUP, candidates=[candidate],
+        allowed_self_relations=tuple(
+            item.key for item in CONFIG.self_relation_types
+        ),
+        action_relation_support={
+            item.key: item.supported_relations
+            for item in CONFIG.retention_policy.contribution_actions
+        },
+    )
+
+    assert result.groups[0].self_relations == [
+        SelfRelationEvidence("response_only", ["m_self", "m_self_2"]),
+    ]
+
+
+def test_final_render_repeated_role_still_rejects_other_person_evidence():
+    payload = _payload()
+    payload["groups"][0]["self_relations"].append({
+        "relation": "response_only", "evidence_message_ids": ["m_other"],
+    })
+
+    with pytest.raises(AnalyzerProtocolError) as error:
         _parse(payload)
+
+    assert error.value.code == "render_evidence"
+
+
+def test_final_render_repeated_role_still_requires_matching_action():
+    payload = _payload()
+    payload["groups"][0]["self_relations"].append({
+        "relation": "response_only", "evidence_message_ids": ["m_self_2"],
+    })
+    candidate = replace(
+        _candidate(), self_evidence_message_ids=["m_self", "m_self_2"],
+    )
+
+    with pytest.raises(AnalyzerProtocolError) as error:
+        parse_personal_group_render_payload(
+            payload, group=GROUP, candidates=[candidate],
+            allowed_self_relations=tuple(
+                item.key for item in CONFIG.self_relation_types
+            ),
+            action_relation_support={
+                item.key: item.supported_relations
+                for item in CONFIG.retention_policy.contribution_actions
+            },
+        )
+
+    assert error.value.code == "render_role"
 
 
 def test_final_render_rejects_self_claim_without_action():
     payload = _payload()
-    payload["groups"][0]["fact_items"][1]["self_action_indices"] = []
+    payload["groups"][0]["self_actions"] = []
+    payload["groups"][0]["self_relations"] = []
     with pytest.raises(AnalyzerProtocolError, match="self.*action"):
         _parse(payload)
 
@@ -203,6 +281,7 @@ def test_final_render_identifies_fact_missing_action_evidence():
 
 def test_final_render_identifies_unsupported_relation():
     payload = _payload()
+    payload["groups"][0]["self_actions"][0]["kind"] = "collaboration"
     payload["groups"][0]["self_relations"][0]["relation"] = (
         "primary_execution"
     )
@@ -244,6 +323,7 @@ def test_final_render_identifies_action_missing_from_content():
 def test_final_render_reports_independent_relation_and_content_errors():
     payload = _payload()
     item = payload["groups"][0]
+    item["self_actions"][0]["kind"] = "uncertain"
     item["self_actions"].append({
         "kind": "execution", "evidence_message_ids": ["m_execute"],
     })
@@ -264,7 +344,6 @@ def test_final_render_reports_independent_relation_and_content_errors():
         )
     feedback = str(error.value)
     assert "self_relations[0]" in feedback
-    assert "self_actions[0]" in feedback
     assert "self_actions[1]" in feedback
     assert "content" in feedback
 
@@ -383,9 +462,9 @@ def test_final_render_sends_source_messages_and_uses_reviewed_metadata(tmp_path)
             properties = function_spec.parameters["properties"][
                 "groups"
             ]["items"]["properties"]
-            assert "self_relations" in properties
+            assert "self_relations" not in properties
             assert "supported" in properties
-            assert properties["self_relations"]["items"]["properties"][
+            assert properties["self_actions"]["items"]["properties"][
                 "evidence_message_ids"
             ]["items"]["enum"] == ["m_self"]
             assert set(data["retention_reason_values"]) == {
@@ -393,7 +472,7 @@ def test_final_render_sends_source_messages_and_uses_reviewed_metadata(tmp_path)
                 "follow_up_assigned", "external_business_progress",
                 "substantive_approval",
             }
-            return _payload()
+            return _simple_payload()
 
     messages = [
         NormalizedMessage(
@@ -465,6 +544,11 @@ def test_final_render_retry_receives_specific_evidence_feedback(tmp_path):
 
     assert outcome.failure_count == 0
     assert outcome.retry_count == 1
+    assert analyzer.prompts[0]["previous_result"] is None
+    previous = analyzer.prompts[1]["previous_result"]
+    assert previous["groups"][0]["fact_items"][1][
+        "evidence_message_ids"
+    ] == ["m_other"]
     assert "fact_items[1]" in analyzer.prompts[1]["validation_feedback"]
     assert "self_actions[0]" in analyzer.prompts[1]["validation_feedback"]
 
@@ -475,6 +559,7 @@ def test_final_render_counts_each_validation_failure_without_raw_evidence(
     class InvalidRoleAnalyzer:
         def request_function(self, prompt, **kwargs):
             payload = _payload()
+            payload["groups"][0]["self_actions"][0]["kind"] = "uncertain"
             payload["groups"][0]["self_relations"][0]["relation"] = (
                 "primary_execution"
             )
@@ -591,6 +676,7 @@ def test_final_review_checks_actions_on_primary_and_fallback(tmp_path, valid_fal
     class Analyzer:
         def request_function(self, prompt, **kwargs):
             invalid = _payload()
+            invalid["groups"][0]["self_actions"][0]["kind"] = "uncertain"
             invalid["groups"][0]["self_relations"][0]["relation"] = "primary_execution"
             return invalid
 
@@ -714,15 +800,24 @@ def test_personal_action_label_cannot_only_describe_other_peoples_work():
 
 
 def test_personal_action_label_must_reference_a_known_action():
-    payload = _payload()
+    payload = _simple_payload()
     item = payload["groups"][0]
     item["self_actions"].append({
-        "kind": "uncertain", "evidence_message_ids": ["m_self"],
+        "kind": "uncertain", "evidence_message_ids": ["m_uncertain"],
+        "relation": None,
     })
-    item["fact_items"][1]["self_action_indices"] = [0, 1]
-    item["fact_items"][3]["self_action_indices"] = [1]
+    item["fact_items"][1]["evidence_message_ids"].append("m_uncertain")
+    item["fact_items"][3]["evidence_message_ids"] = ["m_uncertain"]
     with pytest.raises(AnalyzerProtocolError, match="action_label.*self action"):
-        _parse(payload)
+        parse_personal_group_render_payload(
+            payload, group=GROUP,
+            candidates=[replace(_candidate(), self_evidence_message_ids=[
+                "m_self", "m_uncertain",
+            ])],
+            allowed_self_relations=tuple(x.key for x in CONFIG.self_relation_types),
+            action_relation_support={x.key: x.supported_relations
+                                     for x in CONFIG.retention_policy.contribution_actions},
+        )
 
 
 def test_failed_final_review_cannot_materialize_unreviewed_metadata():
@@ -858,3 +953,192 @@ def test_duplicate_display_files_preserve_identity_and_roundtrip():
     loaded = store.parse_day_document(markdown).events[0]
     assert loaded.manual_edit_type == ""
     assert len(loaded.file_keys) == 4
+
+
+def _simple_payload():
+    payload = _payload()
+    item = payload["groups"][0]
+    del item["self_relations"]
+    for action in item["self_actions"]:
+        action["relation"] = None
+    for fact in item["fact_items"]:
+        del fact["self_action_indices"]
+    return payload
+
+
+@pytest.mark.parametrize("kind, role", [
+    ("receipt", "response_only"),
+    ("decision", "decision_confirmation"),
+    ("initiation", "initiated"),
+    ("acceptance", "feedback_acceptance"),
+])
+def test_final_render_derives_unique_role_and_fact_actions(kind, role):
+    payload = _simple_payload()
+    payload["groups"][0]["self_actions"][0]["kind"] = kind
+    result = _parse(payload).groups[0]
+    assert result.self_relations == [SelfRelationEvidence(role, ["m_self"])]
+    assert result.fact_items[1].self_action_indices == [0]
+
+
+def test_final_render_schema_does_not_request_action_indices():
+    from src.worktrace.analyzers.output_schemas import (
+        personal_group_render_output_schema,
+    )
+    schema = personal_group_render_output_schema(
+        group_id="g1", draft_ids=["d1"], message_ids=["m_self"],
+        self_message_ids=["m_self"], config=CONFIG,
+    )
+    facts = schema["properties"]["groups"]["items"]["properties"][
+        "fact_items"
+    ]["items"]
+    assert "self_action_indices" not in facts["properties"]
+    assert "self_action_indices" not in facts["required"]
+
+
+def test_final_render_fact_can_use_relevant_subset_of_action_evidence():
+    payload = _simple_payload()
+    payload["groups"][0]["self_actions"][0]["evidence_message_ids"] = [
+        "m_self", "m_self_2",
+    ]
+    result = parse_personal_group_render_payload(
+        payload, group=GROUP,
+        candidates=[replace(_candidate(), self_evidence_message_ids=[
+            "m_self", "m_self_2",
+        ])],
+        allowed_self_relations=tuple(x.key for x in CONFIG.self_relation_types),
+        action_relation_support={x.key: x.supported_relations
+                                 for x in CONFIG.retention_policy.contribution_actions},
+    )
+    assert result.groups[0].fact_items[1].evidence_message_ids == [
+        "m_other", "m_self",
+    ]
+    assert result.groups[0].fact_items[1].self_action_indices == [0]
+
+
+def test_final_render_simple_contract_still_rejects_unsupported_self_claim():
+    payload = _simple_payload()
+    payload["groups"][0]["fact_items"][1]["evidence_message_ids"] = ["m_other"]
+    with pytest.raises(AnalyzerProtocolError) as error:
+        _parse(payload)
+    assert error.value.code == "render_evidence"
+
+
+def test_final_render_ambiguous_action_still_requires_role_choice():
+    payload = _simple_payload()
+    payload["groups"][0]["self_actions"][0]["kind"] = "execution"
+    with pytest.raises(AnalyzerProtocolError) as error:
+        _parse(payload)
+    assert error.value.code == "render_role"
+
+
+@pytest.mark.parametrize("kind, supplied, expected", [
+    ("receipt", "primary_execution", "response_only"),
+    ("decision", "initiated", "decision_confirmation"),
+])
+def test_final_render_normalizes_redundant_role_without_raising_contribution(
+    kind, supplied, expected,
+):
+    payload = _simple_payload()
+    item = payload["groups"][0]
+    item["self_actions"][0]["kind"] = kind
+    item["self_actions"][0]["relation"] = supplied
+    assert _parse(payload).groups[0].self_relations == [
+        SelfRelationEvidence(expected, ["m_self"]),
+    ]
+
+
+def test_final_render_ignores_legacy_indices_and_uses_real_evidence():
+    payload = _payload()
+    payload["groups"][0]["fact_items"][1]["self_action_indices"] = [999]
+    result = _parse(payload)
+    assert result.groups[0].fact_items[1].self_action_indices == [0]
+
+
+@pytest.mark.parametrize("kind, role", [
+    ("execution", "primary_execution"),
+    ("execution", "collaboration"),
+    ("commitment", "assigned"),
+    ("collaboration", "response_only"),
+])
+def test_final_render_role_choice_shares_its_actions_evidence(kind, role):
+    payload = _simple_payload()
+    payload["groups"][0]["self_actions"][0].update({
+        "kind": kind, "relation": role,
+    })
+    result = _parse(payload).groups[0]
+    assert result.self_relations == [SelfRelationEvidence(role, ["m_self"])]
+
+
+def test_final_render_schema_places_role_on_action():
+    from src.worktrace.analyzers.output_schemas import (
+        personal_group_render_output_schema,
+    )
+    schema = personal_group_render_output_schema(
+        group_id="g1", draft_ids=["d1"], message_ids=["m_self"],
+        self_message_ids=["m_self"], config=CONFIG,
+    )
+    group = schema["properties"]["groups"]["items"]
+    assert "self_relations" not in group["properties"]
+    assert "self_relations" not in group["required"]
+    assert "relation" in group["properties"]["self_actions"]["items"]["required"]
+
+
+def test_new_contract_cannot_borrow_automatic_role_from_another_action():
+    payload = _simple_payload()
+    payload["groups"][0]["self_actions"].append({
+        "kind": "collaboration", "evidence_message_ids": ["m_self"],
+        "relation": None,
+    })
+    with pytest.raises(AnalyzerProtocolError, match=r"self_actions\[1\].relation"):
+        _parse(payload)
+
+
+def test_new_contract_rejects_incompatible_choice_on_ambiguous_action():
+    payload = _simple_payload()
+    payload["groups"][0]["self_actions"][0].update({
+        "kind": "execution", "relation": "initiated",
+    })
+    with pytest.raises(AnalyzerProtocolError) as error:
+        _parse(payload)
+    assert error.value.code == "render_role"
+
+
+def test_new_contract_combines_role_evidence_without_duplicate_role_output():
+    payload = _simple_payload()
+    payload["groups"][0]["self_actions"].append({
+        "kind": "forwarding", "evidence_message_ids": ["m_self"],
+        "relation": None,
+    })
+    result = _parse(payload).groups[0]
+    assert result.self_relations == [
+        SelfRelationEvidence("response_only", ["m_self"]),
+    ]
+    assert result.fact_items[1].self_action_indices == [0, 1]
+
+
+def test_mixed_contract_cannot_borrow_another_actions_role_choice():
+    payload = _simple_payload()
+    group = payload["groups"][0]
+    group["self_relations"] = []
+    group["self_actions"] = [
+        {"kind": "collaboration", "relation": "primary_execution",
+         "evidence_message_ids": ["m_self"]},
+        {"kind": "execution", "relation": "collaboration",
+         "evidence_message_ids": ["m_self"]},
+    ]
+    with pytest.raises(AnalyzerProtocolError) as error:
+        _parse(payload)
+    assert error.value.code == "render_schema"
+
+
+def test_legacy_group_role_cannot_override_an_explicit_action_choice():
+    payload = _simple_payload()
+    group = payload["groups"][0]
+    group["self_actions"][0].update({
+        "kind": "execution", "relation": "collaboration",
+    })
+    group["self_relations"] = [{
+        "relation": "primary_execution", "evidence_message_ids": ["m_self"],
+    }]
+    with pytest.raises(AnalyzerProtocolError):
+        _parse(payload)

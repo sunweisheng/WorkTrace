@@ -30,7 +30,10 @@ from .analyzers.online import (
     _extract_text_from_responses_payload,
     _extract_text_from_responses_stream_event,
     _has_usage,
+    _online_reasoning_options,
 )
+
+from .utils.token_estimation import prepare_model_prompt
 
 logger = logging.getLogger("worktrace")
 
@@ -44,6 +47,9 @@ def _build_image_request_body(
     reasoning_effort: str | None,
     wire_api: str,
 ) -> dict[str, object]:
+    prompt = prepare_model_prompt(
+        prompt, append_no_think=reasoning_effort == "none",
+    )
     if wire_api == "chat_completions":
         body: dict[str, object] = {
             "model": model,
@@ -51,7 +57,7 @@ def _build_image_request_body(
                 {
                     "role": "user",
                     "content": [
-                        {"type": "text", "text": f"{prompt}\n/no_think"},
+                        {"type": "text", "text": prompt},
                         {
                             "type": "image_url",
                             "image_url": {"url": image_url, "detail": "low"},
@@ -61,8 +67,7 @@ def _build_image_request_body(
             ],
             "stream": stream_enabled,
         }
-        if reasoning_effort == "none":
-            body["extra_body"] = {"thinking": {"type": "disabled"}}
+        body.update(_online_reasoning_options(reasoning_effort, wire_api))
         return body
 
     body = {
@@ -71,7 +76,7 @@ def _build_image_request_body(
             {
                 "role": "user",
                 "content": [
-                    {"type": "input_text", "text": f"{prompt}\n/no_think"},
+                    {"type": "input_text", "text": prompt},
                     {
                         "type": "input_image",
                         "image_url": image_url,
@@ -82,8 +87,7 @@ def _build_image_request_body(
         ],
         "stream": stream_enabled,
     }
-    if reasoning_effort == "none":
-        body["reasoning"] = {"effort": "none"}
+    body.update(_online_reasoning_options(reasoning_effort, wire_api))
     return body
 
 

@@ -28,7 +28,6 @@ from .reaction_catalog import ReactionCatalogError
 from .preflight import run_preflight_checks
 from .runner import run_daily_trace
 from .pipeline.llm_checkpoints import clear_day_llm_checkpoints
-from .utils.filenames import parse_worktrace_markdown_filename
 from .utils.text import sanitize_filename_component
 from .utils.json_io import dump_json
 from .support_report import generate_support_report
@@ -390,15 +389,6 @@ def _clear_previous_personal_run(config: RuntimeConfig, target_date: str) -> Non
         shutil.rmtree(debug_day_dir)
     else:
         debug_day_dir.unlink(missing_ok=True)
-
-    year, month, _day = target_date.split("-")
-    output_dir = config.data_root / year / month
-    if not output_dir.exists():
-        return
-    for path in output_dir.glob("*.md"):
-        parsed = parse_worktrace_markdown_filename(path.name)
-        if parsed.target_date == target_date and not parsed.is_merged:
-            path.unlink()
 
 
 def main(

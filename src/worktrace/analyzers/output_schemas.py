@@ -784,7 +784,6 @@ def personal_group_render_output_schema(
 ) -> dict[str, object]:
     unique_draft_ids = list(dict.fromkeys(draft_ids))
     unique_message_ids = list(dict.fromkeys(message_ids))
-    relation_schema = _self_relations_schema(config or RuntimeConfig())
     action_kinds = [
         item.key
         for item in (config or RuntimeConfig()).retention_policy.contribution_actions
@@ -796,25 +795,24 @@ def personal_group_render_output_schema(
             "type": "object",
             "properties": {
                 "kind": {"type": "string", "enum": action_kinds},
+                "relation": {
+                    "type": ["string", "null"],
+                    "enum": [None] + [
+                        item.key
+                        for item in (config or RuntimeConfig()).self_relation_types
+                    ],
+                },
                 "evidence_message_ids": {
                     "type": "array", "minItems": 1, "uniqueItems": True,
                     "items": {"type": "string", "enum": self_ids},
                 },
             },
-            "required": ["kind", "evidence_message_ids"],
+            "required": ["kind", "evidence_message_ids", "relation"],
             "additionalProperties": False,
         },
     }
     if not self_ids or not action_kinds:
         action_schema["maxItems"] = 0
-    if self_ids:
-        relation_schema["items"]["properties"]["evidence_message_ids"].update({
-            "minItems": 1,
-            "uniqueItems": True,
-            "items": {"type": "string", "enum": self_ids},
-        })
-    else:
-        relation_schema["maxItems"] = 0
     return {
         "type": "object",
         "properties": {
@@ -827,7 +825,6 @@ def personal_group_render_output_schema(
                     "properties": {
                         "group_id": {"type": "string", "enum": [group_id]},
                         "supported": {"type": "boolean"},
-                        "self_relations": relation_schema,
                         "self_actions": action_schema,
                         "removed_claims": {
                             "type": "array",
@@ -862,10 +859,6 @@ def personal_group_render_output_schema(
                                         "enum": ["self", "other", "shared",
                                                  "context", "uncertain"],
                                     },
-                                    "self_action_indices": {
-                                        "type": "array", "uniqueItems": True,
-                                        "items": {"type": "integer", "minimum": 0},
-                                    },
                                     "evidence_message_ids": {
                                         "type": "array",
                                         "minItems": 1,
@@ -880,7 +873,7 @@ def personal_group_render_output_schema(
                                     "field",
                                     "text",
                                     "evidence_message_ids",
-                                    "actor", "self_action_indices",
+                                    "actor",
                                 ],
                                 "additionalProperties": False,
                             },
@@ -891,7 +884,6 @@ def personal_group_render_output_schema(
                         "covered_draft_ids",
                         "fact_items",
                         "supported",
-                        "self_relations",
                         "removed_claims",
                         "self_actions",
                     ],

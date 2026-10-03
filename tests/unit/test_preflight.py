@@ -203,7 +203,7 @@ def test_preflight_disables_online_fallback_when_config_is_missing(tmp_path: Pat
     assert "Missing online LLM configuration" in report.details["online_fallback_warning"]
 
 
-def test_preflight_disables_online_fallback_when_reasoning_effort_is_not_none(
+def test_preflight_accepts_high_reasoning_online_fallback(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -211,7 +211,7 @@ def test_preflight_disables_online_fallback_when_reasoning_effort_is_not_none(
         "WORKTRACE_LLM_BASE_URL=https://llm.example/v1\n"
         "WORKTRACE_LLM_MODEL=provider-model\n"
         "WORKTRACE_LLM_API_KEY=file-key\n"
-        "WORKTRACE_LLM_REASONING_EFFORT=medium\n"
+        "WORKTRACE_LLM_REASONING_EFFORT=high\n"
         "WORKTRACE_CODEX_MODEL=test-codex-model\n"
         "WORKTRACE_CODEX_REASONING_EFFORT=high\n" + _CODEX_PROVIDER_ENV,
         encoding="utf-8",
@@ -225,10 +225,9 @@ def test_preflight_disables_online_fallback_when_reasoning_effort_is_not_none(
     )
 
     assert report.ok is True
-    assert report.details["online_fallback"] == "disabled"
-    assert report.details["online_fallback_warning"] == (
-        "WorkTrace requires WORKTRACE_LLM_REASONING_EFFORT=none in the main flow."
-    )
+    assert report.details["online_fallback"] == "available"
+    assert report.details["online_reasoning_effort"] == "high"
+    assert "online_fallback_warning" not in report.details
 
 
 def test_preflight_fails_when_codex_config_is_missing(tmp_path: Path) -> None:

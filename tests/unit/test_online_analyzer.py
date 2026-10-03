@@ -1781,3 +1781,55 @@ def test_online_analyzer_parses_chat_stream_response(
     assert result.candidate_events == []
     assert result.context_requests == []
     assert analyzer.usage_recorder.summary()["output_tokens"] == 4
+
+
+@pytest.mark.parametrize("wire_api", ["responses", "chat_completions"])
+def test_high_reasoning_is_sent_without_disabling_thinking(wire_api):
+    from src.worktrace.analyzers.online import _build_online_function_request_body
+
+    body = _build_online_function_request_body(
+        "review evidence",
+        settings=build_settings(reasoning_effort="high", wire_api=wire_api),
+        function_spec=sample_function_spec(),
+    )
+    if wire_api == "responses":
+        assert body["reasoning"] == {"effort": "high"}
+        prompt = body["input"]
+    else:
+        assert body["reasoning_effort"] == "high"
+        prompt = body["messages"][0]["content"]
+    assert "extra_body" not in body
+    assert "/no_think" not in prompt
+    assert body["tool_choice"] == "auto"
+    assert body["parallel_tool_calls"] is False
+    assert len(body["tools"]) == 1
+
+
+@pytest.mark.parametrize("failure", ["empty", "wrong_function", "multiple", "arguments"])
+def test_completed_stream_validation_cannot_fall_back_to_earlier_arguments(failure):
+    from src.worktrace.analyzers.online import (
+        _extract_stream_function_arguments_with_diagnostics,
+    )
+    final_call = {
+        "type": "function_call", "name": "submit_preflight",
+        "arguments": '{"probe":"ok"}',
+    }
+    output = [final_call]
+    if failure == "empty":
+        output = []
+    elif failure == "wrong_function":
+        final_call["name"] = "another_function"
+    elif failure == "multiple":
+        output = [final_call, dict(final_call)]
+    else:
+        final_call["arguments"] = "invalid"
+    events = [
+        {"type": "response.function_call_arguments.delta",
+         "item_id": "call-1", "name": "submit_preflight",
+         "delta": '{"probe":"ok"}'},
+        {"type": "response.completed", "response": {"output": output}},
+    ]
+    with pytest.raises(AnalyzerProtocolError):
+        _extract_stream_function_arguments_with_diagnostics(
+            events, expected_name="submit_preflight",
+        )

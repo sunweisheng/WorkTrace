@@ -75,7 +75,7 @@ WorkTrace 会读取你在指定日期里发过消息或做过 reaction 的飞书
 
 仅 Online 模式无需安装、登录或配置 Codex；已有 Codex 配置也不会参与检查。
 个人日报、多人汇总、事实复核、图片摘要、诊断报告和回放使用同一模式。
-Online 继续读取现有协议、流式、TLS 和超时配置，推理设置须为 `none`。
+Online 继续读取现有协议、流式、TLS 和超时配置，默认推理强度为 `high`。
 启动检查会验证 Online 的 Function Calling 格式，跳过全部 Codex 检查。
 
 重试次数继续读取 `config/llm_retry.json`：技术请求默认重试 1 次，话题切分和
@@ -131,7 +131,7 @@ WORKTRACE_LLM_WIRE_API=responses
 - `WORKTRACE_LLM_API_KEY` 是你的密钥
 - `WORKTRACE_LLM_WIRE_API` 是 Online 接口，默认 `responses`；服务明确要求 Chat Completions 时才改为 `chat_completions`
 
-`WORKTRACE_LLM_REASONING_EFFORT` 不属于缺一不可的连接配置；不填写时，代码默认使用 `none`。模板显式保留 `WORKTRACE_LLM_REASONING_EFFORT=none`，此时请求会发送关闭思考的字段。改成其他值时，仅 Online 自检失败；默认双线路自检显示 Online 备用已禁用并提示原因，但当前后续代码仍可能创建该备用，也不会发送关闭思考的字段。请保持 `none`，不能把这项自检状态理解为运行中已经禁用备用。
+`WORKTRACE_LLM_REASONING_EFFORT` 不属于缺一不可的连接配置；不填写时默认使用 `high`。Online 默认使用 `WORKTRACE_LLM_REASONING_EFFORT=high`。Responses 发送 `reasoning.effort=high`，Chat Completions 发送 `reasoning_effort=high`，文字、图片和在线探针使用同一设置。高推理设置不追加 `/no_think`，输出仍要求仅提交最终结果，不展示思考过程。显式配置 `none` 时保留旧行为：追加 `/no_think`，Responses 发送 `reasoning.effort=none`，Chat Completions 发送 `thinking.type=disabled`。实际服务是否支持所选强度，以完整自检和真实业务复测为准。
 
 如需只生成本地文件、不发送给自己，把 `config/self_delivery.json` 改为：
 
@@ -170,7 +170,7 @@ WORKTRACE_LLM_WIRE_API=responses
 - 只处理与你直接相关的工作事项
 - 默认过滤缺少具体对象、保留理由和保留依据的低价值事件
 - 默认过滤部分敏感内容
-- Online 强制 `/no_think`；Codex 主线路不追加该文本，而是使用完整严格契约
+- Online 默认 `high`，只在显式配置 `none` 时追加 `/no_think`；高推理与不展示思考过程可以同时满足。
 - 消息正文中的裸链接会压缩成占位文本，但可引用链接的 URL、标题和临时引用 ID 仍会作为结构化元数据进入 prompt
 - 正式主流程默认不长期保存原始聊天
 
@@ -465,7 +465,7 @@ Markdown 默认只保留结构化工作事件，不会默认附带整段原始�
 - `WORKTRACE_LLM_MODEL`
 - `WORKTRACE_LLM_API_KEY`
 
-`WORKTRACE_LLM_REASONING_EFFORT` 未配置时默认就是 `none`；如果自检单独提示 reasoning effort 不符合要求，请将它改回 `none`。
+`WORKTRACE_LLM_REASONING_EFFORT` 未配置时默认 `high`。服务不支持时检查对应接口的参数能力；不要把仅返回最终结果误解成必须禁用内部推理。
 
 ### 10.2 提示 `lark-cli` 未登录或不是 user
 

@@ -4751,6 +4751,7 @@ class DailyTraceRunner:
         }
         attempts: list[dict[str, object]] = []
         validation_feedback = ""
+        previous_result: object = None
         retry_count = 0
         fallback_count = 0
         last_context_id = ""
@@ -4762,6 +4763,7 @@ class DailyTraceRunner:
                 candidates=group_candidates,
                 config=self.config,
                 validation_feedback=feedback,
+                previous_result=previous_result,
                 messages=messages,
                 conversation_slices=conversation_slices,
             )
@@ -4793,7 +4795,6 @@ class DailyTraceRunner:
                             "group_id": group.group_id,
                             "covered_draft_ids": list(group.draft_ids),
                             "supported": True,
-                            "self_relations": [],
                             "self_actions": [],
                             "removed_claims": [],
                             "fact_items": [
@@ -4825,7 +4826,7 @@ class DailyTraceRunner:
                 },
             )
             for fact in function_spec.typical_arguments["groups"][0]["fact_items"]:
-                fact.update({"actor": "context", "self_action_indices": []})
+                fact.update({"actor": "context"})
             estimates = estimate_structured_input_tokens(
                 prompt,
                 function_spec=function_spec,
@@ -4890,6 +4891,7 @@ class DailyTraceRunner:
                     fallback_count += 1
                 failure_kind = "validation" if payload is not None else "request"
                 validation_feedback = str(exc)
+                previous_result = payload
                 attempts.append(
                     {
                         "group_id": group.group_id,
