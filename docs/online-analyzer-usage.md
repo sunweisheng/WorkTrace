@@ -71,9 +71,9 @@ WORKTRACE_LLM_API_KEY=your-api-key
 WORKTRACE_LLM_WIRE_API=responses
 ```
 
-`WORKTRACE_LLM_WIRE_API` 只允许 `responses` 或 `chat_completions`，不配置时默认 Responses，也不会根据模型名或服务地址自动切换。Online 的生效值必须保持 `WORKTRACE_LLM_REASONING_EFFORT=none`，未填写时默认也是 `none`。`WORKTRACE_LLM_STREAM=false` 是默认值，可按服务能力显式开启流式；文字和图片共用该开关，Online 自检探针固定非流式。`WORKTRACE_LLM_TLS_VERIFY` 可控制证书验证。进程环境可以覆盖 Online、模式及共享超时配置；真实密钥不能提交到 git。模板的 `WORKTRACE_LLM_TIMEOUT_SECONDS=1200` 为示例设置，未配置时仍使用代码默认 `180` 秒。
+`WORKTRACE_LLM_WIRE_API` 只允许 `responses` 或 `chat_completions`，不配置时默认 Responses，也不会根据模型名或服务地址自动切换。Online 默认使用 `WORKTRACE_LLM_REASONING_EFFORT=high`，只输出最终结果。`WORKTRACE_LLM_STREAM=false` 是默认值，可按服务能力显式开启流式；文字和图片共用该开关，Online 自检探针固定非流式。`WORKTRACE_LLM_TLS_VERIFY` 可控制证书验证。进程环境可以覆盖 Online、模式及共享超时配置；真实密钥不能提交到 git。模板的 `WORKTRACE_LLM_TIMEOUT_SECONDS=1200` 为示例设置，未配置时仍使用代码默认 `180` 秒。
 
-非 `none` 的推理配置会令仅 Online 自检失败。默认模式自检会显示 `online_fallback=disabled`，但当前工厂没有使用该状态：配置加载器允许其他推理值，后续仍可能装配 Online 备用。此时请求体也不发送关闭思考的字段。因此必须保持 `none`，不能将这项报告状态当作实际禁用。
+升级保留已有 `.env` 和平台注入值，旧的 `none` 不会自动变成 `high`。使用高推理时须同步修改 `WORKTRACE_LLM_REASONING_EFFORT`；进程环境优先于 `.env`。预检不再限制只能使用 `none`，也不会因设置 `high` 禁用 Online 备用。
 
 ## 3. 同一任务契约
 
@@ -83,19 +83,19 @@ WORKTRACE_LLM_WIRE_API=responses
 
 | 线路 | 传输方式 | 严格保证 |
 | --- | --- | --- |
-| Online（仅 Online 或默认模式备用） | Responses 或 Chat Completions 原生 Function Calling：`tools`、强制 `tool_choice`、`parallel_tool_calls=false` | `strict:true`；非流式和流式都只接受一次预期 Function 调用 |
+| Online（仅 Online 或默认模式备用） | Responses 或 Chat Completions 原生 Function Calling：`tools`、`tool_choice`（高推理时 `auto`，`none` 时指定函数）、`parallel_tool_calls=false` | `strict:true`；非流式和流式都只接受一次预期 Function 调用 |
 | Codex（默认模式主线路） | 完整契约提示词加 `--output-schema` | 同一 `parameters`；提示词要求只提交一次参数 JSON 对象，Python 继续按任务校验 |
 
 Codex CLI 没有 `--strict=true` 参数，项目不会伪造该参数。Codex 提示词会明确展示 Function 名称、描述和 `strict=true`，要求不输出 Function 外壳、Markdown、解释或额外字段；同一份动态 `parameters` 写入 `--output-schema`。对象 Schema 使用 `additionalProperties:false` 并列出必填字段。Schema 是请求契约，Python 的实际字段、证据和覆盖校验由各任务执行；旧领域解析器和部分候选过滤仍有兼容处理，不能把服务端严格 Schema 当作本地每种字段错误都必然拒绝的保证。
 
-Online 提示词才追加 `/no_think`。有效推理配置为 `none` 时，Responses 模式发送 `reasoning={"effort":"none"}`；Chat Completions 模式不发送不兼容的 reasoning 字段，改为发送 `thinking.type=disabled`。Codex 实际提示词不追加 `/no_think`。
+Online 默认使用 `WORKTRACE_LLM_REASONING_EFFORT=high`。Responses 发送 `reasoning.effort=high`，Chat Completions 发送 `reasoning_effort=high`，文字、图片和在线探针使用同一设置。高推理设置不追加 `/no_think`，输出仍要求仅提交最终结果，不展示思考过程。显式配置 `none` 时保留旧行为：追加 `/no_think`，Responses 发送 `reasoning.effort=none`，Chat Completions 发送 `thinking.type=disabled`。实际服务是否支持所选强度，以完整自检和真实业务复测为准。
 
 个人事实复核每次只处理一个候选；其 `draft_id` 与允许引用的证据消息 ID 都由同一份动态参数 Schema 限制。事实字段不在外层重复，统一由 `fact_items` 返回；不同候选最多 3 路并发处理。证据不足以支持必填事实时必须返回 `supported=false`，不返回半完整事件。Python 在两条线路返回后都执行字段完整、枚举、证据归属和覆盖率校验。
 
 统一分批估算仍取两条线路真实请求体中的较大值：
 
 ```text
-online_prepared_prompt = Function 示例和自检 + /no_think
+online_prepared_prompt = Function 示例和自检 + /no_think（仅 none 时发送）
 responses_estimate = estimate(Responses prompt + tools + tool_choice)
 chat_estimate = estimate(Chat messages + tools + tool_choice)
 codex_prepared_prompt = 完整契约提示词 + Codex 提交规则
@@ -156,3 +156,5 @@ Online 每次请求重新读取配置，创建独立的 OpenAI 与 HTTP 客户�
 账本不保存密钥、认证文件、个人 Codex 配置、完整环境变量、图片内容或原始 Codex JSONL。个人和多人 trace 以调用编号关联账本；安全诊断报告只能读取 Python 已计算并允许的事实，不能读取账本中的 prompt 或原始结果。
 
 全日分组和多人汇总的阶段耗时看各自的 `*_all` 墙钟字段；各请求耗时之和只表示模型调用总负载。
+
+输入预算估算保守地预留 `/no_think` 的长度，实际高推理请求不发送该指令；重试中的上一份个人最终返回也计入完整输入。

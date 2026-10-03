@@ -561,9 +561,11 @@ def parse_personal_group_render_payload(
     raw_group = raw_groups[0]
     expected_group_fields = {
         "group_id", "covered_draft_ids", "fact_items", "supported",
-        "self_relations", "removed_claims", "self_actions",
+        "removed_claims", "self_actions",
     }
-    if set(raw_group) != expected_group_fields:
+    if set(raw_group) not in (
+        expected_group_fields, expected_group_fields | {"self_relations"},
+    ):
         raise PersonalRenderValidationError(
             "Personal group render result has unexpected group fields.",
             code="render_schema",
@@ -615,7 +617,7 @@ def parse_personal_group_render_payload(
         )
     if not supported:
         if (raw_group["fact_items"] != []
-                or raw_group["self_relations"] != []
+                or raw_group.get("self_relations", []) != []
                 or raw_group["self_actions"] != [] or not removed_claims):
             raise PersonalRenderValidationError(
                 "Unsupported personal render must return removed claims only.",
@@ -634,10 +636,12 @@ def parse_personal_group_render_payload(
             "Personal self_actions must be an array.", code="render_schema",
         )
     actions: list[PersonalSelfAction] = []
+    chosen_relations: list[dict[str, object]] = []
     for action_index, raw_action in enumerate(raw_actions):
-        if not isinstance(raw_action, dict) or set(raw_action) != {
-            "kind", "evidence_message_ids",
-        }:
+        action_fields = {"kind", "evidence_message_ids"}
+        if "self_relations" not in raw_group:
+            action_fields.add("relation")
+        if not isinstance(raw_action, dict) or set(raw_action) != action_fields:
             raise PersonalRenderValidationError(
                 "Invalid personal self action fields.", code="render_schema",
             )
@@ -656,18 +660,45 @@ def parse_personal_group_render_payload(
                 "contain unique IDs from self_evidence_message_ids.",
                 code="render_evidence",
             )
+        choice = raw_action.get("relation")
+        if (choice is not None
+                and (not isinstance(choice, str) or choice not in allowed_self_relations)):
+            raise PersonalRenderValidationError(
+                f"self_actions[{action_index}] has an invalid relation.",
+                code="render_role",
+            )
+        allowed = action_support[kind]
+        if (len(allowed) != 1
+                and ("relation" in raw_action or "self_relations" not in raw_group)):
+            if (len(allowed) > 1 and choice not in allowed) or (not allowed and choice):
+                raise PersonalRenderValidationError(
+                    f"self_actions[{action_index}].relation must be "
+                    f"one of {list(allowed)} or null when no role is supported.",
+                    code="render_role",
+                )
+        if choice is not None and len(allowed) != 1:
+            chosen_relations.append({
+                "relation": choice, "evidence_message_ids": list(evidence),
+            })
         actions.append(PersonalSelfAction(kind, list(evidence)))
 
-    raw_relations = raw_group["self_relations"]
+    raw_relations = raw_group.get("self_relations", [])
     if not isinstance(raw_relations, list):
         raise PersonalRenderValidationError(
             "Personal render self_relations must be an array.",
             code="render_schema",
         )
-    relations: list[SelfRelationEvidence] = []
+    raw_relations = [*raw_relations, *chosen_relations]
+    relation_evidence: dict[str, list[str]] = {}
+    automatic_evidence: set[str] = set()
+    for action in actions:
+        allowed = action_support[action.kind]
+        if len(allowed) == 1:
+            stored = relation_evidence.setdefault(allowed[0], [])
+            stored.extend(x for x in action.evidence_message_ids if x not in stored)
+            automatic_evidence.update(action.evidence_message_ids)
     validation_errors: list[str] = []
     validation_error_codes: list[str] = []
-    seen_relations: set[str] = set()
     for relation_index, raw_relation in enumerate(raw_relations):
         if not isinstance(raw_relation, dict) or set(raw_relation) != {
             "relation", "evidence_message_ids",
@@ -678,9 +709,9 @@ def parse_personal_group_render_payload(
             )
         relation = raw_relation["relation"]
         evidence = raw_relation["evidence_message_ids"]
-        if relation not in allowed_self_relations or relation in seen_relations:
+        if not isinstance(relation, str) or relation not in allowed_self_relations:
             raise PersonalRenderValidationError(
-                "Invalid or duplicate personal self relation.",
+                "Invalid personal self relation.",
                 code="render_role",
             )
         if (not isinstance(evidence, list) or not evidence
@@ -691,14 +722,13 @@ def parse_personal_group_render_payload(
                 "Invalid personal self relation evidence.",
                 code="render_evidence",
             )
-        seen_relations.add(relation)
         supporting_evidence = {
             message_id
             for action in actions
             if relation in action_support[action.kind]
             for message_id in action.evidence_message_ids
         }
-        if not set(evidence).issubset(supporting_evidence):
+        if not set(evidence).issubset(supporting_evidence | automatic_evidence):
             compatible_kinds = sorted(
                 kind for kind, supported in action_support.items()
                 if relation in supported
@@ -710,17 +740,26 @@ def parse_personal_group_render_payload(
                 "use one only when the original self message supports it."
             )
             validation_error_codes.append("render_role")
-        relations.append(SelfRelationEvidence(relation, list(evidence)))
+        matched_evidence = [x for x in evidence if x in supporting_evidence]
+        if matched_evidence:
+            stored_evidence = relation_evidence.setdefault(relation, [])
+            stored_evidence.extend(
+                x for x in matched_evidence if x not in stored_evidence
+            )
+    relations = [
+        SelfRelationEvidence(relation, evidence)
+        for relation, evidence in relation_evidence.items()
+    ]
     relation_order = {key: index for index, key in enumerate(allowed_self_relations)}
     relations.sort(key=lambda item: relation_order[item.relation])
     for action_index, action in enumerate(actions):
         allowed_relations = action_support[action.kind]
-        if allowed_relations and not any(
-            relation.relation in allowed_relations
-            and set(relation.evidence_message_ids).intersection(
+        if len(allowed_relations) > 1 and not any(
+            relation["relation"] in allowed_relations
+            and set(relation["evidence_message_ids"]).intersection(
                 action.evidence_message_ids
             )
-            for relation in relations
+            for relation in raw_relations
         ):
             validation_errors.append(
                 f"self_actions[{action_index}] is missing a supported "
@@ -736,12 +775,12 @@ def parse_personal_group_render_payload(
     fact_items: list[PersonalRenderFactItem] = []
     by_field: dict[str, list[PersonalRenderFactItem]] = {}
     for index, raw_fact in enumerate(raw_fact_items):
-        if not isinstance(raw_fact, dict) or set(raw_fact) != {
-            "field",
-            "text",
-            "evidence_message_ids",
-            "actor", "self_action_indices",
-        }:
+        required_fact_fields = {"field", "text", "evidence_message_ids", "actor"}
+        if (not isinstance(raw_fact, dict)
+                or set(raw_fact) not in (
+                    required_fact_fields,
+                    required_fact_fields | {"self_action_indices"},
+                )):
             raise PersonalRenderValidationError(
                 f"Personal group render fact_items[{index}] has invalid fields.",
                 code="render_schema",
@@ -775,28 +814,25 @@ def parse_personal_group_render_payload(
                 code="render_evidence",
             )
         actor = raw_fact["actor"]
-        indices = raw_fact["self_action_indices"]
         if (not isinstance(actor, str)
-                or actor not in {"self", "other", "shared", "context", "uncertain"}
-                or not isinstance(indices, list)
-                or any(not isinstance(value, int) or isinstance(value, bool)
-                       or value < 0 or value >= len(actions) for value in indices)
-                or len(indices) != len(set(indices))
-                or bool(indices) != (actor in {"self", "shared"})):
+                or actor not in {"self", "other", "shared", "context", "uncertain"}):
             raise PersonalRenderValidationError(
-                "Invalid personal fact self action references.",
-                code="render_role",
+                "Invalid personal fact actor.", code="render_role",
             )
-        for action_index in indices:
-            if not set(actions[action_index].evidence_message_ids).issubset(
-                evidence_ids
-            ):
-                validation_errors.append(
-                    f"fact_items[{index}].evidence_message_ids must include "
-                    f"all IDs from self_actions[{action_index}]."
-                    "evidence_message_ids."
-                )
-                validation_error_codes.append("render_evidence")
+        # Legacy indices are accepted as input but never used as authority.
+        # Source references establish the links, without adding new evidence.
+        indices = [
+            action_index
+            for action_index, action in enumerate(actions)
+            if actor in {"self", "shared"}
+            and set(action.evidence_message_ids).intersection(evidence_ids)
+        ]
+        if actor in {"self", "shared"} and not indices:
+            validation_errors.append(
+                f"fact_items[{index}].evidence_message_ids must include "
+                "evidence from a matching self_actions item."
+            )
+            validation_error_codes.append("render_evidence")
         fact = PersonalRenderFactItem(
             field_name=field_name,
             text=text,

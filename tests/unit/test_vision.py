@@ -352,3 +352,20 @@ def test_image_protocol_violation_without_online_config_still_fails_safely(
 
     with pytest.raises(CodexProtocolViolationError):
         summarizer.summarize(image_path)
+
+
+@pytest.mark.parametrize("wire_api", ["responses", "chat_completions"])
+def test_high_image_reasoning_is_sent_without_no_think(wire_api):
+    body = _build_image_request_body(
+        prompt="摘要", image_url="data:image/png;base64,AA==",
+        model="test-model", stream_enabled=False,
+        reasoning_effort="high", wire_api=wire_api,
+    )
+    if wire_api == "responses":
+        assert body["reasoning"] == {"effort": "high"}
+        content = body["input"][0]["content"]
+    else:
+        assert body["reasoning_effort"] == "high"
+        content = body["messages"][0]["content"]
+    assert "extra_body" not in body
+    assert content[0]["text"] == "摘要"

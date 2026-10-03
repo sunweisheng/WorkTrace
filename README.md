@@ -21,7 +21,7 @@ WorkTrace 是一个个人工作事件整理工具。它从当前用户在指定�
 
 仅 Online 模式无需安装、登录或配置 Codex；已有 Codex 配置也不会参与检查。
 个人日报、多人汇总、事实复核、图片摘要、诊断报告和回放使用同一模式。
-Online 继续读取现有协议、流式、TLS 和超时配置，推理设置须为 `none`。
+Online 继续读取现有协议、流式、TLS 和超时配置，默认推理强度为 `high`。
 启动检查会验证 Online 的 Function Calling 格式，跳过全部 Codex 检查。
 
 重试次数继续读取 `config/llm_retry.json`：技术请求默认重试 1 次，话题切分和
@@ -192,7 +192,7 @@ Python 围绕本人消息和 reaction 形成 `AnchorUnit`。群聊会把相邻�
 同一会话的片段会按 `model_input_batch_target_tokens` 打包为 `SegmentAnalysisBatch`。该配置也是锚点降级、跨会话候选分组、多人合并候选发现、跨批汇合和正式内容生成的统一分批目标。默认双线路模式运行时根据生效的主模型和备用模型精确匹配 `config/model_input_budget.json` 中的预算 profile；没有匹配项时回退配置的默认预算（当前 `7000`），配置文件不存在时使用 `7000`，只在调试统计中记录未匹配，不增加日报 warning。固定结构任务使用同一份 `FunctionCallSpec`：Online 备用使用原生 Function Calling，Codex 主线路把同一参数结构传给 `--output-schema`，并在完整契约提示词中要求只提交一次参数 JSON。统一估算口径为：
 
 ```text
-online_prepared_prompt = 最终提示词 + 当前合法参数示例 + 当前证据编号清单 + 当前重试错误反馈 + /no_think
+online_prepared_prompt = 最终提示词 + 当前合法参数示例 + 当前证据编号清单 + 当前重试错误反馈 + 上一份返回（个人最终核对重试时） + /no_think（仅 none 时发送）
 online_estimate = estimate(online_prepared_prompt + tools 完整 Function 定义 + tool_choice)
 codex_prepared_prompt = 完整 Function 契约、典型参数、结构示例和最终自检
 codex_estimate = estimate(codex_prepared_prompt + 同一 parameters output-schema)
@@ -292,9 +292,9 @@ Python 以同一来源片段、直接 reply/quote、共享来源消息、共享�
 
 所有单成员和多成员最终组在成员锁定后再调用 `personal_group_render`，读取事实来源与本人参与证据对应的原消息，以及已经补读的附件、在线文档内容，统一复核标题、正文、主要动作、具体对象、保留理由、保留依据和本人参与方式。业务规则读取 `config/retention_policy.json`；纯知识查询没有业务结果时不保留，他人交付而本人仅确认接收时不得标成主责执行。标题必须覆盖组内全部成员；Python 校验字段、合法理由、消息覆盖和本人角色证据，再采用复核结果，不按聊天关键词判断工作含义。`supported=false` 的事件不会写入日报。局部质量重试及主备请求用尽后，最终核对仍失败则整次生成失败，保留诊断记录，不写入或送达未经核对的报告。涉及文件和统计仍由 Python 处理。默认双线路模式中，全日分组结果非法时先按配置由 Codex 带具体错误局部重试；用尽后只把当前请求交给 Online 一次。Online 返回仍非法时保留完全合法组、其余候选拆成单例并写 warning，Online 技术调用失败则终止生成。完整分组复核失败或持续非法时保留复核前分组并写 warning。
 
-最终核对新增 `self_actions`，事实项用 `actor` 和从 0 开始的 `self_action_indices` 声明动作主体及对应的本人动作。Python 校验正文覆盖所有本人动作、事实证据包含动作证据、主要动作与参与方式均有对应支持；接收、转发或不确定动作不能支持主责，承担任务不能写成已完成。同事向本人交付的实质业务事实仍可保留，主要动作写本人接收或转发。相同正文背景只来自候选来源切片及已选证据消息内的同会话较早消息，比较非空完整正文，仅规范换行与首尾空白；不从切片外补入，不按截断文本比较，也不直接降低角色。有独立本人执行证据时仍可保留实际执行；结构校验不能保证发现全部自然语言误判。
+最终核对由模型填写本人动作 `self_actions`（类型、证据和 `relation`）及带 `actor`、证据的事实 `fact_items`。动作只允许一种参与方式时 `relation` 填 null，由 Python 自动确定；有多种允许角色时模型在该动作内选择一个，角色直接使用动作证据。模型不再单独填写 `self_relations` 或 `self_action_indices`；Python 合并同类角色，并根据事实与本人动作的共同证据建立动作引用。每条事实只需引用直接支持它的相关证据，不必重复动作的全部证据，也不会由程序补入无关证据。正文仍须覆盖本人动作及锁定成员；主要动作仍须有本人证据。旧返回的动作编号允许读取但不作为依据，按证据重新计算。接收和转发自动得到回应角色，不会变成主责执行；不确定动作不能支持主责。文字含义仍由模型判断，结构校验不能保证发现全部自然语言误判。 动作含义与允许角色维护在 `config/retention_policy.json`。
 
-4.1.4 起，最终核对会在一次质量反馈中列出可同时定位的事实、动作和参与方式错误位置，并说明参与方式可由哪些配置动作支持。本人动作证据必须来自允许的本人消息；事实引用某动作时，事实证据须包含该动作的全部消息。核对失败仍不写入或送达报告。失败结果保留已完成阶段的会话、消息、片段、批次、候选和组数；`event_count=0` 表示没有正式事件产物，候选与待核对组不能算作已生成事件。安全诊断分别列出请求失败后的重试与业务结果校验重试，主备线路按实际模式说明。
+最终核对的质量重试同时携带具体错误和上一份完整返回 `previous_result`，模型在原消息基础上修正该结果。反馈和上一份返回一起计入输入估算，仍只重试当前组。未解决的证据错误仍使本次生成失败，不写入或送达新报告；旧报告保留。`event_count=0` 表示本次没有正式产物，不能解释为当天没有工作。安全诊断只含固定类别和数量，上一份返回仅用于当前组重试和本地私有调试记录。
 
 CLI JSON 和调试回放写入 Python 计算的 `day_grouping_summary`，包括候选数、初始/最终组数、标题发现请求/重试/逐组检查/候选/失败/超限数、复核组件和请求数、跨组合并数、初步组拆分数、关系成立数、证据分开数、内容重写失败数、校验重试、Online 备用、拆单修补候选数和 warning 数。旧 Markdown 和旧 trace 中的工作流字段仍可读取，但读取后丢弃；旧标题发现 trace 没有 `group_checks` 时明确显示逐组检查不可用，不补造结果。正式主链物化 `MergedEventDraft` 时，采用最终核对后的主要动作和按配置排序的本人参与方式。
 
@@ -465,13 +465,13 @@ WORKTRACE_LLM_API_KEY=your-api-key
 WORKTRACE_LLM_WIRE_API=responses
 ```
 
-Online 要求最终生效的 reasoning effort 为 `none`。未配置 `WORKTRACE_LLM_REASONING_EFFORT` 时，代码默认使用 `none`；模板显式写出该项，便于检查。生效值为 `none` 时，Responses 模式发送 `reasoning.effort=none`；Chat Completions 模式不发送这个字段，改为发送 `thinking.type=disabled`：
+Online 默认使用 `WORKTRACE_LLM_REASONING_EFFORT=high`。Responses 发送 `reasoning.effort=high`，Chat Completions 发送 `reasoning_effort=high`，文字、图片和在线探针使用同一设置。高推理设置不追加 `/no_think`，输出仍要求仅提交最终结果，不展示思考过程。显式配置 `none` 时保留旧行为：追加 `/no_think`，Responses 发送 `reasoning.effort=none`，Chat Completions 发送 `thinking.type=disabled`。实际服务是否支持所选强度，以完整自检和真实业务复测为准。
 
 ```dotenv
-WORKTRACE_LLM_REASONING_EFFORT=none
+WORKTRACE_LLM_REASONING_EFFORT=high
 ```
 
-当前配置检查有一处限制：改成其他推理值时，`online_only` 自检失败；默认模式自检虽显示 `online_fallback=disabled`，后续工厂仍可能创建 Online 备用，而且不会发送关闭思考的字段。应保持 `none`，不能把这项自检状态当作已实际禁用备用。详见[文档与代码核对记录](docs/plans/2026-10-02-documentation-code-audit.md)。
+升级保留已有 `.env` 和平台注入值，旧的 `none` 不会自动变成 `high`。使用高推理时须同步修改 `WORKTRACE_LLM_REASONING_EFFORT`；进程环境优先于 `.env`。预检不再限制只能使用 `none`，也不会因设置 `high` 禁用 Online 备用。
 
 其他可选项：
 
@@ -485,9 +485,9 @@ WORKTRACE_COLLECTED_MERGE_MISSING_FIELD_RETRY_RATIO=0.2
 WORKTRACE_COLLECTED_MERGE_MISSING_FIELD_RETRY_LIMIT=1
 ```
 
-Codex 的模型和推理强度只从仓库本地 `.env` 读取；Online 连接配置仍可由环境变量覆盖 `.env`。真实密钥不能和代码一起提交到 git。Online 请求追加 `/no_think`，其 reasoning effort 必须为 `none`；Codex 实际提示词不追加 `/no_think`。`WORKTRACE_LLM_WIRE_API` 只允许 `responses` 或 `chat_completions`，不根据模型名或服务地址自动判断。每个 Online 请求都会重新读取当前配置，创建并在请求结束后关闭独立的 OpenAI 和 HTTP 客户端，不缓存进程级单例。
+Codex 的模型和推理强度只从仓库本地 `.env` 读取；Online 连接配置仍可由环境变量覆盖 `.env`。真实密钥不能和代码一起提交到 git。Online 默认使用高推理，只在显式配置 `none` 时追加 `/no_think`；Codex 实际提示词不追加 `/no_think`。`WORKTRACE_LLM_WIRE_API` 只允许 `responses` 或 `chat_completions`，不根据模型名或服务地址自动判断。每个 Online 请求都会重新读取当前配置，创建并在请求结束后关闭独立的 OpenAI 和 HTTP 客户端，不缓存进程级单例。
 
-固定结构任务使用同一份 `FunctionCallSpec`。Online 在两种接口下都使用原生 Function Calling：`tools`、`strict:true`、强制 `tool_choice` 与 `parallel_tool_calls=false`；非流式只接受一次预期 Function 调用，流式按调用编号拼接参数片段后执行相同校验。输入预算同时估算 Responses、Chat Completions 和 Codex 三种实际请求结构并取最大值，原有调试字段和统计口径不变。Codex 没有 `--strict=true` 参数：它在完整契约提示词中明确 `strict=true`，把同一份动态 `parameters` 传入 `--output-schema`，并只接受一次参数 JSON 对象。普通文字和图片理解不强制 Function Calling。文字请求与 Codex 子进程以 `WORKTRACE_LLM_TIMEOUT_SECONDS` 作为本次执行时限，未配置时为 180 秒，不包含外层重试和 Codex 排队。Online 图片使用该值配置 HTTP 超时，没有文字请求额外的整次 deadline 检查。
+固定结构任务使用同一份 `FunctionCallSpec`。Online 在两种接口下都使用原生 Function Calling：`tools`、`strict:true`、`tool_choice`（高推理时 `auto`，`none` 时指定函数） 与 `parallel_tool_calls=false`；非流式只接受一次预期 Function 调用，流式按调用编号拼接参数片段后执行相同校验。输入预算同时估算 Responses、Chat Completions 和 Codex 三种实际请求结构并取最大值，原有调试字段和统计口径不变。Codex 没有 `--strict=true` 参数：它在完整契约提示词中明确 `strict=true`，把同一份动态 `parameters` 传入 `--output-schema`，并只接受一次参数 JSON 对象。普通文字和图片理解不强制 Function Calling。文字请求与 Codex 子进程以 `WORKTRACE_LLM_TIMEOUT_SECONDS` 作为本次执行时限，未配置时为 180 秒，不包含外层重试和 Codex 排队。Online 图片使用该值配置 HTTP 超时，没有文字请求额外的整次 deadline 检查。
 
 默认双线路模式中，每个新请求先走 Codex。网络、超时、429、5xx、空结果和无效 JSON 时，当前请求按 `primary_request_retry_limit=1` 再试 Codex 1 次，仍失败才交给 Online 一次；下一请求重新优先 Codex。全日分组、标题发现、完整复核和最终改写的校验失败，会按各阶段配置反馈具体错误，有备用时再调用当前请求备用。窗口切分、片段/锚点提炼的外层重试通常重复相同输入；片段成员缺失或非法也可能被过滤并告警，不能把所有校验问题都说成带错误反馈重试。图片摘要还有一项局部保护：Codex 返回工具调用等不合法图片结果，或明确表示无法识别图片时，不重跑整天，只把该图交给 Online 一次。请求层不把 401、403、TLS、模型、推理强度和请求配置错误当作可重试错误，也不因此切换备用。正式流程中的调试模式使用同一线路，只增加 trace、日志和按请求类型统计的备用次数。
 
@@ -743,3 +743,5 @@ git diff --check
 详细安装、PowerShell 5.1/7 捕获方式、认证边界和验收范围见
 [Windows 使用说明](docs/windows-guide.md)。实现顺序见
 [Windows 改进计划](docs/plans/2026-10-02-windows-runtime-improvements.md)。
+
+输入预算估算保守地预留 `/no_think` 的长度，实际高推理请求不发送该指令；重试中的上一份个人最终返回也计入完整输入。

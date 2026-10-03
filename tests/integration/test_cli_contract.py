@@ -100,6 +100,29 @@ def test_cli_returns_runner_result(capsys, tmp_path) -> None:
     }
 
 
+def test_failed_personal_rerun_keeps_previous_markdown(capsys, tmp_path) -> None:
+    from src.worktrace.cli import build_failed_result
+    from src.worktrace.preflight import PreflightReport
+
+    prior = tmp_path / "data/2026/06/2026-06-22-Me.md"
+    prior.parent.mkdir(parents=True)
+    prior.write_text("prior report", encoding="utf-8")
+
+    exit_code = main(
+        ["--date", "2026-06-22"],
+        config=RuntimeConfig(data_root=tmp_path / "data"),
+        preflight_func=lambda config, *, cwd: PreflightReport(
+            ok=True, details={},
+        ),
+        run_func=lambda *, target_date, config: build_failed_result(
+            target_date, "final review failed",
+        ),
+    )
+
+    assert exit_code == 1
+    assert prior.read_text(encoding="utf-8") == "prior report"
+
+
 def test_cli_supports_preflight_only_output(capsys, tmp_path) -> None:
     def fake_preflight(config, *, cwd):
         from src.worktrace.preflight import PreflightReport

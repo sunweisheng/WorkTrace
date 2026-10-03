@@ -295,9 +295,9 @@ Python 不阅读聊天文字判断对比案例、责任人或流程建议，只�
 
 初始分组通过后，系统先用 `day_group_discovery` 单次提交全部稳定组编号和组合标题；组合标题由 Python 按稳定顺序覆盖初步组全部成员标题，请求字段仍只有 `group_id` 和 `title`，不发送日期、正文或其他分组阶段的正反例。模型必须逐组比较全部标题，并为每个输入组恰好返回一次 `group_checks`，列出其他可能相关组和非空理由；`parse_day_group_discovery_payload(...)` 校验全量覆盖、编号合法、无自关联和无重复后，将重叠的单向关系转换为 `candidate_groups`。这是一套与日期、人员和业务内容无关的协议，不使用 Python 关键词或固定长度片段判断。`pipeline/day_event_grouping.py` 再依据同一 `source_slice_id`、直接 reply/quote、共享来源消息、共享文件、同一附件基础名称和标题候选生成稳定关系编号；同一会话本身不触发。标题候选仍可形成不限组数的完整检查范围，但其中每条实际组间连接单独编号，允许同一范围内同时出现成立和分开的关系。重叠关系形成完整检查范围，最多按 `max_concurrent_day_group_review_requests=3` 并行复核。范围内原始候选可以拆开初步组并重新组合。模型先逐条判断每项 `relation_resolutions`，再统一处理重叠关系并形成最终组；不得先沿用初步组或预设最终组，再用组归属反向解释关系。分开时可返回两侧代表成员。每条关系只返回覆盖两侧判断所需的最少消息编号，Function 示例也由 Python 按关系两侧生成代表成员和代表证据，不按关系数重复整个范围的消息清单。`validate_day_group_review_result(...)` 校验候选完整唯一覆盖、关系逐条处理、成立成员确实同组、分开代表成员确实位于不同组和两侧证据完整。复核失败或持续非法时保留复核前分组并记录 warning。
 
-最终分组锁定后，`personal_group_render` 为每个最终事件单独核对带证据的标题、正文、主要动作、具体对象、保留理由、保留依据和本人参与方式；即使当天只有一个候选或最终组只有一个成员，也会执行这一步，不额外增加全日模型阶段。模型接收正文来源与本人参与证据的并集原消息，以及已补读且属于这些消息的附件、在线文档内容。角色证据只能引用本人消息，正文仍须覆盖各成员原有事实来源；最终事件的来源记录包括实际采用的本人证据。Python 校验完整性、配置角色与合法理由，统一采用核对结果；`supported=false` 的事件不进入最终日报。最多并行处理 3 个最终事件。当前局部质量重试与主备请求用尽后仍有事件核对失败，则整次生成失败，不写入或送达报告；调试记录保留各事件的成功结果和失败原因。
+最终分组锁定后，`personal_group_render` 为每个最终事件单独核对带证据的标题、正文、主要动作、具体对象、保留理由、保留依据和本人参与方式；即使当天只有一个候选或最终组只有一个成员，也会执行这一步，不额外增加全日模型阶段。模型接收正文来源与本人参与证据的并集原消息，以及已补读且属于这些消息的附件、在线文档内容。角色证据只能引用本人消息，正文仍须覆盖各成员原有事实来源；同类参与方式被重复返回时，先逐条校验证据，再合并有效证据。最终事件的来源记录包括实际采用的本人证据。Python 校验完整性、配置角色与合法理由，统一采用核对结果；`supported=false` 的事件不进入最终日报。最多并行处理 3 个最终事件。当前局部质量重试与主备请求用尽后仍有事件核对失败，则整次生成失败，不写入或送达报告；调试记录保留各事件的成功结果和失败原因。
 
-最终核对协议专用的 `self_actions` 保存动作类型与本人证据，`fact_items` 增加 `actor` 和从 0 开始的 `self_action_indices`。早期阶段共用的 `PersonalFactItem` 保持原协议。动作含义、允许角色和核对规则放在 `config/retention_policy.json`。旧配置缺少贡献字段或定义为空时，加载阶段明确报错并提示更新该配置，避免悄悄丢失本人归属。Python 校验本人证据、动作索引、事实证据包含动作证据、正文覆盖全部动作，以及动作与角色双向对应；有明确本人动作时，主要动作也必须引用本人动作。接收、转发、不确定动作不能支撑主责执行。文字含义仍由模型判断，结构校验不能保证所有自然语言误判都被发现。
+最终核对由模型填写本人动作 `self_actions`（类型、证据和 `relation`）及带 `actor`、证据的事实 `fact_items`。动作只允许一种参与方式时 `relation` 填 null，由 Python 自动确定；有多种允许角色时模型在该动作内选择一个，角色直接使用动作证据。模型不再单独填写 `self_relations` 或 `self_action_indices`；Python 合并同类角色，并根据事实与本人动作的共同证据建立动作引用。每条事实只需引用直接支持它的相关证据，不必重复动作的全部证据，也不会由程序补入无关证据。正文仍须覆盖本人动作及锁定成员；主要动作仍须有本人证据。旧返回的动作编号允许读取但不作为依据，按证据重新计算。接收和转发自动得到回应角色，不会变成主责执行；不确定动作不能支持主责。文字含义仍由模型判断，结构校验不能保证发现全部自然语言误判。 动作含义与允许角色维护在 `config/retention_policy.json`。
 
 相同正文关系只比较候选来源切片中、同会话的非空原始完整正文，仅规范换行和首尾空白；空附件正文或压缩后相同不作为重复。相关较早消息同步进入提示、合法事实证据范围与主备解析，实际采用的消息进入最终来源记录。该关系只为模型提供核对背景，不直接降低角色；独立执行证据仍可支撑主责。
 
@@ -449,10 +449,10 @@ FailoverAnalyzer -> CodexAnalyzer -> Codex CLI
 固定结构的正式语义请求：
 
 - Codex 提示词完整展示 Function 契约、`strict=true`、典型参数、结构示例和最终自检，不追加 `/no_think`
-- Online 主线路和备用 prompt 都追加 `/no_think`；有效推理配置为 `none` 时，Responses 发送 `reasoning.effort=none`，Chat Completions 改发 `thinking.type=disabled`
+- Online 默认使用 `WORKTRACE_LLM_REASONING_EFFORT=high`。Responses 发送 `reasoning.effort=high`，Chat Completions 发送 `reasoning_effort=high`，文字、图片和在线探针使用同一设置。高推理设置不追加 `/no_think`，输出仍要求仅提交最终结果，不展示思考过程。显式配置 `none` 时保留旧行为：追加 `/no_think`，Responses 发送 `reasoning.effort=none`，Chat Completions 发送 `thinking.type=disabled`。实际服务是否支持所选强度，以完整自检和真实业务复测为准。
 - 会话分段、事件提炼、保留复核、事实复核、全日分组、个人标题发现、个人完整复核、个人内容重写、多人候选分组、部门标题发现、部门完整复核、正式内容生成和表情元数据补全分别构造 `FunctionCallSpec`
 - 参数完整声明必填字段、动态 ID 枚举、数组数量与去重约束和 `additionalProperties:false`，并在 prompt 中加入当前合法 ID 的典型参数示例
-- Online 两种接口都设置 `strict:true`、`tools`、强制 `tool_choice` 和 `parallel_tool_calls=false`，非流式必须且只能调用一次预期 Function；流式按调用编号拼接 Function 参数后执行相同检查
+- Online 两种接口都设置 `strict:true`、`tools`、`tool_choice`（高推理时 `auto`，`none` 时指定函数） 和 `parallel_tool_calls=false`，非流式必须且只能调用一次预期 Function；流式按调用编号拼接 Function 参数后执行相同检查；若完成事件明确包含最终 output，其校验失败不得退回早期参数片段
 - Codex 使用同一参数结构作为 `--output-schema`，只提交一次参数 JSON；CLI 没有 `--strict=true` 参数，`--strict-config` 不等同该参数
 - 普通文字总结和图片理解不要求固定结构时不强制 Function Calling
 
@@ -493,16 +493,16 @@ FailoverAnalyzer -> CodexAnalyzer -> Codex CLI
 - `slice_retry_limit = 3`
 - `anchor_batch_size = 3`
 - `llm_stream_enabled = False`
-- `llm_reasoning_effort = "none"`
+- `llm_reasoning_effort = "high"`
 - `llm_wire_api = "responses"`
 
 ### 9.2 `.env` 与环境变量
 
 `WORKTRACE_LLM_MODE` 由进程环境变量优先于仓库本地 `.env`，默认 `codex_with_fallback`。纯在线模式只要求 Online 配置，preflight 执行真实的严格 Function Calling 小探针，不检查 Codex 安装、登录或提供方设置。
 
-默认模式的 Codex 主线路必填项是仓库本地 `.env` 中的模型、推理强度和五项中转提供方设置：`WORKTRACE_CODEX_MODEL`、`WORKTRACE_CODEX_REASONING_EFFORT`、`WORKTRACE_CODEX_PROVIDER_ID`、`WORKTRACE_CODEX_PROVIDER_NAME`、`WORKTRACE_CODEX_PROVIDER_BASE_URL`、`WORKTRACE_CODEX_PROVIDER_WIRE_API`、`WORKTRACE_CODEX_PROVIDER_REQUIRES_OPENAI_AUTH`。它们不从进程环境变量或个人 Codex 配置继承；中转站 Key 继续由 Codex CLI 的认证存储提供，不写入 WorkTrace `.env`。Online 备用连接仍使用 `WORKTRACE_LLM_BASE_URL`、`WORKTRACE_LLM_MODEL`、`WORKTRACE_LLM_API_KEY` 三项，默认模式缺少或不合法时只禁用备用；纯在线模式缺少或不合法时自检失败。`WORKTRACE_LLM_WIRE_API` 可选 `responses` 或 `chat_completions`，未配置时保持 Responses；Online 的 `WORKTRACE_LLM_REASONING_EFFORT` 必须为 `none`。timeout/stream/TLS 位于 `.env` 或进程环境变量，环境变量优先。两条文字线路共用 `WORKTRACE_LLM_TIMEOUT_SECONDS`（未配置时 180 秒）作为整次请求总时限；Codex 到点终止子进程，Online 到点关闭当前连接。默认模式的可切换失败按 `primary_request_retry_limit=1` 让当前请求再试 Codex 1 次，仍失败才由可用 Online 备用执行一次；纯在线模式则让当前 Online 请求再试 1 次。图片摘要中的 Codex 工具调用等不合法结果和配置定义的无法识别回复直接触发当前图片的 Online 备用，不改变文字请求规则。请求级重试次数和 Codex 间隔都在 `config/llm_retry.json` 统一控制。`WORKTRACE_LLM_TLS_VERIFY` 进入 Online 的文本、图片和独立探针 HTTP client。
+默认模式的 Codex 主线路必填项是仓库本地 `.env` 中的模型、推理强度和五项中转提供方设置：`WORKTRACE_CODEX_MODEL`、`WORKTRACE_CODEX_REASONING_EFFORT`、`WORKTRACE_CODEX_PROVIDER_ID`、`WORKTRACE_CODEX_PROVIDER_NAME`、`WORKTRACE_CODEX_PROVIDER_BASE_URL`、`WORKTRACE_CODEX_PROVIDER_WIRE_API`、`WORKTRACE_CODEX_PROVIDER_REQUIRES_OPENAI_AUTH`。它们不从进程环境变量或个人 Codex 配置继承；中转站 Key 继续由 Codex CLI 的认证存储提供，不写入 WorkTrace `.env`。Online 备用连接仍使用 `WORKTRACE_LLM_BASE_URL`、`WORKTRACE_LLM_MODEL`、`WORKTRACE_LLM_API_KEY` 三项，默认模式缺少或不合法时只禁用备用；纯在线模式缺少或不合法时自检失败。`WORKTRACE_LLM_WIRE_API` 可选 `responses` 或 `chat_completions`，未配置时保持 Responses；Online 的 `WORKTRACE_LLM_REASONING_EFFORT` 默认使用 `high`。timeout/stream/TLS 位于 `.env` 或进程环境变量，环境变量优先。两条文字线路共用 `WORKTRACE_LLM_TIMEOUT_SECONDS`（未配置时 180 秒）作为整次请求总时限；Codex 到点终止子进程，Online 到点关闭当前连接。默认模式的可切换失败按 `primary_request_retry_limit=1` 让当前请求再试 Codex 1 次，仍失败才由可用 Online 备用执行一次；纯在线模式则让当前 Online 请求再试 1 次。图片摘要中的 Codex 工具调用等不合法结果和配置定义的无法识别回复直接触发当前图片的 Online 备用，不改变文字请求规则。请求级重试次数和 Codex 间隔都在 `config/llm_retry.json` 统一控制。`WORKTRACE_LLM_TLS_VERIFY` 进入 Online 的文本、图片和独立探针 HTTP client。
 
-当前有一项配置边界：默认 preflight 会把 Online 推理强度不是 `none` 的配置报告为 `online_fallback=disabled`，但这个报告状态不传入 factories；工厂仍只按 `load_online_llm_settings(...)` 能否成功加载决定装配备用，而该加载器没有拒绝其他推理值。使用者仍须按要求配置 `none`，不能把自检中的 disabled 视为对该错误配置的实际禁用。
+升级保留已有 `.env` 和平台注入值，旧的 `none` 不会自动变成 `high`。使用高推理时须同步修改 `WORKTRACE_LLM_REASONING_EFFORT`；进程环境优先于 `.env`。预检不再限制只能使用 `none`，也不会因设置 `high` 禁用 Online 备用。
 
 所有正式外部命令都通过同一执行入口。Windows 从 `PATH` 定位真实启动文件：`lark-cli.cmd`、`codex.cmd` 或其他 `.cmd/.bat` 经 `COMSPEC /d /s /c` 启动，`codex.exe` 等 `.exe/.com` 文件直接启动；两种方式都安全处理空格、中文和引号。其他系统保持参数列表调用。输出统一按 UTF-8 解码，异常字节替换为可见占位。Codex 隔离环境在 Windows 保留系统、用户和临时目录变量，同时继续排除 `WORKTRACE_*` 和其他凭据。`tzdata` 为缺少系统 IANA 时区库的 Windows 环境提供 `Asia/Shanghai` 后备。
 
@@ -669,3 +669,5 @@ stage_timing_summary，旧 error_summary / warning_messages 保留。
 平台验收与 .github/workflows/windows.yml 范围见
 [Windows 使用说明](windows-guide.md)，Windows CI 完成情况以远程运行
 结果为准；本地 macOS 离线测试不能代替真实 Windows 在线业务验收。
+
+输入预算估算保守地预留 `/no_think` 的长度，实际高推理请求不发送该指令；重试中的上一份个人最终返回也计入完整输入。

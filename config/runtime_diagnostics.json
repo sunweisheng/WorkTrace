@@ -13,10 +13,9 @@
       "code": "configuration_missing",
       "markers": [
         "missing codex configuration",
-        "missing online llm configuration",
-        "requires worktrace_llm_reasoning_effort=none"
+        "missing online llm configuration"
       ],
-      "summary": "Local model configuration is incomplete or invalid. Check repository-local .env; use import-codex-config to preview Codex settings and keep Online reasoning effort set to none."
+      "summary": "Local model configuration is incomplete or invalid. Check repository-local .env; use import-codex-config to preview Codex settings and verify the configured Online reasoning effort (default high)."
     },
     {
       "code": "tls",

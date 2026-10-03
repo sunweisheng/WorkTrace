@@ -26,7 +26,7 @@ def test_analysis_checkpoint_round_trips_and_clears(tmp_path) -> None:
     assert store.load_analysis(batch) is None
 
 
-def test_default_rerun_cleanup_removes_personal_markdown_checkpoints_and_debug(
+def test_default_rerun_cleanup_preserves_report_and_clears_checkpoints_and_debug(
     tmp_path,
 ) -> None:
     config = RuntimeConfig(data_root=tmp_path / "data")
@@ -55,7 +55,7 @@ def test_default_rerun_cleanup_removes_personal_markdown_checkpoints_and_debug(
 
     _clear_previous_personal_run(config, "2026-07-13")
 
-    assert not markdown_path.exists()
+    assert markdown_path.read_text(encoding="utf-8") == "old"
     assert store.load_analysis(batch) is None
     assert not debug_day_dir.exists()
     assert merged_path.exists()

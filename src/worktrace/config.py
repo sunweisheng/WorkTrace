@@ -2251,7 +2251,7 @@ class RuntimeConfig:
     self_delivery_file_name: str = DEFAULT_SELF_DELIVERY_FILE_NAME
     llm_stream_enabled: bool = False
     llm_tls_verify: bool = False
-    llm_reasoning_effort: str | None = "none"
+    llm_reasoning_effort: str | None = "high"
     llm_wire_api: str = "responses"
 
     def __post_init__(self) -> None:

@@ -74,7 +74,7 @@ def test_load_online_llm_settings_reads_local_env(tmp_path: Path) -> None:
     assert settings.timeout_seconds == 45
     assert settings.stream_enabled is False
     assert settings.tls_verify is False
-    assert settings.reasoning_effort == "none"
+    assert settings.reasoning_effort == "high"
     assert settings.wire_api == "responses"
 
 
