@@ -4767,15 +4767,6 @@ class DailyTraceRunner:
                 messages=messages,
                 conversation_slices=conversation_slices,
             )
-            primary = group_candidates[0]
-            typical_content = [
-                {
-                    "field": "content",
-                    "text": item.content or "该成员属于同一事项。",
-                    "evidence_message_ids": item.source_message_ids,
-                }
-                for item in group_candidates
-            ]
             function_spec = function_call_spec(
                 "personal_group_render",
                 personal_group_render_output_schema(
@@ -4789,44 +4780,7 @@ class DailyTraceRunner:
                     ],
                     config=self.config,
                 ),
-                typical_arguments={
-                    "groups": [
-                        {
-                            "group_id": group.group_id,
-                            "covered_draft_ids": list(group.draft_ids),
-                            "supported": True,
-                            "self_actions": [],
-                            "removed_claims": [],
-                            "fact_items": [
-                                {
-                                    "field": "topic",
-                                    "text": primary.topic or "同一事项处理",
-                                    "evidence_message_ids": primary.source_message_ids[:1],
-                                },
-                                *typical_content,
-                                {
-                                    "field": "object_hint",
-                                    "text": primary.object_hint or "具体事项",
-                                    "evidence_message_ids": primary.source_message_ids[:1],
-                                },
-                                *[
-                                    {
-                                        "field": field,
-                                        "text": getattr(primary, field),
-                                        "evidence_message_ids": primary.source_message_ids,
-                                    }
-                                    for field in (
-                                        "action_label", "retention_reason",
-                                        "retention_detail",
-                                    )
-                                ],
-                            ],
-                        }
-                    ]
-                },
             )
-            for fact in function_spec.typical_arguments["groups"][0]["fact_items"]:
-                fact.update({"actor": "context"})
             estimates = estimate_structured_input_tokens(
                 prompt,
                 function_spec=function_spec,

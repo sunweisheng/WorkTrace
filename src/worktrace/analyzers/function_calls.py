@@ -44,7 +44,10 @@ def _load_function_contracts() -> tuple[dict[str, dict[str, object]], tuple[str,
     for request_kind, raw_contract in raw_functions.items():
         if not isinstance(request_kind, str) or not isinstance(raw_contract, dict):
             raise ValueError("LLM Function contract entries must be objects.")
-        if set(raw_contract) != {"name", "description", "strict"}:
+        required_fields = {"name", "description", "strict"}
+        if (not required_fields.issubset(raw_contract)
+                or set(raw_contract) - required_fields
+                - {"argument_structure_example"}):
             raise ValueError(f"Invalid Function contract fields for {request_kind}.")
         name = raw_contract.get("name")
         description = raw_contract.get("description")
@@ -62,6 +65,14 @@ def _load_function_contracts() -> tuple[dict[str, dict[str, object]], tuple[str,
             "description": description.strip(),
             "strict": strict,
         }
+        if "argument_structure_example" in raw_contract:
+            example = raw_contract["argument_structure_example"]
+            if (not isinstance(example, dict)
+                    or not isinstance(example.get("valid_final_arguments"), dict)):
+                raise ValueError(
+                    f"Invalid Function argument example for {request_kind}."
+                )
+            functions[request_kind]["argument_structure_example"] = example
     if not all(isinstance(item, str) and item.strip() for item in raw_instructions):
         raise ValueError("Codex submission instructions must be non-empty strings.")
     return functions, tuple(item.strip() for item in raw_instructions)
@@ -481,6 +492,13 @@ def function_call_spec(
         enum_values=enum_values or {},
         exact_array_lengths=exact_array_lengths or {},
     )
+    structure_example = (
+        argument_structure_example
+        if argument_structure_example is not None
+        else metadata.get("argument_structure_example")
+    )
+    if typical_arguments is None and isinstance(structure_example, dict):
+        typical_arguments = structure_example.get("valid_final_arguments")
     return FunctionCallSpec(
         request_kind=request_kind,
         name=str(metadata["name"]),
@@ -493,8 +511,8 @@ def function_call_spec(
             else _example_from_schema(normalized_parameters)
         ),
         argument_structure_example=(
-            copy.deepcopy(argument_structure_example)
-            if argument_structure_example is not None
+            copy.deepcopy(structure_example)
+            if structure_example is not None
             else None
         ),
         final_parameter_checks=tuple(final_parameter_checks),

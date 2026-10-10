@@ -16,7 +16,41 @@
     "day_candidate_merge": {"name": "submit_day_candidate_groups", "description": "提交同一天候选事件的跨会话分组结果。", "strict": true},
     "day_group_discovery": {"name": "submit_day_group_discovery", "description": "逐组提交仅根据标题完成的个人事件漏合并检查。", "strict": true},
     "day_group_review": {"name": "submit_day_group_review", "description": "提交存在强关联的个人事件组局部复核结果。", "strict": true},
-    "personal_group_render": {"name": "submit_personal_group_render", "description": "提交锁定成员的个人事件保留判断、带证据的事实字段和本人参与方式。", "strict": true},
+    "personal_group_render": {
+      "name": "submit_personal_group_render",
+      "description": "提交锁定成员的个人事件保留判断、带证据的事实字段和本人参与方式。",
+      "strict": true,
+      "argument_structure_example": {
+        "note": "这是虚构的结构示例，不是当前事件。example- 前缀的编号只能出现在示例里，实际返回必须使用当前输入的合法编号。示例中本人提出报告需求、同事交付、本人接收，各项分别对应原消息，不能把同事的执行归到本人名下。",
+        "source_messages": [
+          {"id": "example-self-request", "actor": "self", "text": "请提供本周业务报告。"},
+          {"id": "example-other-delivery", "actor": "other", "text": "本周业务报告已完成，发给你。"},
+          {"id": "example-self-receipt", "actor": "self", "text": "业务报告已收到。"}
+        ],
+        "valid_final_arguments": {
+          "groups": [{
+            "group_id": "example-group",
+            "covered_draft_ids": ["example-draft"],
+            "supported": true,
+            "self_actions": [
+              {"kind": "initiation", "evidence_message_ids": ["example-self-request"], "relation": null},
+              {"kind": "receipt", "evidence_message_ids": ["example-self-receipt"], "relation": null}
+            ],
+            "removed_claims": [],
+            "fact_items": [
+              {"field": "topic", "text": "业务报告请求与接收", "evidence_message_ids": ["example-self-request", "example-other-delivery", "example-self-receipt"], "actor": "context"},
+              {"field": "content", "text": "本人提出获取本周业务报告的需求。", "evidence_message_ids": ["example-self-request"], "actor": "self"},
+              {"field": "content", "text": "同事完成并交付本周业务报告。", "evidence_message_ids": ["example-other-delivery"], "actor": "other"},
+              {"field": "content", "text": "本人回复确认接收业务报告。", "evidence_message_ids": ["example-self-receipt"], "actor": "self"},
+              {"field": "object_hint", "text": "本周业务报告", "evidence_message_ids": ["example-other-delivery"], "actor": "context"},
+              {"field": "action_label", "text": "提出报告需求并确认接收", "evidence_message_ids": ["example-self-request", "example-self-receipt"], "actor": "self"},
+              {"field": "retention_reason", "text": "deliverable_updated", "evidence_message_ids": ["example-other-delivery"], "actor": "other"},
+              {"field": "retention_detail", "text": "同事完成并交付业务报告，本人提出需求并确认接收。", "evidence_message_ids": ["example-self-request", "example-other-delivery", "example-self-receipt"], "actor": "shared"}
+            ]
+          }]
+        }
+      }
+    },
     "collected_candidate_grouping": {"name": "submit_collected_grouping_result", "description": "提交多人事件候选分组，完整覆盖每个来源事件且不得重复。", "strict": true},
     "collected_group_discovery": {"name": "submit_collected_group_discovery", "description": "逐组提交仅根据标题完成的部门事件漏合并检查。", "strict": true},
     "collected_group_review": {"name": "submit_collected_group_review_result", "description": "提交一个高风险多人候选组的复核或拆分结果。", "strict": true},

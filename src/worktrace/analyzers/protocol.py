@@ -828,9 +828,19 @@ def parse_personal_group_render_payload(
             and set(action.evidence_message_ids).intersection(evidence_ids)
         ]
         if actor in {"self", "shared"} and not indices:
+            action_details = "; ".join(
+                f"self_actions[{action_index}] (kind={action.kind}, "
+                f"evidence_message_ids={action.evidence_message_ids})"
+                for action_index, action in enumerate(actions)
+            ) or "no self_actions"
             validation_errors.append(
                 f"fact_items[{index}].evidence_message_ids must include "
-                "evidence from a matching self_actions item."
+                "evidence from a matching self_actions item. "
+                f"Current fact evidence: {evidence_ids}; "
+                f"existing actions: {action_details}. "
+                "Recheck the original messages: add a separately supported "
+                "self action if needed, or correct the fact's actor/evidence. "
+                "Do not add unrelated evidence."
             )
             validation_error_codes.append("render_evidence")
         fact = PersonalRenderFactItem(
@@ -884,8 +894,14 @@ def parse_personal_group_render_payload(
     if missing_actions:
         validation_errors.append(
             "Personal content fact_items must reference "
-            + ", ".join(f"self_actions[{index}]" for index in missing_actions)
-            + "."
+            + "; ".join(
+                f"self_actions[{index}] (kind={actions[index].kind}, "
+                f"evidence_message_ids={actions[index].evidence_message_ids})"
+                for index in missing_actions
+            )
+            + ". Add or correct content facts with actor=self/shared and "
+            "the directly supporting evidence from each missing action. "
+            "An action_label alone does not cover a self action in content."
         )
         validation_error_codes.append("render_role")
     content_evidence = {

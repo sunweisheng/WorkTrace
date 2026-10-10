@@ -21,6 +21,7 @@ from src.worktrace.models import (
 )
 from src.worktrace.runner import DailyTraceRunner
 from src.worktrace.stores.markdown import MarkdownEventStore
+from tests.helpers import personal_render_payload
 
 
 class FakeSource:
@@ -200,7 +201,7 @@ class FakeAnalyzer:
                             "text": primary["object_hint"],
                             "evidence_message_ids": primary["source_message_ids"],
                         },
-                        *function_spec.typical_arguments["groups"][0][
+                        *personal_render_payload(prompt)["groups"][0][
                             "fact_items"
                         ][-3:],
                     ],
@@ -295,7 +296,7 @@ def test_runner_happy_path(tmp_path: Path) -> None:
                                 "text": "发布目标及上线窗口",
                                 "evidence_message_ids": ["om_1"],
                             },
-                            *function_spec.typical_arguments["groups"][0][
+                            *personal_render_payload(prompt)["groups"][0][
                                 "fact_items"
                             ][-3:],
                         ],

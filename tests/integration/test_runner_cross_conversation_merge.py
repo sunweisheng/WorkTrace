@@ -24,7 +24,7 @@ from src.worktrace.pipeline.cross_conversation_merge import (
 )
 from src.worktrace.runner import DailyTraceRunner
 from src.worktrace.stores.markdown import MarkdownEventStore
-from tests.helpers import NullDelivery
+from tests.helpers import NullDelivery, personal_render_payload
 
 
 def _draft(
@@ -662,7 +662,7 @@ def test_personal_group_render_rewrites_locked_multi_group_content(
                                 "text": "事项需求及交付成果",
                                 "evidence_message_ids": ["m1", "m2"],
                             },
-                            *function_spec.typical_arguments["groups"][0][
+                            *personal_render_payload(prompt)["groups"][0][
                                 "fact_items"
                             ][-3:],
                         ],
@@ -740,7 +740,7 @@ def test_personal_group_render_rewrites_locked_singleton_content(
                                 "text": "事项需求及后续安排",
                                 "evidence_message_ids": ["m1"],
                             },
-                            *function_spec.typical_arguments["groups"][0][
+                            *personal_render_payload(prompt)["groups"][0][
                                 "fact_items"
                             ][-3:],
                         ],
@@ -831,7 +831,7 @@ def test_personal_group_render_rewrites_singleton_and_multi_groups(
                                 "text": f"完整对象 {group_id}",
                                 "evidence_message_ids": evidence_ids,
                             },
-                            *function_spec.typical_arguments["groups"][0][
+                            *personal_render_payload(prompt)["groups"][0][
                                 "fact_items"
                             ][-3:],
                         ],
@@ -907,7 +907,7 @@ def test_personal_group_render_failure_blocks_unreviewed_content(
                                 "text": "不完整对象",
                                 "evidence_message_ids": ["m1"],
                             },
-                            *function_spec.typical_arguments["groups"][0][
+                            *personal_render_payload(prompt)["groups"][0][
                                 "fact_items"
                             ][-3:],
                         ],
@@ -985,7 +985,7 @@ def test_personal_singleton_render_rejects_unknown_message_evidence(
                                 "text": "具体事项",
                                 "evidence_message_ids": ["unknown-message"],
                             },
-                            *function_spec.typical_arguments["groups"][0][
+                            *personal_render_payload(prompt)["groups"][0][
                                 "fact_items"
                             ][-3:],
                         ],
@@ -1054,7 +1054,7 @@ def test_personal_render_failure_preserves_other_review_results(
                                 "text": "第二项具体对象",
                                 "evidence_message_ids": member["source_message_ids"],
                             },
-                            *function_spec.typical_arguments["groups"][0][
+                            *personal_render_payload(prompt)["groups"][0][
                                 "fact_items"
                             ][-3:],
                         ],

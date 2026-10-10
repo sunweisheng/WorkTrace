@@ -279,6 +279,48 @@ def test_final_render_identifies_fact_missing_action_evidence():
         _parse(payload)
 
 
+def test_final_render_feedback_lists_unmatched_fact_and_action_evidence():
+    payload = _simple_payload()
+    payload["groups"][0]["fact_items"][1][
+        "evidence_message_ids"
+    ] = ["m_self_2"]
+    candidate = replace(
+        _candidate(), self_evidence_message_ids=["m_self", "m_self_2"],
+    )
+    with pytest.raises(AnalyzerProtocolError) as error:
+        parse_personal_group_render_payload(
+            payload, group=GROUP, candidates=[candidate],
+            allowed_self_relations=tuple(
+                x.key for x in CONFIG.self_relation_types
+            ),
+            action_relation_support={
+                x.key: x.supported_relations
+                for x in CONFIG.retention_policy.contribution_actions
+            },
+        )
+    feedback = str(error.value)
+    assert "fact_items[1]" in feedback
+    assert "m_self_2" in feedback
+    assert "self_actions[0]" in feedback
+    assert "receipt" in feedback
+    assert "m_self" in feedback
+    assert "unrelated evidence" in feedback
+
+
+def test_final_render_feedback_identifies_receipt_missing_from_content():
+    payload = _simple_payload()
+    fact = payload["groups"][0]["fact_items"][1]
+    fact.update({"actor": "other", "evidence_message_ids": ["m_other"]})
+    with pytest.raises(AnalyzerProtocolError) as error:
+        _parse(payload)
+    feedback = str(error.value)
+    assert "content" in feedback
+    assert "self_actions[0]" in feedback
+    assert "receipt" in feedback
+    assert "m_self" in feedback
+    assert "action_label" in feedback
+
+
 def test_final_render_identifies_unsupported_relation():
     payload = _payload()
     payload["groups"][0]["self_actions"][0]["kind"] = "collaboration"
@@ -464,6 +506,44 @@ def test_final_render_sends_source_messages_and_uses_reviewed_metadata(tmp_path)
             ]["items"]["properties"]
             assert "self_relations" not in properties
             assert "supported" in properties
+            # The shipped example must demonstrate valid action/content links.
+            example = function_spec.typical_arguments["groups"][0]
+            assert example["self_actions"]
+            example_candidate = replace(
+                _candidate(),
+                draft_id=example["covered_draft_ids"][0],
+                source_message_ids=list(dict.fromkeys(
+                    message_id
+                    for fact in example["fact_items"]
+                    for message_id in fact["evidence_message_ids"]
+                )),
+                self_evidence_message_ids=list(dict.fromkeys(
+                    message_id
+                    for action in example["self_actions"]
+                    for message_id in action["evidence_message_ids"]
+                )),
+            )
+            example_result = parse_personal_group_render_payload(
+                function_spec.typical_arguments,
+                group=CrossConversationGroup(
+                    example["group_id"], example["covered_draft_ids"],
+                    example_candidate.draft_id,
+                ),
+                candidates=[example_candidate],
+                allowed_self_relations=tuple(
+                    x.key for x in CONFIG.self_relation_types
+                ),
+                action_relation_support={
+                    x.key: x.supported_relations
+                    for x in CONFIG.retention_policy.contribution_actions
+                },
+            ).groups[0]
+            assert len(example_result.self_actions) == 2
+            assert any(
+                fact.actor == "other"
+                for fact in example_result.fact_items
+                if fact.field_name == "content"
+            )
             assert properties["self_actions"]["items"]["properties"][
                 "evidence_message_ids"
             ]["items"]["enum"] == ["m_self"]
