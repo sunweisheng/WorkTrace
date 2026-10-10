@@ -1,6 +1,6 @@
 # WorkTrace 多人事件 Markdown 汇总设计
 
-> 状态：4.1.0 的 `merge-collected` 实现说明；2026-10-02 按代码、配置和测试核对。
+> 状态：4.1.7 的 `merge-collected` 实现说明；2026-10-10 按代码、配置和测试核对。
 
 ## 1. 目标与边界
 
@@ -179,7 +179,7 @@ codex_estimate = estimate(codex_prepared_prompt + 同一 parameters output-schem
 input_estimated_tokens = max(online_estimate, codex_estimate)
 ```
 
-Python 从 `config/model_input_budget.json` 读取 `model_input_batch_target_tokens`。`codex_with_fallback` 按仓库本地模型配置的主模型和备用模型精确匹配模型预算 profile；当前文件为 `gpt-5.6-terra` + `qwen3.7-max` 配置 `20000`。没有匹配项或使用 `online_only` 时采用该 JSON 的 `default_target_tokens`（当前 `7000`）；配置文件不存在时默认也是 `7000`。这里列出的是仓库配置，不表示已核对本机实际模型设置。个人日报和多人汇总共用该目标，备用线路不重新分批。每尝试加入一个候选都会重建拟提交批次的 prompt、Function 和编号清单后重新估算；组批和实际调用前使用同一个生产函数。不可继续拆分的最小输入仍超过目标时标记后发送；校验反馈导致当前重试超限时标记 `oversized_retry` 后发送。该值是模型输入估算目标，不是 HTTP 字节数或服务端上下文上限，服务端精确 token 只用于事后核对。
+Python 从 `config/model_input_budget.json` 读取 `model_input_batch_target_tokens`。`codex_with_fallback` 按仓库本地模型配置的主模型和备用模型精确匹配模型预算 profile；当前文件为 `gpt-5.6-terra` + `qwen3.7-max` 配置 `20000`。没有匹配项或使用 `online_only` 时采用该 JSON 的 `default_target_tokens`（当前 `7000`）；配置文件不存在时默认也是 `7000`。这里列出的是仓库配置，不表示已核对本机实际模型设置。个人日报和多人汇总共用该目标，备用线路不重新分批。每尝试加入一个候选都会重建拟提交批次的 prompt、Function 和编号清单后重新估算；组批和实际调用前使用同一个生产函数。不可继续拆分的最小输入仍超过目标时标记后发送；校验反馈导致当前重试超限时标记 `oversized_retry` 后发送；多人标题发现 `collected_group_discovery` 除外，首次、重试和备用请求超限时均跳过该阶段。该值是模型输入估算目标，不是 HTTP 字节数或服务端上下文上限，服务端精确 token 只用于事后核对。
 
 `config/event_generation.json` 提供团队汇总的共同事实规则、完整事项边界、摘要模板、正式正文模板和脱敏正反例。案例只用于学习边界和表达结构，不得复制其中的人员、对象、数字或结论。模板和案例随最终 prompt 一起进入上述完整输入估算，不新增字符阈值；调用次数、输入长度、重试和耗时继续由 Python 统计。
 
@@ -191,7 +191,7 @@ Python 从 `config/model_input_budget.json` 读取 `model_input_batch_target_tok
 
 `config/event_grouping.json` 是个人与多人分组语义说明的共同来源。每个 `group_reason_definitions` 项除描述和关系类型外，还配置 `acceptance_rules` 与 `rejection_rules`：`same_object` 要求唯一共同对象和逐事件直接关系；`continuous_action` 要求前一结果明确成为后一动作的输入、条件或后续动作；`same_deliverable_batch` 覆盖同一批配套产物、同一交付物的多个版本，以及不同时间、状态、地区或阶段形成但需要统一汇报或交付的连续产物，并说明每项在整体中的角色。共同消息或共同文件必须由 Python 计算并连接全组；同一会话不能单独支持合并。具体中文判断规则不复制到 Python。`config/collected_merge.json` 只保留多人高风险复核开关和阈值。
 
-初步分组后，至少有两个组时，`collected_group_discovery` 把当前 scope 全部组的 `group_id` 和组合标题作为一个请求提交；不足两个组时跳过标题发现。组合标题由 Python 按稳定顺序覆盖初步组全部来源事件标题，避免候选摘要的主标题掩盖其他成员；请求不发送日期、正文、对象、附件、人员、来源信息或其他分组阶段的业务正反例，字段仍严格只有 `group_id` 和 `title`。模型必须逐组比较全部标题，并按输入顺序为每个组恰好返回一次 `group_checks`，列出可能相关的其他编号和非空理由；Python 校验全量覆盖、编号、自关联和重复后，将重叠关系形成可包含两个或更多组的候选。协议不包含特定日期、人员、业务关键词或固定长度片段。超过当前输入预算目标仍整体提交。所选模式的请求和质量重试（以及配置可用时的备用请求）全部失败时，按没有标题候选继续并记录 warning。
+初步分组后，至少有两个组时，`collected_group_discovery` 把当前 scope 全部组的 `group_id` 和组合标题作为一个请求提交；不足两个组时跳过标题发现。组合标题由 Python 按稳定顺序覆盖初步组全部来源事件标题，避免候选摘要的主标题掩盖其他成员；请求不发送日期、正文、对象、附件、人员、来源信息或其他分组阶段的业务正反例，字段仍严格只有 `group_id` 和 `title`。模型必须逐组比较全部标题，并按输入顺序为每个组恰好返回一次 `group_checks`，列出可能相关的其他编号和非空理由；Python 校验全量覆盖、编号、自关联和重复后，将重叠关系形成可包含两个或更多组的候选。协议不包含特定日期、人员、业务关键词或固定长度片段。Python 在首次、重试和备用调用前按完整 prompt、Function 契约与输出 Schema 估算输入；超过当前 `model_input_batch_target_tokens` 时直接跳过标题发现，不提交超限请求，也不为了这个超限请求尝试备用。初步组继续进入后续完整复核和正文合并；共同消息、共同文件、附件基础名称、同日会话和高风险条件仍可建立检查范围。trace 状态为 `skipped_input_budget`，保存超限估算、阈值和 `skip_reason`，未发出的请求不计入调用、重试或备用次数，也不计为模型调用失败。跳过后可能少发现仅靠标题识别的跨组关系，因此会记录 warning。未超过预算时才整体提交；所选模式的请求和质量重试（以及配置可用时的备用请求）全部失败时，按没有标题候选继续并记录 warning。
 
 标题候选、共同消息、共同文件、同一附件基础名称、同日会话候选和下列高风险条件共同建立检查范围。配置文件 `config/collected_merge.json` 的默认高风险条件是：
 
@@ -213,7 +213,7 @@ Python 从 `config/model_input_budget.json` 读取 `model_input_batch_target_tok
 
 - 候选发现完整输入估算不超过 `model_input_batch_target_tokens` 时一次处理
 - 超过统一 token 上限时按消息、文件和会话关系集合优先分批，各批初步组由 Python 直接合并；不构造候选摘要，也不做摘要再次分组
-- 跨批可能漏掉的关系交给随后面向全部组的标题发现，以及由结构关系建立范围的完整内容复核
+- 跨批可能漏掉的关系交给随后面向全部组的标题发现，以及由结构关系建立范围的完整内容复核；标题发现完整请求超过预算时直接跳过，后续复核和正文合并继续
 - 不可继续拆开的候选输入按来源文件平均分配内容空间，短内容完整保留，长内容同时保留开头和结尾
 - 完整复核超限时同样按关系分批，单条正文仍过长时复用正文切片和分层摘要
 - 正式内容按最终锁定组逐事件生成，按 `max_concurrent_collected_merge_review_requests` 并行处理（当前默认 3），不把多个最终事件装入同一次请求
@@ -305,7 +305,7 @@ WORKTRACE_COLLECTED_MERGE_TRACE_ROOT=data/debug/collected_merge
 - `evidence_audit`：组内可用证据、最终证据、完整连接结果、已覆盖和未覆盖编号
 - `semantic_audit`：语义理由、逐事件说明覆盖结果和高风险复核触发原因
 - `model_declared_evidence_relation_ids` 只在旧 trace 回放结果中记录，不参与新流程
-- `collected_group_discovery.json` 中协议版本、全部组编号和标题、两种 token 估算、超限状态、逐组检查、Python 形成的候选或放弃原因
+- `collected_group_discovery.json` 中协议版本、全部组编号和标题、两种 token 估算、超限状态、逐组检查、Python 形成的候选或放弃原因；预算跳过另存 `skipped_token_estimates` 和 `skip_reason`，状态为 `skipped_input_budget`
 - `collected_group_review.json` 中初步组、可拆成员、关系来源、不可拆成员块、关系处理、跨组合并、初步组拆分和最终分组
 - 完整复核 step 中的初步组、待处理关系、不可拆成员块、有效拆分理由、`python_validation.errors` 和来源覆盖
 - 当前逻辑请求的在线/Codex 调用记录、切换次数、各线路耗时和 Codex 等待

@@ -5684,8 +5684,15 @@ def test_collected_separate_relation_may_name_representatives() -> None:
     assert error == ""
 
 
-def test_collected_group_discovery_submits_only_ids_and_titles_and_keeps_oversized_whole(
+@pytest.mark.parametrize(
+    "input_budget,title_repetitions,should_skip",
+    [(100, 200, True), (20_000, 8000, True), (1_000_000, 200, False)],
+)
+def test_collected_group_discovery_respects_input_budget(
     tmp_path: Path,
+    input_budget: int,
+    title_repetitions: int,
+    should_skip: bool,
 ) -> None:
     class DiscoveryAnalyzer(TwoStageAnalyzer):
         def __init__(self) -> None:
@@ -5723,7 +5730,7 @@ def test_collected_group_discovery_submits_only_ids_and_titles_and_keeps_oversiz
         config=replace(
             load_runtime_config_overrides(RuntimeConfig(), cwd=Path.cwd()),
             data_root=tmp_path / "data",
-            model_input_batch_target_tokens=100,
+            model_input_batch_target_tokens=input_budget,
         ),
     )
     events = [
@@ -5731,7 +5738,11 @@ def test_collected_group_discovery_submits_only_ids_and_titles_and_keeps_oversiz
             f"d{index}",
             f"人员{index}",
             f"人员{index}.md",
-            _event(event_id=f"e{index}", title="长标题" * 200, content="不应提交"),
+            _event(
+                event_id=f"e{index}",
+                title="长标题" * title_repetitions,
+                content="不应提交",
+            ),
         )
         for index in range(1, 4)
     ]
@@ -5748,17 +5759,196 @@ def test_collected_group_discovery_submits_only_ids_and_titles_and_keeps_oversiz
         "2026-06-29", events, groups
     )
 
+    if should_skip:
+        assert analyzer.requests == []
+        assert outcome.result == DayGroupDiscoveryResult()
+        assert outcome.artifact["status"] == "skipped_input_budget"
+        assert (
+            outcome.artifact["token_estimates"]["input_estimated_tokens"]
+            > input_budget
+        )
+        assert outcome.artifact["skip_reason"]
+        assert outcome.artifact["attempts"] == []
+        assert outcome.artifact["oversized_submission"] is False
+        assert outcome.request_count == 0
+        assert outcome.retry_count == 0
+        assert outcome.fallback_count == 0
+        assert outcome.failure_count == 0
+        assert outcome.warnings
+        return
+
     assert len(analyzer.requests) == 1
     prompt, function_spec, oversized = analyzer.requests[0]
     assert all(set(item) == {"group_id", "title"} for item in prompt["groups"])
     assert "events" not in prompt
     assert function_spec.request_kind == "collected_group_discovery"
-    assert oversized is True
+    assert oversized is False
     assert outcome.result.candidate_groups[0].group_ids == [
         "collected-group-001",
         "collected-group-002",
     ]
-    assert outcome.artifact["oversized_submission"] is True
+    assert outcome.artifact["oversized_submission"] is False
+
+
+@pytest.mark.parametrize("retry_limit", [0, 1])
+@pytest.mark.parametrize("feedback_tokens", [1000, 1001])
+def test_collected_group_discovery_checks_validation_feedback_budget(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    retry_limit: int,
+    feedback_tokens: int,
+) -> None:
+    success_payload = {
+        "group_checks": [
+            {
+                "group_id": "g1", "related_group_ids": [],
+                "reason": "标题对应独立事项。",
+            },
+            {
+                "group_id": "g2", "related_group_ids": [],
+                "reason": "标题对应另一事项。",
+            },
+        ]
+    }
+
+    class InvalidDiscoveryAnalyzer(TwoStageAnalyzer):
+        def __init__(self) -> None:
+            super().__init__()
+            self.requests = []
+            self.fallback_calls = []
+
+        def request_function(
+            self, prompt, *, function_spec, allow_oversized_input=False
+        ):
+            self.requests.append(allow_oversized_input)
+            if len(self.requests) > 1:
+                return success_payload
+            return {"group_checks": []}
+
+        def fallback_current_request(self, *args, **kwargs):
+            self.fallback_calls.append(kwargs)
+            return success_payload
+
+    def estimate_input(prompt, **kwargs):
+        tokens = (
+            feedback_tokens
+            if "retry_validation_errors" in json.loads(prompt)
+            else 1000
+        )
+        return {
+            "prompt_estimated_tokens": 100,
+            "online_input_estimated_tokens": tokens - 1,
+            "codex_input_estimated_tokens": tokens,
+            "input_estimated_tokens": tokens,
+        }
+
+    monkeypatch.setattr(
+        "src.worktrace.collected_merge.estimate_structured_input_tokens",
+        estimate_input,
+    )
+    analyzer = InvalidDiscoveryAnalyzer()
+    runner = _build_runner(
+        tmp_path,
+        analyzer=analyzer,
+        config=RuntimeConfig(
+            data_root=tmp_path / "data",
+            model_input_batch_target_tokens=1000,
+            day_group_validation_retry_limit=retry_limit,
+        ),
+    )
+    events = [
+        CollectedSourceEvent(
+            f"d{index}", f"人员{index}", f"人员{index}.md",
+            _event(event_id=f"e{index}", title=f"事项{index}", content="事实"),
+        )
+        for index in range(1, 3)
+    ]
+    groups = [
+        CollectedGroupingGroup(f"g{index}", [event.draft_id])
+        for index, event in enumerate(events, start=1)
+    ]
+
+    outcome = runner._discover_collected_group_review_candidates(
+        "2026-06-29", events, groups
+    )
+
+    if feedback_tokens == 1000:
+        assert outcome.artifact["status"] == "success"
+        assert len(outcome.result.group_checks) == 2
+        assert outcome.request_count == 2
+        assert outcome.retry_count == retry_limit
+        assert outcome.fallback_count == (0 if retry_limit else 1)
+        assert all(oversized is False for oversized in analyzer.requests)
+        assert all(
+            call["allow_oversized_input"] is False
+            for call in analyzer.fallback_calls
+        )
+        assert outcome.warnings == []
+        return
+
+    assert analyzer.requests == [False]
+    assert analyzer.fallback_calls == []
+    assert outcome.result == DayGroupDiscoveryResult()
+    assert outcome.artifact["status"] == "skipped_input_budget"
+    assert outcome.artifact["skipped_token_estimates"]["input_estimated_tokens"] == 1001
+    assert outcome.artifact["attempts"][0]["status"] == "invalid"
+    assert outcome.request_count == 1
+    assert outcome.retry_count == 0
+    assert outcome.fallback_count == 0
+    assert outcome.oversized_submission_count == 0
+    assert outcome.warnings
+
+
+def test_collected_group_discovery_budget_skip_does_not_block_markdown(
+    tmp_path: Path,
+) -> None:
+    class OversizedDiscoveryAnalyzer(TwoStageAnalyzer):
+        def request_function(
+            self, prompt, *, function_spec, allow_oversized_input=False
+        ):
+            raise AssertionError("Oversized title discovery must not be submitted")
+
+    inbox = tmp_path / "merge_inbox" / "2026" / "06" / "29"
+    _write_day_doc(
+        inbox / "2026-06-29-张三.md",
+        [
+            _event(event_id="e1", title="事项一", content="事实一"),
+            _event(event_id="e2", title="事项二", content="事实二"),
+        ],
+        tmp_path,
+    )
+    runner = _build_runner(
+        tmp_path,
+        analyzer=OversizedDiscoveryAnalyzer(),
+        config=RuntimeConfig(
+            data_root=tmp_path / "data", model_input_batch_target_tokens=1,
+            collected_merge_trace_enabled=True,
+        ),
+    )
+
+    result = runner.run("2026-06-29")
+
+    assert result.output_path is not None
+    output_path = Path(result.output_path)
+    assert output_path.exists()
+    document = runner.store.parse_day_document(
+        output_path.read_text(encoding="utf-8")
+    )
+    assert {event.content for event in document.events} == {"事实一", "事实二"}
+    assert result.quality_summary.discovery_request_count == 0
+    assert result.quality_summary.discovery_failure_count == 0
+    assert result.quality_summary.discovery_oversized_submission_count == 0
+    assert any(
+        "Skipped collected group discovery because input exceeds budget" in item
+        for item in result.warning_messages
+    )
+    trace_path = (
+        runner._collected_merge_trace_dir / "collected_group_discovery.json"
+    )
+    artifact = json.loads(trace_path.read_text(encoding="utf-8"))
+    assert artifact["status"] == "skipped_input_budget"
+    assert artifact["token_estimates"]["input_estimated_tokens"] > 1
+    assert artifact["attempts"] == []
 
 
 def test_collected_group_discovery_title_covers_every_initial_member(

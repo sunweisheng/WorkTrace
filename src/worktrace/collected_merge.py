@@ -1057,6 +1057,23 @@ class CollectedMergeRunner:
             )
             return prompt, function_spec, estimates
 
+        def skip_oversized_request(
+            estimates: dict[str, int],
+        ) -> _CollectedDiscoveryOutcome:
+            artifact["skipped_token_estimates"] = estimates
+            return self._finish_collected_group_discovery(
+                DayGroupDiscoveryResult(),
+                artifact=artifact,
+                attempts=attempts,
+                retry_count=retry_count,
+                fallback_count=fallback_count,
+                usage_record_start_index=usage_record_start_index,
+                skip_reason=(
+                    f"estimated={estimates['input_estimated_tokens']} "
+                    f"target={self.config.model_input_batch_target_tokens}."
+                ),
+            )
+
         for attempt_index in range(
             self.config.day_group_validation_retry_limit + 1
         ):
@@ -1066,6 +1083,10 @@ class CollectedMergeRunner:
                 estimates["input_estimated_tokens"]
                 > self.config.model_input_batch_target_tokens
             )
+            if oversized:
+                return skip_oversized_request(estimates)
+            if attempt_index:
+                retry_count += 1
             last_context_id = (
                 f"collected-group-discovery:{target_date}:primary-{attempt_index + 1}"
             )
@@ -1082,7 +1103,7 @@ class CollectedMergeRunner:
                     raw_payload = request_function(
                         prompt,
                         function_spec=function_spec,
-                        allow_oversized_input=oversized,
+                        allow_oversized_input=False,
                     )
                 used_fallback = self._last_analyzer_request_used_fallback()
                 fallback_count += int(used_fallback)
@@ -1119,7 +1140,6 @@ class CollectedMergeRunner:
                         abandon_reason=str(exc),
                     )
                 if attempt_index < self.config.day_group_validation_retry_limit:
-                    retry_count += 1
                     continue
                 break
             except (AnalyzerProtocolError, TypeError, ValueError) as exc:
@@ -1183,6 +1203,8 @@ class CollectedMergeRunner:
                 estimates["input_estimated_tokens"]
                 > self.config.model_input_batch_target_tokens
             )
+            if oversized:
+                return skip_oversized_request(estimates)
             context_id = f"collected-group-discovery:{target_date}:fallback"
             recorder = self._llm_usage_recorder()
             context = (
@@ -1201,7 +1223,7 @@ class CollectedMergeRunner:
                         failed_request_context_id=last_context_id,
                         error_category="validation_error",
                         function_spec=function_spec,
-                        allow_oversized_input=oversized,
+                        allow_oversized_input=False,
                     )
                 result = parse_day_group_discovery_payload(
                     raw_payload,
@@ -1280,6 +1302,7 @@ class CollectedMergeRunner:
         fallback_count: int,
         usage_record_start_index: int,
         abandon_reason: str = "",
+        skip_reason: str = "",
     ) -> _CollectedDiscoveryOutcome:
         recorder = self._llm_usage_recorder()
         usage_attempts = [
@@ -1293,13 +1316,17 @@ class CollectedMergeRunner:
                 "collected-group-discovery:"
             )
         ]
+        if skip_reason:
+            artifact["status"] = "skipped_input_budget"
+        elif abandon_reason:
+            artifact["status"] = "abandoned"
         artifact.update(
             {
-                "status": "abandoned" if abandon_reason else artifact["status"],
                 "attempts": attempts,
                 "usage_attempts": usage_attempts,
                 "result": result.to_dict(),
                 "abandon_reason": abandon_reason,
+                "skip_reason": skip_reason,
                 "token_estimates": (
                     {
                         key: attempts[0].get(key)
@@ -1311,7 +1338,7 @@ class CollectedMergeRunner:
                         )
                     }
                     if attempts
-                    else {}
+                    else artifact.get("skipped_token_estimates", {})
                 ),
                 "oversized_submission": any(
                     item.get("oversized_submission") is True for item in attempts
@@ -1342,12 +1369,17 @@ class CollectedMergeRunner:
             }
         )
         self._write_collected_group_discovery_artifact(artifact)
-        warning = (
-            "Skipped collected group discovery after all attempts failed: "
-            f"{abandon_reason}"
-            if abandon_reason
-            else ""
-        )
+        warning = ""
+        if skip_reason:
+            warning = (
+                "Skipped collected group discovery because input exceeds budget: "
+                f"{skip_reason}"
+            )
+        elif abandon_reason:
+            warning = (
+                "Skipped collected group discovery after all attempts failed: "
+                f"{abandon_reason}"
+            )
         return _CollectedDiscoveryOutcome(
             result=result,
             warnings=[warning] if warning else [],
