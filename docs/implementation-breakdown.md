@@ -19,7 +19,7 @@
 
 | 文件 | 当前职责 |
 | --- | --- |
-| `sources/feishu_cli.py` | 当前用户身份、本人发言/reaction 会话发现、消息分页、消息标准化、附件和 reaction 解析 |
+| `sources/feishu_cli.py` | 当前用户身份、本人发言/reaction 和个人自聊会话发现、消息分页、消息标准化、附件和 reaction 解析 |
 | `reaction_catalog.py` | 加载本地 reaction 目录并补充名称、说明、语义 |
 | `reaction_catalogs/feishu.py` | 显式同步飞书 reaction 目录与图片资源 |
 | `resolvers/feishu_message.py` | 文本清洗、链接标题、飞书 Docx/Wiki 正文、文本附件和图片摘要接入 |
@@ -119,7 +119,7 @@ flowchart LR
 10. 聚合动作、协作方式、消息指纹、会话指纹、文件标识、来源人员、事件 ID 和上一级负责人
 11. Python 计算 scope 和整次运行的 `quality_summary`，团队 `WorkEvent` 最终过滤、写入和自发送
 
-当前多人 trace 的显式备用刷新存在已知未定义变量错误，可能打断正常降级；见 [collected-people-merge-plan.md](collected-people-merge-plan.md) 的调试限制。以上流程描述正常处理路径，不把该分支视为已验证可继续。
+多人 trace 的 step 刷新由 `_refresh_collected_merge_trace_step(...)` 补齐调用记录并写回当前 step；它不改变正常的分组、复核和降级流程。
 
 ## 9. 配置来源
 

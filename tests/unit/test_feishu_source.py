@@ -213,6 +213,12 @@ def test_normalize_message_corrects_sentence_final_ma() -> None:
 
 def test_list_target_conversations_skips_blacklisted_conversation_ids() -> None:
     def fake_runner(args):
+        if args[2] == "+chat-messages-list":
+            return SimpleNamespace(
+                returncode=0,
+                stdout=json.dumps({"items": []}),
+                stderr="",
+            )
         assert args[2] == "+messages-search"
         payload = {
             "items": [
@@ -251,6 +257,12 @@ def test_list_target_conversations_skips_blacklisted_conversation_ids() -> None:
 
 def test_list_target_conversations_includes_reaction_only_conversation() -> None:
     def fake_runner(args):
+        if args[2] == "+chat-messages-list":
+            return SimpleNamespace(
+                returncode=0,
+                stdout=json.dumps({"items": []}),
+                stderr="",
+            )
         if "--sender" in args:
             payload = {"items": []}
         else:
@@ -284,6 +296,46 @@ def test_list_target_conversations_includes_reaction_only_conversation() -> None
     )
 
     assert [item.conversation_id for item in results] == ["oc_reaction"]
+
+
+def test_list_target_conversations_includes_direct_self_chat_messages() -> None:
+    def fake_runner(args):
+        if args[2] == "+chat-messages-list":
+            assert "--user-id" in args
+            return SimpleNamespace(
+                returncode=0,
+                stdout=json.dumps(
+                    {
+                        "data": {
+                            "messages": [
+                                {
+                                    "chat_id": "oc_self_chat",
+                                    "chat_type": "p2p",
+                                    "message_id": "om_self_chat",
+                                    "sender_open_id": "ou_other",
+                                    "send_time": "2026-06-29T09:00:00+08:00",
+                                    "text": "从其他渠道转给自己的工作记录",
+                                }
+                            ]
+                        }
+                    }
+                ),
+                stderr="",
+            )
+        return SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps({"data": {"messages": []}}),
+            stderr="",
+        )
+
+    source = FeishuCliChatSource(config=RuntimeConfig(), command_runner=fake_runner)
+
+    results = source.list_target_conversations(
+        "2026-06-29",
+        SelfIdentity(open_id="ou_self", display_name="self", source="test"),
+    )
+
+    assert [item.conversation_id for item in results] == ["oc_self_chat"]
 
 
 def test_fetch_conversation_messages_skips_blacklisted_conversation_ids() -> None:

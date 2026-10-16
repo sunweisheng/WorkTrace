@@ -2,7 +2,7 @@
 
 ## 1. 文档定位
 
-本文档以当前代码为准（4.1.6），描述 WorkTrace 的正式入口、个人日报主链、多人汇总主链、数据边界、失败回退、过滤层和产物。历史设计稿只用于解释演进，不应覆盖本文档中的当前行为。
+本文档以当前代码为准（4.1.9），描述 WorkTrace 的正式入口、个人日报主链、多人汇总主链、数据边界、失败回退、过滤层和产物。历史设计稿只用于解释演进，不应覆盖本文档中的当前行为。
 
 ## 2. 产品与信任边界
 
@@ -116,12 +116,13 @@ sequenceDiagram
 
 ### 5.2 会话发现
 
-`FeishuCliChatSource.list_target_conversations(...)` 使用两次搜索：
+`FeishuCliChatSource.list_target_conversations(...)` 使用两次搜索，并补充一次个人自聊读取：
 
 1. 按当前用户 `open_id` 搜索本人当天发送的消息
 2. 搜索当天消息，在 `reaction_discovery_page_limit` 限制内识别当前用户当天做过的 reaction（当前最多 3 页）
+3. 按当前用户 `open_id` 分页读取个人自聊在目标日期内的消息
 
-二者任一命中的会话都会进入候选，`excluded_conversation_ids` 在此阶段直接排除。随后 `fetch_conversation_messages(...)` 按会话、按时间升序分页读取当天消息。
+三类来源任一命中的会话都会进入候选，结果按会话 ID 去重，`excluded_conversation_ids` 在此阶段直接排除。随后 `fetch_conversation_messages(...)` 按会话、按时间升序分页读取当天消息。个人自聊中的消息不要求发送者是当前用户，因此其他渠道转发或机器人写入的当天内容也会被读取；它们是否进入事件提炼，还要看该自聊当天是否存在本人发言或本人 reaction 形成的锚点。
 
 本人当天只做 reaction 的会话也可能进入分析，但 reaction 发现只搜索当天发送的消息且有分页上限，不保证找齐对历史消息做出的 reaction 或上限之外的会话。
 
@@ -334,6 +335,8 @@ data/YYYY/MM/YYYY-MM-DD-姓名.md
 
 写入后，`config/self_delivery.json` 的 `enabled` 默认是 `true`。开启时，`FeishuCliSelfDelivery` 规范化发送文件名，使用 bot 身份向当前 user `open_id` 发送文件；发送错误不会删除已写入文件，运行状态变为 `success_with_warnings`。关闭时不调用飞书 CLI，Markdown 保持已写入状态，结果的 `self_delivery_status` 为 `disabled`。多人汇总显式传入 `--offline --owner-name 姓名` 时，完全跳过飞书身份查询和自送达，直接把本地合并结果写为 `YYYY-MM-DD-姓名-merged.md`。
 
+用户明确要求生成并上传时，调用方读取本次最终 CLI JSON 的 `status` 和 `output_path`，再交给 `worktrace-upload-md` 技能。`success` 或 `success_with_warnings` 且 Markdown 已写入时都允许继续上传；`success_with_warnings` 只说明存在已列出的告警，不增加“接受遗漏”确认。生成失败、文件不存在时停止，服务端要求覆盖时再按日期取得明确确认。
+
 ## 6. 三层过滤模型
 
 ```mermaid
@@ -413,7 +416,7 @@ flowchart TD
 
 本次内容质量优化不改变 CLI、Function schema、公开 Markdown 字段、原子 `fact_items`、证据归属或送达方式，也不建设跨日事项状态库、事项身份、状态流转和历史时间线。模板不要求固定输出“下一步”、责任人、目标时间、背景、范围、状态或风险字段；来源中明确存在的信息可以自然写入正文，缺少时直接省略，不强制填“待确认”。
 
-单条候选如果没有进入跨组关系，分组阶段可直接确定为单成员组，但仍会进入最终正文写作。多条候选在来源事件达到 10 条、来源文件达到 4 个、跨批、Python 修复、同一会话连接多个无共同消息或文件的部分、无完整共同证据且对象不一致，或模型标记 `broad_object` 时加入检查范围。完整复核不预设保留或拆分方向；协议错误反馈包含错误组、关系编号、不可拆成员块、证据端点和缺失成员。解析后的结果质量错误由当前主线路局部重试，当前额外 1 次；默认模式可再交给可用 Online 备用 1 次，纯在线模式没有备用；最后仍非法时保留复核前分组并写 warning，不影响其他范围或整次部门汇总。正式内容按最终组逐事件严格检查；某项失败时只回退该项，在正常异常处理路径下继续其余团队事件和当前 scope 写入。开启多人 trace 并在质量重试后刷新显式备用记录时，`_refresh_collected_merge_trace_step(...)` 当前引用未定义的 `source_coverage_error`，可能抛出 `NameError`；这一已知代码限制可能中断上述降级流程，见 [多人汇总调试与已知限制](collected-people-merge-plan.md)。本次仅修正文档，未修复该代码。
+单条候选如果没有进入跨组关系，分组阶段可直接确定为单成员组，但仍会进入最终正文写作。多条候选在来源事件达到 10 条、来源文件达到 4 个、跨批、Python 修复、同一会话连接多个无共同消息或文件的部分、无完整共同证据且对象不一致，或模型标记 `broad_object` 时加入检查范围。完整复核不预设保留或拆分方向；协议错误反馈包含错误组、关系编号、不可拆成员块、证据端点和缺失成员。解析后的结果质量错误由当前主线路局部重试，当前额外 1 次；默认模式可再交给可用 Online 备用 1 次，纯在线模式没有备用；最后仍非法时保留复核前分组并写 warning，不影响其他范围或整次部门汇总。正式内容按最终组逐事件严格检查；某项失败时只回退该项，在正常异常处理路径下继续其余团队事件和当前 scope 写入。
 
 候选、复核和正式正文使用各自任务专用 Function，并调用同一生产估算函数：`prepared_prompt` 包含最终提示词、当前合法参数示例、证据编号、重试错误反馈和 `/no_think`；`online_estimate` 再加入完整 Function 定义与 `tool_choice`，`codex_estimate` 再加入完整 output-schema，最终取两者较大值。估算器区分 ASCII 和非 ASCII 字符，并为混合中文 JSON、动态编号及协议固定开销留出余量。`model_input_batch_target_tokens` 在默认模式从当前模型预算 profile 读取；配置不存在、主备组合未匹配或使用纯在线模式时采用 `default_target_tokens`，当前回退 `7000`；它是输入估算目标，不是 HTTP 字节数或服务端上下文上限。每尝试加入一个候选都重新构建并估算；复核超过目标时按关系分批，单个最终事件正文仍过长时复用正文切片和分层摘要；不可继续拆分的最小输入允许发送。所有最终团队事件各自请求，最多并行 3 项。候选分组和完整复核的质量重试只作用于当前请求，携带具体 Python 错误后重新估算，超限时标记 `oversized_retry` 后发送。正式正文按自己的覆盖和缺字段规则重试当前组，现有接口不会把前次 Python 错误加入正文提示词。正式内容必须返回完整 `covered_draft_ids` 和 `fact_items`；Python 检查当前组的 draft 分配、锁定成员和事实来源，最终失败时使用当前组的确定性来源内容回退并记录 warning。调试 step 在 Python 校验失败时标记 `validation_failed`，`failed_step_indexes` 同时包含调用失败和校验失败；候选分组还保存解析前的 `raw_function_payload`，用于检查被解析器丢弃的非法结构。
 

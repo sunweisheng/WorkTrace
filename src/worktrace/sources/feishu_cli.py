@@ -102,6 +102,51 @@ class FeishuCliChatSource(ChatSource):
                 ),
             )
 
+        self_chat_page_token = ""
+        while True:
+            self_chat_args = [
+                "lark-cli",
+                "im",
+                "+chat-messages-list",
+                "--as",
+                "user",
+                "--user-id",
+                self_identity.open_id,
+                "--order",
+                "asc",
+                "--page-size",
+                "50",
+                "--start",
+                start.isoformat(),
+                "--end",
+                end.isoformat(),
+            ]
+            if self_chat_page_token:
+                self_chat_args.extend(["--page-token", self_chat_page_token])
+            self_chat_payload = self._run_json(tuple(self_chat_args))
+            for item in self._extract_items(self_chat_payload):
+                message = self._normalize_message(item)
+                if not is_same_target_date(
+                    message.send_time,
+                    target_date,
+                    self.config.timezone,
+                ):
+                    continue
+                if message.conversation_id in excluded_conversation_ids:
+                    continue
+                self._remember_conversation_mode(message)
+                conversations.setdefault(
+                    message.conversation_id,
+                    ConversationRef(
+                        conversation_id=message.conversation_id,
+                        conversation_name=message.conversation_name,
+                    ),
+                )
+
+            self_chat_page_token = self._next_page_token(self_chat_payload)
+            if not self_chat_page_token:
+                break
+
         reaction_payload = self._run_json(
             (
                 "lark-cli",

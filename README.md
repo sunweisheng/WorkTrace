@@ -80,12 +80,14 @@ python3 -m src.worktrace.cli sync-reaction-catalog --source feishu
 
 `config/self_delivery.json` 控制个人日报和多人汇总是否发送给当前登录用户。默认是 `{"enabled": true}`；改为 `{"enabled": false}` 后仍会完整生成 Markdown，但不调用飞书 CLI。多人汇总额外传入 `--offline` 时，也会跳过飞书身份查询，并且必须传入 `--owner-name`。CLI JSON 会返回 `self_delivery_status: "disabled"`，这不是发送失败。
 
+用户明确要求“生成并上传”时，先读取本次最终 CLI JSON 的 `status` 和 `output_path`，再交给 `worktrace-upload-md` 技能上传。`success` 或 `success_with_warnings` 且文件有效时都可以继续；后者只表示报告带有已列出的告警，不需要额外确认接受遗漏。生成失败、文件不存在，或服务端要求覆盖时，分别停止或按覆盖规则确认。
+
 ## 当前范围
 
 已经进入正式代码路径的能力：
 
 - 使用 `lark-cli` user 身份发现会话和读取消息
-- 同时把“本人发言”和“本人当天 reaction”作为会话发现及锚点信号
+- 同时把“本人发言和本人 reaction”以及目标日期内个人自聊消息作为会话发现信号
 - 从本地表情目录补充 reaction 的中文名称、说明和语义
 - 围绕本人锚点构造窗口，由 LLM 切分工作片段
 - 将同一会话的多个片段按模型输入分批目标打包分析
@@ -133,7 +135,7 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-    A["获取当前 user 身份"] --> B["搜索本人发言和本人 reaction 所在会话"]
+    A["获取当前 user 身份"] --> B["发现本人发言、reaction 和个人自聊所在会话"]
     B --> C["排除 conversation_blacklist"]
     C --> D["分页拉取当日会话消息"]
     D --> E["标准化消息并加载本地 reaction 语义"]
@@ -174,12 +176,15 @@ flowchart TD
 
 ### 1. 会话发现与消息采集
 
-`FeishuCliChatSource` 先查当前用户身份，再用两类信号发现目标会话：
+`FeishuCliChatSource` 先查当前用户身份，再用三类信号发现目标会话：
 
 - 当前用户在目标日期发送过消息
 - 当前用户在目标日期对消息做过 reaction
+- 当前用户个人自聊在目标日期有消息
 
 每位使用者应从 `config/conversation_blacklist.example.json` 复制一份本地 `config/conversation_blacklist.json`，再填写自己需要屏蔽的会话 ID。实际黑名单不纳入 Git 管理，其中的会话会在发现和拉取阶段同时排除。随后按会话分页拉取目标日期内消息并标准化文本、reply/quote、链接、附件和 reaction。为补齐私聊 reply/quote 直接关系或模型明确请求的相邻上下文，系统还可能临时读取目标日期之外的直接关联消息；事件日期仍固定为目标日期。
+
+个人自聊会按当前用户的 `open_id` 单独分页读取，因其他渠道转发或机器人写入而出现在自聊里的当天消息也会被读取；它们是否进入事件提炼，还要看该自聊当天是否存在本人发言或本人 reaction 形成的锚点。结果仍受会话黑名单和目标日期过滤限制。
 
 ### 2. 初始窗口、分段与分段批处理
 
@@ -296,7 +301,7 @@ Python 以同一来源片段、直接 reply/quote、共享来源消息、共享�
 
 最终核对的质量重试同时携带具体错误和上一份完整返回 `previous_result`，模型在原消息基础上修正该结果。反馈和上一份返回一起计入输入估算，仍只重试当前组。未解决的证据错误仍使本次生成失败，不写入或送达新报告；旧报告保留。`event_count=0` 表示本次没有正式产物，不能解释为当天没有工作。安全诊断只含固定类别和数量，上一份返回仅用于当前组重试和本地私有调试记录。
 
-4.1.8 明确要求每个本人动作都有对应正文，接收或转发不能只写在主要动作中。事实与动作的证据不对应时，反馈列出具体事实、动作类型和证据编号；正文漏写动作时，反馈列出需要覆盖的动作。`config/llm_function_contracts.json` 的个人最终核对结构示例用虚构消息演示本人提出需求、同事交付和本人接收，两条模型线路使用同一示例。示例编号不能复制到实际返回中；升级时同步该配置和 `config/retention_policy.json`，保留已有的有效定制规则。
+4.1.9 延续个人最终核对的证据覆盖要求，并补充个人自聊分页读取与 `success_with_warnings` 上传边界。个人最终核对明确要求每个本人动作都有对应正文，接收或转发不能只写在主要动作中。事实与动作的证据不对应时，反馈列出具体事实、动作类型和证据编号；正文漏写动作时，反馈列出需要覆盖的动作。`config/llm_function_contracts.json` 的个人最终核对结构示例用虚构消息演示本人提出需求、同事交付和本人接收，两条模型线路使用同一示例。示例编号不能复制到实际返回中；升级时同步该配置和 `config/retention_policy.json`，保留已有的有效定制规则。
 
 CLI JSON 和调试回放写入 Python 计算的 `day_grouping_summary`，包括候选数、初始/最终组数、标题发现请求/重试/逐组检查/候选/失败/超限数、复核组件和请求数、跨组合并数、初步组拆分数、关系成立数、证据分开数、内容重写失败数、校验重试、Online 备用、拆单修补候选数和 warning 数。旧 Markdown 和旧 trace 中的工作流字段仍可读取，但读取后丢弃；旧标题发现 trace 没有 `group_checks` 时明确显示逐组检查不可用，不补造结果。正式主链物化 `MergedEventDraft` 时，采用最终核对后的主要动作和按配置排序的本人参与方式。
 

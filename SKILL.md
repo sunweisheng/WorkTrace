@@ -89,7 +89,7 @@ WorkTrace 另有一个管理人员汇总模式：管理人员先收集多人已�
 - 最终单成员组和多成员组锁定后都使用 `personal_group_render`，依据原消息和已经补读的附件、文档内容，统一复核标题、正文、主要动作、具体对象、保留理由、保留依据和本人参与方式；业务规则读取 `config/retention_policy.json`。Python 校验事实证据与本人证据，采用复核后的字段，`supported=false` 时剔除该事件。最多同时处理 3 项，当前重试与主备请求用尽后仍失败则整次生成失败，保留诊断记录，不写入或送达未经核对的报告。
 - 最终核对由模型填写本人动作 `self_actions`（类型、证据和 `relation`）及带 `actor`、证据的事实 `fact_items`。动作只允许一种参与方式时 `relation` 填 null，由 Python 自动确定；有多种允许角色时模型在该动作内选择一个，角色直接使用动作证据。模型不再单独填写 `self_relations` 或 `self_action_indices`；Python 合并同类角色，并根据事实与本人动作的共同证据建立动作引用。每条事实只需引用直接支持它的相关证据，不必重复动作的全部证据，也不会由程序补入无关证据。正文仍须覆盖本人动作及锁定成员；主要动作仍须有本人证据。旧返回的动作编号允许读取但不作为依据，按证据重新计算。接收和转发自动得到回应角色，不会变成主责执行；不确定动作不能支持主责。文字含义仍由模型判断，结构校验不能保证发现全部自然语言误判。 动作定义读取 `contribution_actions`，共同约束读取 `contribution_rules`；升级时同步配置。
 - 4.1.4 起，最终核对反馈一次列出能独立定位的事实、动作、角色和正文缺口，角色错误还列出配置允许的动作类型；保持原有质量重试次数。运行失败时保留已完成阶段的统计，候选数和待核对组数不算正式事件数。4.1.5 起，最终核对的失败尝试按固定类别计入 `day_grouping_summary.content_render_error_counts`，安全诊断只显示类别和次数；业务校验重试与请求失败后的重试分别列出。不要把事实证据错误写成网络问题，也不要把备用线路固定称为 Online。
-- 4.1.8 的提示明确每个本人动作都必须有对应的正文事实，接收或转发也不能只写在主要动作中。证据或正文覆盖失败的反馈列出具体事实、动作类型及证据编号；仍须依据原消息修正，不补入无关证据。个人最终核对的完整虚构结构示例维护在 `config/llm_function_contracts.json`，两条线路共同使用，不能复制示例编号到实际返回；升级同步该配置和 `config/retention_policy.json`。
+- 4.1.9 延续个人最终核对的证据覆盖要求，并包含个人自聊分页读取和 `success_with_warnings` 上传边界。提示明确每个本人动作都必须有对应的正文事实，接收或转发也不能只写在主要动作中。证据或正文覆盖失败的反馈列出具体事实、动作类型及证据编号；仍须依据原消息修正，不补入无关证据。个人最终核对的完整虚构结构示例维护在 `config/llm_function_contracts.json`，两条线路共同使用，不能复制示例编号到实际返回；升级同步该配置和 `config/retention_policy.json`。
 - 为判断原样再次发送的内容，最终核对仅从候选来源切片及已选证据消息内，补入同会话较早的非空完整相同正文；只规范换行和首尾空白，不扩展到切片外，也不按截断后的文本判断。`same_text_messages` 只提供核对背景，不证明原创者或自动降低贡献；有独立本人执行证据时仍可保留实际执行。结构校验不能保证发现全部自然语言误判。
 - 个人与多人分组语义说明统一读取 `config/event_grouping.json`；Python 不读取聊天文字判断业务含义。
 - `--debug-output` 在 `_merge_day_candidates/` 写入 `input.json`、`prompt.txt`、`grouping_attempts.json`、`day_group_discovery.json`、`day_group_review.json`、`personal_group_render.json` 和 `resolved_groups.json`。完整回放成功后可用 `scripts/replay_failed_day_group_reviews.py` 只重放失败复核范围，结果写入 `day_group_review_replay.json`，不直接修改正式个人 MD。CLI 与回放 `summary.json` 的 `day_grouping_summary` 由 Python 计算。
@@ -105,6 +105,7 @@ python -m src.worktrace.cli --date YYYY-MM-DD
 
 - WorkTrace CLI 只负责生成和本人送达，没有上传子命令。不得引用历史上传命令，也不得把 macOS 或某台机器的仓库路径写入技能或自动化。
 - 用户明确要求“生成并上传”时，从本次最终 CLI JSON 取得实际 Markdown 路径和日报日期，然后转用已安装的 `worktrace-upload-md` 技能。该技能通过 HTTPS 接口上传，并分别使用 macOS 钥匙串或 Windows 当前用户 DPAPI 读取已保存的上传 Key。
+- `status` 为 `success` 或 `success_with_warnings` 且 `output_path` 有效时，都可以继续上传。`success_with_warnings` 只说明报告带有已列出的告警（例如片段跳过），不需要另行回复“接受可能遗漏风险”，也不阻止首次上传。
 - 上传前仍须校验文件名日期、文件大小和日报类型。首次请求不得主动覆盖；服务端要求覆盖时，必须取得用户对该日期的明确确认。
 - 生成失败、文件不存在或候选不唯一时停止，不得尝试上传旧文件或猜测路径。
 
@@ -225,7 +226,7 @@ python3 -m src.worktrace.cli --debug-output merge-collected --date YYYY-MM-DD
 
 使用这个 skill 时，应当明确向用户说明以下事实：
 
-- WorkTrace 只处理目标日期内本人发过消息或做过 reaction 的会话
+- WorkTrace 只处理目标日期内本人发过消息或做过 reaction，或个人自聊里出现过消息的会话；自聊消息被读取后，仍需该会话当天有本人发言或本人 reaction 锚点才会进入正式提炼
 - WorkTrace 只尝试提取与本人直接相关的工作事项
 - WorkTrace 不输出群名、内部 ID 或参与人名单，只在责任分工等确有必要时保留姓名
 - 正式任务成功写入 Markdown 后清理模型临时缓存；失败或中断时缓存仍可能含聊天上下文，原始调试目录也不随成功自动删除，不再需要时应清理
